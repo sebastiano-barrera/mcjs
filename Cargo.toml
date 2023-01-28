@@ -1,0 +1,13 @@
+[package]
+name = "mcjs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lazy_static = "1.4.0"
+swc_atoms = "0.4.34"
+swc_common = "0.29.28"
+swc_ecma_ast = "0.96.2"
+swc_ecma_parser = "0.124.4"
