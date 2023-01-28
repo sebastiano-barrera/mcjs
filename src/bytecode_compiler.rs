@@ -443,7 +443,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
             }
             Lit::Str(s) => Ok(builder.emit(Instr::Const(Value::String(s.value.to_string())))),
             // Lit::Bool(_) => todo!(),
-            // Lit::Null(_) => todo!(),
+            Lit::Null(_) => Ok(builder.emit(Instr::Const(Value::Null))),
             // Lit::BigInt(_) => todo!(),
             // Lit::Regex(_) => todo!(),
             // Lit::JSXText(_) => todo!(),

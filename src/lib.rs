@@ -101,4 +101,50 @@ mod tests {
         let sink = vm.take_sink();
         assert_eq!(&[Value::Number(3.0)], &sink[..]);
     }
+
+    #[test]
+    fn test_simple_trace() {
+        let mut vm = quick_compile(
+            "
+            function foo(mode, a, b) {
+                if (mode === 'sum') {
+                    return a + b;
+                } else if (mode === 'product') {
+                    return a * b;
+                } 
+                return null;
+            }
+            
+            sink(foo('product', 20, 2));
+            ",
+        );
+
+        vm.interpret().unwrap();
+        let sink = vm.take_sink();
+        assert_eq!(&[Value::Number(40.0)], &sink[..]);
+    }
+
+
+    #[test]
+    fn test_while() {
+        let mut vm = quick_compile(
+            "
+            function sum_range(n) {
+                let i = 0;
+                let ret = 0;
+                while (i <= n) {
+                    ret += i;
+                    i++;
+                }
+                return ret;
+            }
+            
+            sink(sum_range(100));
+            ",
+        );
+
+        vm.interpret().unwrap();
+        let sink = vm.take_sink();
+        assert_eq!(&[Value::Number(4950.0)], &sink[..]);
+    }
 }

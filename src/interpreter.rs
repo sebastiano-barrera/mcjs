@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    cmp::Ordering,
     collections::{HashMap, VecDeque},
     path::PathBuf,
 };
@@ -151,10 +152,12 @@ impl VM {
     }
 
     pub fn interpret(&mut self) -> Result<Value> {
-        self.interpret_fn(FnId::ROOT_FN, &[])
+        self.interpret_fn(FnId::ROOT_FN, &[], Default::default())
     }
 
-    fn interpret_fn(&self, fnid: FnId, args: &[Value]) -> Result<Value> {
+    fn interpret_fn(&self, fnid: FnId, args: &[Value], flags: InterpreterFlags) -> Result<Value> {
+        let indent = "|  ".repeat(flags.indent_level as usize);
+
         let func = self.module.fns.get(&fnid).expect("invalid function ID");
         let instrs = &func.instrs;
 
@@ -165,7 +168,7 @@ impl VM {
                 Operand::Value(value) => value.clone(),
                 Operand::IID(IID(ndx)) => results[*ndx as usize].clone(),
             };
-            eprintln!("   get {:?} -> {:?}", operand, value);
+            eprintln!("{}    . get {:?} -> {:?}", indent, operand, value);
             value
         };
 
@@ -177,7 +180,7 @@ impl VM {
             let instr = &instrs[ndx];
             let mut next_ndx = ndx + 1;
 
-            eprintln!("{:4} {:?}", ndx, instr);
+            eprintln!("{}{:4} {:?}", indent, ndx, instr);
 
             match instr {
                 Instr::Const(value) => {
@@ -206,17 +209,36 @@ impl VM {
                     let a = get_operand(&mut results, a);
                     let b = get_operand(&mut results, b);
 
-                    if let (Value::Number(a), Value::Number(b)) = (&a, &b) {
-                        results[ndx] = Value::Bool(match op {
-                            CmpOp::GE => a >= b,
-                            CmpOp::GT => a > b,
-                            CmpOp::LT => a < b,
-                            CmpOp::LE => a <= b,
-                            CmpOp::EQ => a == b,
-                            CmpOp::NE => a != b,
-                        });
-                    } else {
-                        panic!("invalid operands for cmp op: {:?}; {:?}", a, b);
+                    match (&a, &b) {
+                        (Value::Number(a), Value::Number(b)) => {
+                            results[ndx] = Value::Bool(match op {
+                                CmpOp::GE => a >= b,
+                                CmpOp::GT => a > b,
+                                CmpOp::LT => a < b,
+                                CmpOp::LE => a <= b,
+                                CmpOp::EQ => a == b,
+                                CmpOp::NE => a != b,
+                            });
+                        }
+                        (Value::String(a), Value::String(b)) => {
+                            let ordering = a.cmp(b);
+                            results[ndx] = Value::Bool(matches!(
+                                (op, ordering),
+                                (CmpOp::GE, Ordering::Greater)
+                                    | (CmpOp::GE, Ordering::Equal)
+                                    | (CmpOp::GT, Ordering::Greater)
+                                    | (CmpOp::LT, Ordering::Less)
+                                    | (CmpOp::LE, Ordering::Less)
+                                    | (CmpOp::LE, Ordering::Equal)
+                                    | (CmpOp::EQ, Ordering::Equal)
+                                    | (CmpOp::NE, Ordering::Greater)
+                                    | (CmpOp::NE, Ordering::Less)
+                            ));
+                        }
+
+                        _ => {
+                            panic!("invalid operands for cmp op: {:?}; {:?}", a, b);
+                        }
                     }
                 }
                 Instr::JmpIf { cond, dest } => {
@@ -257,7 +279,11 @@ impl VM {
                             .iter()
                             .map(|oper| get_operand(&results, oper))
                             .collect();
-                        let ret_val = self.interpret_fn(callee_fnid, &arg_values[..])?;
+                        let flags = InterpreterFlags {
+                            indent_level: flags.indent_level + 1,
+                            ..flags
+                        };
+                        let ret_val = self.interpret_fn(callee_fnid, &arg_values[..], flags)?;
                         results[ndx] = ret_val;
                     } else {
                         panic!("invalid callee (not a function): {:?}", callee);
@@ -269,6 +295,21 @@ impl VM {
         }
 
         Ok(Value::Undefined)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct InterpreterFlags {
+    indent_level: u8,
+    create_trace: bool,
+}
+
+impl Default for InterpreterFlags {
+    fn default() -> Self {
+        Self {
+            indent_level: 0,
+            create_trace: false,
+        }
     }
 }
 
