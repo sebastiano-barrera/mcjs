@@ -1,10 +1,16 @@
 use std::collections::HashMap;
 
 use swc_atoms::JsWord;
-use swc_ecma_ast::{BinaryOp, Decl, Lit};
+use swc_ecma_ast::{BinaryOp, Decl, Function, Lit, Pat};
 
 use crate::common::{Error, Result};
-use crate::interpreter::{self, ArithOp, CmpOp, Instr, Operand, Value, IID};
+use crate::interpreter::{self, ArithOp, CmpOp, FnId, Instr, Operand, Value, IID};
+
+macro_rules! unsupported_node {
+    ($value:expr) => {{
+        todo!("unsupported AST node: {:#?}", $value);
+    }};
+}
 
 pub fn compile_file(filename: String, content: String) -> Result<interpreter::Module> {
     let ast_module = parse_file(filename, content)?;
@@ -12,54 +18,137 @@ pub fn compile_file(filename: String, content: String) -> Result<interpreter::Mo
 }
 
 struct Builder {
+    fns: HashMap<FnId, FnBuilder>,
+    fn_stack: Vec<FnBuilder>,
+    next_fnid: u32,
+}
+
+struct FnBuilder {
+    fnid: FnId,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
+}
+impl FnBuilder {
+    fn new(id: FnId) -> Self {
+        FnBuilder {
+            fnid: id,
+            scopes: vec![Scope::new()],
+            instrs: Vec::new(),
+        }
+    }
+    fn build(self) -> interpreter::Function {
+        interpreter::Function::new(self.instrs)
+    }
+
+    fn peek_iid(&self) -> IID {
+        IID(self.instrs.len() as u32)
+    }
 }
 
 impl Builder {
     fn new() -> Self {
+        let next_fnid = 1;
+        assert_ne!(FnId(next_fnid), FnId::ROOT_FN);
         Builder {
-            scopes: vec![Scope::new()],
-            instrs: vec![],
+            fns: HashMap::new(),
+            fn_stack: vec![FnBuilder::new(FnId::ROOT_FN)],
+            next_fnid,
         }
     }
 
-    fn build(self) -> interpreter::Module {
-        interpreter::Module::new(self.instrs)
+    fn build(mut self) -> interpreter::Module {
+        self.end_function();
+        assert!(self.fn_stack.is_empty());
+
+        let fns = self
+            .fns
+            .drain()
+            .map(|(fn_id, fn_builder)| (fn_id, fn_builder.build()))
+            .collect();
+        interpreter::Module::new(fns)
     }
 
     fn reserve(&mut self) -> IID {
         self.emit(Instr::Nop)
     }
 
+    fn cur_fnb(&mut self) -> &mut FnBuilder {
+        self.fn_stack.last_mut().expect("no FnBuilder!")
+    }
+
     fn emit(&mut self, instr: Instr) -> IID {
-        let iid = self.peek_iid();
-        self.instrs.push(instr);
+        let fnb = self.cur_fnb();
+        let iid = fnb.peek_iid();
+        fnb.instrs.push(instr);
         iid
     }
 
+    fn peek_iid(&mut self) -> IID {
+        self.cur_fnb().peek_iid()
+    }
+
     fn get_mut(&mut self, iid: IID) -> Option<&mut Instr> {
-        let IID(ndx) = iid;
-        self.instrs.get_mut(ndx as usize)
+        self.cur_fnb().instrs.get_mut(iid.0 as usize)
     }
 
     fn define_var(&mut self, name: JsWord, var: Var) {
-        self.scopes
+        self.cur_fnb()
+            .scopes
             .last_mut()
             .expect("no scopes!")
             .define(name, var);
     }
 
-    fn peek_iid(&self) -> IID {
-        IID(self.instrs.len() as u32)
-    }
-
-    fn get_var(&self, sym: &JsWord) -> Option<&Var> {
+    fn get_var(&mut self, sym: &JsWord) -> Option<&Var> {
         // Lookup sym in each scope, inner to outer
-        self.scopes
+        self.cur_fnb()
+            .scopes
             .iter()
             .rev()
             .find_map(|scope| scope.get_var(sym))
+    }
+
+    fn start_function(&mut self, name: JsWord, params: &[swc_ecma_ast::Param]) {
+        let fnid = FnId(self.next_fnid);
+        self.next_fnid += 1;
+
+        self.fn_stack.push(FnBuilder::new(fnid));
+
+        let self_fn = self.emit(Instr::Const(Value::SelfFunction));
+        self.define_var(
+            name,
+            Var {
+                iid: self_fn,
+                is_const: true,
+            },
+        );
+
+        for (param_ndx, param) in params.iter().enumerate() {
+            if !param.decorators.is_empty() {
+                panic!("unsupported: decorators on function parameters");
+            }
+
+            match &param.pat {
+                Pat::Ident(ident) => {
+                    let iid = self.emit(Instr::GetArg(param_ndx));
+                    self.define_var(
+                        ident.sym.clone(),
+                        Var {
+                            iid,
+                            is_const: false,
+                        },
+                    );
+                }
+                other => unsupported_node!(other),
+            }
+        }
+    }
+
+    fn end_function(&mut self) -> FnId {
+        let fnb = self.fn_stack.pop().expect("no FnBuilder!");
+        let fnid = fnb.fnid;
+        self.fns.insert(fnid, fnb);
+        fnid
     }
 }
 
@@ -91,12 +180,6 @@ impl Scope {
 struct Var {
     iid: IID,
     is_const: bool,
-}
-
-macro_rules! unsupported_node {
-    ($value:expr) => {{
-        todo!("unsupported AST node: {:#?}", $value);
-    }};
 }
 
 fn compile_module(ast_module: &swc_ecma_ast::Module) -> Result<interpreter::Module> {
@@ -135,11 +218,21 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             for stmt in &block.stmts {
                 compile_stmt(builder, stmt)?;
             }
+            Ok(())
         }
         // Stmt::Empty(_) => todo!(),
         // Stmt::Debugger(_) => todo!(),
         // Stmt::With(_) => todo!(),
-        // Stmt::Return(_) => todo!(),
+        Stmt::Return(stmt) => {
+            let value = if let Some(arg) = &stmt.arg {
+                compile_expr(builder, arg)?
+            } else {
+                builder.emit(Instr::Const(Value::Undefined))
+            };
+
+            builder.emit(Instr::Return(value.into()));
+            Ok(())
+        }
         // Stmt::Labeled(_) => todo!(),
         // Stmt::Break(_) => todo!(),
         // Stmt::Continue(_) => todo!(),
@@ -151,19 +244,11 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         // Stmt::For(_) => todo!(),
         // Stmt::ForIn(_) => todo!(),
         // Stmt::ForOf(_) => todo!(),
-        Stmt::Decl(decl) => match decl {
-            // Decl::Class(_) => todo!(),
-            // Decl::Fn(_) => todo!(),
-            Decl::Var(var_decl) => {
-                compile_var_decl(builder, var_decl)?;
-            }
-            Decl::TsInterface(_) | Decl::TsTypeAlias(_) | Decl::TsEnum(_) | Decl::TsModule(_) => {
-                panic!("TypeScript syntax not supported (for now!)")
-            }
-            other => unsupported_node!(other),
-        },
+        Stmt::Decl(decl) => compile_decl(builder, decl),
+
         Stmt::Expr(expr) => {
             compile_expr(builder, &expr.expr)?;
+            Ok(())
         }
 
         Stmt::If(if_stmt) => {
@@ -178,10 +263,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 // END      < rest... >
 
                 let jmpif = builder.reserve();
-                compile_stmt(builder, &else_blk)?;
+                compile_stmt(builder, else_blk)?;
                 let jmp_end = builder.reserve();
                 let if_true_start: IID = builder.peek_iid();
-                compile_stmt(builder, &*if_stmt.cons)?;
+                compile_stmt(builder, &if_stmt.cons)?;
                 let end: IID = builder.peek_iid();
 
                 *builder.get_mut(jmpif).unwrap() = Instr::JmpIf {
@@ -199,7 +284,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
                 let neg_condition = builder.emit(Instr::Not(condition.into()));
                 let jmpif = builder.reserve();
-                compile_stmt(builder, &*if_stmt.cons);
+                compile_stmt(builder, &if_stmt.cons)?;
                 let end: IID = builder.peek_iid();
 
                 *builder.get_mut(jmpif).unwrap() = Instr::JmpIf {
@@ -207,7 +292,59 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                     dest: end,
                 };
             }
+
+            Ok(())
         }
+        other => unsupported_node!(other),
+    }
+}
+
+fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
+    match decl {
+        // Decl::Class(_) => todo!(),
+        Decl::Fn(fn_decl) => {
+            if fn_decl.declare {
+                panic!("unsupported case: fn_decl.declare");
+            }
+
+            let (name, _) = fn_decl.ident.to_id();
+            let func = &fn_decl.function;
+
+            if !func.decorators.is_empty() {
+                panic!("unsupported: function decorators");
+            }
+            if func.is_async {
+                panic!("unsupported: async functions");
+            }
+            if func.is_generator {
+                panic!("unsupported: generator functions");
+            }
+            if func.return_type.is_some() {
+                panic!("unsupported: TypeScript syntax (return type)");
+            }
+            if func.type_params.is_some() {
+                panic!("unsupported: TypeScript syntax (return type)");
+            }
+
+            builder.start_function(name.clone(), func.params.as_slice());
+            let stmts = &func.body.as_ref().expect("function without body?!").stmts;
+            for stmt in stmts {
+                compile_stmt(builder, stmt)?;
+            }
+            let fnid = builder.end_function();
+
+            let iid = builder.emit(Instr::Const(Value::LocalFn(fnid)));
+            builder.define_var(name, Var{iid, is_const: true});
+        }
+
+        Decl::Var(var_decl) => {
+            compile_var_decl(builder, var_decl)?;
+        }
+
+        Decl::TsInterface(_) | Decl::TsTypeAlias(_) | Decl::TsEnum(_) | Decl::TsModule(_) => {
+            panic!("TypeScript syntax not supported (for now!)")
+        }
+
         other => unsupported_node!(other),
     }
 
@@ -257,6 +394,20 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                         return Ok(builder.emit(Instr::Const(Value::Null)));
                     }
                 }
+
+                let fn_iid = compile_expr(builder, callee)?;
+                let mut args_iids = vec![];
+                for arg in args {
+                    if arg.spread.is_some() {
+                        panic!("unsupported: spread function parameter: function(a, b, ...)");
+                    }
+                    let iid = compile_expr(builder, &arg.expr)?;
+                    args_iids.push(iid.into());
+                }
+                return Ok(builder.emit(Instr::Call {
+                    callee: fn_iid.into(),
+                    args: args_iids,
+                }));
             }
 
             Err(Error::UnsupportedItem)

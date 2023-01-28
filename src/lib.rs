@@ -80,4 +80,25 @@ mod tests {
         let val: Value = "b".to_string().into();
         assert_eq!(&[val], &sink[..]);
     }
+
+    #[test]
+    fn test_simple_fn() {
+        let mut vm = quick_compile(
+            "
+            function foo(a, b) { return a + b; }
+            sink(foo(1, 2));
+            ",
+        );
+
+        // 0    const 123
+        // 1    const 'a'
+        // 2    cmp v0 < v1
+        // 3    jmpif v2 -> #5
+        // 4    set v2 <- 'b'
+        // 5    push_sink v2
+
+        vm.interpret().unwrap();
+        let sink = vm.take_sink();
+        assert_eq!(&[Value::Number(3.0)], &sink[..]);
+    }
 }
