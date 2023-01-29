@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use swc_atoms::JsWord;
-use swc_ecma_ast::{BinaryOp, Decl, Function, Lit, Pat};
+use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
 use crate::common::{Error, Result};
 use crate::interpreter::{self, ArithOp, CmpOp, FnId, Instr, Operand, Value, IID};
@@ -239,7 +239,23 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         // Stmt::Switch(_) => todo!(),
         // Stmt::Throw(_) => todo!(),
         // Stmt::Try(_) => todo!(),
-        // Stmt::While(_) => todo!(),
+        Stmt::While(while_stmt) => {
+            let while_header_iid = builder.peek_iid();
+            let condition = compile_expr(builder, &while_stmt.test)?;
+            let neg_condition = builder.emit(Instr::Not(condition.into()));
+            let jmpif = builder.reserve();
+            compile_stmt(builder, &while_stmt.body)?;
+            builder.emit(Instr::Jmp(while_header_iid));
+            let while_end_iid = builder.peek_iid();
+
+            *builder.get_mut(jmpif).unwrap() = Instr::JmpIf {
+                cond: neg_condition.into(),
+                dest: while_end_iid,
+            };
+
+            Ok(())
+        }
+
         // Stmt::DoWhile(_) => todo!(),
         // Stmt::For(_) => todo!(),
         // Stmt::ForIn(_) => todo!(),
@@ -334,7 +350,13 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
             let fnid = builder.end_function();
 
             let iid = builder.emit(Instr::Const(Value::LocalFn(fnid)));
-            builder.define_var(name, Var{iid, is_const: true});
+            builder.define_var(
+                name,
+                Var {
+                    iid,
+                    is_const: true,
+                },
+            );
         }
 
         Decl::Var(var_decl) => {
@@ -450,10 +472,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
             other => unsupported_node!(other),
         },
 
-        Expr::Ident(ident) => match builder.get_var(&ident.sym) {
-            Some(var) => Ok(var.iid),
-            None => Err(Error::UnboundVariable(ident.sym.to_string())),
-        },
+        Expr::Ident(ident) => get_var(builder, ident),
 
         Expr::Assign(asmt) => {
             let ident = asmt
@@ -464,8 +483,51 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                 .get_var(&ident.sym)
                 .ok_or_else(|| Error::UnboundVariable(ident.to_string()))?
                 .iid;
+            let right = compile_expr(builder, &asmt.right)?.into();
 
-            let value = compile_expr(builder, &asmt.right)?.into();
+            let value = match asmt.op {
+                AssignOp::Assign => right,
+                AssignOp::AddAssign => builder
+                    .emit(Instr::Arith {
+                        op: ArithOp::Add,
+                        a: var_id.into(),
+                        b: right,
+                    })
+                    .into(),
+                AssignOp::SubAssign => builder
+                    .emit(Instr::Arith {
+                        op: ArithOp::Sub,
+                        a: var_id.into(),
+                        b: right,
+                    })
+                    .into(),
+                AssignOp::MulAssign => builder
+                    .emit(Instr::Arith {
+                        op: ArithOp::Mul,
+                        a: var_id.into(),
+                        b: right,
+                    })
+                    .into(),
+                AssignOp::DivAssign => builder
+                    .emit(Instr::Arith {
+                        op: ArithOp::Div,
+                        a: var_id.into(),
+                        b: right,
+                    })
+                    .into(),
+                // AssignOp::ModAssign => todo!(),
+                // AssignOp::LShiftAssign => todo!(),
+                // AssignOp::RShiftAssign => todo!(),
+                // AssignOp::ZeroFillRShiftAssign => todo!(),
+                // AssignOp::BitOrAssign => todo!(),
+                // AssignOp::BitXorAssign => todo!(),
+                // AssignOp::BitAndAssign => todo!(),
+                // AssignOp::ExpAssign => todo!(),
+                // AssignOp::AndAssign => todo!(),
+                // AssignOp::OrAssign => todo!(),
+                // AssignOp::NullishAssign => todo!(),
+                other => unsupported_node!(other),
+            };
 
             Ok(builder.emit(Instr::Set { var_id, value }))
         }
@@ -475,7 +537,29 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
         // Expr::Object(_) => todo!(),
         // Expr::Fn(_) => todo!(),
         // Expr::Unary(_) => todo!(),
-        // Expr::Update(_) => todo!(),
+        Expr::Update(update_expr) => {
+            if let Expr::Ident(ident) = &*update_expr.arg {
+                // NOTE: update_expr.prefix does not matter in this case, but
+                // it will matter when this code is extended to other types of args
+                let var_id = get_var(builder, ident)?;
+                let value = builder.emit(Instr::Arith {
+                    op: match update_expr.op {
+                        UpdateOp::PlusPlus => ArithOp::Add,
+                        UpdateOp::MinusMinus => ArithOp::Sub,
+                    },
+                    a: var_id.into(),
+                    // TODO Use integers here, when they get implemented
+                    b: Value::Number(1.0).into(),
+                });
+                builder.emit(Instr::Set {
+                    var_id,
+                    value: value.into(),
+                });
+                Ok(value)
+            } else {
+                todo!("unsupported: UpdateExpr on anything other than an identifier")
+            }
+        }
         // Expr::Member(_) => todo!(),
         // Expr::SuperProp(_) => todo!(),
         // Expr::Cond(_) => todo!(),
@@ -504,6 +588,13 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
         // Expr::OptChain(_) => todo!(),
         // Expr::Invalid(_) => todo!(),
         other => unsupported_node!(other),
+    }
+}
+
+fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<IID> {
+    match builder.get_var(&ident.sym) {
+        Some(var) => Ok(var.iid),
+        None => Err(Error::UnboundVariable(ident.sym.to_string())),
     }
 }
 

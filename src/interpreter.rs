@@ -144,20 +144,20 @@ impl<'a> VM<'a> {
         args: &[Value],
         flags: InterpreterFlags,
     ) -> Result<Value> {
-        let indent = "|  ".repeat(flags.indent_level as usize);
+        let indent = "     | ".repeat(flags.indent_level as usize);
 
         let func = self.module.fns.get(&fnid).expect("invalid function ID");
         let instrs = &func.instrs;
 
         let mut results = vec![Value::Null; instrs.len()];
 
-        let get_operand = |results: &Vec<Value>, operand: &Operand| {
-            let value = match operand {
-                Operand::Value(value) => value.clone(),
-                Operand::IID(IID(ndx)) => results[*ndx as usize].clone(),
-            };
-            eprintln!("{}    . get {:?} -> {:?}", indent, operand, value);
-            value
+        let get_operand = |results: &Vec<Value>, operand: &Operand| match operand {
+            Operand::Value(value) => value.clone(),
+            Operand::IID(IID(ndx)) => {
+                let value = results[*ndx as usize].clone();
+                eprintln!("{}     ' {:?} = {:?}", indent, operand, value);
+                value
+            }
         };
 
         let mut ndx = 0;

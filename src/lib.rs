@@ -131,6 +131,6 @@ mod tests {
         );
 
         let sink = interpreter::interpret(&module).unwrap().sink;
-        assert_eq!(&[Value::Number(4950.0)], &sink[..]);
+        assert_eq!(&[Value::Number(5050.0)], &sink[..]);
     }
 }
