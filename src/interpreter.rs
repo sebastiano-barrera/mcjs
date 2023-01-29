@@ -149,7 +149,7 @@ impl<'a> VM<'a> {
         let func = self.module.fns.get(&fnid).expect("invalid function ID");
         let instrs = &func.instrs;
 
-        let mut results = vec![Value::Null; instrs.len()];
+        let mut results = vec![Value::Undefined; instrs.len()];
 
         let get_operand = |results: &Vec<Value>, operand: &Operand| match operand {
             Operand::Value(value) => value.clone(),
