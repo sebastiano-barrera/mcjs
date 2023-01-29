@@ -107,55 +107,43 @@ pub enum CmpOp {
     NE,
 }
 
-pub struct Config {
-    pub include_paths: Vec<PathBuf>,
+pub struct VM<'a> {
+    module: &'a Module,
+    sink: Vec<Value>,
 }
 
-pub struct VM {
-    cfg: Config,
-    module: Module,
-    sink: RefCell<Vec<Value>>,
+pub struct Output {
+    pub sink: Vec<Value>,
 }
 
-impl VM {
-    pub fn new(module: Module, cfg: Config) -> Self {
-        VM {
-            cfg,
-            module,
-            sink: RefCell::new(Vec::new()),
-        }
-    }
+pub fn interpret(module: &Module) -> Result<Output> {
+    interpret_with_flags(module, Default::default())
+}
 
-    #[cfg(disabled)]
-    pub fn require(&mut self, require_path: &str) -> Result<()> {
-        let filename = format!("{}.js", require_path);
-        let include_paths = &self.cfg.include_paths;
-        let file_path = include_paths
-            .iter()
-            .map(|include_path| include_path.join(&filename))
-            .find(|path| path.is_file())
-            .ok_or(Error::FileNotFound)?;
+pub fn interpret_and_trace(module: &Module) -> Result<Output> {
+    let flags = InterpreterFlags {
+        create_trace: true,
+        ..Default::default()
+    };
+    interpret_with_flags(module, flags)
+}
 
-        let mut program_text = String::new();
-        std::fs::File::open(file_path)?.read_to_string(&mut program_text)?;
+fn interpret_with_flags(module: &Module, flags: InterpreterFlags) -> Result<Output> {
+    let mut vm = VM {
+        module,
+        sink: Vec::new(),
+    };
+    vm.interpret_fn(FnId::ROOT_FN, &[], flags)?;
+    Ok(Output { sink: vm.sink })
+}
 
-        parser::parse_file(filename, program_text);
-        // eprintln!("Parse tree:\n{:?}", parse_tree);
-        // Ok(())
-    }
-
-    pub fn take_sink(&mut self) -> Vec<Value> {
-        let mut cur_sink = self.sink.borrow_mut();
-        let mut old_sink = Vec::new();
-        std::mem::swap(&mut old_sink, &mut cur_sink);
-        old_sink
-    }
-
-    pub fn interpret(&mut self) -> Result<Value> {
-        self.interpret_fn(FnId::ROOT_FN, &[], Default::default())
-    }
-
-    fn interpret_fn(&self, fnid: FnId, args: &[Value], flags: InterpreterFlags) -> Result<Value> {
+impl<'a> VM<'a> {
+    fn interpret_fn(
+        &mut self,
+        fnid: FnId,
+        args: &[Value],
+        flags: InterpreterFlags,
+    ) -> Result<Value> {
         let indent = "|  ".repeat(flags.indent_level as usize);
 
         let func = self.module.fns.get(&fnid).expect("invalid function ID");
@@ -203,7 +191,7 @@ impl VM {
                 }
                 Instr::PushSink(operand) => {
                     let value = get_operand(&mut results, operand);
-                    self.sink.borrow_mut().push(value);
+                    self.sink.push(value);
                 }
                 Instr::Cmp { op, a, b } => {
                     let a = get_operand(&mut results, a);

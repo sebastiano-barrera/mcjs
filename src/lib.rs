@@ -11,17 +11,10 @@ mod interpreter;
 mod tests {
     use super::*;
 
-    use interpreter::{Config, Value, VM};
+    use interpreter::{Value, VM};
 
-    fn quick_compile(code: &str) -> VM {
-        let module =
-            bytecode_compiler::compile_file("input.js".to_string(), code.to_string()).unwrap();
-        VM::new(
-            module,
-            Config {
-                include_paths: vec![],
-            },
-        )
+    fn quick_compile(code: &str) -> interpreter::Module {
+        bytecode_compiler::compile_file("input.js".to_string(), code.to_string()).unwrap()
     }
 
     // For the future, for loading code from `test-resources/`:
@@ -31,24 +24,22 @@ mod tests {
 
     #[test]
     fn test_simple_call() {
-        let mut vm = quick_compile("/* Here is some simple code: */ sink(1 + 4 + 99); ");
+        let module = quick_compile("/* Here is some simple code: */ sink(1 + 4 + 99); ");
 
         // 0   const 1
         // 1   const 4
         // 2   add v0, v1
         // 3   push_sink v2
 
-        vm.interpret().unwrap();
-        let sink = vm.take_sink();
+        let sink = interpreter::interpret(&module).unwrap().sink;
         assert_eq!(&[Value::Number(104.0)], &sink[..]);
     }
 
     #[test]
     fn test_multiple_calls() {
-        let mut vm =
+        let module =
             quick_compile("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ");
-        vm.interpret().unwrap();
-        let sink = vm.take_sink();
+        let sink = interpreter::interpret(&module).unwrap().sink;
         assert_eq!(
             &[Value::Number(12. * 5.), Value::Number(99. - 15.)],
             &sink[..]
@@ -57,7 +48,7 @@ mod tests {
 
     #[test]
     fn test_if() {
-        let mut vm = quick_compile(
+        let module = quick_compile(
             "
             const x = 123;
             let y = 'a';
@@ -75,15 +66,14 @@ mod tests {
         // 4    set v2 <- 'b'
         // 5    push_sink v2
 
-        vm.interpret().unwrap();
-        let sink = vm.take_sink();
+        let sink = interpreter::interpret(&module).unwrap().sink;
         let val: Value = "b".to_string().into();
         assert_eq!(&[val], &sink[..]);
     }
 
     #[test]
     fn test_simple_fn() {
-        let mut vm = quick_compile(
+        let module = quick_compile(
             "
             function foo(a, b) { return a + b; }
             sink(foo(1, 2));
@@ -97,14 +87,13 @@ mod tests {
         // 4    set v2 <- 'b'
         // 5    push_sink v2
 
-        vm.interpret().unwrap();
-        let sink = vm.take_sink();
+        let sink = interpreter::interpret(&module).unwrap().sink;
         assert_eq!(&[Value::Number(3.0)], &sink[..]);
     }
 
     #[test]
     fn test_simple_trace() {
-        let mut vm = quick_compile(
+        let module = quick_compile(
             "
             function foo(mode, a, b) {
                 if (mode === 'sum') {
@@ -119,15 +108,13 @@ mod tests {
             ",
         );
 
-        vm.interpret().unwrap();
-        let sink = vm.take_sink();
+        let sink = interpreter::interpret(&module).unwrap().sink;
         assert_eq!(&[Value::Number(40.0)], &sink[..]);
     }
 
-
     #[test]
     fn test_while() {
-        let mut vm = quick_compile(
+        let module = quick_compile(
             "
             function sum_range(n) {
                 let i = 0;
@@ -143,8 +130,7 @@ mod tests {
             ",
         );
 
-        vm.interpret().unwrap();
-        let sink = vm.take_sink();
+        let sink = interpreter::interpret(&module).unwrap().sink;
         assert_eq!(&[Value::Number(4950.0)], &sink[..]);
     }
 }
