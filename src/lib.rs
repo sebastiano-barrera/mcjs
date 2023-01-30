@@ -103,7 +103,7 @@ mod tests {
             "
             const x = 123;
             let y = 'a';
-            if (x < 200) {
+            if (x < 256) {
                 y = 'b';
             }
             sink(y);
@@ -130,7 +130,6 @@ mod tests {
         assert_eq!(&[val], &sink[..]);
     }
 
-    #[ignore]
     #[test]
     fn test_while() {
         let module = quick_compile(
@@ -149,9 +148,17 @@ mod tests {
             ",
         );
 
-        let sink = interpreter::interpret(&module).unwrap().sink;
-        assert_eq!(&[Value::Number(28.0)], &sink[..]);
+        let output = interpreter::interpret_and_trace(&module).unwrap();
+        assert_eq!(&[Value::Number(28.0)], &output.sink[..]);
 
-        // assert!(false);
+        assert!(output.trace.is_some());
+    }
+
+    #[test]
+    fn test_uncastable() {
+        let module = quick_compile("sink(!'some string');");
+
+        let output = interpreter::interpret_and_trace(&module).unwrap();
+        assert!(output.trace.is_none());
     }
 }

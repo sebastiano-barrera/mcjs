@@ -536,7 +536,21 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
         // Expr::Array(_) => todo!(),
         // Expr::Object(_) => todo!(),
         // Expr::Fn(_) => todo!(),
-        // Expr::Unary(_) => todo!(),
+        Expr::Unary(unary_expr) => {
+            match unary_expr.op {
+                swc_ecma_ast::UnaryOp::Bang => {
+                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    Ok(builder.emit(Instr::Not(arg.into())))
+                }
+                other => unsupported_node!(other),
+                // swc_ecma_ast::UnaryOp::Minus => todo!(),
+                // swc_ecma_ast::UnaryOp::Plus => todo!(),
+                // swc_ecma_ast::UnaryOp::Tilde => todo!(),
+                // swc_ecma_ast::UnaryOp::TypeOf => todo!(),
+                // swc_ecma_ast::UnaryOp::Void => todo!(),
+                // swc_ecma_ast::UnaryOp::Delete => todo!(),
+            }
+        }
         Expr::Update(update_expr) => {
             if let Expr::Ident(ident) = &*update_expr.arg {
                 // NOTE: update_expr.prefix does not matter in this case, but

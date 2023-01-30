@@ -238,7 +238,8 @@ impl<'a> VM<'a> {
                         }
 
                         _ => {
-                            panic!("invalid operands for cmp op: {:?}; {:?}", a, b);
+                            values_buf[ndx] = Value::Bool(false);
+                            // panic!("invalid operands for cmp op: {:?}; {:?}", a, b);
                         }
                     }
                 }
@@ -262,7 +263,11 @@ impl<'a> VM<'a> {
                     let value = get_operand(&values_buf, value);
                     values_buf[ndx] = match value {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
-                        other => panic!("invalid operand for `not` (not boolean): {:?}", other),
+                        _ => {
+                            Value::Bool(false)
+
+                            // panic!("invalid operand for `not` (not boolean): {:?}", other);
+                        }
                     };
                 }
                 Instr::Jmp(dest) => {

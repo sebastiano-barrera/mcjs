@@ -1,16 +1,84 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 use crate::interpreter::{self, IID};
 
 use dynasm::dynasm;
 
 // This is going to be changed at some point
-type Value = interpreter::Value;
+type BoxedValue = interpreter::Value;
+
+trait TypeTag: 'static + Sized + Debug {
+    type Value: Debug;
+    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value>;
+}
 
 #[derive(Debug)]
-enum Operand {
+struct TNum;
+impl TypeTag for TNum {
+    type Value = f64;
+
+    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value> {
+        if let interpreter::Value::Number(num) = interpreter_value {
+            Some(*num)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TBool;
+impl TypeTag for TBool {
+    type Value = bool;
+
+    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value> {
+        if let interpreter::Value::Bool(bool_val) = interpreter_value {
+            Some(*bool_val)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TStr;
+impl TypeTag for TStr {
+    type Value = String;
+
+    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value> {
+        if let interpreter::Value::String(s) = interpreter_value {
+            Some(s.clone())
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TBoxed;
+impl TypeTag for TBoxed {
+    type Value = BoxedValue;
+
+    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value> {
+        Some(interpreter_value.clone())
+    }
+}
+
+#[derive(Debug)]
+struct TNone;
+impl TypeTag for TNone {
+    type Value = ();
+
+    fn check_type(_: &interpreter::Value) -> Option<()> {
+        None
+    }
+}
+
+#[derive(Debug)]
+enum Operand<Tag: TypeTag> {
     ValueId(ValueId),
-    Const(Value),
+    Const(Tag::Value),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +103,8 @@ pub struct TraceBuilder {
     trace_ended: bool,
 }
 
+struct TypeError;
+
 impl TraceBuilder {
     pub fn new() -> Self {
         TraceBuilder {
@@ -46,18 +116,26 @@ impl TraceBuilder {
         }
     }
 
-    fn resolve_interpreter_operand(
+    fn resolve_interpreter_operand<ReqTag: TypeTag>(
         &self,
         operand: &interpreter::Operand,
         value_buf: &Vec<interpreter::Value>,
-    ) -> Operand {
+    ) -> Option<Operand<ReqTag>> {
         match operand {
-            interpreter::Operand::Value(value) => Operand::Const(value.clone()),
+            interpreter::Operand::Value(value) => {
+                ReqTag::check_type(value).map(|x| Operand::Const(x))
+            }
+
             interpreter::Operand::IID(iid) => {
                 if let Some(value_id) = self.var_iid.get(&(self.stack_depth, *iid)) {
-                    Operand::ValueId(*value_id)
+                    let instr = &self.instrs[value_id.0 as usize];
+                    if instr.result_type_is::<ReqTag>() {
+                        Some(Operand::ValueId(*value_id))
+                    } else {
+                        None
+                    }
                 } else {
-                    Operand::Const(value_buf[iid.0 as usize].clone())
+                    ReqTag::check_type(&value_buf[iid.0 as usize]).map(|x| Operand::Const(x))
                 }
             }
         }
@@ -66,6 +144,20 @@ impl TraceBuilder {
     pub(crate) fn interpreter_step(&mut self, step: &InterpreterStep) {
         if self.trace_ended {
             return;
+        }
+
+        macro_rules! resolve {
+            ($type_tag:ty, $operand:expr) => {
+                match self.resolve_interpreter_operand::<$type_tag>($operand, &step.values_buf) {
+                    None => {
+                        // Type error => fail the trace
+                        self.failed = true;
+                        self.trace_ended = true;
+                        return;
+                    }
+                    Some(operand) => operand,
+                }
+            };
         }
 
         let instr = &step.func.instrs()[step.iid.0 as usize];
@@ -89,15 +181,13 @@ impl TraceBuilder {
             interpreter::Instr::Not(oper) => {
                 // if the operand resolves to a constant, we can just skip it
                 // (functions as constant folding)
-                if let Operand::ValueId(vid) =
-                    self.resolve_interpreter_operand(&oper, &step.values_buf)
-                {
+                if let Operand::ValueId(vid) = resolve!(TBool, &oper) {
                     self.instrs.push(Instr::Not(vid));
                 }
             }
             interpreter::Instr::Arith { op, a, b } => {
-                let a = self.resolve_interpreter_operand(&a, &step.values_buf);
-                let b = self.resolve_interpreter_operand(&b, &step.values_buf);
+                let a = resolve!(TNum, &a);
+                let b = resolve!(TNum, &b);
                 match (a, b) {
                     (Operand::Const(_), Operand::Const(_)) => {
                         // constant folding
@@ -108,19 +198,19 @@ impl TraceBuilder {
                 }
             }
             interpreter::Instr::Cmp { op, a, b } => {
-                let a = self.resolve_interpreter_operand(&a, &step.values_buf);
-                let b = self.resolve_interpreter_operand(&b, &step.values_buf);
+                let a = resolve!(TNum, &a);
+                let b = resolve!(TNum, &b);
                 match (a, b) {
                     (Operand::Const(_), Operand::Const(_)) => {
                         // constant folding
                     }
                     (a, b) => {
-                        self.emit(Instr::Cmp { op: *op, a, b });
+                        self.emit(Instr::CmpNum { op: *op, a, b });
                     }
                 }
             }
             interpreter::Instr::JmpIf { cond, dest } => {
-                let cond = self.resolve_interpreter_operand(&cond, &step.values_buf);
+                let cond = resolve!(TBool, &cond);
                 match cond {
                     Operand::Const(_) => {
                         // constant folding
@@ -137,22 +227,19 @@ impl TraceBuilder {
                 // unconditional jump.  Nothing to do, let's just follow the interpreter to the next instruction
             }
             interpreter::Instr::Set { var_id, value } => {
-                let value = self.resolve_interpreter_operand(&value, &step.values_buf);
-                match value {
-                    Operand::ValueId(vid) => {
-                        self.var_iid.insert((self.stack_depth, *var_id), vid);
+                if let interpreter::Operand::IID(vid) = value {
+                    if let Some(value_id) = self.var_iid.get(&(self.stack_depth, *vid)) {
+                        self.var_iid
+                            .insert((self.stack_depth, *var_id), value_id.clone());
                     }
-                    Operand::Const(_) => {
-                        // constant folding
-                    }
-                };
+                }
             }
             interpreter::Instr::PushSink(value) => {
-                let value = self.resolve_interpreter_operand(&value, &step.values_buf);
+                let value = resolve!(TBoxed, &value);
                 self.emit(Instr::PushSink(value));
             }
             interpreter::Instr::Return(value) => {
-                let value = self.resolve_interpreter_operand(&value, &step.values_buf);
+                let value = resolve!(TBoxed, &value);
                 self.emit(Instr::Return(value));
                 self.trace_ended = true;
             }
@@ -192,32 +279,41 @@ enum Instr {
     Not(ValueId),
     Arith {
         op: ArithOp,
-        a: Operand,
-        b: Operand,
+        a: Operand<TNum>,
+        b: Operand<TNum>,
     },
-    Cmp {
+    CmpNum {
         op: CmpOp,
-        a: Operand,
-        b: Operand,
+        a: Operand<TNum>,
+        b: Operand<TNum>,
     },
     ExitUnless {
         cond: ValueId,
         dest: interpreter::IID,
     },
-    PushSink(Operand),
-    Return(Operand),
+    PushSink(Operand<TBoxed>),
+    Return(Operand<TBoxed>),
 }
 
 type ArithOp = interpreter::ArithOp;
 type CmpOp = interpreter::CmpOp;
 
-// Number(f64),
-// String(String),
-// Bool(bool),
-// Null,
-// Undefined,
-// SelfFunction,
-// LocalFn(FnId),
+impl Instr {
+    fn result_type_is<ReqTag: TypeTag>(&self) -> bool {
+        std::any::TypeId::of::<ReqTag>() == self.type_tag()
+    }
+
+    fn type_tag(&self) -> std::any::TypeId {
+        match self {
+            Instr::Not(_) => std::any::TypeId::of::<TBool>(),
+            Instr::Arith { op, a, b } => std::any::TypeId::of::<TNum>(),
+            Instr::CmpNum { op, a, b } => std::any::TypeId::of::<TBool>(),
+            Instr::ExitUnless { cond, dest } => std::any::TypeId::of::<TNone>(),
+            Instr::PushSink(_) => std::any::TypeId::of::<TNone>(),
+            Instr::Return(_) => std::any::TypeId::of::<TNone>(),
+        }
+    }
+}
 
 // A JIT trace, in SSA representation.
 pub struct Trace {
@@ -235,7 +331,6 @@ impl Trace {
 
     pub(crate) fn compile(&self) -> NativeThunk {
         use dynasmrt::{DynasmApi, DynasmLabelApi};
-
         let mut asm = dynasmrt::x64::Assembler::new().unwrap();
 
         dynasm!(asm
@@ -249,13 +344,18 @@ impl Trace {
 
         let buf = asm.finalize().unwrap();
 
-        NativeThunk { buf, entry_offset }
+        NativeThunk {
+            buf,
+            entry_offset,
+            sink: Vec::new(),
+        }
     }
 }
 
 pub struct NativeThunk {
     buf: dynasmrt::ExecutableBuffer,
     entry_offset: dynasmrt::AssemblyOffset,
+    sink: Vec<BoxedValue>,
 }
 
 impl NativeThunk {
