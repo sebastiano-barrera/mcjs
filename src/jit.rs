@@ -4,6 +4,18 @@ use crate::interpreter::{self, IID};
 
 use dynasm::dynasm;
 
+// This is going to be changed at some point
+type Value = interpreter::Value;
+
+#[derive(Debug)]
+enum Operand {
+    ValueId(ValueId),
+    Const(Value),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ValueId(u32);
+
 pub struct TraceBuilder {
     // This map associates Instruction IDs from the interpreter to ValueIds in
     // the SSA trace we're building. Instruction IDs that are absent from this
@@ -22,18 +34,6 @@ pub struct TraceBuilder {
     failed: bool,
     trace_ended: bool,
 }
-
-// This is going to be changed at some point
-type Value = interpreter::Value;
-
-#[derive(Debug)]
-enum Operand {
-    ValueId(ValueId),
-    Const(Value),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ValueId(u32);
 
 impl TraceBuilder {
     pub fn new() -> Self {
