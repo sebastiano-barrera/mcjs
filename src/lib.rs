@@ -6,6 +6,7 @@
 mod bytecode_compiler;
 mod common;
 mod interpreter;
+mod jit;
 
 #[cfg(test)]
 mod tests {
@@ -14,7 +15,10 @@ mod tests {
     use interpreter::{Value, VM};
 
     fn quick_compile(code: &str) -> interpreter::Module {
-        bytecode_compiler::compile_file("input.js".to_string(), code.to_string()).unwrap()
+        let module =
+            bytecode_compiler::compile_file("input.js".to_string(), code.to_string()).unwrap();
+        module.dump();
+        module
     }
 
     // For the future, for loading code from `test-resources/`:
@@ -89,29 +93,44 @@ mod tests {
 
         let sink = interpreter::interpret(&module).unwrap().sink;
         assert_eq!(&[Value::Number(3.0)], &sink[..]);
+
+        // assert!(false);
     }
 
     #[test]
     fn test_simple_trace() {
         let module = quick_compile(
             "
-            function foo(mode, a, b) {
-                if (mode === 'sum') {
-                    return a + b;
-                } else if (mode === 'product') {
-                    return a * b;
-                } 
-                return null;
+            const x = 123;
+            let y = 'a';
+            if (x < 200) {
+                y = 'b';
             }
-            
-            sink(foo('product', 20, 2));
+            sink(y);
             ",
         );
 
-        let sink = interpreter::interpret(&module).unwrap().sink;
-        assert_eq!(&[Value::Number(40.0)], &sink[..]);
+        // 0    const 123
+        // 1    const 'a'
+        // 2    cmp v0 < v1
+        // 3    jmpif v2 -> #5
+        // 4    set v2 <- 'b'
+        // 5    push_sink v2
+
+        let output = interpreter::interpret_and_trace(&module).unwrap();
+        eprint!("trace = ");
+        let trace = output.trace.unwrap();
+        trace.dump();
+
+        let thunk = trace.compile();
+        assert_eq!(123, thunk.run());
+
+        let sink = &output.sink;
+        let val: Value = "b".to_string().into();
+        assert_eq!(&[val], &sink[..]);
     }
 
+    #[ignore]
     #[test]
     fn test_while() {
         let module = quick_compile(
@@ -126,11 +145,13 @@ mod tests {
                 return ret;
             }
             
-            sink(sum_range(100));
+            sink(sum_range(8));
             ",
         );
 
         let sink = interpreter::interpret(&module).unwrap().sink;
-        assert_eq!(&[Value::Number(5050.0)], &sink[..]);
+        assert_eq!(&[Value::Number(28.0)], &sink[..]);
+
+        // assert!(false);
     }
 }

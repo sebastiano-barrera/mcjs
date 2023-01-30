@@ -37,7 +37,7 @@ impl FnBuilder {
         }
     }
     fn build(self) -> interpreter::Function {
-        interpreter::Function::new(self.instrs)
+        interpreter::Function::new(self.instrs.into_boxed_slice())
     }
 
     fn peek_iid(&self) -> IID {

@@ -1,11 +1,14 @@
 use std::{
     cell::RefCell,
     cmp::Ordering,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
 };
 
-use crate::common::{Error, Result};
+use crate::{
+    common::{Error, Result},
+    jit::{self, InterpreterStep},
+};
 
 /// A value that can be input, output, or processed by the program.
 #[derive(Debug, PartialEq, Clone)]
@@ -26,7 +29,7 @@ impl From<String> for Value {
 }
 
 // Instruction ID. Can identify an instruction, or its result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub struct IID(pub u32);
 
@@ -89,7 +92,7 @@ impl From<Value> for Operand {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ArithOp {
     Add,
     Sub,
@@ -97,7 +100,7 @@ pub enum ArithOp {
     Div,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum CmpOp {
     GE,
     GT,
@@ -110,10 +113,12 @@ pub enum CmpOp {
 pub struct VM<'a> {
     module: &'a Module,
     sink: Vec<Value>,
+    trace_builder: Option<jit::TraceBuilder>,
 }
 
 pub struct Output {
     pub sink: Vec<Value>,
+    pub trace: Option<jit::Trace>,
 }
 
 pub fn interpret(module: &Module) -> Result<Output> {
@@ -132,9 +137,17 @@ fn interpret_with_flags(module: &Module, flags: InterpreterFlags) -> Result<Outp
     let mut vm = VM {
         module,
         sink: Vec::new(),
+        trace_builder: if flags.create_trace {
+            Some(jit::TraceBuilder::new())
+        } else {
+            None
+        },
     };
     vm.interpret_fn(FnId::ROOT_FN, &[], flags)?;
-    Ok(Output { sink: vm.sink })
+    Ok(Output {
+        sink: vm.sink,
+        trace: vm.trace_builder.and_then(|tb| tb.build()),
+    })
 }
 
 impl<'a> VM<'a> {
@@ -149,7 +162,7 @@ impl<'a> VM<'a> {
         let func = self.module.fns.get(&fnid).expect("invalid function ID");
         let instrs = &func.instrs;
 
-        let mut results = vec![Value::Undefined; instrs.len()];
+        let mut values_buf = vec![Value::Undefined; instrs.len()];
 
         let get_operand = |results: &Vec<Value>, operand: &Operand| match operand {
             Operand::Value(value) => value.clone(),
@@ -172,14 +185,14 @@ impl<'a> VM<'a> {
 
             match instr {
                 Instr::Const(value) => {
-                    results[ndx] = value.clone();
+                    values_buf[ndx] = value.clone();
                 }
                 Instr::Arith { op, a, b } => {
-                    let a = get_operand(&mut results, a);
-                    let b = get_operand(&mut results, b);
+                    let a = get_operand(&mut values_buf, a);
+                    let b = get_operand(&mut values_buf, b);
 
                     if let (Value::Number(a), Value::Number(b)) = (&a, &b) {
-                        results[ndx] = Value::Number(match op {
+                        values_buf[ndx] = Value::Number(match op {
                             ArithOp::Add => a + b,
                             ArithOp::Sub => a - b,
                             ArithOp::Mul => a * b,
@@ -190,16 +203,16 @@ impl<'a> VM<'a> {
                     }
                 }
                 Instr::PushSink(operand) => {
-                    let value = get_operand(&mut results, operand);
+                    let value = get_operand(&mut values_buf, operand);
                     self.sink.push(value);
                 }
                 Instr::Cmp { op, a, b } => {
-                    let a = get_operand(&mut results, a);
-                    let b = get_operand(&mut results, b);
+                    let a = get_operand(&mut values_buf, a);
+                    let b = get_operand(&mut values_buf, b);
 
                     match (&a, &b) {
                         (Value::Number(a), Value::Number(b)) => {
-                            results[ndx] = Value::Bool(match op {
+                            values_buf[ndx] = Value::Bool(match op {
                                 CmpOp::GE => a >= b,
                                 CmpOp::GT => a > b,
                                 CmpOp::LT => a < b,
@@ -210,7 +223,7 @@ impl<'a> VM<'a> {
                         }
                         (Value::String(a), Value::String(b)) => {
                             let ordering = a.cmp(b);
-                            results[ndx] = Value::Bool(matches!(
+                            values_buf[ndx] = Value::Bool(matches!(
                                 (op, ordering),
                                 (CmpOp::GE, Ordering::Greater)
                                     | (CmpOp::GE, Ordering::Equal)
@@ -230,7 +243,7 @@ impl<'a> VM<'a> {
                     }
                 }
                 Instr::JmpIf { cond, dest } => {
-                    let cond_value = get_operand(&mut results, cond);
+                    let cond_value = get_operand(&mut values_buf, cond);
                     match cond_value {
                         Value::Bool(true) => {
                             next_ndx = dest.0 as usize;
@@ -240,14 +253,14 @@ impl<'a> VM<'a> {
                     }
                 }
                 Instr::Set { var_id, value } => {
-                    let value = get_operand(&results, value);
+                    let value = get_operand(&values_buf, value);
                     let var_ndx = var_id.0 as usize;
-                    results[var_ndx] = value;
+                    values_buf[var_ndx] = value;
                 }
                 Instr::Nop => {}
                 Instr::Not(value) => {
-                    let value = get_operand(&results, value);
-                    results[ndx] = match value {
+                    let value = get_operand(&values_buf, value);
+                    values_buf[ndx] = match value {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         other => panic!("invalid operand for `not` (not boolean): {:?}", other),
                     };
@@ -255,28 +268,38 @@ impl<'a> VM<'a> {
                 Instr::Jmp(dest) => {
                     next_ndx = dest.0 as usize;
                 }
-                Instr::Return(value) => return Ok(get_operand(&results, value)),
+                Instr::Return(value) => return Ok(get_operand(&values_buf, value)),
                 Instr::GetArg(arg_ndx) => {
-                    results[ndx] = args[*arg_ndx].clone();
+                    values_buf[ndx] = args[*arg_ndx].clone();
                 }
 
                 Instr::Call { callee, args } => {
-                    let callee = get_operand(&results, callee);
+                    let callee = get_operand(&values_buf, callee);
                     if let Value::LocalFn(callee_fnid) = callee {
                         let arg_values: Vec<Value> = args
                             .iter()
-                            .map(|oper| get_operand(&results, oper))
+                            .map(|oper| get_operand(&values_buf, oper))
                             .collect();
                         let flags = InterpreterFlags {
                             indent_level: flags.indent_level + 1,
                             ..flags
                         };
                         let ret_val = self.interpret_fn(callee_fnid, &arg_values[..], flags)?;
-                        results[ndx] = ret_val;
+                        values_buf[ndx] = ret_val;
                     } else {
                         panic!("invalid callee (not a function): {:?}", callee);
                     }
                 }
+            }
+
+            if let Some(trace_builder) = &mut self.trace_builder {
+                trace_builder.interpreter_step(&InterpreterStep {
+                    values_buf: &values_buf,
+                    fnid,
+                    func: &func,
+                    iid: IID(ndx as u32),
+                    next_iid: IID(next_ndx as u32),
+                });
             }
 
             ndx = next_ndx;
@@ -315,13 +338,61 @@ impl Module {
     pub fn new(fns: HashMap<FnId, Function>) -> Self {
         Module { fns }
     }
+
+    pub(crate) fn dump(&self) {
+        eprintln!("=== module");
+        for (fnid, func) in self.fns.iter() {
+            eprintln!("fn #{}():", fnid.0);
+            for (ndx, instr) in func.instrs.iter().enumerate() {
+                eprintln!(
+                    "  {:4}{:4}: {:?}",
+                    if func.loop_heads.contains(&IID(ndx as u32)) {
+                        ">>"
+                    } else {
+                        ""
+                    },
+                    ndx,
+                    instr
+                );
+            }
+        }
+        eprintln!("---");
+    }
 }
 
 pub struct Function {
-    instrs: Vec<Instr>,
+    instrs: Box<[Instr]>,
+    loop_heads: HashSet<IID>,
 }
 impl Function {
-    pub(crate) fn new(instrs: Vec<Instr>) -> Function {
-        Function { instrs }
+    pub(crate) fn new(instrs: Box<[Instr]>) -> Function {
+        let loop_heads = find_loop_heads(&instrs[..]);
+        Function { instrs, loop_heads }
     }
+
+    pub(crate) fn instrs(&self) -> &[Instr] {
+        self.instrs.as_ref()
+    }
+
+    pub(crate) fn is_loop_head(&self, iid: IID) -> bool {
+        self.loop_heads.contains(&iid)
+    }
+}
+
+fn find_loop_heads(instrs: &[Instr]) -> HashSet<IID> {
+    let mut heads = HashSet::new();
+    for (ndx, inst) in instrs.iter().enumerate() {
+        match inst {
+            Instr::Jmp(IID(dest_ndx))
+            | Instr::JmpIf {
+                dest: IID(dest_ndx),
+                ..
+            } if *dest_ndx as usize <= ndx => {
+                heads.insert(IID(*dest_ndx));
+            }
+            _ => {}
+        }
+    }
+
+    heads
 }
