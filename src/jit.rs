@@ -8,81 +8,35 @@ use dynasm::dynasm;
 // This is going to be changed at some point
 type BoxedValue = interpreter::Value;
 
-trait TypeTag: 'static + Sized + Debug {
-    type Value: Debug;
-    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value>;
-}
-
-#[derive(Debug)]
-struct TNum;
-impl TypeTag for TNum {
-    type Value = f64;
-
-    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value> {
-        if let interpreter::Value::Number(num) = interpreter_value {
-            Some(*num)
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Debug)]
-struct TBool;
-impl TypeTag for TBool {
-    type Value = bool;
-
-    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value> {
-        if let interpreter::Value::Bool(bool_val) = interpreter_value {
-            Some(*bool_val)
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Debug)]
-struct TStr;
-impl TypeTag for TStr {
-    type Value = String;
-
-    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value> {
-        if let interpreter::Value::String(s) = interpreter_value {
-            Some(s.clone())
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Debug)]
-struct TBoxed;
-impl TypeTag for TBoxed {
-    type Value = BoxedValue;
-
-    fn check_type(interpreter_value: &interpreter::Value) -> Option<Self::Value> {
-        Some(interpreter_value.clone())
-    }
-}
-
-#[derive(Debug)]
-struct TNone;
-impl TypeTag for TNone {
-    type Value = ();
-
-    fn check_type(_: &interpreter::Value) -> Option<()> {
-        None
-    }
-}
-
-#[derive(Debug)]
-enum Operand<Tag: TypeTag> {
+#[derive(PartialEq, Clone)]
+enum Operand {
     ValueId(ValueId),
-    Const(Tag::Value),
+    Imm(BoxedValue),
 }
 
-#[derive(Clone, Copy, Debug)]
+impl From<ValueId> for Operand {
+    fn from(vid: ValueId) -> Self {
+        Operand::ValueId(vid)
+    }
+}
+
+impl std::fmt::Debug for Operand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Operand::ValueId(vid) => vid.fmt(f),
+            Operand::Imm(value) => value.fmt(f),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ValueId(u32);
+
+impl std::fmt::Debug for ValueId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
 
 pub struct TraceBuilder {
     // This map associates Instruction IDs from the interpreter to ValueIds in
@@ -94,13 +48,18 @@ pub struct TraceBuilder {
     //
     // Key is (stack depth, IID)
     // TODO change this name...
-    var_iid: HashMap<(u32, interpreter::IID), ValueId>,
+    var_iid: HashMap<(u32, interpreter::IID), Operand>,
     stack_depth: u32,
 
     instrs: Vec<Instr>,
+    parameters: Vec<TraceParam>,
 
     failed: bool,
     trace_ended: bool,
+}
+
+struct TraceParam {
+    iid: interpreter::IID,
 }
 
 struct TypeError;
@@ -111,31 +70,46 @@ impl TraceBuilder {
             var_iid: HashMap::new(),
             stack_depth: 0,
             instrs: Vec::new(),
+            parameters: Vec::new(),
             failed: false,
             trace_ended: false,
         }
     }
 
-    fn resolve_interpreter_operand<ReqTag: TypeTag>(
-        &self,
+    fn resolve_interpreter_operand(
+        &mut self,
         operand: &interpreter::Operand,
         value_buf: &Vec<interpreter::Value>,
-    ) -> Option<Operand<ReqTag>> {
+    ) -> Operand {
         match operand {
-            interpreter::Operand::Value(value) => {
-                ReqTag::check_type(value).map(|x| Operand::Const(x))
-            }
+            // constants from the interpreter bytecode are simply preserved
+            interpreter::Operand::Value(value) => Operand::Imm(value.clone()),
 
+            // variables from the interpreter (identified by the ID of the
+            // instruction that produced them) are mapped to the corresponding
+            // JIT instruction ID
             interpreter::Operand::IID(iid) => {
-                if let Some(value_id) = self.var_iid.get(&(self.stack_depth, *iid)) {
-                    let instr = &self.instrs[value_id.0 as usize];
-                    if instr.result_type_is::<ReqTag>() {
-                        Some(Operand::ValueId(*value_id))
-                    } else {
-                        None
-                    }
+                let key = (self.stack_depth, *iid);
+
+                if let Some(operand_for_var) = self.var_iid.get(&key) {
+                    eprintln!("TB: {:?} is {:?}", iid, operand_for_var);
+                    operand_for_var.clone()
                 } else {
-                    ReqTag::check_type(&value_buf[iid.0 as usize]).map(|x| Operand::Const(x))
+                    eprintln!(
+                        "TB: {:?} is unresolved => considered parameter, adding guard",
+                        operand
+                    );
+                    let param_ndx = self.add_parameter(*iid);
+                    let vid = self.emit(Instr::TraceParam(param_ndx));
+                    let observed_value = &value_buf[iid.0 as usize];
+                    self.emit(Instr::AssertEqConst {
+                        x: Operand::ValueId(vid),
+                        expected: observed_value.clone(),
+                    });
+
+                    let operand_for_var = Operand::ValueId(vid);
+                    self.var_iid.insert(key, operand_for_var.clone());
+                    operand_for_var
                 }
             }
         }
@@ -146,24 +120,10 @@ impl TraceBuilder {
             return;
         }
 
-        macro_rules! resolve {
-            ($type_tag:ty, $operand:expr) => {
-                match self.resolve_interpreter_operand::<$type_tag>($operand, &step.values_buf) {
-                    None => {
-                        // Type error => fail the trace
-                        self.failed = true;
-                        self.trace_ended = true;
-                        return;
-                    }
-                    Some(operand) => operand,
-                }
-            };
-        }
-
         let instr = &step.func.instrs()[step.iid.0 as usize];
-        eprintln!("TB: step: {:?}", instr);
+        eprintln!("TB: step");
 
-        if step.func.is_loop_head(step.iid) {
+        if false && step.func.is_loop_head(step.iid) {
             eprintln!("TB: instr is loop head. aborting.");
             // loops not supported yet!
             self.failed = true;
@@ -171,86 +131,105 @@ impl TraceBuilder {
             return;
         }
 
-        match instr {
-            interpreter::Instr::Nop => {}
-            interpreter::Instr::Const(_) => {
-                // Nothing to do. In later instructions, we can fetch the value
-                // from the interpreter's value buffer.  This is equivalent to
-                // constant folding.
+        let interpreter_result = &step.values_buf[step.iid.0 as usize];
+
+        let result = match instr {
+            interpreter::Instr::Nop => None,
+            interpreter::Instr::Const(value) => {
+                // This is constant folding: the interpreter's IID is associated directly
+                // to the constant, not to an instruction from the trace.
+                Some(Operand::Imm(value.clone()))
             }
             interpreter::Instr::Not(oper) => {
                 // if the operand resolves to a constant, we can just skip it
                 // (functions as constant folding)
-                if let Operand::ValueId(vid) = resolve!(TBool, &oper) {
-                    self.instrs.push(Instr::Not(vid));
+                match self.resolve_interpreter_operand(&oper, &step.values_buf) {
+                    Operand::ValueId(vid) => Some(self.emit(Instr::Not(vid)).into()),
+                    imm @ Operand::Imm(_) => Some(imm),
                 }
             }
             interpreter::Instr::Arith { op, a, b } => {
-                let a = resolve!(TNum, &a);
-                let b = resolve!(TNum, &b);
+                let a = self.resolve_interpreter_operand(&a, &step.values_buf);
+                let b = self.resolve_interpreter_operand(&b, &step.values_buf);
                 match (a, b) {
-                    (Operand::Const(_), Operand::Const(_)) => {
-                        // constant folding
+                    (Operand::Imm(_), Operand::Imm(_)) => {
+                        Some(Operand::Imm(interpreter_result.clone()))
                     }
-                    (a, b) => {
-                        self.emit(Instr::Arith { op: *op, a, b });
-                    }
+                    (a, b) => Some(self.emit(Instr::Arith { op: *op, a, b }).into()),
                 }
             }
             interpreter::Instr::Cmp { op, a, b } => {
-                let a = resolve!(TNum, &a);
-                let b = resolve!(TNum, &b);
+                let a = self.resolve_interpreter_operand(&a, &step.values_buf);
+                let b = self.resolve_interpreter_operand(&b, &step.values_buf);
                 match (a, b) {
-                    (Operand::Const(_), Operand::Const(_)) => {
-                        // constant folding
+                    (Operand::Imm(_), Operand::Imm(_)) => {
+                        Some(Operand::Imm(interpreter_result.clone()))
                     }
-                    (a, b) => {
-                        self.emit(Instr::CmpNum { op: *op, a, b });
-                    }
+                    (a, b) => Some(self.emit(Instr::CmpNum { op: *op, a, b }).into()),
                 }
             }
-            interpreter::Instr::JmpIf { cond, dest } => {
-                let cond = resolve!(TBool, &cond);
+            interpreter::Instr::JmpIf { cond, .. } => {
+                let cond = self.resolve_interpreter_operand(&cond, &step.values_buf);
                 match cond {
-                    Operand::Const(_) => {
-                        // constant folding
-                    }
+                    // treat this the same as an unconditional jump
+                    Operand::Imm(_cond) => None,
                     Operand::ValueId(vid) => {
-                        self.emit(Instr::ExitUnless {
-                            cond: vid,
-                            dest: *dest,
-                        });
+                        let branch_taken = step.next_iid.0 != step.iid.0;
+                        let vid = if branch_taken {
+                            self.emit(Instr::Not(vid))
+                        } else {
+                            vid
+                        };
+                        let cond = Operand::ValueId(vid);
+                        Some(self.emit(Instr::AssertTrue { cond }).into())
                     }
                 }
             }
             interpreter::Instr::Jmp(_) => {
                 // unconditional jump.  Nothing to do, let's just follow the interpreter to the next instruction
+                None
             }
             interpreter::Instr::Set { var_id, value } => {
-                if let interpreter::Operand::IID(vid) = value {
-                    if let Some(value_id) = self.var_iid.get(&(self.stack_depth, *vid)) {
-                        self.var_iid
-                            .insert((self.stack_depth, *var_id), value_id.clone());
-                    }
-                }
+                let value = self.resolve_interpreter_operand(value, &step.values_buf);
+                self.map_iid(*var_id, value);
+                None
             }
             interpreter::Instr::PushSink(value) => {
-                let value = resolve!(TBoxed, &value);
+                let value = self.resolve_interpreter_operand(&value, &step.values_buf);
                 self.emit(Instr::PushSink(value));
+                None
             }
             interpreter::Instr::Return(value) => {
-                let value = resolve!(TBoxed, &value);
-                self.emit(Instr::Return(value));
-                self.trace_ended = true;
+                let value = self.resolve_interpreter_operand(&value, &step.values_buf);
+                if self.stack_depth == 0 {
+                    self.trace_ended = true;
+                } else {
+                    self.stack_depth -= 1;
+                }
+                Some(self.emit(Instr::Return(value)).into())
             }
-            interpreter::Instr::GetArg(_) => todo!(),
-            interpreter::Instr::Call { callee, args } => todo!(),
+            interpreter::Instr::GetArg(index) => Some(self.emit(Instr::GetArg(*index)).into()),
+            interpreter::Instr::Call { .. } => {
+                eprintln!("TB: warning: following call no matter what");
+                self.stack_depth += 1;
+                None
+            }
+        };
+
+        // Map IID to the result operand
+        if let Some(result) = result {
+            self.map_iid(step.iid, result);
         }
+    }
+
+    fn map_iid(&mut self, iid: IID, jit_operand: Operand) {
+        eprintln!("TB: map {:?} -> {:?}", iid, jit_operand);
+        self.var_iid.insert((self.stack_depth, iid), jit_operand);
     }
 
     fn emit(&mut self, instr: Instr) -> ValueId {
         let vid = ValueId(self.instrs.len() as u32);
-        eprintln!("TB: emit: {:?}", instr);
+        eprintln!("TB: emit: v{:<4} {:?}", vid.0, instr);
         self.instrs.push(instr);
         vid
     }
@@ -264,6 +243,12 @@ impl TraceBuilder {
             })
         }
     }
+
+    pub(crate) fn add_parameter(&mut self, iid: IID) -> u16 {
+        let ndx = self.parameters.len() as u16;
+        self.parameters.push(TraceParam { iid });
+        ndx
+    }
 }
 
 pub struct InterpreterStep<'a> {
@@ -274,43 +259,42 @@ pub struct InterpreterStep<'a> {
     pub(crate) next_iid: interpreter::IID,
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Debug)]
 enum Instr {
+    GetArg(usize),
+    TraceParam(u16),
     Not(ValueId),
-    Arith {
-        op: ArithOp,
-        a: Operand<TNum>,
-        b: Operand<TNum>,
-    },
-    CmpNum {
-        op: CmpOp,
-        a: Operand<TNum>,
-        b: Operand<TNum>,
-    },
-    ExitUnless {
-        cond: ValueId,
-        dest: interpreter::IID,
-    },
-    PushSink(Operand<TBoxed>),
-    Return(Operand<TBoxed>),
+    Arith { op: ArithOp, a: Operand, b: Operand },
+    CmpNum { op: CmpOp, a: Operand, b: Operand },
+    AssertTrue { cond: Operand },
+    AssertEqConst { x: Operand, expected: BoxedValue },
+    PushSink(Operand),
+    Return(Operand),
 }
 
 type ArithOp = interpreter::ArithOp;
 type CmpOp = interpreter::CmpOp;
 
-impl Instr {
-    fn result_type_is<ReqTag: TypeTag>(&self) -> bool {
-        std::any::TypeId::of::<ReqTag>() == self.type_tag()
-    }
+enum ValueType {
+    Boxed,
+    Bool,
+    Num,
+    Str,
+    None,
+}
 
-    fn type_tag(&self) -> std::any::TypeId {
+impl Instr {
+    fn result_type(&self) -> ValueType {
         match self {
-            Instr::Not(_) => std::any::TypeId::of::<TBool>(),
-            Instr::Arith { op, a, b } => std::any::TypeId::of::<TNum>(),
-            Instr::CmpNum { op, a, b } => std::any::TypeId::of::<TBool>(),
-            Instr::ExitUnless { cond, dest } => std::any::TypeId::of::<TNone>(),
-            Instr::PushSink(_) => std::any::TypeId::of::<TNone>(),
-            Instr::Return(_) => std::any::TypeId::of::<TNone>(),
+            Instr::Not(_) => ValueType::Bool,
+            Instr::Arith { .. } => ValueType::Num,
+            Instr::CmpNum { .. } => ValueType::Bool,
+            Instr::AssertTrue { .. } => ValueType::None,
+            Instr::AssertEqConst { .. } => ValueType::None,
+            Instr::PushSink(_) => ValueType::None,
+            Instr::Return(_) => ValueType::None,
+            Instr::GetArg(_) => ValueType::Boxed,
+            Instr::TraceParam(_) => ValueType::Boxed,
         }
     }
 }
@@ -323,9 +307,9 @@ pub struct Trace {
 impl Trace {
     #[cfg(test)]
     pub(crate) fn dump(&self) {
-        eprintln!("\n");
+        eprintln!();
         for (ndx, instr) in self.instrs.iter().enumerate() {
-            eprintln!("{:4} {:?}\n", ndx, instr);
+            eprintln!(" {:4?} {:?}", ndx, instr);
         }
     }
 
@@ -363,5 +347,76 @@ impl NativeThunk {
         let ptr = self.buf.ptr(self.entry_offset);
         let thunk: extern "C" fn() -> u64 = unsafe { std::mem::transmute(ptr) };
         thunk()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quick_compile(code: &str) -> interpreter::Module {
+        use crate::bytecode_compiler;
+
+        let module =
+            bytecode_compiler::compile_file("input.js".to_string(), code.to_string()).unwrap();
+        module.dump();
+        module
+    }
+
+    #[test]
+    fn test_tracing_simple_constant_folding() {
+        let module = quick_compile(
+            "
+            const x = 123;
+            let y = 'a';
+            if (x < 256) {
+                y = 'b';
+            }
+            sink(y);
+            ",
+        );
+
+        // 0    const 123
+        // 1    const 'a'
+        // 2    cmp v0 < v1
+        // 3    jmpif v2 -> #5
+        // 4    set v2 <- 'b'
+        // 5    push_sink v2
+
+        let output = interpreter::interpret_and_trace(&module, 0).unwrap();
+
+        eprint!("trace = ");
+        let trace = output.trace.unwrap();
+        trace.dump();
+        assert_eq!(
+            &trace.instrs[..],
+            &[Instr::PushSink(Operand::Imm("b".to_string().into()))]
+        );
+    }
+
+    #[test]
+    fn test_tracing_one_func() {
+        let module = quick_compile(
+            "
+            function foo(mode, a, b) { 
+                if (mode === 'sum')
+                    return a + b;
+                else if (mode === 'product')
+                    return a * b;
+                else
+                    return 'something else';
+            }
+
+            sink(foo('product', 9, 8));
+            ",
+        );
+
+        let output = interpreter::interpret_and_trace(&module, 1).unwrap();
+
+        eprint!("trace = ");
+        let trace = output.trace.unwrap();
+        trace.dump();
+
+        assert!(false);
     }
 }

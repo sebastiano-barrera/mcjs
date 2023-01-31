@@ -29,9 +29,15 @@ impl From<String> for Value {
 }
 
 // Instruction ID. Can identify an instruction, or its result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub struct IID(pub u32);
+
+impl std::fmt::Debug for IID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "i{}", self.0)
+    }
+}
 
 #[derive(Debug)]
 pub enum Instr {
@@ -77,7 +83,7 @@ impl std::fmt::Debug for Operand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Value(val) => val.fmt(f),
-            Self::IID(iid) => write!(f, "v{}", iid.0),
+            Self::IID(iid) => iid.fmt(f),
         }
     }
 }
@@ -92,7 +98,7 @@ impl From<Value> for Operand {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ArithOp {
     Add,
     Sub,
@@ -100,7 +106,7 @@ pub enum ArithOp {
     Div,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CmpOp {
     GE,
     GT,
@@ -125,9 +131,9 @@ pub fn interpret(module: &Module) -> Result<Output> {
     interpret_with_flags(module, Default::default())
 }
 
-pub fn interpret_and_trace(module: &Module) -> Result<Output> {
+pub fn interpret_and_trace(module: &Module, start_depth: u32) -> Result<Output> {
     let flags = InterpreterFlags {
-        create_trace: true,
+        tracer_flags: Some(TracerFlags { start_depth }),
         ..Default::default()
     };
     interpret_with_flags(module, flags)
@@ -137,7 +143,7 @@ fn interpret_with_flags(module: &Module, flags: InterpreterFlags) -> Result<Outp
     let mut vm = VM {
         module,
         sink: Vec::new(),
-        trace_builder: if flags.create_trace {
+        trace_builder: if flags.tracer_flags.is_some() {
             Some(jit::TraceBuilder::new())
         } else {
             None
@@ -174,14 +180,15 @@ impl<'a> VM<'a> {
         };
 
         let mut ndx = 0;
-        loop {
+        let mut return_value = None;
+        while return_value.is_none() {
             if ndx >= instrs.len() {
                 break;
             }
             let instr = &instrs[ndx];
             let mut next_ndx = ndx + 1;
 
-            eprintln!("{}{:4} {:?}", indent, ndx, instr);
+            eprintln!("{}i{:<4} {:?}", indent, ndx, instr);
 
             match instr {
                 Instr::Const(value) => {
@@ -273,7 +280,9 @@ impl<'a> VM<'a> {
                 Instr::Jmp(dest) => {
                     next_ndx = dest.0 as usize;
                 }
-                Instr::Return(value) => return Ok(get_operand(&values_buf, value)),
+                Instr::Return(value) => {
+                    return_value = Some(get_operand(&values_buf, value));
+                }
                 Instr::GetArg(arg_ndx) => {
                     values_buf[ndx] = args[*arg_ndx].clone();
                 }
@@ -285,11 +294,10 @@ impl<'a> VM<'a> {
                             .iter()
                             .map(|oper| get_operand(&values_buf, oper))
                             .collect();
-                        let flags = InterpreterFlags {
-                            indent_level: flags.indent_level + 1,
-                            ..flags
-                        };
-                        let ret_val = self.interpret_fn(callee_fnid, &arg_values[..], flags)?;
+
+                        let ret_val =
+                            self.interpret_fn(callee_fnid, &arg_values[..], flags.for_call())?;
+
                         values_buf[ndx] = ret_val;
                     } else {
                         panic!("invalid callee (not a function): {:?}", callee);
@@ -298,33 +306,52 @@ impl<'a> VM<'a> {
             }
 
             if let Some(trace_builder) = &mut self.trace_builder {
-                trace_builder.interpreter_step(&InterpreterStep {
-                    values_buf: &values_buf,
-                    fnid,
-                    func: &func,
-                    iid: IID(ndx as u32),
-                    next_iid: IID(next_ndx as u32),
-                });
+                if flags.tracer_flags.as_ref().unwrap().start_depth == 0 {
+                    trace_builder.interpreter_step(&InterpreterStep {
+                        values_buf: &values_buf,
+                        fnid,
+                        func: &func,
+                        iid: IID(ndx as u32),
+                        next_iid: IID(next_ndx as u32),
+                    });
+                }
             }
 
             ndx = next_ndx;
         }
 
-        Ok(Value::Undefined)
+        Ok(return_value.unwrap_or(Value::Undefined))
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct InterpreterFlags {
     indent_level: u8,
-    create_trace: bool,
+    tracer_flags: Option<TracerFlags>,
+}
+impl InterpreterFlags {
+    fn for_call(&self) -> InterpreterFlags {
+        let mut ret = self.clone();
+        ret.indent_level += 1;
+        if let Some(tf) = &mut ret.tracer_flags {
+            if tf.start_depth > 0 {
+                tf.start_depth -= 1;
+            }
+        }
+        return ret;
+    }
+}
+
+#[derive(Clone)]
+struct TracerFlags {
+    start_depth: u32,
 }
 
 impl Default for InterpreterFlags {
     fn default() -> Self {
         Self {
             indent_level: 0,
-            create_trace: false,
+            tracer_flags: None,
         }
     }
 }

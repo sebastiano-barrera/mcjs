@@ -98,36 +98,28 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_trace() {
+    fn test_fn_with_branch() {
         let module = quick_compile(
             "
-            const x = 123;
-            let y = 'a';
-            if (x < 256) {
-                y = 'b';
+            function foo(mode, a, b) { 
+                if (mode === 'sum')
+                    return a + b;
+                else if (mode === 'product')
+                    return a * b;
+                else
+                    return 'something else';
             }
-            sink(y);
+
+            sink(foo('product', 9, 8));
             ",
         );
 
-        // 0    const 123
-        // 1    const 'a'
-        // 2    cmp v0 < v1
-        // 3    jmpif v2 -> #5
-        // 4    set v2 <- 'b'
-        // 5    push_sink v2
-
-        let output = interpreter::interpret_and_trace(&module).unwrap();
+        let output = interpreter::interpret_and_trace(&module, 0).unwrap();
         eprint!("trace = ");
         let trace = output.trace.unwrap();
         trace.dump();
 
-        let thunk = trace.compile();
-        assert_eq!(123, thunk.run());
-
-        let sink = &output.sink;
-        let val: Value = "b".to_string().into();
-        assert_eq!(&[val], &sink[..]);
+        assert!(false);
     }
 
     #[test]
@@ -144,21 +136,20 @@ mod tests {
                 return ret;
             }
             
-            sink(sum_range(8));
+            sink(sum_range(2));
             ",
         );
 
-        let output = interpreter::interpret_and_trace(&module).unwrap();
-        assert_eq!(&[Value::Number(28.0)], &output.sink[..]);
-
-        assert!(output.trace.is_some());
+        let output = interpreter::interpret(&module).unwrap();
+        let trace = output.trace.as_ref().unwrap();
+        assert!(false);
     }
 
     #[test]
     fn test_uncastable() {
         let module = quick_compile("sink(!'some string');");
 
-        let output = interpreter::interpret_and_trace(&module).unwrap();
+        let output = interpreter::interpret_and_trace(&module, 0).unwrap();
         assert!(output.trace.is_none());
     }
 }
