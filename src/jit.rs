@@ -8,6 +8,22 @@ use dynasm::dynasm;
 // This is going to be changed at some point
 type BoxedValue = interpreter::Value;
 
+#[derive(Debug)]
+struct TypeError {
+    desired_type: ValueType,
+}
+
+#[derive(Debug)]
+enum Error {
+    Type(TypeError),
+    Unsupported(String),
+}
+impl From<TypeError> for Error {
+    fn from(type_err: TypeError) -> Self {
+        Error::Type(type_err)
+    }
+}
+
 #[derive(PartialEq, Clone)]
 enum Operand {
     ValueId(ValueId),
@@ -38,6 +54,31 @@ impl std::fmt::Debug for ValueId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueType {
+    Boxed,
+    Bool,
+    Num,
+    Str,
+    Null,
+    Undefined,
+    Function,
+}
+
+impl ValueType {
+    fn of(value: &BoxedValue) -> Self {
+        match value {
+            interpreter::Value::Number(_) => ValueType::Num,
+            interpreter::Value::String(_) => ValueType::Str,
+            interpreter::Value::Bool(_) => ValueType::Bool,
+            interpreter::Value::Null => ValueType::Null,
+            interpreter::Value::Undefined => ValueType::Undefined,
+            interpreter::Value::SelfFunction => ValueType::Function,
+            interpreter::Value::LocalFn(_) => ValueType::Function,
+        }
+    }
+}
+
 pub struct TraceBuilder {
     // This map associates Instruction IDs from the interpreter to ValueIds in
     // the SSA trace we're building. Instruction IDs that are absent from this
@@ -62,8 +103,6 @@ struct TraceParam {
     iid: interpreter::IID,
 }
 
-struct TypeError;
-
 impl TraceBuilder {
     pub fn new() -> Self {
         TraceBuilder {
@@ -79,15 +118,15 @@ impl TraceBuilder {
     fn resolve_interpreter_operand(
         &mut self,
         operand: &interpreter::Operand,
-        value_buf: &Vec<interpreter::Value>,
+        value_buf: &[interpreter::Value],
     ) -> Operand {
         match operand {
             // constants from the interpreter bytecode are simply preserved
             interpreter::Operand::Value(value) => Operand::Imm(value.clone()),
 
             // variables from the interpreter (identified by the ID of the
-            // instruction that produced them) are mapped to the corresponding
-            // JIT instruction ID
+            // instruction that produced them) are mapped to the JIT instruction
+            // that last assigned to it (the JIT trace is SSA)
             interpreter::Operand::IID(iid) => {
                 let key = (self.stack_depth, *iid);
 
@@ -115,20 +154,142 @@ impl TraceBuilder {
         }
     }
 
+    fn operand_type(&mut self, operand: &Operand) -> Option<ValueType> {
+        match operand {
+            Operand::ValueId(vid) => {
+                let instr = self.instrs.get(vid.0 as usize).unwrap();
+                instr.result_type()
+            }
+            Operand::Imm(value) => Some(ValueType::of(value)),
+        }
+    }
+
+    fn ensure_type(&mut self, operand: Operand, desired_type: ValueType) -> Option<Operand> {
+        let input_type = self.operand_type(&operand)?;
+
+        let converted_operand = match (input_type, desired_type) {
+            (a, b) if a == b => Some(operand),
+
+            (_, ValueType::Null) => Some(Operand::Imm(BoxedValue::Null)),
+            (_, ValueType::Undefined) => Some(Operand::Imm(BoxedValue::Undefined)),
+            (_, ValueType::Function) => None,
+
+            (ValueType::Boxed, desired_type) => {
+                assert_ne!(ValueType::Boxed, desired_type);
+                Some(self.emit(Instr::Unbox(desired_type, operand)).into())
+            }
+
+            (input_type, ValueType::Boxed) => {
+                assert_ne!(ValueType::Boxed, input_type);
+                Some(self.emit(Instr::Box(operand)).into())
+            }
+
+            (ValueType::Bool, ValueType::Num) => Some(
+                self.emit(Instr::Choose {
+                    ty: ValueType::Num,
+                    cond: operand,
+                    if_true: Operand::Imm(BoxedValue::Number(1.0)),
+                    if_false: Operand::Imm(BoxedValue::Number(0.0)),
+                })
+                .into(),
+            ),
+            (ValueType::Bool, ValueType::Str) => Some(
+                self.emit(Instr::Choose {
+                    ty: ValueType::Str,
+                    cond: operand,
+                    // TODO the String allocation could be avoided
+                    if_true: Operand::Imm(BoxedValue::String("true".to_string())),
+                    if_false: Operand::Imm(BoxedValue::String("false".to_string())),
+                })
+                .into(),
+            ),
+
+            (ValueType::Num, ValueType::Bool) => Some(
+                self.emit(Instr::Cmp {
+                    ty: ValueType::Num,
+                    op: CmpOp::EQ,
+                    a: operand,
+                    b: Operand::Imm(BoxedValue::Number(0.0)),
+                })
+                .into(),
+            ),
+            (ValueType::Num, ValueType::Str) => Some(self.emit(Instr::Num2Str(operand)).into()),
+
+            (ValueType::Str, ValueType::Bool) => Some(
+                self.emit(Instr::Cmp {
+                    ty: ValueType::Str,
+                    op: CmpOp::EQ,
+                    a: operand,
+                    // TODO this string allocation could be avoided
+                    b: Operand::Imm(BoxedValue::String("".to_string())),
+                })
+                .into(),
+            ),
+
+            // TODO Convert string to number
+            (ValueType::Str, ValueType::Num) => None,
+
+            (ValueType::Null, ValueType::Bool) => Some(Operand::Imm(BoxedValue::Bool(false))),
+            (ValueType::Null, ValueType::Num) => Some(Operand::Imm(BoxedValue::Number(0.0))),
+
+            // TODO this string allocation could be avoided
+            (ValueType::Null, ValueType::Str) => {
+                Some(Operand::Imm(BoxedValue::String("null".to_string())))
+            }
+
+            (ValueType::Undefined, ValueType::Bool) => Some(Operand::Imm(BoxedValue::Bool(false))),
+            (ValueType::Undefined, ValueType::Num) => Some(Operand::Imm(BoxedValue::Number(0.0))),
+            (ValueType::Undefined, ValueType::Str) => {
+                Some(Operand::Imm(BoxedValue::String("undefined".to_string())))
+            }
+
+            (ValueType::Function, _) => None,
+
+            _ => unreachable!(),
+        };
+
+        if let Some(converted_operand) = &converted_operand {
+            assert_eq!(Some(desired_type), self.operand_type(converted_operand));
+        }
+
+        converted_operand
+    }
+
+    fn resolve_operand_as(
+        &mut self,
+        interp_oper: &interpreter::Operand,
+        values_buf: &[interpreter::Value],
+        desired_type: ValueType,
+    ) -> Result<Operand, TypeError> {
+        let oper = self.resolve_interpreter_operand(interp_oper, values_buf);
+        self.ensure_type(oper, desired_type)
+            .ok_or(TypeError { desired_type })
+    }
+
     pub(crate) fn interpreter_step(&mut self, step: &InterpreterStep) {
         if self.trace_ended {
             return;
+        }
+        if let Err(error) = self.try_interpreter_step(step) {
+            eprintln!("TB: trace failed: {:?}", error);
+            // loops not supported yet!
+            self.failed = true;
+            self.trace_ended = true;
+        }
+    }
+
+    fn try_interpreter_step(&mut self, step: &InterpreterStep) -> Result<(), Error> {
+        if self.trace_ended {
+            return Ok(());
         }
 
         let instr = &step.func.instrs()[step.iid.0 as usize];
         eprintln!("TB: step");
 
+        // TODO Disable loops. Loops are temporarily allowed, though they
+        // produce several types of incorrect traces, because it makes development easier.
         if false && step.func.is_loop_head(step.iid) {
-            eprintln!("TB: instr is loop head. aborting.");
-            // loops not supported yet!
-            self.failed = true;
-            self.trace_ended = true;
-            return;
+            return Err(Error::Unsupported("loops".to_string()));
         }
 
         let interpreter_result = &step.values_buf[step.iid.0 as usize];
@@ -143,14 +304,18 @@ impl TraceBuilder {
             interpreter::Instr::Not(oper) => {
                 // if the operand resolves to a constant, we can just skip it
                 // (functions as constant folding)
-                match self.resolve_interpreter_operand(&oper, &step.values_buf) {
+                let oper = self.resolve_operand_as(&oper, &step.values_buf, ValueType::Bool)?;
+                match oper {
                     Operand::ValueId(vid) => Some(self.emit(Instr::Not(vid)).into()),
-                    imm @ Operand::Imm(_) => Some(imm),
+                    Operand::Imm(BoxedValue::Bool(value)) => {
+                        Some(Operand::Imm(BoxedValue::Bool(!value)))
+                    }
+                    _ => unreachable!(),
                 }
             }
             interpreter::Instr::Arith { op, a, b } => {
-                let a = self.resolve_interpreter_operand(&a, &step.values_buf);
-                let b = self.resolve_interpreter_operand(&b, &step.values_buf);
+                let a = self.resolve_operand_as(&a, &step.values_buf, ValueType::Num)?;
+                let b = self.resolve_operand_as(&b, &step.values_buf, ValueType::Num)?;
                 match (a, b) {
                     (Operand::Imm(_), Operand::Imm(_)) => {
                         Some(Operand::Imm(interpreter_result.clone()))
@@ -159,26 +324,37 @@ impl TraceBuilder {
                 }
             }
             interpreter::Instr::Cmp { op, a, b } => {
-                let a = self.resolve_interpreter_operand(&a, &step.values_buf);
-                let b = self.resolve_interpreter_operand(&b, &step.values_buf);
-                match (a, b) {
-                    (Operand::Imm(_), Operand::Imm(_)) => {
-                        Some(Operand::Imm(interpreter_result.clone()))
-                    }
-                    (a, b) => Some(self.emit(Instr::CmpNum { op: *op, a, b }).into()),
-                }
+                let a = self.resolve_operand_as(&a, &step.values_buf, ValueType::Num)?;
+                let b = self.resolve_operand_as(&b, &step.values_buf, ValueType::Num)?;
+                Some(match (a, b) {
+                    (Operand::Imm(_), Operand::Imm(_)) => Operand::Imm(interpreter_result.clone()),
+                    (a, b) => self
+                        .emit(Instr::Cmp {
+                            ty: ValueType::Num,
+                            op: *op,
+                            a,
+                            b,
+                        })
+                        .into(),
+                })
             }
             interpreter::Instr::JmpIf { cond, .. } => {
-                let cond = self.resolve_interpreter_operand(&cond, &step.values_buf);
+                let cond = self.resolve_operand_as(&cond, &step.values_buf, ValueType::Bool)?;
                 match cond {
                     // treat this the same as an unconditional jump
                     Operand::Imm(_cond) => None,
                     Operand::ValueId(vid) => {
-                        let branch_taken = step.next_iid.0 != step.iid.0;
+                        let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
+                        eprintln!(
+                            "TB: jmpif: branch {}taken ({:?} -> {:?})",
+                            if branch_taken { "" } else { "not " },
+                            step.iid,
+                            step.next_iid,
+                        );
                         let vid = if branch_taken {
-                            self.emit(Instr::Not(vid))
-                        } else {
                             vid
+                        } else {
+                            self.emit(Instr::Not(vid))
                         };
                         let cond = Operand::ValueId(vid);
                         Some(self.emit(Instr::AssertTrue { cond }).into())
@@ -200,7 +376,7 @@ impl TraceBuilder {
                 None
             }
             interpreter::Instr::Return(value) => {
-                let value = self.resolve_interpreter_operand(&value, &step.values_buf);
+                let value = self.resolve_operand_as(&value, &step.values_buf, ValueType::Boxed)?;
                 if self.stack_depth == 0 {
                     self.trace_ended = true;
                 } else {
@@ -210,7 +386,7 @@ impl TraceBuilder {
             }
             interpreter::Instr::GetArg(index) => Some(self.emit(Instr::GetArg(*index)).into()),
             interpreter::Instr::Call { .. } => {
-                eprintln!("TB: warning: following call no matter what");
+                eprintln!("TB: warning: following call no matter what (not correct in all cases!)");
                 self.stack_depth += 1;
                 None
             }
@@ -220,6 +396,8 @@ impl TraceBuilder {
         if let Some(result) = result {
             self.map_iid(step.iid, result);
         }
+
+        Ok(())
     }
 
     fn map_iid(&mut self, iid: IID, jit_operand: Operand) {
@@ -264,10 +442,35 @@ enum Instr {
     GetArg(usize),
     TraceParam(u16),
     Not(ValueId),
-    Arith { op: ArithOp, a: Operand, b: Operand },
-    CmpNum { op: CmpOp, a: Operand, b: Operand },
-    AssertTrue { cond: Operand },
-    AssertEqConst { x: Operand, expected: BoxedValue },
+    Arith {
+        op: ArithOp,
+        a: Operand,
+        b: Operand,
+    },
+    Cmp {
+        ty: ValueType,
+        op: CmpOp,
+        a: Operand,
+        b: Operand,
+    },
+    Choose {
+        ty: ValueType,
+        cond: Operand,
+        if_true: Operand,
+        if_false: Operand,
+    },
+    AssertTrue {
+        cond: Operand,
+    },
+    AssertEqConst {
+        x: Operand,
+        expected: BoxedValue,
+    },
+
+    Unbox(ValueType, Operand),
+    Box(Operand),
+    Num2Str(Operand),
+
     PushSink(Operand),
     Return(Operand),
 }
@@ -275,26 +478,22 @@ enum Instr {
 type ArithOp = interpreter::ArithOp;
 type CmpOp = interpreter::CmpOp;
 
-enum ValueType {
-    Boxed,
-    Bool,
-    Num,
-    Str,
-    None,
-}
-
 impl Instr {
-    fn result_type(&self) -> ValueType {
+    fn result_type(&self) -> Option<ValueType> {
         match self {
-            Instr::Not(_) => ValueType::Bool,
-            Instr::Arith { .. } => ValueType::Num,
-            Instr::CmpNum { .. } => ValueType::Bool,
-            Instr::AssertTrue { .. } => ValueType::None,
-            Instr::AssertEqConst { .. } => ValueType::None,
-            Instr::PushSink(_) => ValueType::None,
-            Instr::Return(_) => ValueType::None,
-            Instr::GetArg(_) => ValueType::Boxed,
-            Instr::TraceParam(_) => ValueType::Boxed,
+            Instr::Not(_) => Some(ValueType::Bool),
+            Instr::Arith { .. } => Some(ValueType::Num),
+            Instr::Cmp { .. } => Some(ValueType::Bool),
+            Instr::AssertTrue { .. } => None,
+            Instr::AssertEqConst { .. } => None,
+            Instr::PushSink(_) => None,
+            Instr::Return(_) => None,
+            Instr::GetArg(_) => Some(ValueType::Boxed),
+            Instr::TraceParam(_) => Some(ValueType::Boxed),
+            Instr::Choose { ty, .. } => Some(ty.clone()),
+            Instr::Unbox(ty, _) => Some(ty.clone()),
+            Instr::Box(_) => Some(ValueType::Boxed),
+            Instr::Num2Str(_) => Some(ValueType::Str),
         }
     }
 }
@@ -412,6 +611,42 @@ mod tests {
         );
 
         let output = interpreter::interpret_and_trace(&module, 1).unwrap();
+
+        eprint!("trace = ");
+        let trace = output.trace.unwrap();
+        trace.dump();
+
+        assert!(false);
+    }
+
+    #[test]
+    fn test_while() {
+        let module = quick_compile(
+            "
+            function sum_range(n) {
+                let i = 0;
+                let ret = 0;
+                while (i <= n) {
+                    ret += i;
+                    i++;
+                }
+                return ret;
+            }
+
+            function sum_range_down(n) {
+                let ret = 0;
+                while (n > 0) {
+                    ret += n;
+                    n--;
+                }
+                return ret;
+            }
+            
+            sink(sum_range_down(2));
+            ",
+        );
+
+        let output = interpreter::interpret_and_trace(&module, 0).unwrap();
 
         eprint!("trace = ");
         let trace = output.trace.unwrap();
