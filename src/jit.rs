@@ -27,10 +27,19 @@ impl From<TypeError> for Error {
     }
 }
 
+#[derive(PartialEq, Clone, Debug)]
+struct Cmp {
+    ty: ValueType,
+    op: CmpOp,
+    a: Operand,
+    b: Operand,
+}
+
 #[derive(PartialEq, Clone)]
 enum Operand {
     ValueId(ValueId),
     Imm(BoxedValue),
+    Cmp(Box<Cmp>),
 }
 
 impl Operand {
@@ -49,11 +58,18 @@ impl From<ValueId> for Operand {
     }
 }
 
+impl From<Cmp> for Operand {
+    fn from(cmp: Cmp) -> Self {
+        Operand::Cmp(Box::new(cmp))
+    }
+}
+
 impl std::fmt::Debug for Operand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Operand::ValueId(vid) => vid.fmt(f),
             Operand::Imm(value) => value.fmt(f),
+            Operand::Cmp(cmp) => cmp.fmt(f),
         }
     }
 }
@@ -174,6 +190,7 @@ impl TraceBuilder {
                 instr.result_type()
             }
             Operand::Imm(value) => Some(ValueType::of(value)),
+            Operand::Cmp(_) => Some(ValueType::Bool),
         }
     }
 
@@ -218,24 +235,24 @@ impl TraceBuilder {
             ),
 
             (ValueType::Num, ValueType::Bool) => Some(
-                self.emit(Instr::Cmp {
+                Cmp {
                     ty: ValueType::Num,
                     op: CmpOp::EQ,
                     a: operand,
                     b: Operand::Imm(BoxedValue::Number(0.0)),
-                })
+                }
                 .into(),
             ),
             (ValueType::Num, ValueType::Str) => Some(self.emit(Instr::Num2Str(operand)).into()),
 
             (ValueType::Str, ValueType::Bool) => Some(
-                self.emit(Instr::Cmp {
+                Cmp {
                     ty: ValueType::Str,
                     op: CmpOp::EQ,
                     a: operand,
                     // TODO this string allocation could be avoided
                     b: Operand::Imm(BoxedValue::String("".to_string())),
-                })
+                }
                 .into(),
             ),
 
@@ -318,12 +335,15 @@ impl TraceBuilder {
                 // if the operand resolves to a constant, we can just skip it
                 // (functions as constant folding)
                 let oper = self.resolve_operand_as(&oper, &step.values_buf, ValueType::Bool)?;
+                // TODO Move constant folding to self.emit()
                 match oper {
-                    Operand::ValueId(vid) => Some(self.emit(Instr::Not(vid)).into()),
+                    Operand::Cmp(_) | Operand::ValueId(_) => {
+                        Some(self.emit(Instr::Not(oper)).into())
+                    }
                     Operand::Imm(BoxedValue::Bool(value)) => {
                         Some(Operand::Imm(BoxedValue::Bool(!value)))
                     }
-                    _ => unreachable!(),
+                    other => panic!("Invalid operand for Not: {:?}", other),
                 }
             }
             interpreter::Instr::Arith { op, a, b } => {
@@ -341,22 +361,22 @@ impl TraceBuilder {
                 let b = self.resolve_operand_as(&b, &step.values_buf, ValueType::Num)?;
                 Some(match (a, b) {
                     (Operand::Imm(_), Operand::Imm(_)) => Operand::Imm(interpreter_result.clone()),
-                    (a, b) => self
-                        .emit(Instr::Cmp {
-                            ty: ValueType::Num,
-                            op: *op,
-                            a,
-                            b,
-                        })
-                        .into(),
+                    (a, b) => Cmp {
+                        ty: ValueType::Num,
+                        op: *op,
+                        a,
+                        b,
+                    }
+                    .into(),
                 })
             }
             interpreter::Instr::JmpIf { cond, .. } => {
                 let cond = self.resolve_operand_as(&cond, &step.values_buf, ValueType::Bool)?;
                 match cond {
                     // treat this the same as an unconditional jump
-                    Operand::Imm(_cond) => None,
-                    Operand::ValueId(vid) => {
+                    Operand::Imm(_) => None,
+
+                    Operand::Cmp(_) | Operand::ValueId(_) => {
                         let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
                         eprintln!(
                             "TB: jmpif: branch {}taken ({:?} -> {:?})",
@@ -364,12 +384,12 @@ impl TraceBuilder {
                             step.iid,
                             step.next_iid,
                         );
-                        let vid = if branch_taken {
-                            vid
+
+                        let cond = if branch_taken {
+                            cond
                         } else {
-                            self.emit(Instr::Not(vid))
+                            self.emit(Instr::Not(cond)).into()
                         };
-                        let cond = Operand::ValueId(vid);
                         Some(self.emit(Instr::AssertTrue { cond }).into())
                     }
                 }
@@ -457,7 +477,7 @@ pub struct InterpreterStep<'a> {
 enum Instr {
     GetArg(usize),
     TraceParam(u16),
-    Not(ValueId),
+    Not(Operand),
     Arith {
         op: ArithOp,
         a: Operand,
@@ -525,17 +545,17 @@ fn operands_softregs<'a, Ops: Iterator<Item = &'a Operand>>(
 impl regalloc::Instruction for Instr {
     fn inputs(&self) -> Vec<regalloc::SoftReg> {
         match self {
-            Instr::Not(arg) => operands_softregs([&Operand::ValueId(*arg)].into_iter()),
+            Instr::Not(arg) => operands_softregs([arg].into_iter()),
             Instr::Arith { a, b, .. } => operands_softregs([a, b].into_iter()),
             Instr::Cmp { a, b, .. } => operands_softregs([a, b].into_iter()),
             Instr::Choose {
-                ty,
                 cond,
                 if_true,
                 if_false,
+                ..
             } => operands_softregs([cond, if_true, if_false].into_iter()),
             Instr::AssertTrue { cond } => operands_softregs([cond].into_iter()),
-            Instr::AssertEqConst { x, expected } => operands_softregs([x].into_iter()),
+            Instr::AssertEqConst { x, .. } => operands_softregs([x].into_iter()),
             Instr::Unbox(_, arg) => operands_softregs([arg].into_iter()),
             Instr::Box(arg) => operands_softregs([arg].into_iter()),
             Instr::Num2Str(arg) => operands_softregs([arg].into_iter()),
