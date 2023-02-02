@@ -356,12 +356,13 @@ impl TraceBuilder {
                 Some(self.emit(Instr::Arith { op: *op, a, b }).into())
             }
             interpreter::Instr::Cmp { op, a, b } => {
-                let a = self.resolve_operand_as(&a, &step.values_buf, ValueType::Num)?;
-                let b = self.resolve_operand_as(&b, &step.values_buf, ValueType::Num)?;
+                let a = self.resolve_interpreter_operand(&a, &step.values_buf);
+                let a_type = self.operand_type(&a).unwrap();
+                let b = self.resolve_operand_as(&b, &step.values_buf, a_type)?;
                 Some(match (a, b) {
                     (Operand::Imm(_), Operand::Imm(_)) => Operand::Imm(interpreter_result.clone()),
                     (a, b) => Cmp {
-                        ty: ValueType::Num,
+                        ty: a_type,
                         op: *op,
                         a,
                         b,
