@@ -35,6 +35,23 @@ struct Cmp {
     b: Operand,
 }
 
+impl Cmp {
+    fn invert(&self) -> Self {
+        let inverted_op = match self.op {
+            CmpOp::GE => CmpOp::LT,
+            CmpOp::GT => CmpOp::LE,
+            CmpOp::LT => CmpOp::GE,
+            CmpOp::LE => CmpOp::GT,
+            CmpOp::EQ => CmpOp::NE,
+            CmpOp::NE => CmpOp::EQ,
+        };
+        Cmp {
+            op: inverted_op,
+            ..self.clone()
+        }
+    }
+}
+
 #[derive(PartialEq, Clone)]
 enum Operand {
     ValueId(ValueId),
@@ -168,16 +185,15 @@ impl TraceBuilder {
                         operand
                     );
                     let param_ndx = self.add_parameter(*iid);
-                    let vid = self.emit(Instr::TraceParam(param_ndx));
+                    let param = self.emit(Instr::TraceParam(param_ndx));
                     let observed_value = &value_buf[iid.0 as usize];
                     self.emit(Instr::AssertEqConst {
-                        x: Operand::ValueId(vid),
+                        x: param.clone(),
                         expected: observed_value.clone(),
                     });
 
-                    let operand_for_var = Operand::ValueId(vid);
-                    self.var_iid.insert(key, operand_for_var.clone());
-                    operand_for_var
+                    self.var_iid.insert(key, param.clone());
+                    param
                 }
             }
         }
@@ -326,35 +342,15 @@ impl TraceBuilder {
 
         let result = match instr {
             interpreter::Instr::Nop => None,
-            interpreter::Instr::Const(value) => {
-                // This is constant folding: the interpreter's IID is associated directly
-                // to the constant, not to an instruction from the trace.
-                Some(Operand::Imm(value.clone()))
-            }
+            interpreter::Instr::Const(value) => Some(Operand::Imm(value.clone())),
             interpreter::Instr::Not(oper) => {
-                // if the operand resolves to a constant, we can just skip it
-                // (functions as constant folding)
                 let oper = self.resolve_operand_as(&oper, &step.values_buf, ValueType::Bool)?;
-                // TODO Move constant folding to self.emit()
-                match oper {
-                    Operand::Cmp(_) | Operand::ValueId(_) => {
-                        Some(self.emit(Instr::Not(oper)).into())
-                    }
-                    Operand::Imm(BoxedValue::Bool(value)) => {
-                        Some(Operand::Imm(BoxedValue::Bool(!value)))
-                    }
-                    other => panic!("Invalid operand for Not: {:?}", other),
-                }
+                Some(self.emit(Instr::Not(oper)))
             }
             interpreter::Instr::Arith { op, a, b } => {
                 let a = self.resolve_operand_as(&a, &step.values_buf, ValueType::Num)?;
                 let b = self.resolve_operand_as(&b, &step.values_buf, ValueType::Num)?;
-                match (a, b) {
-                    (Operand::Imm(_), Operand::Imm(_)) => {
-                        Some(Operand::Imm(interpreter_result.clone()))
-                    }
-                    (a, b) => Some(self.emit(Instr::Arith { op: *op, a, b }).into()),
-                }
+                Some(self.emit(Instr::Arith { op: *op, a, b }).into())
             }
             interpreter::Instr::Cmp { op, a, b } => {
                 let a = self.resolve_operand_as(&a, &step.values_buf, ValueType::Num)?;
@@ -375,7 +371,6 @@ impl TraceBuilder {
                 match cond {
                     // treat this the same as an unconditional jump
                     Operand::Imm(_) => None,
-
                     Operand::Cmp(_) | Operand::ValueId(_) => {
                         let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
                         eprintln!(
@@ -438,11 +433,70 @@ impl TraceBuilder {
         self.var_iid.insert((self.stack_depth, iid), jit_operand);
     }
 
-    fn emit(&mut self, instr: Instr) -> ValueId {
-        let vid = ValueId(self.instrs.len() as u32);
-        eprintln!("TB: emit: v{:<4} {:?}", vid.0, instr);
-        self.instrs.push(instr);
-        vid
+    fn emit(&mut self, instr: Instr) -> Operand {
+        match instr {
+            Instr::Not(Operand::Imm(BoxedValue::Bool(value))) => {
+                Operand::Imm(BoxedValue::Bool(!value))
+            }
+            Instr::Not(Operand::Cmp(cmp)) => Operand::Cmp(Box::new(cmp.invert())),
+
+            Instr::Arith {
+                op,
+                a: Operand::Imm(BoxedValue::Number(a)),
+                b: Operand::Imm(BoxedValue::Number(b)),
+            } => Operand::Imm(BoxedValue::Number(match op {
+                ArithOp::Add => a + b,
+                ArithOp::Sub => a - b,
+                ArithOp::Mul => a * b,
+                ArithOp::Div => a / b,
+            })),
+
+            Instr::Arith {
+                op: ArithOp::Add,
+                a: Operand::Imm(BoxedValue::Number(a_const)),
+                b,
+            } if a_const == 0.0 => b,
+            Instr::Arith {
+                op: ArithOp::Add,
+                a,
+                b: Operand::Imm(BoxedValue::Number(b_const)),
+            } if b_const == 0.0 => a,
+            Instr::Arith {
+                op: ArithOp::Sub,
+                a: Operand::Imm(BoxedValue::Number(a_const)),
+                b,
+            } if a_const == 0.0 => b,
+            Instr::Arith {
+                op: ArithOp::Sub,
+                a,
+                b: Operand::Imm(BoxedValue::Number(b_const)),
+            } if b_const == 0.0 => a,
+
+            Instr::Arith {
+                op: ArithOp::Mul,
+                a: Operand::Imm(BoxedValue::Number(1.0)),
+                b,
+            } => b,
+            Instr::Arith {
+                op: ArithOp::Mul,
+                a,
+                b: Operand::Imm(BoxedValue::Number(1.0)),
+            } => a,
+
+            Instr::Arith {
+                op: ArithOp::Div,
+                a,
+                b: Operand::Imm(BoxedValue::Number(1.0)),
+            } => a,
+
+            _ => {
+                // Alright, no constant folding. Emit the instruction on the trace
+                let vid = ValueId(self.instrs.len() as u32);
+                eprintln!("TB: emit: v{:<4} {:?}", vid.0, instr);
+                self.instrs.push(instr);
+                vid.into()
+            }
+        }
     }
 
     pub(crate) fn build(self) -> Option<Trace> {
