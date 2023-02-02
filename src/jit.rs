@@ -60,11 +60,14 @@ enum Operand {
 }
 
 impl Operand {
-    fn as_value_id(&self) -> Option<ValueId> {
-        if let Operand::ValueId(vid) = self {
-            Some(vid.clone())
-        } else {
-            None
+    fn value_ids(&self) -> Box<dyn Iterator<Item = ValueId>> {
+        match self {
+            Operand::ValueId(vid) => Box::new(std::iter::once(vid.clone())),
+            Operand::Imm(_) => Box::new(std::iter::empty()),
+            Operand::Cmp(boxed_cmp) => {
+                let Cmp { ty: _, op: _, a, b } = boxed_cmp.as_ref();
+                Box::new(a.value_ids().chain(b.value_ids()))
+            }
         }
     }
 }
@@ -474,20 +477,20 @@ impl TraceBuilder {
 
             Instr::Arith {
                 op: ArithOp::Mul,
-                a: Operand::Imm(BoxedValue::Number(1.0)),
+                a: Operand::Imm(BoxedValue::Number(a_const)),
                 b,
-            } => b,
+            } if a_const == 1.0 => b,
             Instr::Arith {
                 op: ArithOp::Mul,
                 a,
-                b: Operand::Imm(BoxedValue::Number(1.0)),
-            } => a,
+                b: Operand::Imm(BoxedValue::Number(b_const)),
+            } if b_const == 1.0 => a,
 
             Instr::Arith {
                 op: ArithOp::Div,
                 a,
-                b: Operand::Imm(BoxedValue::Number(1.0)),
-            } => a,
+                b: Operand::Imm(BoxedValue::Number(b_const)),
+            } if b_const == 1.0 => a,
 
             _ => {
                 // Alright, no constant folding. Emit the instruction on the trace
@@ -586,39 +589,39 @@ impl Instr {
             Instr::Num2Str(_) => Some(ValueType::Str),
         }
     }
-}
 
-fn operands_softregs<'a, Ops: Iterator<Item = &'a Operand>>(
-    operands: Ops,
-) -> Vec<regalloc::SoftReg> {
-    operands
-        .filter_map(|oper| oper.as_value_id().map(|vid| regalloc::SoftReg(vid.0)))
-        .collect()
-}
-
-impl regalloc::Instruction for Instr {
-    fn inputs(&self) -> Vec<regalloc::SoftReg> {
+    fn operands<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = &'a Operand>> {
+        use std::iter::once;
         match self {
-            Instr::Not(arg) => operands_softregs([arg].into_iter()),
-            Instr::Arith { a, b, .. } => operands_softregs([a, b].into_iter()),
-            Instr::Cmp { a, b, .. } => operands_softregs([a, b].into_iter()),
+            Instr::Not(arg) => Box::new(once(arg)),
+            Instr::Arith { a, b, op: _ } => Box::new([a, b].into_iter()),
+            Instr::Cmp { a, b, .. } => Box::new([a, b].into_iter()),
             Instr::Choose {
                 cond,
                 if_true,
                 if_false,
                 ..
-            } => operands_softregs([cond, if_true, if_false].into_iter()),
-            Instr::AssertTrue { cond } => operands_softregs([cond].into_iter()),
-            Instr::AssertEqConst { x, .. } => operands_softregs([x].into_iter()),
-            Instr::Unbox(_, arg) => operands_softregs([arg].into_iter()),
-            Instr::Box(arg) => operands_softregs([arg].into_iter()),
-            Instr::Num2Str(arg) => operands_softregs([arg].into_iter()),
-            Instr::PushSink(arg) => operands_softregs([arg].into_iter()),
-            Instr::Return(arg) => operands_softregs([arg].into_iter()),
+            } => Box::new([cond, if_true, if_false].into_iter()),
+            Instr::AssertTrue { cond } => Box::new([cond].into_iter()),
+            Instr::AssertEqConst { x, .. } => Box::new([x].into_iter()),
+            Instr::Unbox(_, arg) => Box::new([arg].into_iter()),
+            Instr::Box(arg) => Box::new([arg].into_iter()),
+            Instr::Num2Str(arg) => Box::new([arg].into_iter()),
+            Instr::PushSink(arg) => Box::new([arg].into_iter()),
+            Instr::Return(arg) => Box::new([arg].into_iter()),
 
-            Instr::GetArg(_) => vec![],
-            Instr::TraceParam(_) => vec![],
+            Instr::GetArg(_) => Box::new(std::iter::empty()),
+            Instr::TraceParam(_) => Box::new(std::iter::empty()),
         }
+    }
+}
+
+impl regalloc::Instruction for Instr {
+    fn inputs(&self) -> Vec<regalloc::SoftReg> {
+        self.operands()
+            .flat_map(|operand| operand.value_ids())
+            .map(|ValueId(index)| regalloc::SoftReg(index))
+            .collect()
     }
 }
 
@@ -774,7 +777,7 @@ mod tests {
                 return ret;
             }
             
-            sink(sum_range_down(2));
+            sink(sum_range_down(5));
             ",
         );
 
