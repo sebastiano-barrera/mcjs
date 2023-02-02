@@ -7,6 +7,7 @@ mod bytecode_compiler;
 mod common;
 mod interpreter;
 mod jit;
+mod regalloc;
 
 #[cfg(test)]
 mod tests {

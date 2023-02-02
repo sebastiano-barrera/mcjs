@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use crate::interpreter::{self, IID};
+use crate::{
+    interpreter::{self, IID},
+    regalloc,
+};
 
 use dynasm::dynasm;
 
@@ -28,6 +31,16 @@ impl From<TypeError> for Error {
 enum Operand {
     ValueId(ValueId),
     Imm(BoxedValue),
+}
+
+impl Operand {
+    fn as_value_id(&self) -> Option<ValueId> {
+        if let Operand::ValueId(vid) = self {
+            Some(vid.clone())
+        } else {
+            None
+        }
+    }
 }
 
 impl From<ValueId> for Operand {
@@ -416,8 +429,11 @@ impl TraceBuilder {
         if self.failed {
             None
         } else {
+            let hregs = regalloc::allocate_registers(self.instrs.as_slice(), 6);
+
             Some(Trace {
                 instrs: self.instrs,
+                hreg_alloc: hregs,
             })
         }
     }
@@ -498,17 +514,59 @@ impl Instr {
     }
 }
 
+fn operands_softregs<'a, Ops: Iterator<Item = &'a Operand>>(
+    operands: Ops,
+) -> Vec<regalloc::SoftReg> {
+    operands
+        .filter_map(|oper| oper.as_value_id().map(|vid| regalloc::SoftReg(vid.0)))
+        .collect()
+}
+
+impl regalloc::Instruction for Instr {
+    fn inputs(&self) -> Vec<regalloc::SoftReg> {
+        match self {
+            Instr::Not(arg) => operands_softregs([&Operand::ValueId(*arg)].into_iter()),
+            Instr::Arith { a, b, .. } => operands_softregs([a, b].into_iter()),
+            Instr::Cmp { a, b, .. } => operands_softregs([a, b].into_iter()),
+            Instr::Choose {
+                ty,
+                cond,
+                if_true,
+                if_false,
+            } => operands_softregs([cond, if_true, if_false].into_iter()),
+            Instr::AssertTrue { cond } => operands_softregs([cond].into_iter()),
+            Instr::AssertEqConst { x, expected } => operands_softregs([x].into_iter()),
+            Instr::Unbox(_, arg) => operands_softregs([arg].into_iter()),
+            Instr::Box(arg) => operands_softregs([arg].into_iter()),
+            Instr::Num2Str(arg) => operands_softregs([arg].into_iter()),
+            Instr::PushSink(arg) => operands_softregs([arg].into_iter()),
+            Instr::Return(arg) => operands_softregs([arg].into_iter()),
+
+            Instr::GetArg(_) => vec![],
+            Instr::TraceParam(_) => vec![],
+        }
+    }
+}
+
 // A JIT trace, in SSA representation.
 pub struct Trace {
     instrs: Vec<Instr>,
+    hreg_alloc: regalloc::Allocation,
 }
 
 impl Trace {
     #[cfg(test)]
     pub(crate) fn dump(&self) {
+        use std::borrow::Cow;
+
         eprintln!();
         for (ndx, instr) in self.instrs.iter().enumerate() {
-            eprintln!(" {:4?} {:?}", ndx, instr);
+            let hreg = self.hreg_alloc.hreg_of_instr(ndx);
+
+            let hreg = hreg
+                .map(|x| Cow::Owned(format!("{:?}", x)))
+                .unwrap_or_else(|| Cow::Borrowed("???"));
+            eprintln!(" {:4?} {:5} {:?}", ndx, hreg, instr);
         }
     }
 
