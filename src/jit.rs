@@ -357,18 +357,47 @@ impl TraceBuilder {
             }
             interpreter::Instr::Cmp { op, a, b } => {
                 let a = self.resolve_interpreter_operand(&a, &step.values_buf);
-                let a_type = self.operand_type(&a).unwrap();
-                let b = self.resolve_operand_as(&b, &step.values_buf, a_type)?;
-                Some(match (a, b) {
+                let b = self.resolve_interpreter_operand(&b, &step.values_buf);
+
+                let result = match (a, b) {
                     (Operand::Imm(_), Operand::Imm(_)) => Operand::Imm(interpreter_result.clone()),
-                    (a, b) => Cmp {
-                        ty: a_type,
-                        op: *op,
-                        a,
-                        b,
+                    (Operand::Cmp(_), _) | (_, Operand::Cmp(_)) => {
+                        panic!("invalid operand of type Cmp for instr Cmp")
                     }
-                    .into(),
-                })
+                    (a, b) => {
+                        let a_type = self.operand_type(&a).unwrap();
+                        let b_type = self.operand_type(&b).unwrap();
+
+                        match (a_type, b_type) {
+                            (ValueType::Boxed, unboxed_type) => Cmp {
+                                ty: unboxed_type,
+                                op: *op,
+                                a: self.emit(Instr::Unbox(unboxed_type, a)),
+                                b,
+                            },
+                            (unboxed_type, ValueType::Boxed) => Cmp {
+                                ty: unboxed_type,
+                                op: *op,
+                                a: self.emit(Instr::Unbox(unboxed_type, a)),
+                                b,
+                            },
+                            _ => {
+                                let b = self.ensure_type(b, a_type).ok_or_else(|| TypeError {
+                                    desired_type: a_type,
+                                })?;
+                                Cmp {
+                                    ty: a_type,
+                                    op: *op,
+                                    a,
+                                    b,
+                                }
+                            }
+                        }
+                        .into()
+                    }
+                };
+
+                Some(result)
             }
             interpreter::Instr::JmpIf { cond, .. } => {
                 let cond = self.resolve_operand_as(&cond, &step.values_buf, ValueType::Bool)?;
