@@ -5,8 +5,9 @@ use std::{
     path::PathBuf,
 };
 
+pub use crate::common::Error;
 use crate::{
-    common::{Error, Result},
+    common::Result,
     jit::{self, InterpreterStep},
 };
 
@@ -116,56 +117,56 @@ pub enum CmpOp {
     NE,
 }
 
-pub struct VM<'a> {
-    module: &'a Module,
+pub struct VM {
+    modules: HashMap<String, Module>,
     sink: Vec<Value>,
     trace_builder: Option<jit::TraceBuilder>,
 }
 
-pub struct Output {
-    pub sink: Vec<Value>,
-    pub trace: Option<jit::Trace>,
-}
+impl VM {
+    pub fn new() -> Self {
+        VM {
+            modules: HashMap::new(),
+            sink: Vec::new(),
+            trace_builder: None,
+        }
+    }
 
-pub fn interpret(module: &Module) -> Result<Output> {
-    interpret_with_flags(module, Default::default())
-}
+    pub fn take_sink(&mut self) -> Vec<Value> {
+        let mut swap_area = Vec::new();
+        std::mem::swap(&mut swap_area, &mut self.sink);
+        swap_area
+    }
 
-pub fn interpret_and_trace(module: &Module, start_depth: u32) -> Result<Output> {
-    let flags = InterpreterFlags {
-        tracer_flags: Some(TracerFlags { start_depth }),
-        ..Default::default()
-    };
-    interpret_with_flags(module, flags)
-}
+    pub fn take_trace(&mut self) -> Option<jit::Trace> {
+        self.trace_builder.take().and_then(|tb| tb.build())
+    }
 
-fn interpret_with_flags(module: &Module, flags: InterpreterFlags) -> Result<Output> {
-    let mut vm = VM {
-        module,
-        sink: Vec::new(),
-        trace_builder: if flags.tracer_flags.is_some() {
-            Some(jit::TraceBuilder::new())
-        } else {
-            None
-        },
-    };
-    vm.interpret_fn(FnId::ROOT_FN, &[], flags)?;
-    Ok(Output {
-        sink: vm.sink,
-        trace: vm.trace_builder.and_then(|tb| tb.build()),
-    })
-}
+    pub fn run_script(&mut self, script_text: String, flags: InterpreterFlags) -> Result<()> {
+        let module =
+            crate::bytecode_compiler::compile_file("<input>".to_string(), script_text).unwrap();
+        #[cfg(test)]
+        {
+            module.dump();
+        }
 
-impl<'a> VM<'a> {
-    fn interpret_fn(
+        if flags.tracer_flags.is_some() {
+            self.trace_builder = Some(jit::TraceBuilder::new());
+        }
+        self.run_module_fn(&module, FnId::ROOT_FN, &[], flags)?;
+        Ok(())
+    }
+
+    fn run_module_fn(
         &mut self,
+        module: &Module,
         fnid: FnId,
         args: &[Value],
         flags: InterpreterFlags,
     ) -> Result<Value> {
         let indent = "     | ".repeat(flags.indent_level as usize);
 
-        let func = self.module.fns.get(&fnid).expect("invalid function ID");
+        let func = module.fns.get(&fnid).unwrap();
         let instrs = &func.instrs;
 
         let mut values_buf = vec![Value::Undefined; instrs.len()];
@@ -295,8 +296,12 @@ impl<'a> VM<'a> {
                             .map(|oper| get_operand(&values_buf, oper))
                             .collect();
 
-                        let ret_val =
-                            self.interpret_fn(callee_fnid, &arg_values[..], flags.for_call())?;
+                        let ret_val = self.run_module_fn(
+                            module,
+                            callee_fnid,
+                            &arg_values[..],
+                            flags.for_call(),
+                        )?;
 
                         values_buf[ndx] = ret_val;
                     } else {
@@ -325,9 +330,9 @@ impl<'a> VM<'a> {
 }
 
 #[derive(Clone)]
-struct InterpreterFlags {
-    indent_level: u8,
-    tracer_flags: Option<TracerFlags>,
+pub struct InterpreterFlags {
+    pub indent_level: u8,
+    pub tracer_flags: Option<TracerFlags>,
 }
 impl InterpreterFlags {
     fn for_call(&self) -> InterpreterFlags {
@@ -343,8 +348,8 @@ impl InterpreterFlags {
 }
 
 #[derive(Clone)]
-struct TracerFlags {
-    start_depth: u32,
+pub struct TracerFlags {
+    pub start_depth: u32,
 }
 
 impl Default for InterpreterFlags {

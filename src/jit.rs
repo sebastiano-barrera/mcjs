@@ -744,19 +744,33 @@ impl NativeThunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jit;
 
-    fn quick_compile(code: &str) -> interpreter::Module {
+    struct Output {
+        sink: Vec<interpreter::Value>,
+        trace: Option<jit::Trace>,
+    }
+
+    fn quick_run(code: &str, start_stack_depth: u32) -> Output {
         use crate::bytecode_compiler;
 
-        let module =
-            bytecode_compiler::compile_file("input.js".to_string(), code.to_string()).unwrap();
-        module.dump();
-        module
+        let mut vm = interpreter::VM::new();
+        let flags = interpreter::InterpreterFlags {
+            tracer_flags: Some(interpreter::TracerFlags {
+                start_depth: start_stack_depth,
+            }),
+            ..Default::default()
+        };
+        vm.run_script(code.to_string(), flags).unwrap();
+        Output {
+            sink: vm.take_sink(),
+            trace: vm.take_trace(),
+        }
     }
 
     #[test]
     fn test_tracing_simple_constant_folding() {
-        let module = quick_compile(
+        let output = quick_run(
             "
             const x = 123;
             let y = 'a';
@@ -765,6 +779,7 @@ mod tests {
             }
             sink(y);
             ",
+            0,
         );
 
         // 0    const 123
@@ -773,8 +788,6 @@ mod tests {
         // 3    jmpif v2 -> #5
         // 4    set v2 <- 'b'
         // 5    push_sink v2
-
-        let output = interpreter::interpret_and_trace(&module, 0).unwrap();
 
         eprint!("trace = ");
         let trace = output.trace.unwrap();
@@ -787,7 +800,7 @@ mod tests {
 
     #[test]
     fn test_tracing_one_func() {
-        let module = quick_compile(
+        let output = quick_run(
             "
             function foo(mode, a, b) { 
                 if (mode === 'sum')
@@ -800,9 +813,8 @@ mod tests {
 
             sink(foo('product', 9, 8));
             ",
+            1,
         );
-
-        let output = interpreter::interpret_and_trace(&module, 1).unwrap();
 
         eprint!("trace = ");
         let trace = output.trace.unwrap();
@@ -813,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_while() {
-        let module = quick_compile(
+        let output = quick_run(
             "
             function sum_range(n) {
                 let i = 0;
@@ -836,9 +848,8 @@ mod tests {
             
             sink(sum_range_down(5));
             ",
+            0,
         );
-
-        let output = interpreter::interpret_and_trace(&module, 0).unwrap();
 
         eprint!("trace = ");
         let trace = output.trace.unwrap();

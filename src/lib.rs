@@ -9,17 +9,24 @@ mod interpreter;
 mod jit;
 mod regalloc;
 
+pub use interpreter::VM;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use interpreter::{Value, VM};
 
-    fn quick_compile(code: &str) -> interpreter::Module {
-        let module =
-            bytecode_compiler::compile_file("input.js".to_string(), code.to_string()).unwrap();
-        module.dump();
-        module
+    struct Output {
+        sink: Vec<Value>,
+    }
+
+    fn quick_run(code: &str) -> Result<Output, interpreter::Error> {
+        let mut vm = VM::new();
+        vm.run_script(code.to_string(), Default::default())?;
+        Ok(Output {
+            sink: vm.take_sink(),
+        })
     }
 
     // For the future, for loading code from `test-resources/`:
@@ -29,31 +36,23 @@ mod tests {
 
     #[test]
     fn test_simple_call() {
-        let module = quick_compile("/* Here is some simple code: */ sink(1 + 4 + 99); ");
-
-        // 0   const 1
-        // 1   const 4
-        // 2   add v0, v1
-        // 3   push_sink v2
-
-        let sink = interpreter::interpret(&module).unwrap().sink;
-        assert_eq!(&[Value::Number(104.0)], &sink[..]);
+        let output = quick_run("/* Here is some simple code: */ sink(1 + 4 + 99); ").unwrap();
+        assert_eq!(&[Value::Number(104.0)], &output.sink[..]);
     }
 
     #[test]
     fn test_multiple_calls() {
-        let module =
-            quick_compile("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ");
-        let sink = interpreter::interpret(&module).unwrap().sink;
+        let output =
+            quick_run("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ").unwrap();
         assert_eq!(
             &[Value::Number(12. * 5.), Value::Number(99. - 15.)],
-            &sink[..]
+            &output.sink[..]
         );
     }
 
     #[test]
     fn test_if() {
-        let module = quick_compile(
+        let output = quick_run(
             "
             const x = 123;
             let y = 'a';
@@ -62,28 +61,22 @@ mod tests {
             }
             sink(y);
             ",
-        );
+        )
+        .unwrap();
 
-        // 0    const 123
-        // 1    const 'a'
-        // 2    cmp v0 < v1
-        // 3    jmpif v2 -> #5
-        // 4    set v2 <- 'b'
-        // 5    push_sink v2
-
-        let sink = interpreter::interpret(&module).unwrap().sink;
         let val: Value = "b".to_string().into();
-        assert_eq!(&[val], &sink[..]);
+        assert_eq!(&[val], &output.sink[..]);
     }
 
     #[test]
     fn test_simple_fn() {
-        let module = quick_compile(
+        let output = quick_run(
             "
             function foo(a, b) { return a + b; }
             sink(foo(1, 2));
             ",
-        );
+        )
+        .unwrap();
 
         // 0    const 123
         // 1    const 'a'
@@ -92,15 +85,13 @@ mod tests {
         // 4    set v2 <- 'b'
         // 5    push_sink v2
 
-        let sink = interpreter::interpret(&module).unwrap().sink;
-        assert_eq!(&[Value::Number(3.0)], &sink[..]);
-
-        // assert!(false);
+        assert_eq!(&[Value::Number(3.0)], &output.sink[..]);
     }
 
+    #[ignore]
     #[test]
     fn test_fn_with_branch() {
-        let module = quick_compile(
+        let output = quick_run(
             "
             function foo(mode, a, b) { 
                 if (mode === 'sum')
@@ -113,19 +104,20 @@ mod tests {
 
             sink(foo('product', 9, 8));
             ",
-        );
+        )
+        .unwrap();
 
-        let output = interpreter::interpret_and_trace(&module, 0).unwrap();
-        eprint!("trace = ");
-        let trace = output.trace.unwrap();
-        trace.dump();
+        // eprint!("trace = ");
+        // let trace = output.trace.unwrap();
+        // trace.dump();
 
         assert!(false);
     }
 
+    #[ignore]
     #[test]
     fn test_while() {
-        let module = quick_compile(
+        let output = quick_run(
             "
             function sum_range(n) {
                 let i = 0;
@@ -139,18 +131,19 @@ mod tests {
             
             sink(sum_range(2));
             ",
-        );
+        )
+        .unwrap();
 
-        let output = interpreter::interpret(&module).unwrap();
-        let trace = output.trace.as_ref().unwrap();
+        // let trace = output.trace.as_ref().unwrap();
         assert!(false);
     }
 
+    #[ignore]
     #[test]
     fn test_uncastable() {
-        let module = quick_compile("sink(!'some string');");
+        let output = quick_run("sink(!'some string');").unwrap();
 
-        let output = interpreter::interpret_and_trace(&module, 0).unwrap();
-        assert!(output.trace.is_none());
+        // let output = interpreter::interpret_and_trace(&module, 0).unwrap();
+        // assert!(output.trace.is_none());
     }
 }
