@@ -1,12 +1,15 @@
+use lazy_static::lazy_static;
 use std::{
     cell::RefCell,
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 pub use crate::common::Error;
 use crate::{
+    bytecode_compiler,
     common::Result,
     jit::{self, InterpreterStep},
 };
@@ -21,6 +24,7 @@ pub enum Value {
     Undefined,
     SelfFunction,
     LocalFn(FnId),
+    NativeFunction(u32),
 }
 
 impl From<String> for Value {
@@ -75,6 +79,7 @@ pub enum Instr {
 }
 
 #[allow(clippy::upper_case_acronyms)]
+#[derive(Clone)]
 pub enum Operand {
     Value(Value),
     IID(IID),
@@ -119,9 +124,10 @@ pub enum CmpOp {
 
 pub struct VM {
     include_paths: Vec<PathBuf>,
+    bc_compiler: bytecode_compiler::Compiler,
     modules: HashMap<String, Module>,
-    sink: Vec<Value>,
     trace_builder: Option<jit::TraceBuilder>,
+    sink: Vec<Value>,
 }
 
 pub struct NotADirectoryError(PathBuf);
@@ -131,13 +137,43 @@ impl std::fmt::Debug for NotADirectoryError {
     }
 }
 
+type NativeFunc = fn(&mut VM, &[Value]) -> Result<Value>;
+
+lazy_static! {
+    static ref NATIVE_FUNCS: HashMap<u32, NativeFunc> = {
+        let mut map = HashMap::new();
+        map.insert(VM::NFID_REQUIRE, nf_require as NativeFunc);
+        map
+    };
+}
+
+fn nf_require(vm: &mut VM, args: &[Value]) -> Result<Value> {
+    let arg0 = args.iter().next();
+    match arg0 {
+        Some(Value::String(path)) => {
+            vm.load_module(path)?;
+            Ok(Value::Undefined)
+        }
+        _ => Err(Error::NativeInvalidArgs),
+    }
+}
+
 impl VM {
+    const NFID_REQUIRE: u32 = 1;
+
     pub fn new() -> Self {
+        let mut bc_compiler = bytecode_compiler::Compiler::new();
+        bc_compiler.bind_native(
+            "require".into(),
+            Value::NativeFunction(Self::NFID_REQUIRE).into(),
+        );
+
         VM {
-            modules: HashMap::new(),
-            sink: Vec::new(),
-            trace_builder: None,
             include_paths: Vec::new(),
+            bc_compiler,
+            modules: HashMap::new(),
+            trace_builder: None,
+            sink: Vec::new(),
         }
     }
 
@@ -151,7 +187,10 @@ impl VM {
         self.trace_builder.take().and_then(|tb| tb.build())
     }
 
-    pub fn add_include_path(&mut self, path: PathBuf) -> std::result::Result<(), NotADirectoryError> {
+    pub fn add_include_path(
+        &mut self,
+        path: PathBuf,
+    ) -> std::result::Result<(), NotADirectoryError> {
         if path.is_dir() {
             self.include_paths.push(path);
             Ok(())
@@ -160,9 +199,56 @@ impl VM {
         }
     }
 
+    pub fn load_module(&mut self, path: &str) -> Result<()> {
+        use std::io::Read;
+
+        let (file_path, key): (PathBuf, String) = self.find_module(path.to_string())?;
+
+        let text = {
+            let mut source_file = std::fs::File::open(file_path).map_err(Error::Io)?;
+            let mut buf = String::new();
+            source_file.read_to_string(&mut buf).map_err(Error::Io)?;
+            buf
+        };
+
+        let module = self
+            .bc_compiler
+            .compile_file(key.clone(), text)
+            .unwrap();
+
+        #[cfg(test)]
+        {
+            eprintln!("=== loaded module: {}", key);
+            module.dump();
+        }
+
+        self.run_module_fn(&module, FnId::ROOT_FN, &[], Default::default())?;
+        Ok(())
+    }
+
+    fn find_module(&self, require_path: String) -> Result<(PathBuf, String)> {
+        let mut key = require_path;
+        if !key.ends_with(".js") {
+            key.push_str(".js");
+        }
+        let require_path = Path::new(&key[..]);
+
+        for inc_path in self.include_paths.iter() {
+            let potential_path = inc_path.join(require_path);
+            if potential_path.is_file() {
+                return Ok((potential_path.canonicalize().unwrap(), key));
+            }
+        }
+
+        Err(Error::NoSuchModule(key))
+    }
+
     pub fn run_script(&mut self, script_text: String, flags: InterpreterFlags) -> Result<()> {
-        let module =
-            crate::bytecode_compiler::compile_file("<input>".to_string(), script_text).unwrap();
+        let module = self
+            .bc_compiler
+            .compile_file("<input>".to_string(), script_text)
+            .unwrap();
+
         #[cfg(test)]
         {
             module.dump();
@@ -308,22 +394,36 @@ impl VM {
 
                 Instr::Call { callee, args } => {
                     let callee = get_operand(&values_buf, callee);
-                    if let Value::LocalFn(callee_fnid) = callee {
-                        let arg_values: Vec<Value> = args
-                            .iter()
-                            .map(|oper| get_operand(&values_buf, oper))
-                            .collect();
+                    match callee {
+                        Value::LocalFn(callee_fnid) => {
+                            let arg_values: Vec<Value> = args
+                                .iter()
+                                .map(|oper| get_operand(&values_buf, oper))
+                                .collect();
 
-                        let ret_val = self.run_module_fn(
-                            module,
-                            callee_fnid,
-                            &arg_values[..],
-                            flags.for_call(),
-                        )?;
+                            let ret_val = self.run_module_fn(
+                                module,
+                                callee_fnid,
+                                &arg_values[..],
+                                flags.for_call(),
+                            )?;
 
-                        values_buf[ndx] = ret_val;
-                    } else {
-                        panic!("invalid callee (not a function): {:?}", callee);
+                            values_buf[ndx] = ret_val;
+                        }
+                        Value::NativeFunction(nfid) => {
+                            let arg_values: Vec<Value> = args
+                                .iter()
+                                .map(|oper| get_operand(&values_buf, oper))
+                                .collect();
+                            let nf = NATIVE_FUNCS
+                                .get(&nfid)
+                                .ok_or(Error::NativeNoSuchFunction(nfid))?;
+                            let ret_val = nf(self, arg_values.as_slice())?;
+                            values_buf[ndx] = ret_val;
+                        }
+                        _ => {
+                            panic!("invalid callee (not a function): {:?}", callee);
+                        }
                     }
                 }
             }

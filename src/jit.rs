@@ -130,6 +130,7 @@ impl ValueType {
             interpreter::Value::Undefined => ValueType::Undefined,
             interpreter::Value::SelfFunction => ValueType::Function,
             interpreter::Value::LocalFn(_) => ValueType::Function,
+            interpreter::Value::NativeFunction(_) => ValueType::Function,
         }
     }
 }

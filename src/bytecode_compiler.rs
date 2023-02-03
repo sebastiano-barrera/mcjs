@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use swc_atoms::JsWord;
+use swc_common::{sync::Lrc, SourceMap};
 use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
 use crate::common::{Error, Result};
@@ -12,9 +13,35 @@ macro_rules! unsupported_node {
     }};
 }
 
-pub fn compile_file(filename: String, content: String) -> Result<interpreter::Module> {
-    let ast_module = parse_file(filename, content)?;
-    compile_module(&ast_module)
+pub struct Compiler {
+    builtins: HashMap<JsWord, Operand>,
+}
+
+impl Compiler {
+    pub fn new() -> Self {
+        Compiler {
+            builtins: HashMap::new(),
+        }
+    }
+
+    pub fn bind_native(&mut self, ident: JsWord, operand: Operand) {
+        self.builtins.insert(ident, operand);
+    }
+
+    pub fn compile_file(
+        &mut self,
+        filename: String,
+        content: String,
+    ) -> Result<interpreter::Module> {
+        let (source_map, ast_module) = parse_file(filename, content)?;
+        let builder = Builder::new(self.builtins.clone());
+        let res = compile_module(builder, &ast_module);
+        if let Err(err) = &res {
+            eprintln!("error: {}", err.message(&*source_map));
+        }
+
+        res
+    }
 }
 
 struct Builder {
@@ -46,12 +73,23 @@ impl FnBuilder {
 }
 
 impl Builder {
-    fn new() -> Self {
+    fn new(builtins: HashMap<JsWord, Operand>) -> Self {
         let next_fnid = 1;
         assert_ne!(FnId(next_fnid), FnId::ROOT_FN);
+
+        let mut root_fn = FnBuilder::new(FnId::ROOT_FN);
+        let outermost_scope = root_fn.scopes.last_mut().unwrap();
+        for (name, operand) in builtins.into_iter() {
+            let var = Var {
+                is_const: true,
+                operand,
+            };
+            outermost_scope.define(name.clone(), var);
+        }
+
         Builder {
             fns: HashMap::new(),
-            fn_stack: vec![FnBuilder::new(FnId::ROOT_FN)],
+            fn_stack: vec![root_fn],
             next_fnid,
         }
     }
@@ -114,11 +152,10 @@ impl Builder {
 
         self.fn_stack.push(FnBuilder::new(fnid));
 
-        let self_fn = self.emit(Instr::Const(Value::SelfFunction));
         self.define_var(
             name,
             Var {
-                iid: self_fn,
+                operand: Value::SelfFunction.into(),
                 is_const: true,
             },
         );
@@ -134,7 +171,7 @@ impl Builder {
                     self.define_var(
                         ident.sym.clone(),
                         Var {
-                            iid,
+                            operand: iid.into(),
                             is_const: false,
                         },
                     );
@@ -178,14 +215,15 @@ impl Scope {
 }
 
 struct Var {
-    iid: IID,
+    operand: Operand,
     is_const: bool,
 }
 
-fn compile_module(ast_module: &swc_ecma_ast::Module) -> Result<interpreter::Module> {
+fn compile_module(
+    mut builder: Builder,
+    ast_module: &swc_ecma_ast::Module,
+) -> Result<interpreter::Module> {
     use swc_ecma_ast::{ModuleDecl, ModuleItem, Stmt, VarDeclKind};
-
-    let mut builder = Builder::new();
 
     for item in &ast_module.body {
         match item {
@@ -227,10 +265,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             let value = if let Some(arg) = &stmt.arg {
                 compile_expr(builder, arg)?
             } else {
-                builder.emit(Instr::Const(Value::Undefined))
+                builder.emit(Instr::Const(Value::Undefined)).into()
             };
 
-            builder.emit(Instr::Return(value.into()));
+            builder.emit(Instr::Return(value));
             Ok(())
         }
         // Stmt::Labeled(_) => todo!(),
@@ -353,7 +391,7 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
             builder.define_var(
                 name,
                 Var {
-                    iid,
+                    operand: iid.into(),
                     is_const: true,
                 },
             );
@@ -385,12 +423,15 @@ fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> 
     for decl in &var_decl.decls {
         let iid = match &decl.init {
             Some(expr) => compile_expr(builder, expr)?,
-            None => builder.emit(Instr::Const(Value::Undefined)),
+            None => Value::Undefined.into(),
         };
 
         if let Some(ident) = decl.name.as_ident() {
             let name: JsWord = ident.id.to_id().0;
-            let var = Var { iid, is_const };
+            let var = Var {
+                operand: iid.into(),
+                is_const,
+            };
             builder.define_var(name, var);
         } else {
             unsupported_node!(decl)
@@ -400,11 +441,11 @@ fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> 
     Ok(())
 }
 
-fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID> {
+fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Operand> {
     use swc_ecma_ast::{CallExpr, Expr};
 
     match expr {
-        Expr::Call(CallExpr { callee, args, .. }) => {
+        Expr::Call(call_expr @ CallExpr { callee, args, .. }) => {
             if let Some(callee) = callee.as_expr() {
                 if let Some(callee) = callee.as_ident() {
                     if callee.sym.as_ref() == "sink" {
@@ -413,7 +454,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                             builder.emit(Instr::PushSink(value));
                         }
 
-                        return Ok(builder.emit(Instr::Const(Value::Null)));
+                        return Ok(builder.emit(Instr::Const(Value::Null)).into());
                     }
                 }
 
@@ -426,13 +467,18 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                     let iid = compile_expr(builder, &arg.expr)?;
                     args_iids.push(iid.into());
                 }
-                return Ok(builder.emit(Instr::Call {
-                    callee: fn_iid.into(),
-                    args: args_iids,
-                }));
+                return Ok(builder
+                    .emit(Instr::Call {
+                        callee: fn_iid.into(),
+                        args: args_iids,
+                    })
+                    .into());
             }
 
-            Err(Error::UnsupportedItem)
+            Err(Error::UnsupportedItem {
+                span: call_expr.span,
+                details: "only calls to simple identifiers are supported for now",
+            })
         }
 
         Expr::Bin(bin_expr) => {
@@ -455,17 +501,21 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                 _ => panic!("unsupported binary op: {:?}", bin_expr.op),
             };
 
-            Ok(builder.emit(instr))
+            Ok(builder.emit(instr).into())
         }
 
         Expr::Lit(lit) => match lit {
             Lit::Num(number) => {
-                let result = builder.emit(Instr::Const(Value::Number(number.value)));
+                let result = builder
+                    .emit(Instr::Const(Value::Number(number.value)))
+                    .into();
                 Ok(result)
             }
-            Lit::Str(s) => Ok(builder.emit(Instr::Const(Value::String(s.value.to_string())))),
+            Lit::Str(s) => Ok(builder
+                .emit(Instr::Const(Value::String(s.value.to_string())))
+                .into()),
             // Lit::Bool(_) => todo!(),
-            Lit::Null(_) => Ok(builder.emit(Instr::Const(Value::Null))),
+            Lit::Null(_) => Ok(builder.emit(Instr::Const(Value::Null)).into()),
             // Lit::BigInt(_) => todo!(),
             // Lit::Regex(_) => todo!(),
             // Lit::JSXText(_) => todo!(),
@@ -475,14 +525,29 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
         Expr::Ident(ident) => get_var(builder, ident),
 
         Expr::Assign(asmt) => {
-            let ident = asmt
-                .left
-                .as_ident()
-                .expect("compiler limitation: assignment is only supported to identifiers");
-            let var_id = builder
+            let ident = asmt.left.as_ident().ok_or_else(|| Error::UnsupportedItem {
+                span: asmt.span,
+                details: "only assignments to simple identifiers are supported",
+            })?;
+            let operand = builder
                 .get_var(&ident.sym)
-                .ok_or_else(|| Error::UnboundVariable(ident.to_string()))?
-                .iid;
+                .ok_or_else(|| Error::UnboundVariable {
+                    span: asmt.span,
+                    ident: ident.to_string(),
+                })?
+                .operand
+                .clone();
+            let var_id = match operand {
+                // Reuse the vairable ID, if there is one
+                Operand::IID(iid) => iid,
+                Operand::Value(_) => {
+                    return Err(Error::IllegalAssignment {
+                        span: asmt.span,
+                        target: ident.to_string(),
+                    })
+                }
+            };
+
             let right = compile_expr(builder, &asmt.right)?.into();
 
             let value = match asmt.op {
@@ -490,28 +555,28 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                 AssignOp::AddAssign => builder
                     .emit(Instr::Arith {
                         op: ArithOp::Add,
-                        a: var_id.into(),
+                        a: operand.clone(),
                         b: right,
                     })
                     .into(),
                 AssignOp::SubAssign => builder
                     .emit(Instr::Arith {
                         op: ArithOp::Sub,
-                        a: var_id.into(),
+                        a: operand.clone(),
                         b: right,
                     })
                     .into(),
                 AssignOp::MulAssign => builder
                     .emit(Instr::Arith {
                         op: ArithOp::Mul,
-                        a: var_id.into(),
+                        a: operand.clone(),
                         b: right,
                     })
                     .into(),
                 AssignOp::DivAssign => builder
                     .emit(Instr::Arith {
                         op: ArithOp::Div,
-                        a: var_id.into(),
+                        a: operand.clone(),
                         b: right,
                     })
                     .into(),
@@ -529,7 +594,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                 other => unsupported_node!(other),
             };
 
-            Ok(builder.emit(Instr::Set { var_id, value }))
+            Ok(builder.emit(Instr::Set { var_id, value }).into())
         }
 
         // Expr::This(_) => todo!(),
@@ -540,7 +605,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
             match unary_expr.op {
                 swc_ecma_ast::UnaryOp::Bang => {
                     let arg = compile_expr(builder, &unary_expr.arg)?;
-                    Ok(builder.emit(Instr::Not(arg.into())))
+                    Ok(builder.emit(Instr::Not(arg.into())).into())
                 }
                 other => unsupported_node!(other),
                 // swc_ecma_ast::UnaryOp::Minus => todo!(),
@@ -555,19 +620,29 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
             if let Expr::Ident(ident) = &*update_expr.arg {
                 // NOTE: update_expr.prefix does not matter in this case, but
                 // it will matter when this code is extended to other types of args
-                let var_id = get_var(builder, ident)?;
-                let value = builder.emit(Instr::Arith {
-                    op: match update_expr.op {
-                        UpdateOp::PlusPlus => ArithOp::Add,
-                        UpdateOp::MinusMinus => ArithOp::Sub,
-                    },
-                    a: var_id.into(),
-                    // TODO Use integers here, when they get implemented
-                    b: Value::Number(1.0).into(),
-                });
+                let var_id = match get_var(builder, ident)? {
+                    Operand::Value(_) => {
+                        return Err(Error::IllegalAssignment {
+                            span: update_expr.span,
+                            target: ident.to_string(),
+                        })
+                    }
+                    Operand::IID(iid) => iid,
+                };
+                let value: Operand = builder
+                    .emit(Instr::Arith {
+                        op: match update_expr.op {
+                            UpdateOp::PlusPlus => ArithOp::Add,
+                            UpdateOp::MinusMinus => ArithOp::Sub,
+                        },
+                        a: var_id.into(),
+                        // TODO Use integers here, when they get implemented
+                        b: Value::Number(1.0).into(),
+                    })
+                    .into();
                 builder.emit(Instr::Set {
                     var_id,
-                    value: value.into(),
+                    value: value.clone(),
                 });
                 Ok(value)
             } else {
@@ -605,14 +680,17 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
     }
 }
 
-fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<IID> {
+fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<Operand> {
     match builder.get_var(&ident.sym) {
-        Some(var) => Ok(var.iid),
-        None => Err(Error::UnboundVariable(ident.sym.to_string())),
+        Some(var) => Ok(var.operand.clone()),
+        None => Err(Error::UnboundVariable {
+            span: ident.span,
+            ident: ident.sym.to_string(),
+        }),
     }
 }
 
-fn parse_file(filename: String, content: String) -> Result<swc_ecma_ast::Module> {
+fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_ecma_ast::Module)> {
     use swc_common::{
         errors::{emitter::EmitterWriter, Handler},
         sync::Lrc,
@@ -649,7 +727,7 @@ fn parse_file(filename: String, content: String) -> Result<swc_ecma_ast::Module>
     }
 
     match parser.parse_module() {
-        Ok(ast_module) => Ok(ast_module),
+        Ok(ast_module) => Ok((source_map, ast_module)),
         Err(e) => {
             e.into_diagnostic(&err_handler).emit();
             Err(Error::ParseError)
