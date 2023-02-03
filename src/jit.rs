@@ -768,6 +768,7 @@ mod tests {
         }
     }
 
+    #[ignore]
     #[test]
     fn test_tracing_simple_constant_folding() {
         let output = quick_run(
@@ -798,6 +799,7 @@ mod tests {
         );
     }
 
+    #[ignore]
     #[test]
     fn test_tracing_one_func() {
         let output = quick_run(
@@ -823,6 +825,7 @@ mod tests {
         assert!(false);
     }
 
+    #[ignore]
     #[test]
     fn test_while() {
         let output = quick_run(

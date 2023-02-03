@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 pub use crate::common::Error;
@@ -118,9 +118,17 @@ pub enum CmpOp {
 }
 
 pub struct VM {
+    include_paths: Vec<PathBuf>,
     modules: HashMap<String, Module>,
     sink: Vec<Value>,
     trace_builder: Option<jit::TraceBuilder>,
+}
+
+pub struct NotADirectoryError(PathBuf);
+impl std::fmt::Debug for NotADirectoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "provided path is not a directory: {}", self.0.display())
+    }
 }
 
 impl VM {
@@ -129,6 +137,7 @@ impl VM {
             modules: HashMap::new(),
             sink: Vec::new(),
             trace_builder: None,
+            include_paths: Vec::new(),
         }
     }
 
@@ -140,6 +149,15 @@ impl VM {
 
     pub fn take_trace(&mut self) -> Option<jit::Trace> {
         self.trace_builder.take().and_then(|tb| tb.build())
+    }
+
+    pub fn add_include_path(&mut self, path: PathBuf) -> std::result::Result<(), NotADirectoryError> {
+        if path.is_dir() {
+            self.include_paths.push(path);
+            Ok(())
+        } else {
+            Err(NotADirectoryError(path))
+        }
     }
 
     pub fn run_script(&mut self, script_text: String, flags: InterpreterFlags) -> Result<()> {
