@@ -710,7 +710,10 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                 todo!("unsupported: UpdateExpr on anything other than an identifier")
             }
         }
-        // Expr::Member(_) => todo!(),
+        Expr::Member(member_expr) => {
+            let (_, _, value) = compile_member_access(builder, member_expr)?;
+            Ok(value)
+        }
         // Expr::SuperProp(_) => todo!(),
         // Expr::Cond(_) => todo!(),
         // Expr::New(_) => todo!(),
@@ -756,23 +759,7 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
     } else if let Some(target_expr) = asmt.left.as_expr() {
         match target_expr {
             Expr::Member(member_expr) => {
-                let obj = compile_expr(builder, member_expr.obj.as_ref())?;
-                let key = match &member_expr.prop {
-                    MemberProp::Ident(prop_ident) => {
-                        Operand::Value(Value::String(prop_ident.sym.to_string()))
-                    }
-                    _ => {
-                        return Err(error!("assignment to an expression is unsupported")
-                            .with_span(asmt.span))
-                    }
-                };
-
-                let old_value = builder
-                    .emit(Instr::ObjGet {
-                        obj: obj.clone(),
-                        key: key.clone(),
-                    })
-                    .into();
+                let (obj, key, old_value) = compile_member_access(builder, member_expr)?;
                 let new_value = compile_assignment_rhs(builder, asmt, &old_value)?;
                 builder.emit(Instr::ObjSet {
                     obj,
@@ -788,6 +775,32 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
     } else {
         panic!("unsupported pattern as assignment target: {:?}", asmt.left)
     }
+}
+
+fn compile_member_access(
+    builder: &mut Builder,
+    member_expr: &swc_ecma_ast::MemberExpr,
+) -> Result<(Operand, Operand, Operand)> {
+    use swc_ecma_ast::MemberProp;
+
+    let obj = compile_expr(builder, member_expr.obj.as_ref())?;
+    let key = match &member_expr.prop {
+        MemberProp::Ident(prop_ident) => Operand::Value(Value::String(prop_ident.sym.to_string())),
+        _ => {
+            return Err(
+                error!("accessing an object with non-identifer key is unsupported")
+                    .with_span(member_expr.span),
+            )
+        }
+    };
+
+    let value = builder
+        .emit(Instr::ObjGet {
+            obj: obj.clone(),
+            key: key.clone(),
+        })
+        .into();
+    Ok((obj, key, value))
 }
 
 /// Read the operand and compute its new value, as requested by the given assignment
