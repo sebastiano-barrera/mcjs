@@ -9,7 +9,7 @@ fn test_load_json5_parse() {
 
     let mut vm = mcjs::VM::new();
     vm.add_include_path(include_path.to_owned()).unwrap();
-    vm.run_script("require('cli')".to_string(), Default::default()).unwrap();
+    vm.run_script("require('stringify')".to_string(), Default::default()).unwrap();
 
     assert!(false);
 }

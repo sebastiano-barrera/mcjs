@@ -38,6 +38,25 @@ impl From<String> for Value {
     }
 }
 
+impl Value {
+    fn js_typeof(&self) -> Value {
+        let ty_s = match self {
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Bool(_) => "boolean",
+            Value::Object(_) => "object",
+            // TODO This is actually an error in our type system.  null is really a value of the 'object' type
+            Value::Null => "object",
+            Value::Undefined => "undefined",
+            Value::SelfFunction => "function",
+            Value::LocalFn(_) => "function",
+            Value::NativeFunction(_) => "function",
+        };
+
+        Value::String(ty_s.to_string())
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Object(Rc<RefCell<HashMap<ObjectKey, Value>>>);
 
@@ -124,6 +143,12 @@ pub enum Instr {
         obj: Operand,
         key: Operand,
     },
+
+    // Temporary; should be replaced by objects, just like all other "classes"
+    ArrayNew,
+    ArrayPush(Operand, Operand),
+
+    TypeOf(Operand),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -547,6 +572,16 @@ impl VM {
                         })
                         .clone();
                 }
+                Instr::ArrayNew => {
+                    eprintln!("ArrayNew does nothing for now");
+                }
+                Instr::ArrayPush(_arr, _elem) => {
+                    eprintln!("ArrayPush does nothing for now");
+                }
+                Instr::TypeOf(arg) => {
+                    let value = get_operand(&values_buf, arg);
+                    values_buf[ndx] = value.js_typeof().into();
+                }
             }
 
             if let Some(trace_builder) = &mut self.trace_builder {
@@ -577,7 +612,6 @@ fn set_builtins(bc_compiler: &mut bytecode_compiler::Compiler) {
         "String".into(),
         Value::NativeFunction(VM::NFID_STRING_NEW).into(),
     );
-
 }
 
 #[derive(Clone)]

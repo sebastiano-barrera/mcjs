@@ -533,6 +533,12 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                 BinaryOp::GtEq => cmp(CmpOp::GE, a, b),
                 BinaryOp::EqEqEq => cmp(CmpOp::EQ, a, b),
                 BinaryOp::NotEqEq => cmp(CmpOp::NE, a, b),
+
+                // TODO TODO TODO This does not implement any of the 'wat' semantics of JavaScript
+                // See https://www.destroyallsoftware.com/talks/wat
+                BinaryOp::EqEq => cmp(CmpOp::EQ, a, b),
+                BinaryOp::NotEq => cmp(CmpOp::NE, a, b),
+
                 _ => panic!("unsupported binary op: {:?}", bin_expr.op),
             };
 
@@ -630,7 +636,31 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
         }
 
         // Expr::This(_) => todo!(),
-        // Expr::Array(_) => todo!(),
+        Expr::Array(arr_expr) => {
+            use swc_ecma_ast::ExprOrSpread;
+            let array: Operand = builder.emit(Instr::ArrayNew).into();
+            for elem in arr_expr.elems.iter() {
+                match elem {
+                    Some(ExprOrSpread { spread, expr }) => {
+                        if spread.is_some() {
+                            return Err(error!("spread syntax is currently unsupported")
+                                .with_span(arr_expr.span));
+                        }
+                        let elem = compile_expr(builder, expr)?;
+                        builder.emit(Instr::ArrayPush(array.clone(), elem));
+                    }
+                    None => {
+                        eprintln!(
+                            "warning: an element in Expr::Array is `None` ({:?})",
+                            arr_expr.span
+                        );
+                    }
+                }
+            }
+
+            Ok(array)
+        }
+
         Expr::Fn(fn_expr) => {
             // TODO Refactor this with Decl::Fn
             let name = fn_expr.ident.as_ref().map(|ident| ident.to_id().0);
@@ -676,11 +706,14 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                     let arg = compile_expr(builder, &unary_expr.arg)?;
                     Ok(builder.emit(Instr::Not(arg.into())).into())
                 }
+                swc_ecma_ast::UnaryOp::TypeOf => {
+                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    Ok(builder.emit(Instr::TypeOf(arg)).into())
+                },
                 other => unsupported_node!(other),
                 // swc_ecma_ast::UnaryOp::Minus => todo!(),
                 // swc_ecma_ast::UnaryOp::Plus => todo!(),
                 // swc_ecma_ast::UnaryOp::Tilde => todo!(),
-                // swc_ecma_ast::UnaryOp::TypeOf => todo!(),
                 // swc_ecma_ast::UnaryOp::Void => todo!(),
                 // swc_ecma_ast::UnaryOp::Delete => todo!(),
             }

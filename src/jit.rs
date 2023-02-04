@@ -135,6 +135,22 @@ impl ValueType {
             interpreter::Value::Object(_) => ValueType::Obj,
         }
     }
+
+    fn js_typeof(&self) -> Option<Operand> {
+        let ret_str = match self {
+            ValueType::Bool => "boolean",
+            ValueType::Num => "number",
+            ValueType::Str => "string",
+            ValueType::Obj => "object",
+            // TODO This is actually an error in our type system.  null is really a value of the 'object' type
+            ValueType::Null => "object",
+            ValueType::Undefined => "undefined",
+            ValueType::Function => "function",
+            ValueType::Boxed => return None,
+        };
+
+        Some(Operand::Imm(BoxedValue::String(ret_str.into())))
+    }
 }
 
 pub struct TraceBuilder {
@@ -212,7 +228,7 @@ impl TraceBuilder {
                 }
             }
 
-            interpreter::Operand::Var(var_id) => {
+            interpreter::Operand::Var(_var_id) => {
                 todo!("resolve_interpreter_operand for Operand::Var")
             }
         }
@@ -434,8 +450,7 @@ impl TraceBuilder {
                 // unconditional jump.  Nothing to do, let's just follow the interpreter to the next instruction
                 None
             }
-            interpreter::Instr::Set { var_id, value } => {
-                let value = self.resolve_interpreter_operand(value, &step.values_buf)?;
+            interpreter::Instr::Set { .. } => {
                 todo!("JIT of instruction Set");
                 None
             }
@@ -474,6 +489,16 @@ impl TraceBuilder {
                 let key = self.resolve_operand_as(key, &step.values_buf, ValueType::Str)?;
 
                 Some(self.emit(Instr::ObjGet { obj, key })?)
+            }
+            interpreter::Instr::ArrayNew => {
+                todo!("array new")
+            }
+            interpreter::Instr::ArrayPush(_arr, _elem) => {
+                todo!("array push")
+            }
+            interpreter::Instr::TypeOf(arg) => {
+                let arg = self.resolve_interpreter_operand(arg, &step.values_buf)?;
+                Some(self.emit(Instr::TypeOf(arg))?)
             }
         };
 
@@ -572,14 +597,31 @@ impl TraceBuilder {
                 }
             },
 
-            _ => {
-                // Alright, no constant folding. Emit the instruction on the trace
-                let vid = ValueId(self.instrs.len() as u32);
-                eprintln!("TB: emit: v{:<4} {:?}", vid.0, instr);
-                self.instrs.push(instr);
-                Ok(vid.into())
+            Instr::TypeOf(ref arg) => {
+                let ty = match arg {
+                    Operand::ValueId(vid) => {
+                        let target_instr = self.instrs.get(vid.0 as usize).unwrap();
+                        target_instr.result_type().and_then(|ty| ty.js_typeof())
+                    }
+                    Operand::Imm(value) => ValueType::of(value).js_typeof(),
+                    Operand::Cmp(_) => panic!("JIT bug: invalid operand of type Cmp for TypeOf"),
+                };
+
+                match ty {
+                    Some(ret) => Ok(ret),
+                    None => self.write(instr),
+                }
             }
+
+            _ => self.write(instr),
         }
+    }
+
+    fn write(&mut self, instr: Instr) -> Result<Operand, Error> {
+        let vid = ValueId(self.instrs.len() as u32);
+        eprintln!("TB: emit: v{:<4} {:?}", vid.0, instr);
+        self.instrs.push(instr);
+        Ok(vid.into())
     }
 
     pub(crate) fn build(self) -> Option<Trace> {
@@ -655,6 +697,8 @@ enum Instr {
         key: Operand,
     },
 
+    TypeOf(Operand),
+
     PushSink(Operand),
     Return(Operand),
 }
@@ -681,6 +725,7 @@ impl Instr {
             Instr::ObjNew => Some(ValueType::Obj),
             Instr::ObjSet { .. } => None,
             Instr::ObjGet { .. } => Some(ValueType::Boxed),
+            Instr::TypeOf(_) => Some(ValueType::Str),
         }
     }
 
@@ -710,6 +755,7 @@ impl Instr {
             Instr::ObjNew => Box::new(std::iter::empty()),
             Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
             Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
+            Instr::TypeOf(arg) => Box::new([arg].into_iter()),
         }
     }
 }
