@@ -500,6 +500,12 @@ impl TraceBuilder {
                 let arg = self.resolve_interpreter_operand(arg, &step.values_buf)?;
                 Some(self.emit(Instr::TypeOf(arg))?)
             }
+
+            interpreter::Instr::BoolOp { op, a, b } => {
+                let a = self.resolve_operand_as(a, &step.values_buf, ValueType::Bool)?;
+                let b = self.resolve_operand_as(b, &step.values_buf, ValueType::Bool)?;
+                Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
+            }
         };
 
         // Map IID to the result operand
@@ -570,6 +576,38 @@ impl TraceBuilder {
                 a,
                 b: Operand::Imm(BoxedValue::Number(b_const)),
             } if b_const == 1.0 => Ok(a),
+
+            Instr::BoolOp {
+                op: BoolOp::And,
+                a: Operand::Imm(BoxedValue::Bool(false)),
+                b: _,
+            } => Ok(Operand::Imm(BoxedValue::Bool(false))),
+            Instr::BoolOp {
+                op: BoolOp::And,
+                a: _,
+                b: Operand::Imm(BoxedValue::Bool(false)),
+            } => Ok(Operand::Imm(BoxedValue::Bool(false))),
+            Instr::BoolOp {
+                op: BoolOp::And,
+                a: Operand::Imm(BoxedValue::Bool(true)),
+                b: Operand::Imm(BoxedValue::Bool(true)),
+            } => Ok(Operand::Imm(BoxedValue::Bool(true))),
+
+            Instr::BoolOp {
+                op: BoolOp::Or,
+                a: Operand::Imm(BoxedValue::Bool(true)),
+                b: _,
+            } => Ok(Operand::Imm(BoxedValue::Bool(true))),
+            Instr::BoolOp {
+                op: BoolOp::Or,
+                a: _,
+                b: Operand::Imm(BoxedValue::Bool(true)),
+            } => Ok(Operand::Imm(BoxedValue::Bool(true))),
+            Instr::BoolOp {
+                op: BoolOp::Or,
+                a: Operand::Imm(BoxedValue::Bool(false)),
+                b: Operand::Imm(BoxedValue::Bool(false)),
+            } => Ok(Operand::Imm(BoxedValue::Bool(false))),
 
             Instr::Unbox(value_type, ref arg) => match arg {
                 Operand::Imm(_) => panic!("invalid operand for Unbox: immediate"),
@@ -668,6 +706,11 @@ enum Instr {
         a: Operand,
         b: Operand,
     },
+    BoolOp {
+        op: BoolOp,
+        a: Operand,
+        b: Operand,
+    },
     Choose {
         ty: ValueType,
         cond: Operand,
@@ -705,6 +748,7 @@ enum Instr {
 
 type ArithOp = interpreter::ArithOp;
 type CmpOp = interpreter::CmpOp;
+type BoolOp = interpreter::BoolOp;
 
 impl Instr {
     fn result_type(&self) -> Option<ValueType> {
@@ -712,6 +756,7 @@ impl Instr {
             Instr::Not(_) => Some(ValueType::Bool),
             Instr::Arith { .. } => Some(ValueType::Num),
             Instr::Cmp { .. } => Some(ValueType::Bool),
+            Instr::BoolOp { .. } => Some(ValueType::Bool),
             Instr::AssertTrue { .. } => None,
             Instr::AssertEqConst { .. } => None,
             Instr::PushSink(_) => None,
@@ -733,8 +778,9 @@ impl Instr {
         use std::iter::once;
         match self {
             Instr::Not(arg) => Box::new(once(arg)),
-            Instr::Arith { a, b, op: _ } => Box::new([a, b].into_iter()),
+            Instr::Arith { a, b, .. } => Box::new([a, b].into_iter()),
             Instr::Cmp { a, b, .. } => Box::new([a, b].into_iter()),
+            Instr::BoolOp { a, b, .. } => Box::new([a, b].into_iter()),
             Instr::Choose {
                 cond,
                 if_true,

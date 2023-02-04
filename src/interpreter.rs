@@ -55,6 +55,14 @@ impl Value {
 
         Value::String(ty_s.to_string())
     }
+
+    pub(crate) fn expect_bool(&self) -> Result<bool> {
+        if let Value::Bool(val) = self {
+            Ok(*val)
+        } else {
+            Err(error!("expected a boolean"))
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -112,6 +120,11 @@ pub enum Instr {
     },
     Cmp {
         op: CmpOp,
+        a: Operand,
+        b: Operand,
+    },
+    BoolOp {
+        op: BoolOp,
         a: Operand,
         b: Operand,
     },
@@ -214,6 +227,12 @@ pub enum CmpOp {
     LE,
     EQ,
     NE,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BoolOp {
+    And,
+    Or,
 }
 
 pub struct VM {
@@ -581,6 +600,15 @@ impl VM {
                 Instr::TypeOf(arg) => {
                     let value = get_operand(&values_buf, arg);
                     values_buf[ndx] = value.js_typeof().into();
+                }
+                Instr::BoolOp { op, a, b } => {
+                    let a: bool = get_operand(&values_buf, a).expect_bool()?;
+                    let b: bool = get_operand(&values_buf, b).expect_bool()?;
+                    let res = match op {
+                        BoolOp::And => a && b,
+                        BoolOp::Or => a || b,
+                    };
+                    values_buf[ndx] = Value::Bool(res);
                 }
             }
 

@@ -7,7 +7,7 @@ use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 pub use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::interpreter::{
-    self, ArithOp, CmpOp, FnId, Instr, Operand, StackFrameId, Value, VarId, VarIndex, IID,
+    self, ArithOp, BoolOp, CmpOp, FnId, Instr, Operand, StackFrameId, Value, VarId, VarIndex, IID,
 };
 
 macro_rules! unsupported_node {
@@ -522,6 +522,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
 
             let arith = |op, a, b| Instr::Arith { a, b, op };
             let cmp = |op, a, b| Instr::Cmp { a, b, op };
+            let bool_op = |op, a, b| Instr::BoolOp { a, b, op };
             let instr = match bin_expr.op {
                 BinaryOp::Add => arith(ArithOp::Add, a, b),
                 BinaryOp::Sub => arith(ArithOp::Sub, a, b),
@@ -538,6 +539,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                 // See https://www.destroyallsoftware.com/talks/wat
                 BinaryOp::EqEq => cmp(CmpOp::EQ, a, b),
                 BinaryOp::NotEq => cmp(CmpOp::NE, a, b),
+
+                BinaryOp::LogicalAnd => bool_op(BoolOp::And, a, b),
 
                 _ => panic!("unsupported binary op: {:?}", bin_expr.op),
             };
@@ -709,7 +712,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                 swc_ecma_ast::UnaryOp::TypeOf => {
                     let arg = compile_expr(builder, &unary_expr.arg)?;
                     Ok(builder.emit(Instr::TypeOf(arg)).into())
-                },
+                }
                 other => unsupported_node!(other),
                 // swc_ecma_ast::UnaryOp::Minus => todo!(),
                 // swc_ecma_ast::UnaryOp::Plus => todo!(),
