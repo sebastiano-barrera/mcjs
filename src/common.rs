@@ -10,7 +10,7 @@ pub enum Error {
 
     UnsupportedItem { span: Span, details: &'static str },
     UnboundVariable { span: Span, ident: String },
-    IllegalAssignment { span: Span, target: String },
+    IllegalAssignment { span: Span },
     InvalidObjectKey,
 
     NativeInvalidArgs,
@@ -48,9 +48,9 @@ impl Error {
                 let span_str = source_map.span_to_string(*span);
                 format!("{span_str}: unbound variable `{ident}`")
             }
-            Error::IllegalAssignment { span, target } => {
+            Error::IllegalAssignment { span } => {
                 let span_str = source_map.span_to_string(*span);
-                format!("{span_str}: illegal assignment to `{target}` (const?)")
+                format!("{span_str}: illegal target for assignment (maybe it's const?)")
             }
             Error::InvalidObjectKey => "invalid object key".to_string(),
             Error::NativeInvalidArgs => "native function: invalid args".to_string(),
@@ -59,4 +59,3 @@ impl Error {
         }
     }
 }
-

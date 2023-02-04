@@ -137,6 +137,8 @@ impl Builder {
     }
 
     fn define_var(&mut self, name: JsWord, var: Var) {
+        // let depth = self.cur_fnb().scopes.len() - 1;
+        // eprintln!("define_var {name} [{depth}]");
         self.cur_fnb()
             .scopes
             .last_mut()
@@ -146,11 +148,11 @@ impl Builder {
 
     fn get_var(&mut self, sym: &JsWord) -> Option<&Var> {
         // Lookup sym in each scope, inner to outer
-        self.cur_fnb()
-            .scopes
+
+        self.fn_stack
             .iter()
             .rev()
-            .find_map(|scope| scope.get_var(sym))
+            .find_map(|fnb| fnb.scopes.iter().rev().find_map(|scope| scope.get_var(sym)))
     }
 
     fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
@@ -198,8 +200,10 @@ impl Builder {
     }
 }
 
+#[derive(Debug)]
 struct Scope {
-    vars: HashMap<JsWord, Var>,
+    // TODO Take advantage of identifier interning!
+    vars: HashMap<String, Var>,
 }
 impl Scope {
     fn new() -> Self {
@@ -209,6 +213,8 @@ impl Scope {
     }
 
     fn define(&mut self, name: JsWord, var: Var) {
+        let name = String::from_utf8(name.as_bytes().to_owned())
+            .expect("only UTF-8 identifiers are supporeted!");
         if self.vars.contains_key(&name) {
             panic!(
                 "definition of var `{}` shadows previous definition (compiler limitation)",
@@ -219,10 +225,12 @@ impl Scope {
     }
 
     fn get_var(&self, sym: &JsWord) -> Option<&Var> {
-        self.vars.get(sym)
+        let name = String::from_utf8_lossy(sym.as_bytes());
+        self.vars.get(name.as_ref())
     }
 }
 
+#[derive(Debug)]
 struct Var {
     operand: Operand,
     is_const: bool,
@@ -233,6 +241,15 @@ fn compile_module(
     ast_module: &swc_ecma_ast::Module,
 ) -> Result<interpreter::Module> {
     use swc_ecma_ast::{ModuleDecl, ModuleItem, Stmt, VarDeclKind};
+
+    let exports_object = builder.emit(Instr::ObjNew).into();
+    builder.define_var(
+        "module".into(),
+        Var {
+            is_const: true,
+            operand: exports_object,
+        },
+    );
 
     for item in &ast_module.body {
         match item {
@@ -430,17 +447,14 @@ fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> 
     };
 
     for decl in &var_decl.decls {
-        let iid = match &decl.init {
+        let operand = match &decl.init {
             Some(expr) => compile_expr(builder, expr)?,
             None => Value::Undefined.into(),
         };
 
         if let Some(ident) = decl.name.as_ident() {
             let name: JsWord = ident.id.to_id().0;
-            let var = Var {
-                operand: iid.into(),
-                is_const,
-            };
+            let var = Var { operand, is_const };
             builder.define_var(name, var);
         } else {
             unsupported_node!(decl)
@@ -534,27 +548,44 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
         Expr::Ident(ident) => get_var(builder, ident),
 
         Expr::Assign(asmt) => {
-            let ident = asmt.left.as_ident().ok_or_else(|| Error::UnsupportedItem {
-                span: asmt.span,
-                details: "only assignments to simple identifiers are supported",
-            })?;
-            let operand = builder
-                .get_var(&ident.sym)
-                .ok_or_else(|| Error::UnboundVariable {
-                    span: asmt.span,
-                    ident: ident.to_string(),
-                })?
-                .operand
-                .clone();
-            let var_id = match operand {
-                // Reuse the vairable ID, if there is one
-                Operand::IID(iid) => iid,
-                Operand::Value(_) => {
-                    return Err(Error::IllegalAssignment {
-                        span: asmt.span,
-                        target: ident.to_string(),
-                    })
+            use swc_ecma_ast::{MemberExpr, MemberProp, PatOrExpr};
+
+            let target_operand = if let Some(ident) = asmt.left.as_ident() {
+                get_var(builder, ident)?.clone()
+            } else if let Some(target_expr) = asmt.left.as_expr() {
+                match target_expr {
+                    Expr::Member(member_expr) => {
+                        let obj = compile_expr(builder, member_expr.obj.as_ref())?;
+                        let key = match &member_expr.prop {
+                            MemberProp::Ident(prop_ident) => {
+                                Operand::Value(Value::String(prop_ident.sym.to_string()))
+                            }
+                            _ => {
+                                return Err(Error::UnsupportedItem {
+                                    span: asmt.span,
+                                    details: "assignment to an expression is unsupported",
+                                })
+                            }
+                        };
+                        builder.emit(Instr::ObjGet { obj, key }).into()
+                    }
+                    // We should have already handled this case in the `if let ... = asm.left.as_ident()` case
+                    Expr::Ident(_) => unreachable!(),
+                    _ => {
+                        return Err(Error::UnsupportedItem {
+                            span: asmt.span,
+                            details: "assignment to an expression is unsupported",
+                        })
+                    }
                 }
+            } else {
+                panic!("unsupported pattern as assignment target: {:?}", asmt.left)
+            };
+
+            let var_id = match target_operand {
+                // Reuse the variable ID, if there is one
+                Operand::IID(iid) => iid,
+                Operand::Value(_) => return Err(Error::IllegalAssignment { span: asmt.span }),
             };
 
             let right = compile_expr(builder, &asmt.right)?.into();
@@ -564,28 +595,28 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                 AssignOp::AddAssign => builder
                     .emit(Instr::Arith {
                         op: ArithOp::Add,
-                        a: operand.clone(),
+                        a: target_operand.clone(),
                         b: right,
                     })
                     .into(),
                 AssignOp::SubAssign => builder
                     .emit(Instr::Arith {
                         op: ArithOp::Sub,
-                        a: operand.clone(),
+                        a: target_operand.clone(),
                         b: right,
                     })
                     .into(),
                 AssignOp::MulAssign => builder
                     .emit(Instr::Arith {
                         op: ArithOp::Mul,
-                        a: operand.clone(),
+                        a: target_operand.clone(),
                         b: right,
                     })
                     .into(),
                 AssignOp::DivAssign => builder
                     .emit(Instr::Arith {
                         op: ArithOp::Div,
-                        a: operand.clone(),
+                        a: target_operand.clone(),
                         b: right,
                     })
                     .into(),
@@ -731,7 +762,6 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                     Operand::Value(_) => {
                         return Err(Error::IllegalAssignment {
                             span: update_expr.span,
-                            target: ident.to_string(),
                         })
                     }
                     Operand::IID(iid) => iid,
@@ -790,10 +820,17 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
 fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<Operand> {
     match builder.get_var(&ident.sym) {
         Some(var) => Ok(var.operand.clone()),
-        None => Err(Error::UnboundVariable {
-            span: ident.span,
-            ident: ident.sym.to_string(),
-        }),
+        None => {
+            // eprintln!("unbound variable; scopes info:");
+            // for (ndx, fnb) in builder.fn_stack.iter().enumerate() {
+            //     eprintln!("  [{ndx}]: {:#?}", fnb.scopes);
+            // }
+
+            Err(Error::UnboundVariable {
+                span: ident.span,
+                ident: ident.sym.to_string(),
+            })
+        }
     }
 }
 
@@ -867,13 +904,11 @@ mod tests {
         let instrs = &root_fn.instrs();
         let obj_id = instrs
             .iter()
-            .enumerate()
-            .find_map(|(ndx, instr)| match instr {
-                Instr::ObjNew => Some(ndx),
+            .find_map(|instr| match instr {
+                Instr::PushSink(Operand::IID(iid)) => Some(*iid),
                 _ => None,
             })
             .unwrap();
-        let obj_id = IID(obj_id as u32);
         let keys: Vec<_> = instrs
             .iter()
             .filter_map(|instr| match instr {

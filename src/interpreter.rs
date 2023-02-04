@@ -118,6 +118,10 @@ pub enum Instr {
         key: Operand,
         value: Operand,
     },
+    ObjGet {
+        obj: Operand,
+        key: Operand,
+    },
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -166,7 +170,6 @@ pub enum CmpOp {
 
 pub struct VM {
     include_paths: Vec<PathBuf>,
-    bc_compiler: bytecode_compiler::Compiler,
     modules: HashMap<String, Module>,
     trace_builder: Option<jit::TraceBuilder>,
     sink: Vec<Value>,
@@ -204,15 +207,8 @@ impl VM {
     const NFID_REQUIRE: u32 = 1;
 
     pub fn new() -> Self {
-        let mut bc_compiler = bytecode_compiler::Compiler::new();
-        bc_compiler.bind_native(
-            "require".into(),
-            Value::NativeFunction(Self::NFID_REQUIRE).into(),
-        );
-
         VM {
             include_paths: Vec::new(),
-            bc_compiler,
             modules: HashMap::new(),
             trace_builder: None,
             sink: Vec::new(),
@@ -253,7 +249,9 @@ impl VM {
             buf
         };
 
-        let module = self.bc_compiler.compile_file(key.clone(), text).unwrap();
+        let mut bc_compiler = bytecode_compiler::Compiler::new();
+        set_builtins(&mut bc_compiler);
+        let module = bc_compiler.compile_file(key.clone(), text).unwrap();
 
         #[cfg(test)]
         {
@@ -283,8 +281,9 @@ impl VM {
     }
 
     pub fn run_script(&mut self, script_text: String, flags: InterpreterFlags) -> Result<()> {
-        let module = self
-            .bc_compiler
+        let mut bc_compiler = bytecode_compiler::Compiler::new();
+        set_builtins(&mut bc_compiler);
+        let module = bc_compiler
             .compile_file("<input>".to_string(), script_text)
             .unwrap();
 
@@ -469,17 +468,32 @@ impl VM {
                 Instr::ObjNew => {
                     values_buf[ndx] = Value::Object(Object::new());
                 }
-
                 Instr::ObjSet { obj, key, value } => {
                     let obj = get_operand(&values_buf, obj);
-                    if let Value::Object(mut obj) = obj {
-                        let key = get_operand(&values_buf, key);
-                        let key = ObjectKey::from_value(&key).ok_or(Error::InvalidObjectKey)?;
-                        let value = get_operand(&values_buf, value);
-                        obj.set(key, value);
+                    let mut obj = if let Value::Object(obj) = obj {
+                        obj
                     } else {
                         panic!("ObjSet: not an object");
-                    }
+                    };
+                    let key = get_operand(&values_buf, key);
+                    let key = ObjectKey::from_value(&key).ok_or(Error::InvalidObjectKey)?;
+                    let value = get_operand(&values_buf, value);
+                    obj.set(key, value);
+                }
+                Instr::ObjGet { obj, key } => {
+                    let obj = if let Value::Object(obj) = get_operand(&values_buf, obj) {
+                        obj
+                    } else {
+                        panic!("ObjSet: not an object");
+                    };
+                    let key = get_operand(&values_buf, key);
+                    let key = ObjectKey::from_value(&key).ok_or(Error::InvalidObjectKey)?;
+                    let value = obj.get(&key);
+                    values_buf[ndx] = value
+                        .unwrap_or_else(|| {
+                            panic!("ObjGet: no property for key `{:?}` in object", key)
+                        })
+                        .clone();
                 }
             }
 
@@ -500,6 +514,13 @@ impl VM {
 
         Ok(return_value.unwrap_or(Value::Undefined))
     }
+}
+
+fn set_builtins(bc_compiler: &mut bytecode_compiler::Compiler) {
+    bc_compiler.bind_native(
+        "require".into(),
+        Value::NativeFunction(VM::NFID_REQUIRE).into(),
+    );
 }
 
 #[derive(Clone)]

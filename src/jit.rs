@@ -465,6 +465,12 @@ impl TraceBuilder {
                 self.emit(Instr::ObjSet { obj, key, value })?;
                 None
             }
+            interpreter::Instr::ObjGet { obj, key } => {
+                let obj = self.resolve_operand_as(obj, &step.values_buf, ValueType::Obj)?;
+                let key = self.resolve_operand_as(key, &step.values_buf, ValueType::Str)?;
+
+                Some(self.emit(Instr::ObjGet { obj, key })?)
+            }
         };
 
         // Map IID to the result operand
@@ -640,6 +646,10 @@ enum Instr {
         key: Operand,
         value: Operand,
     },
+    ObjGet {
+        obj: Operand,
+        key: Operand,
+    },
 
     PushSink(Operand),
     Return(Operand),
@@ -666,6 +676,7 @@ impl Instr {
             Instr::Num2Str(_) => Some(ValueType::Str),
             Instr::ObjNew => Some(ValueType::Obj),
             Instr::ObjSet { .. } => None,
+            Instr::ObjGet { .. } => Some(ValueType::Boxed),
         }
     }
 
@@ -694,6 +705,7 @@ impl Instr {
 
             Instr::ObjNew => Box::new(std::iter::empty()),
             Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
+            Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
         }
     }
 }
