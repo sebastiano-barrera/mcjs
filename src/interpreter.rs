@@ -1,4 +1,6 @@
 use lazy_static::lazy_static;
+use std::cell::Ref;
+use std::rc::Rc;
 use std::{
     cell::RefCell,
     cmp::Ordering,
@@ -20,6 +22,7 @@ pub enum Value {
     Number(f64),
     String(String),
     Bool(bool),
+    Object(Object),
     Null,
     Undefined,
     SelfFunction,
@@ -33,6 +36,38 @@ impl From<String> for Value {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct Object(Rc<RefCell<HashMap<ObjectKey, Value>>>);
+
+impl Object {
+    fn new() -> Self {
+        Object(Rc::new(RefCell::new(HashMap::new())))
+    }
+
+    fn get<'a>(&'a self, key: &ObjectKey) -> Option<Ref<'a, Value>> {
+        let hashmap = self.0.borrow();
+        Ref::filter_map(hashmap, |map| map.get(key)).ok()
+    }
+
+    fn set(&mut self, key: ObjectKey, value: Value) {
+        let mut map = self.0.borrow_mut();
+        map.insert(key, value);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub enum ObjectKey {
+    String(String),
+}
+impl ObjectKey {
+    fn from_value(value: &Value) -> Option<ObjectKey> {
+        if let Value::String(s) = value {
+            Some(ObjectKey::String(s.clone()))
+        } else {
+            None
+        }
+    }
+}
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
@@ -75,6 +110,13 @@ pub enum Instr {
         callee: Operand,
         // smallvec?
         args: Vec<Operand>,
+    },
+
+    ObjNew,
+    ObjSet {
+        obj: Operand,
+        key: Operand,
+        value: Operand,
     },
 }
 
@@ -211,10 +253,7 @@ impl VM {
             buf
         };
 
-        let module = self
-            .bc_compiler
-            .compile_file(key.clone(), text)
-            .unwrap();
+        let module = self.bc_compiler.compile_file(key.clone(), text).unwrap();
 
         #[cfg(test)]
         {
@@ -426,6 +465,22 @@ impl VM {
                         }
                     }
                 }
+
+                Instr::ObjNew => {
+                    values_buf[ndx] = Value::Object(Object::new());
+                }
+
+                Instr::ObjSet { obj, key, value } => {
+                    let obj = get_operand(&values_buf, obj);
+                    if let Value::Object(mut obj) = obj {
+                        let key = get_operand(&values_buf, key);
+                        let key = ObjectKey::from_value(&key).ok_or(Error::InvalidObjectKey)?;
+                        let value = get_operand(&values_buf, value);
+                        obj.set(key, value);
+                    } else {
+                        panic!("ObjSet: not an object");
+                    }
+                }
             }
 
             if let Some(trace_builder) = &mut self.trace_builder {
@@ -494,6 +549,10 @@ impl Module {
         Module { fns }
     }
 
+    pub(crate) fn functions(&self) -> &HashMap<FnId, Function> {
+        &self.fns
+    }
+
     pub(crate) fn dump(&self) {
         eprintln!("=== module");
         for (fnid, func) in self.fns.iter() {
@@ -550,4 +609,50 @@ fn find_loop_heads(instrs: &[Instr]) -> HashSet<IID> {
     }
 
     heads
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Output {
+        sink: Vec<Value>,
+    }
+
+    fn quick_run(code: &str) -> Result<Output> {
+        let mut vm = VM::new();
+        vm.run_script(code.to_string(), Default::default())?;
+        Ok(Output {
+            sink: vm.take_sink(),
+        })
+    }
+
+    #[test]
+    fn test_object_init() {
+        let output = quick_run(
+            "sink({
+                aString: 'asdlol123',
+                aNumber: 1239423.4518923,
+                anotherObject: { x: 123, y: 899 },
+                aFunction: function(pt) { return 42; }
+            })",
+        )
+        .unwrap();
+
+        assert_eq!(1, output.sink.len());
+        let obj = if let Value::Object(obj) = &output.sink[0] {
+            obj
+        } else {
+            panic!("not an object")
+        };
+
+        let val = obj.get(&ObjectKey::String("aString".to_string())).unwrap();
+        assert_eq!(&*val, &Value::String("asdlol123".to_string()));
+    }
+
+    #[ignore]
+    #[test]
+    fn test_object_member_set() {
+        panic!("not yet implemented");
+    }
 }

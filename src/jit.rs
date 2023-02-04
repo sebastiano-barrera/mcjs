@@ -115,6 +115,7 @@ enum ValueType {
     Bool,
     Num,
     Str,
+    Obj,
     Null,
     Undefined,
     Function,
@@ -131,6 +132,7 @@ impl ValueType {
             interpreter::Value::SelfFunction => ValueType::Function,
             interpreter::Value::LocalFn(_) => ValueType::Function,
             interpreter::Value::NativeFunction(_) => ValueType::Function,
+            interpreter::Value::Object(_) => ValueType::Obj,
         }
     }
 }
@@ -453,6 +455,16 @@ impl TraceBuilder {
                 self.stack_depth += 1;
                 None
             }
+
+            interpreter::Instr::ObjNew => Some(self.emit(Instr::ObjNew)?),
+            interpreter::Instr::ObjSet { obj, key, value } => {
+                let obj = self.resolve_operand_as(obj, &step.values_buf, ValueType::Obj)?;
+                let key = self.resolve_operand_as(key, &step.values_buf, ValueType::Str)?;
+                let value = self.resolve_operand_as(value, &step.values_buf, ValueType::Boxed)?;
+
+                self.emit(Instr::ObjSet { obj, key, value })?;
+                None
+            }
         };
 
         // Map IID to the result operand
@@ -622,6 +634,13 @@ enum Instr {
     Box(Operand),
     Num2Str(Operand),
 
+    ObjNew,
+    ObjSet {
+        obj: Operand,
+        key: Operand,
+        value: Operand,
+    },
+
     PushSink(Operand),
     Return(Operand),
 }
@@ -645,6 +664,8 @@ impl Instr {
             Instr::Unbox(ty, _) => Some(ty.clone()),
             Instr::Box(_) => Some(ValueType::Boxed),
             Instr::Num2Str(_) => Some(ValueType::Str),
+            Instr::ObjNew => Some(ValueType::Obj),
+            Instr::ObjSet { .. } => None,
         }
     }
 
@@ -670,6 +691,9 @@ impl Instr {
 
             Instr::GetArg(_) => Box::new(std::iter::empty()),
             Instr::TraceParam(_) => Box::new(std::iter::empty()),
+
+            Instr::ObjNew => Box::new(std::iter::empty()),
+            Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
         }
     }
 }

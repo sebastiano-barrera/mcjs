@@ -13,6 +13,13 @@ macro_rules! unsupported_node {
     }};
 }
 
+fn err_unsupported_node(span: swc_common::Span) -> Error {
+    Error::UnsupportedItem {
+        span,
+        details: "unsupported syntax!",
+    }
+}
+
 pub struct Compiler {
     builtins: HashMap<JsWord, Operand>,
 }
@@ -146,19 +153,21 @@ impl Builder {
             .find_map(|scope| scope.get_var(sym))
     }
 
-    fn start_function(&mut self, name: JsWord, params: &[swc_ecma_ast::Param]) {
+    fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
         let fnid = FnId(self.next_fnid);
         self.next_fnid += 1;
 
         self.fn_stack.push(FnBuilder::new(fnid));
 
-        self.define_var(
-            name,
-            Var {
-                operand: Value::SelfFunction.into(),
-                is_const: true,
-            },
-        );
+        if let Some(name) = name {
+            self.define_var(
+                name,
+                Var {
+                    operand: Value::SelfFunction.into(),
+                    is_const: true,
+                },
+            );
+        }
 
         for (param_ndx, param) in params.iter().enumerate() {
             if !param.decorators.is_empty() {
@@ -380,7 +389,7 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
                 panic!("unsupported: TypeScript syntax (return type)");
             }
 
-            builder.start_function(name.clone(), func.params.as_slice());
+            builder.start_function(Some(name.clone()), func.params.as_slice());
             let stmts = &func.body.as_ref().expect("function without body?!").stmts;
             for stmt in stmts {
                 compile_stmt(builder, stmt)?;
@@ -597,10 +606,108 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
             Ok(builder.emit(Instr::Set { var_id, value }).into())
         }
 
+        Expr::Object(obj_expr) => {
+            let obj: Operand = builder.emit(Instr::ObjNew).into();
+
+            for prop_or_spread in obj_expr.props.iter() {
+                match prop_or_spread {
+                    swc_ecma_ast::PropOrSpread::Spread(spread_elm) => {
+                        return Err(Error::UnsupportedItem {
+                            span: spread_elm.dot3_token,
+                            details: "spread syntax (...) is currently unsupported",
+                        })
+                    }
+                    swc_ecma_ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
+                        swc_ecma_ast::Prop::KeyValue(kv_expr) => {
+                            let value = compile_expr(builder, &kv_expr.value)?;
+                            let key = match &kv_expr.key {
+                                swc_ecma_ast::PropName::Ident(ident) => {
+                                    Value::String(ident.sym.to_string())
+                                }
+                                swc_ecma_ast::PropName::Str(s) => {
+                                    Value::String(s.value.to_string())
+                                }
+                                swc_ecma_ast::PropName::Num(num) => Value::Number(num.value),
+                                swc_ecma_ast::PropName::Computed(x) => {
+                                    return Err(err_unsupported_node(x.span))
+                                }
+                                swc_ecma_ast::PropName::BigInt(x) => {
+                                    return Err(err_unsupported_node(x.span))
+                                }
+                            }
+                            .into();
+
+                            builder.emit(Instr::ObjSet {
+                                obj: obj.clone(),
+                                key,
+                                value,
+                            });
+                        }
+                        swc_ecma_ast::Prop::Shorthand(expr) => {
+                            return Err(err_unsupported_node(expr.span))
+                        }
+                        swc_ecma_ast::Prop::Assign(expr) => {
+                            return Err(err_unsupported_node(expr.key.span))
+                        }
+                        swc_ecma_ast::Prop::Getter(expr) => {
+                            return Err(err_unsupported_node(expr.span))
+                        }
+                        swc_ecma_ast::Prop::Setter(expr) => {
+                            return Err(err_unsupported_node(expr.span))
+                        }
+                        swc_ecma_ast::Prop::Method(expr) => {
+                            return Err(err_unsupported_node(expr.function.span))
+                        }
+                    },
+                }
+            }
+
+            Ok(obj)
+        }
+
         // Expr::This(_) => todo!(),
         // Expr::Array(_) => todo!(),
-        // Expr::Object(_) => todo!(),
-        // Expr::Fn(_) => todo!(),
+        Expr::Fn(fn_expr) => {
+            // TODO Refactor this with Decl::Fn
+            let name = fn_expr.ident.as_ref().map(|ident| ident.to_id().0);
+            let func = &fn_expr.function;
+
+            if !func.decorators.is_empty() {
+                panic!("unsupported: function decorators");
+            }
+            if func.is_async {
+                panic!("unsupported: async functions");
+            }
+            if func.is_generator {
+                panic!("unsupported: generator functions");
+            }
+            if func.return_type.is_some() {
+                panic!("unsupported: TypeScript syntax (return type)");
+            }
+            if func.type_params.is_some() {
+                panic!("unsupported: TypeScript syntax (return type)");
+            }
+
+            builder.start_function(name.clone(), func.params.as_slice());
+            let stmts = &func.body.as_ref().expect("function without body?!").stmts;
+            for stmt in stmts {
+                compile_stmt(builder, stmt)?;
+            }
+            let fnid = builder.end_function();
+
+            let iid = builder.emit(Instr::Const(Value::LocalFn(fnid)));
+            if let Some(name) = name {
+                builder.define_var(
+                    name,
+                    Var {
+                        operand: iid.into(),
+                        is_const: true,
+                    },
+                );
+            }
+            Ok(iid.into())
+        }
+
         Expr::Unary(unary_expr) => {
             match unary_expr.op {
                 swc_ecma_ast::UnaryOp::Bang => {
@@ -732,5 +839,61 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
             e.into_diagnostic(&err_handler).emit();
             Err(Error::ParseError)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quick_compile(code: &str) -> interpreter::Module {
+        Compiler::new()
+            .compile_file("<input>".to_string(), code.to_string())
+            .unwrap()
+    }
+
+    #[test]
+    fn test_bytecode_object_init() {
+        let module = quick_compile(
+            "sink({
+                aString: 'asdlol123',
+                aNumber: 1239423.4518923,
+                anotherObject: { x: 123, y: 899 },
+                aFunction: function(pt) { return 42; }
+            })",
+        );
+
+        let root_fn = module.functions().get(&FnId::ROOT_FN).unwrap();
+        let instrs = &root_fn.instrs();
+        let obj_id = instrs
+            .iter()
+            .enumerate()
+            .find_map(|(ndx, instr)| match instr {
+                Instr::ObjNew => Some(ndx),
+                _ => None,
+            })
+            .unwrap();
+        let obj_id = IID(obj_id as u32);
+        let keys: Vec<_> = instrs
+            .iter()
+            .filter_map(|instr| match instr {
+                Instr::ObjSet {
+                    obj: Operand::IID(iid),
+                    key: Operand::Value(key),
+                    ..
+                } if *iid == obj_id => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            keys.as_slice(),
+            &[
+                Value::String("aString".to_owned()),
+                Value::String("aNumber".to_owned()),
+                Value::String("anotherObject".to_owned()),
+                Value::String("aFunction".to_owned()),
+            ]
+        );
     }
 }

@@ -7,9 +7,11 @@ pub enum Error {
     FileNotFound,
     Io(std::io::Error),
     ParseError,
+
     UnsupportedItem { span: Span, details: &'static str },
     UnboundVariable { span: Span, ident: String },
     IllegalAssignment { span: Span, target: String },
+    InvalidObjectKey,
 
     NativeInvalidArgs,
     NativeNoSuchFunction(u32),
@@ -50,6 +52,7 @@ impl Error {
                 let span_str = source_map.span_to_string(*span);
                 format!("{span_str}: illegal assignment to `{target}` (const?)")
             }
+            Error::InvalidObjectKey => "invalid object key".to_string(),
             Error::NativeInvalidArgs => "native function: invalid args".to_string(),
             Error::NativeNoSuchFunction(nfid) => format!("no such native function with ID {nfid}"),
             Error::NoSuchModule(name) => format!("no such module `{name}`"),
