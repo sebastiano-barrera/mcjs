@@ -211,6 +211,10 @@ impl TraceBuilder {
                     Ok(param)
                 }
             }
+
+            interpreter::Operand::Var(var_id) => {
+                todo!("resolve_interpreter_operand for Operand::Var")
+            }
         }
     }
 
@@ -432,7 +436,7 @@ impl TraceBuilder {
             }
             interpreter::Instr::Set { var_id, value } => {
                 let value = self.resolve_interpreter_operand(value, &step.values_buf)?;
-                self.map_iid(*var_id, value);
+                todo!("JIT of instruction Set");
                 None
             }
             interpreter::Instr::PushSink(value) => {

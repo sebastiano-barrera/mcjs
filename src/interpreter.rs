@@ -18,7 +18,7 @@ use crate::{
     jit::{self, InterpreterStep},
 };
 
-/// A value that can be input, output, or processed by the program.
+/// A value that can be input, output, or processed by the program at runtime.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     Number(f64),
@@ -102,7 +102,7 @@ pub enum Instr {
     },
     Jmp(IID),
     Set {
-        var_id: IID,
+        var_id: VarId,
         value: Operand,
     },
     PushSink(Operand),
@@ -126,10 +126,30 @@ pub enum Instr {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct StackFrameId(pub(crate) u16);
+#[derive(Clone, Copy, Debug)]
+pub struct VarIndex(pub(crate) u16);
+#[derive(Clone, Copy)]
+pub struct VarId {
+    pub(crate) stack_fid: StackFrameId,
+    pub(crate) var_ndx: VarIndex,
+}
+
+impl std::fmt::Debug for VarId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "var[{}:{}]", self.stack_fid.0, self.var_ndx.0)
+    }
+}
+
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone)]
 pub enum Operand {
+    // Evaluates immediately to a constant value.
     Value(Value),
+    // Evaluates to the value of the indicated variable.
+    Var(VarId),
+    // Evaluates to the result of the indicated instruction.
     IID(IID),
 }
 
@@ -138,6 +158,7 @@ impl std::fmt::Debug for Operand {
         match self {
             Self::Value(val) => val.fmt(f),
             Self::IID(iid) => iid.fmt(f),
+            Self::Var(varid) => varid.fmt(f),
         }
     }
 }
@@ -205,8 +226,19 @@ fn nf_require(vm: &mut VM, args: &[Value]) -> Result<Value> {
     }
 }
 
+#[derive(Clone)]
+struct StackFrameHandle(Rc<RefCell<Box<[Value]>>>);
+
+impl StackFrameHandle {
+    fn create(n_slots: usize) -> Self {
+        let frame = vec![Value::Undefined; n_slots].into_boxed_slice();
+        StackFrameHandle(Rc::new(RefCell::new(frame)))
+    }
+}
+
 impl VM {
     const NFID_REQUIRE: u32 = 1;
+    const NFID_STRING_NEW: u32 = 2;
 
     pub fn new() -> Self {
         VM {
@@ -314,6 +346,7 @@ impl VM {
         let instrs = &func.instrs;
 
         let mut values_buf = vec![Value::Undefined; instrs.len()];
+        let stack_frame = StackFrameHandle::create(func.n_slots as usize);
 
         let get_operand = |results: &Vec<Value>, operand: &Operand| match operand {
             Operand::Value(value) => value.clone(),
@@ -321,6 +354,15 @@ impl VM {
                 let value = results[*ndx as usize].clone();
                 eprintln!("{}     ' {:?} = {:?}", indent, operand, value);
                 value
+            }
+            Operand::Var(VarId { stack_fid, var_ndx }) => {
+                if stack_fid.0 == 0 {
+                    let frame = stack_frame.0.borrow();
+                    let var_ndx = var_ndx.0 as usize;
+                    frame.get(var_ndx).unwrap().clone()
+                } else {
+                    todo!("outer stack frames not passed yet!")
+                }
             }
         };
 
@@ -406,9 +448,15 @@ impl VM {
                     }
                 }
                 Instr::Set { var_id, value } => {
-                    let value = get_operand(&values_buf, value);
-                    let var_ndx = var_id.0 as usize;
-                    values_buf[var_ndx] = value;
+                    let VarId { stack_fid, var_ndx } = var_id;
+                    if stack_fid.0 == 0 {
+                        let mut frame = stack_frame.0.borrow_mut();
+                        let var_ndx = var_ndx.0 as usize;
+                        let slot = frame.get_mut(var_ndx).unwrap();
+                        *slot = get_operand(&values_buf, value);
+                    } else {
+                        todo!("Set: outer stack frames not passed yet!")
+                    }
                 }
                 Instr::Nop => {}
                 Instr::Not(value) => {
@@ -525,6 +573,11 @@ fn set_builtins(bc_compiler: &mut bytecode_compiler::Compiler) {
         "require".into(),
         Value::NativeFunction(VM::NFID_REQUIRE).into(),
     );
+    bc_compiler.bind_native(
+        "String".into(),
+        Value::NativeFunction(VM::NFID_STRING_NEW).into(),
+    );
+
 }
 
 #[derive(Clone)]
@@ -602,11 +655,16 @@ impl Module {
 pub struct Function {
     instrs: Box<[Instr]>,
     loop_heads: HashSet<IID>,
+    n_slots: u16,
 }
 impl Function {
-    pub(crate) fn new(instrs: Box<[Instr]>) -> Function {
+    pub(crate) fn new(instrs: Box<[Instr]>, n_slots: u16) -> Function {
         let loop_heads = find_loop_heads(&instrs[..]);
-        Function { instrs, loop_heads }
+        Function {
+            instrs,
+            loop_heads,
+            n_slots,
+        }
     }
 
     pub(crate) fn instrs(&self) -> &[Instr] {

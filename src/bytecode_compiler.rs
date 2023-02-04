@@ -6,7 +6,9 @@ use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
 pub use crate::common::{Context, Error, Result};
 use crate::error;
-use crate::interpreter::{self, ArithOp, CmpOp, FnId, Instr, Operand, Value, IID};
+use crate::interpreter::{
+    self, ArithOp, CmpOp, FnId, Instr, Operand, StackFrameId, Value, VarId, VarIndex, IID,
+};
 
 macro_rules! unsupported_node {
     ($value:expr) => {{
@@ -58,21 +60,66 @@ struct FnBuilder {
     fnid: FnId,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
+    last_index: u16,
+}
+#[derive(Debug)]
+struct Scope {
+    // TODO Take advantage of identifier interning!
+    vars: HashMap<String, VarIndex>,
 }
 impl FnBuilder {
     fn new(id: FnId) -> Self {
         FnBuilder {
             fnid: id,
-            scopes: vec![Scope::new()],
+            scopes: vec![Self::new_scope()],
             instrs: Vec::new(),
+            last_index: 0,
         }
     }
+
     fn build(self) -> interpreter::Function {
-        interpreter::Function::new(self.instrs.into_boxed_slice())
+        let n_slots = self.last_index;
+        interpreter::Function::new(self.instrs.into_boxed_slice(), n_slots)
+    }
+
+    fn new_scope() -> Scope {
+        Scope {
+            vars: HashMap::new(),
+        }
+    }
+
+    fn inner_scope(&self) -> &Scope {
+        self.scopes.last().unwrap()
+    }
+    fn inner_scope_mut(&mut self) -> &mut Scope {
+        self.scopes.last_mut().unwrap()
     }
 
     fn peek_iid(&self) -> IID {
         IID(self.instrs.len() as u32)
+    }
+
+    fn define(&mut self, name: JsWord) -> VarIndex {
+        let name = String::from_utf8(name.as_bytes().to_owned())
+            .expect("only UTF-8 identifiers are supporeted!");
+
+        let var_index = VarIndex(self.last_index);
+        let scope = self.inner_scope_mut();
+        if scope.vars.contains_key(&name) {
+            panic!(
+                "definition of var `{}` shadows previous definition (compiler limitation)",
+                name
+            );
+        }
+        scope.vars.insert(name, var_index);
+
+        self.last_index += 1;
+        var_index
+    }
+
+    fn get_var(&self, sym: &JsWord) -> Option<VarIndex> {
+        let name = String::from_utf8_lossy(sym.as_bytes());
+        self.inner_scope().vars.get(name.as_ref()).copied()
     }
 }
 
@@ -81,21 +128,21 @@ impl Builder {
         let next_fnid = 1;
         assert_ne!(FnId(next_fnid), FnId::ROOT_FN);
 
-        let mut root_fn = FnBuilder::new(FnId::ROOT_FN);
-        let outermost_scope = root_fn.scopes.last_mut().unwrap();
+        let mut builder = Builder {
+            fns: HashMap::new(),
+            fn_stack: vec![FnBuilder::new(FnId::ROOT_FN)],
+            next_fnid,
+        };
+
         for (name, operand) in builtins.into_iter() {
-            let var = Var {
-                is_const: true,
-                operand,
-            };
-            outermost_scope.define(name.clone(), var);
+            let var_id = builder.define_var(name.clone());
+            builder.emit(Instr::Set {
+                var_id,
+                value: operand,
+            });
         }
 
-        Builder {
-            fns: HashMap::new(),
-            fn_stack: vec![root_fn],
-            next_fnid,
-        }
+        builder
     }
 
     fn build(mut self) -> interpreter::Module {
@@ -133,23 +180,28 @@ impl Builder {
         self.cur_fnb().instrs.get_mut(iid.0 as usize)
     }
 
-    fn define_var(&mut self, name: JsWord, var: Var) {
+    fn define_var(&mut self, name: JsWord) -> VarId {
         // let depth = self.cur_fnb().scopes.len() - 1;
         // eprintln!("define_var {name} [{depth}]");
-        self.cur_fnb()
-            .scopes
-            .last_mut()
-            .expect("no scopes!")
-            .define(name, var);
+        let var_ndx = self.cur_fnb().define(name);
+        VarId {
+            stack_fid: StackFrameId(0),
+            var_ndx,
+        }
     }
 
-    fn get_var(&mut self, sym: &JsWord) -> Option<&Var> {
-        // TODO: Closures!
+    fn get_var(&mut self, sym: &JsWord) -> Option<VarId> {
         // Lookup sym in each scope, inner to outer
         self.fn_stack
             .iter()
             .rev()
-            .find_map(|fnb| fnb.scopes.iter().rev().find_map(|scope| scope.get_var(sym)))
+            .enumerate()
+            .find_map(|(stack_frame_offset, fnb)| {
+                fnb.get_var(sym).map(|var_ndx| VarId {
+                    stack_fid: StackFrameId(stack_frame_offset as u16),
+                    var_ndx,
+                })
+            })
     }
 
     fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
@@ -159,13 +211,11 @@ impl Builder {
         self.fn_stack.push(FnBuilder::new(fnid));
 
         if let Some(name) = name {
-            self.define_var(
-                name,
-                Var {
-                    operand: Value::SelfFunction.into(),
-                    is_const: true,
-                },
-            );
+            let var_id = self.define_var(name);
+            self.emit(Instr::Set {
+                var_id,
+                value: Value::SelfFunction.into(),
+            });
         }
 
         for (param_ndx, param) in params.iter().enumerate() {
@@ -176,13 +226,11 @@ impl Builder {
             match &param.pat {
                 Pat::Ident(ident) => {
                     let iid = self.emit(Instr::GetArg(param_ndx));
-                    self.define_var(
-                        ident.sym.clone(),
-                        Var {
-                            operand: iid.into(),
-                            is_const: false,
-                        },
-                    );
+                    let var_id = self.define_var(ident.sym.clone());
+                    self.emit(Instr::Set {
+                        var_id,
+                        value: iid.into(),
+                    });
                 }
                 other => unsupported_node!(other),
             }
@@ -197,56 +245,18 @@ impl Builder {
     }
 }
 
-#[derive(Debug)]
-struct Scope {
-    // TODO Take advantage of identifier interning!
-    vars: HashMap<String, Var>,
-}
-impl Scope {
-    fn new() -> Self {
-        Scope {
-            vars: HashMap::new(),
-        }
-    }
-
-    fn define(&mut self, name: JsWord, var: Var) {
-        let name = String::from_utf8(name.as_bytes().to_owned())
-            .expect("only UTF-8 identifiers are supporeted!");
-        if self.vars.contains_key(&name) {
-            panic!(
-                "definition of var `{}` shadows previous definition (compiler limitation)",
-                name
-            );
-        }
-        self.vars.insert(name, var);
-    }
-
-    fn get_var(&self, sym: &JsWord) -> Option<&Var> {
-        let name = String::from_utf8_lossy(sym.as_bytes());
-        self.vars.get(name.as_ref())
-    }
-}
-
-#[derive(Debug)]
-struct Var {
-    operand: Operand,
-    is_const: bool,
-}
-
 fn compile_module(
     mut builder: Builder,
     ast_module: &swc_ecma_ast::Module,
 ) -> Result<interpreter::Module> {
     use swc_ecma_ast::{ModuleDecl, ModuleItem, Stmt, VarDeclKind};
 
-    let exports_object = builder.emit(Instr::ObjNew).into();
-    builder.define_var(
-        "module".into(),
-        Var {
-            is_const: true,
-            operand: exports_object,
-        },
-    );
+    // Exports object.  TODO Actually make it accessible via `require`!
+    {
+        let obj = builder.emit(Instr::ObjNew).into();
+        let var_id = builder.define_var("module".into());
+        builder.emit(Instr::Set { var_id, value: obj });
+    }
 
     for item in &ast_module.body {
         match item {
@@ -414,14 +424,11 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
             }
             let fnid = builder.end_function();
 
-            let iid = builder.emit(Instr::Const(Value::LocalFn(fnid)));
-            builder.define_var(
-                name,
-                Var {
-                    operand: iid.into(),
-                    is_const: true,
-                },
-            );
+            let var_id = builder.define_var(name);
+            builder.emit(Instr::Set {
+                var_id,
+                value: Value::LocalFn(fnid).into(),
+            });
         }
 
         Decl::Var(var_decl) => {
@@ -456,8 +463,11 @@ fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> 
 
         if let Some(ident) = decl.name.as_ident() {
             let name: JsWord = ident.id.to_id().0;
-            let var = Var { operand, is_const };
-            builder.define_var(name, var);
+            let var_id = builder.define_var(name);
+            builder.emit(Instr::Set {
+                var_id,
+                value: operand,
+            });
         } else {
             unsupported_node!(decl)
         }
@@ -547,10 +557,13 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
             other => unsupported_node!(other),
         },
 
-        Expr::Ident(ident) => get_var(builder, ident),
+        Expr::Ident(ident) => {
+            let var_id = get_var(builder, ident)?;
+            Ok(Operand::Var(var_id))
+        }
 
         Expr::Assign(asmt) => compile_assignment(asmt, builder)
-            .with_context(error!("in assignment to: {:?}", asmt.left).with_span(asmt.span)),
+            .with_context(error!("in assignment").with_span(asmt.span)),
 
         Expr::Object(obj_expr) => {
             let obj: Operand = builder.emit(Instr::ObjNew).into();
@@ -648,13 +661,11 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
 
             let iid = builder.emit(Instr::Const(Value::LocalFn(fnid)));
             if let Some(name) = name {
-                builder.define_var(
-                    name,
-                    Var {
-                        operand: iid.into(),
-                        is_const: true,
-                    },
-                );
+                let var_id = builder.define_var(name);
+                builder.emit(Instr::Set {
+                    var_id,
+                    value: iid.into(),
+                });
             }
             Ok(iid.into())
         }
@@ -678,19 +689,14 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
             if let Expr::Ident(ident) = &*update_expr.arg {
                 // NOTE: update_expr.prefix does not matter in this case, but
                 // it will matter when this code is extended to other types of args
-                let var_id = match get_var(builder, ident)? {
-                    Operand::Value(_) => {
-                        return Err(error!("illegal update assignment").with_span(update_expr.span))
-                    }
-                    Operand::IID(iid) => iid,
-                };
+                let var_id = get_var(builder, ident)?;
                 let value: Operand = builder
                     .emit(Instr::Arith {
                         op: match update_expr.op {
                             UpdateOp::PlusPlus => ArithOp::Add,
                             UpdateOp::MinusMinus => ArithOp::Sub,
                         },
-                        a: var_id.into(),
+                        a: Operand::Var(var_id),
                         // TODO Use integers here, when they get implemented
                         b: Value::Number(1.0).into(),
                     })
@@ -738,8 +744,15 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
 fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) -> Result<Operand> {
     use swc_ecma_ast::{Expr, MemberExpr, MemberProp, PatOrExpr};
 
-    let target_operand = if let Some(ident) = asmt.left.as_ident() {
-        get_var(builder, ident)?.clone()
+    if let Some(ident) = asmt.left.as_ident() {
+        let var_id = get_var(builder, ident)?;
+        let operand = Operand::Var(var_id);
+        let new_value = compile_assignment_rhs(builder, asmt, &operand)?;
+        builder.emit(Instr::Set {
+            var_id,
+            value: new_value,
+        });
+        Ok(operand)
     } else if let Some(target_expr) = asmt.left.as_expr() {
         match target_expr {
             Expr::Member(member_expr) => {
@@ -753,28 +766,37 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
                             .with_span(asmt.span))
                     }
                 };
-                builder.emit(Instr::ObjGet { obj, key }).into()
+
+                let old_value = builder
+                    .emit(Instr::ObjGet {
+                        obj: obj.clone(),
+                        key: key.clone(),
+                    })
+                    .into();
+                let new_value = compile_assignment_rhs(builder, asmt, &old_value)?;
+                builder.emit(Instr::ObjSet {
+                    obj,
+                    key,
+                    value: new_value.clone(),
+                });
+                Ok(new_value)
             }
             // We should have already handled this case in the `if let ... = asm.left.as_ident()` case
             Expr::Ident(_) => unreachable!(),
-            _ => {
-                return Err(
-                    error!("assignment to an expression is unsupported").with_span(asmt.span)
-                )
-            }
+            _ => Err(error!("assignment to an expression is unsupported").with_span(asmt.span)),
         }
     } else {
         panic!("unsupported pattern as assignment target: {:?}", asmt.left)
-    };
-    let var_id = match target_operand {
-        // Reuse the variable ID, if there is one
-        Operand::IID(iid) => iid,
-        Operand::Value(value) => {
-            return Err(
-                error!("assignment target is a constant (value: {:?})", value).with_span(asmt.span),
-            )
-        }
-    };
+    }
+}
+
+/// Read the operand and compute its new value, as requested by the given assignment
+/// expression. This is part of the compilation procedure of assignment expressions.
+fn compile_assignment_rhs(
+    builder: &mut Builder,
+    asmt: &swc_ecma_ast::AssignExpr,
+    target_operand: &Operand,
+) -> Result<Operand> {
     let right = compile_expr(builder, &asmt.right)?.into();
     let value = match asmt.op {
         AssignOp::Assign => right,
@@ -819,21 +841,13 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
         // AssignOp::NullishAssign => todo!(),
         other => unsupported_node!(other),
     };
-    Ok(builder.emit(Instr::Set { var_id, value }).into())
+    Ok(value)
 }
 
-fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<Operand> {
-    match builder.get_var(&ident.sym) {
-        Some(var) => Ok(var.operand.clone()),
-        None => {
-            // eprintln!("unbound variable; scopes info:");
-            // for (ndx, fnb) in builder.fn_stack.iter().enumerate() {
-            //     eprintln!("  [{ndx}]: {:#?}", fnb.scopes);
-            // }
-
-            Err(error!("unbound variable `{}`", ident.sym).with_span(ident.span))
-        }
-    }
+fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<VarId> {
+    builder
+        .get_var(&ident.sym)
+        .ok_or_else(|| error!("unbound variable `{}`", ident.sym).with_span(ident.span))
 }
 
 fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_ecma_ast::Module)> {

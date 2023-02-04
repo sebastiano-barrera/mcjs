@@ -2,15 +2,25 @@ use swc_common::{SourceMap, Span};
 
 struct Item {
     span: Option<Span>,
+    src_filename: &'static str,
+    src_lineno: u32,
     message: String,
 }
 
 impl std::fmt::Debug for Item {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(span) = self.span {
-            write!(f, "{:?}: {}", span, self.message)
+            write!(
+                f,
+                "{:?}: {} [VM code at {}:{}]",
+                span, self.message, self.src_filename, self.src_lineno
+            )
         } else {
-            write!(f, "{}", self.message)
+            write!(
+                f,
+                "{} [VM code at {}:{}]",
+                self.message, self.src_filename, self.src_lineno
+            )
         }
     }
 }
@@ -26,7 +36,12 @@ impl Item {
         match self.span {
             Some(span) => {
                 let span_str = source_map.span_to_string(span);
-                write!(buf, "{span_str}: {}", self.message).unwrap();
+                write!(
+                    buf,
+                    "{span_str}: {} [VM code at {}:{}]",
+                    self.message, self.src_filename, self.src_lineno
+                )
+                .unwrap();
             }
             None => buf.push_str(self.message.as_str()),
         }
@@ -52,7 +67,7 @@ impl std::fmt::Debug for Error {
 macro_rules! error {
     ($($args:expr),+) => {{
         let message = format!($($args),*);
-        Error::new(message)
+        Error::new(message, file!(), line!())
     }}
 }
 
@@ -63,10 +78,12 @@ impl From<std::io::Error> for Error {
 }
 
 impl Error {
-    pub(crate) fn new(message: String) -> Self {
+    pub(crate) fn new(message: String, filename: &'static str, lineno: u32) -> Self {
         Error {
             head: Item {
                 span: None,
+                src_filename: filename,
+                src_lineno: lineno,
                 message,
             },
             chain: Vec::new(),
