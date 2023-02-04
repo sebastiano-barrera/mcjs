@@ -1,23 +1,17 @@
 use std::collections::HashMap;
 
 use swc_atoms::JsWord;
-use swc_common::{sync::Lrc, SourceMap};
+use swc_common::{sync::Lrc, SourceMap, Span};
 use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
-use crate::common::{Error, Result};
+pub use crate::common::{Context, Error, Result};
+use crate::error;
 use crate::interpreter::{self, ArithOp, CmpOp, FnId, Instr, Operand, Value, IID};
 
 macro_rules! unsupported_node {
     ($value:expr) => {{
         todo!("unsupported AST node: {:#?}", $value);
     }};
-}
-
-fn err_unsupported_node(span: swc_common::Span) -> Error {
-    Error::UnsupportedItem {
-        span,
-        details: "unsupported syntax!",
-    }
 }
 
 pub struct Compiler {
@@ -40,11 +34,14 @@ impl Compiler {
         filename: String,
         content: String,
     ) -> Result<interpreter::Module> {
-        let (source_map, ast_module) = parse_file(filename, content)?;
+        use crate::common::Context;
+        let (source_map, ast_module) = parse_file(filename.clone(), content)
+            .with_context(error!("while parsing file: {filename}"))?;
         let builder = Builder::new(self.builtins.clone());
-        let res = compile_module(builder, &ast_module);
+        let res = compile_module(builder, &ast_module)
+            .with_context(error!("while compiling module: {filename}"));
         if let Err(err) = &res {
-            eprintln!("error: {}", err.message(&*source_map));
+            eprintln!("\nbytecode compiler error: {}\n", err.message(&*source_map));
         }
 
         res
@@ -147,8 +144,8 @@ impl Builder {
     }
 
     fn get_var(&mut self, sym: &JsWord) -> Option<&Var> {
+        // TODO: Closures!
         // Lookup sym in each scope, inner to outer
-
         self.fn_stack
             .iter()
             .rev()
@@ -265,7 +262,8 @@ fn compile_module(
             //     ModuleDecl::TsNamespaceExport(_) => todo!(),
             // },
             ModuleItem::Stmt(stmt) => {
-                compile_stmt(&mut builder, stmt)?;
+                compile_stmt(&mut builder, stmt)
+                    .with_context(error!("while compiling statement"))?;
             }
             other => unsupported_node!(other),
         }
@@ -280,7 +278,8 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
     match stmt {
         Stmt::Block(block) => {
             for stmt in &block.stmts {
-                compile_stmt(builder, stmt)?;
+                compile_stmt(builder, stmt)
+                    .with_context(error!("in block").with_span(block.span))?;
             }
             Ok(())
         }
@@ -332,7 +331,8 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         }
 
         Stmt::If(if_stmt) => {
-            let condition = compile_expr(builder, &if_stmt.test)?;
+            let condition = compile_expr(builder, &if_stmt.test)
+                .with_context(error!("in if statement").with_span(if_stmt.span))?;
 
             if let Some(else_blk) = &if_stmt.alt {
                 // with an else block:
@@ -409,7 +409,8 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
             builder.start_function(Some(name.clone()), func.params.as_slice());
             let stmts = &func.body.as_ref().expect("function without body?!").stmts;
             for stmt in stmts {
-                compile_stmt(builder, stmt)?;
+                compile_stmt(builder, stmt)
+                    .with_context(error!("in function declaration").with_span(func.span))?;
             }
             let fnid = builder.end_function();
 
@@ -424,7 +425,8 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
         }
 
         Decl::Var(var_decl) => {
-            compile_var_decl(builder, var_decl)?;
+            compile_var_decl(builder, var_decl)
+                .with_context(error!("in variable declaration").with_span(var_decl.span))?;
         }
 
         Decl::TsInterface(_) | Decl::TsTypeAlias(_) | Decl::TsEnum(_) | Decl::TsModule(_) => {
@@ -498,10 +500,10 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                     .into());
             }
 
-            Err(Error::UnsupportedItem {
-                span: call_expr.span,
-                details: "only calls to simple identifiers are supported for now",
-            })
+            Err(
+                error!("only calls to simple identifiers are supported for now")
+                    .with_span(call_expr.span),
+            )
         }
 
         Expr::Bin(bin_expr) => {
@@ -547,95 +549,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
 
         Expr::Ident(ident) => get_var(builder, ident),
 
-        Expr::Assign(asmt) => {
-            use swc_ecma_ast::{MemberExpr, MemberProp, PatOrExpr};
-
-            let target_operand = if let Some(ident) = asmt.left.as_ident() {
-                get_var(builder, ident)?.clone()
-            } else if let Some(target_expr) = asmt.left.as_expr() {
-                match target_expr {
-                    Expr::Member(member_expr) => {
-                        let obj = compile_expr(builder, member_expr.obj.as_ref())?;
-                        let key = match &member_expr.prop {
-                            MemberProp::Ident(prop_ident) => {
-                                Operand::Value(Value::String(prop_ident.sym.to_string()))
-                            }
-                            _ => {
-                                return Err(Error::UnsupportedItem {
-                                    span: asmt.span,
-                                    details: "assignment to an expression is unsupported",
-                                })
-                            }
-                        };
-                        builder.emit(Instr::ObjGet { obj, key }).into()
-                    }
-                    // We should have already handled this case in the `if let ... = asm.left.as_ident()` case
-                    Expr::Ident(_) => unreachable!(),
-                    _ => {
-                        return Err(Error::UnsupportedItem {
-                            span: asmt.span,
-                            details: "assignment to an expression is unsupported",
-                        })
-                    }
-                }
-            } else {
-                panic!("unsupported pattern as assignment target: {:?}", asmt.left)
-            };
-
-            let var_id = match target_operand {
-                // Reuse the variable ID, if there is one
-                Operand::IID(iid) => iid,
-                Operand::Value(_) => return Err(Error::IllegalAssignment { span: asmt.span }),
-            };
-
-            let right = compile_expr(builder, &asmt.right)?.into();
-
-            let value = match asmt.op {
-                AssignOp::Assign => right,
-                AssignOp::AddAssign => builder
-                    .emit(Instr::Arith {
-                        op: ArithOp::Add,
-                        a: target_operand.clone(),
-                        b: right,
-                    })
-                    .into(),
-                AssignOp::SubAssign => builder
-                    .emit(Instr::Arith {
-                        op: ArithOp::Sub,
-                        a: target_operand.clone(),
-                        b: right,
-                    })
-                    .into(),
-                AssignOp::MulAssign => builder
-                    .emit(Instr::Arith {
-                        op: ArithOp::Mul,
-                        a: target_operand.clone(),
-                        b: right,
-                    })
-                    .into(),
-                AssignOp::DivAssign => builder
-                    .emit(Instr::Arith {
-                        op: ArithOp::Div,
-                        a: target_operand.clone(),
-                        b: right,
-                    })
-                    .into(),
-                // AssignOp::ModAssign => todo!(),
-                // AssignOp::LShiftAssign => todo!(),
-                // AssignOp::RShiftAssign => todo!(),
-                // AssignOp::ZeroFillRShiftAssign => todo!(),
-                // AssignOp::BitOrAssign => todo!(),
-                // AssignOp::BitXorAssign => todo!(),
-                // AssignOp::BitAndAssign => todo!(),
-                // AssignOp::ExpAssign => todo!(),
-                // AssignOp::AndAssign => todo!(),
-                // AssignOp::OrAssign => todo!(),
-                // AssignOp::NullishAssign => todo!(),
-                other => unsupported_node!(other),
-            };
-
-            Ok(builder.emit(Instr::Set { var_id, value }).into())
-        }
+        Expr::Assign(asmt) => compile_assignment(asmt, builder)
+            .with_context(error!("in assignment to: {:?}", asmt.left).with_span(asmt.span)),
 
         Expr::Object(obj_expr) => {
             let obj: Operand = builder.emit(Instr::ObjNew).into();
@@ -643,10 +558,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
             for prop_or_spread in obj_expr.props.iter() {
                 match prop_or_spread {
                     swc_ecma_ast::PropOrSpread::Spread(spread_elm) => {
-                        return Err(Error::UnsupportedItem {
-                            span: spread_elm.dot3_token,
-                            details: "spread syntax (...) is currently unsupported",
-                        })
+                        return Err(error!("spread syntax (...) is currently unsupported")
+                            .with_span(spread_elm.dot3_token))
                     }
                     swc_ecma_ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
                         swc_ecma_ast::Prop::KeyValue(kv_expr) => {
@@ -660,10 +573,14 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                                 }
                                 swc_ecma_ast::PropName::Num(num) => Value::Number(num.value),
                                 swc_ecma_ast::PropName::Computed(x) => {
-                                    return Err(err_unsupported_node(x.span))
+                                    return Err(
+                                        error!("unsupported node: {:?}", x).with_span(x.span)
+                                    )
                                 }
                                 swc_ecma_ast::PropName::BigInt(x) => {
-                                    return Err(err_unsupported_node(x.span))
+                                    return Err(
+                                        error!("unsupported node: {:?}", x).with_span(x.span)
+                                    )
                                 }
                             }
                             .into();
@@ -675,19 +592,22 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                             });
                         }
                         swc_ecma_ast::Prop::Shorthand(expr) => {
-                            return Err(err_unsupported_node(expr.span))
+                            return Err(error!("unsupported node: {:?}", expr).with_span(expr.span))
                         }
                         swc_ecma_ast::Prop::Assign(expr) => {
-                            return Err(err_unsupported_node(expr.key.span))
+                            return Err(
+                                error!("unsupported node: {:?}", expr).with_span(expr.key.span)
+                            );
                         }
                         swc_ecma_ast::Prop::Getter(expr) => {
-                            return Err(err_unsupported_node(expr.span))
+                            return Err(error!("unsupported node: {:?}", expr).with_span(expr.span));
                         }
                         swc_ecma_ast::Prop::Setter(expr) => {
-                            return Err(err_unsupported_node(expr.span))
+                            return Err(error!("unsupported node: {:?}", expr).with_span(expr.span));
                         }
                         swc_ecma_ast::Prop::Method(expr) => {
-                            return Err(err_unsupported_node(expr.function.span))
+                            return Err(error!("unsupported node: {:?}", expr)
+                                .with_span(expr.function.span));
                         }
                     },
                 }
@@ -760,9 +680,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                 // it will matter when this code is extended to other types of args
                 let var_id = match get_var(builder, ident)? {
                     Operand::Value(_) => {
-                        return Err(Error::IllegalAssignment {
-                            span: update_expr.span,
-                        })
+                        return Err(error!("illegal update assignment").with_span(update_expr.span))
                     }
                     Operand::IID(iid) => iid,
                 };
@@ -817,6 +735,93 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
     }
 }
 
+fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) -> Result<Operand> {
+    use swc_ecma_ast::{Expr, MemberExpr, MemberProp, PatOrExpr};
+
+    let target_operand = if let Some(ident) = asmt.left.as_ident() {
+        get_var(builder, ident)?.clone()
+    } else if let Some(target_expr) = asmt.left.as_expr() {
+        match target_expr {
+            Expr::Member(member_expr) => {
+                let obj = compile_expr(builder, member_expr.obj.as_ref())?;
+                let key = match &member_expr.prop {
+                    MemberProp::Ident(prop_ident) => {
+                        Operand::Value(Value::String(prop_ident.sym.to_string()))
+                    }
+                    _ => {
+                        return Err(error!("assignment to an expression is unsupported")
+                            .with_span(asmt.span))
+                    }
+                };
+                builder.emit(Instr::ObjGet { obj, key }).into()
+            }
+            // We should have already handled this case in the `if let ... = asm.left.as_ident()` case
+            Expr::Ident(_) => unreachable!(),
+            _ => {
+                return Err(
+                    error!("assignment to an expression is unsupported").with_span(asmt.span)
+                )
+            }
+        }
+    } else {
+        panic!("unsupported pattern as assignment target: {:?}", asmt.left)
+    };
+    let var_id = match target_operand {
+        // Reuse the variable ID, if there is one
+        Operand::IID(iid) => iid,
+        Operand::Value(value) => {
+            return Err(
+                error!("assignment target is a constant (value: {:?})", value).with_span(asmt.span),
+            )
+        }
+    };
+    let right = compile_expr(builder, &asmt.right)?.into();
+    let value = match asmt.op {
+        AssignOp::Assign => right,
+        AssignOp::AddAssign => builder
+            .emit(Instr::Arith {
+                op: ArithOp::Add,
+                a: target_operand.clone(),
+                b: right,
+            })
+            .into(),
+        AssignOp::SubAssign => builder
+            .emit(Instr::Arith {
+                op: ArithOp::Sub,
+                a: target_operand.clone(),
+                b: right,
+            })
+            .into(),
+        AssignOp::MulAssign => builder
+            .emit(Instr::Arith {
+                op: ArithOp::Mul,
+                a: target_operand.clone(),
+                b: right,
+            })
+            .into(),
+        AssignOp::DivAssign => builder
+            .emit(Instr::Arith {
+                op: ArithOp::Div,
+                a: target_operand.clone(),
+                b: right,
+            })
+            .into(),
+        // AssignOp::ModAssign => todo!(),
+        // AssignOp::LShiftAssign => todo!(),
+        // AssignOp::RShiftAssign => todo!(),
+        // AssignOp::ZeroFillRShiftAssign => todo!(),
+        // AssignOp::BitOrAssign => todo!(),
+        // AssignOp::BitXorAssign => todo!(),
+        // AssignOp::BitAndAssign => todo!(),
+        // AssignOp::ExpAssign => todo!(),
+        // AssignOp::AndAssign => todo!(),
+        // AssignOp::OrAssign => todo!(),
+        // AssignOp::NullishAssign => todo!(),
+        other => unsupported_node!(other),
+    };
+    Ok(builder.emit(Instr::Set { var_id, value }).into())
+}
+
 fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<Operand> {
     match builder.get_var(&ident.sym) {
         Some(var) => Ok(var.operand.clone()),
@@ -826,10 +831,7 @@ fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<Operand
             //     eprintln!("  [{ndx}]: {:#?}", fnb.scopes);
             // }
 
-            Err(Error::UnboundVariable {
-                span: ident.span,
-                ident: ident.sym.to_string(),
-            })
+            Err(error!("unbound variable `{}`", ident.sym).with_span(ident.span))
         }
     }
 }
@@ -874,7 +876,7 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
         Ok(ast_module) => Ok((source_map, ast_module)),
         Err(e) => {
             e.into_diagnostic(&err_handler).emit();
-            Err(Error::ParseError)
+            Err(error!("parse error"))
         }
     }
 }

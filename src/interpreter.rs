@@ -1,4 +1,5 @@
 use lazy_static::lazy_static;
+
 use std::cell::Ref;
 use std::rc::Rc;
 use std::{
@@ -13,6 +14,7 @@ pub use crate::common::Error;
 use crate::{
     bytecode_compiler,
     common::Result,
+    error,
     jit::{self, InterpreterStep},
 };
 
@@ -199,7 +201,7 @@ fn nf_require(vm: &mut VM, args: &[Value]) -> Result<Value> {
             vm.load_module(path)?;
             Ok(Value::Undefined)
         }
-        _ => Err(Error::NativeInvalidArgs),
+        _ => Err(error!("invalid args for require()")),
     }
 }
 
@@ -243,9 +245,9 @@ impl VM {
         let (file_path, key): (PathBuf, String) = self.find_module(path.to_string())?;
 
         let text = {
-            let mut source_file = std::fs::File::open(file_path).map_err(Error::Io)?;
+            let mut source_file = std::fs::File::open(file_path).map_err(Error::from)?;
             let mut buf = String::new();
-            source_file.read_to_string(&mut buf).map_err(Error::Io)?;
+            source_file.read_to_string(&mut buf).map_err(Error::from)?;
             buf
         };
 
@@ -277,7 +279,7 @@ impl VM {
             }
         }
 
-        Err(Error::NoSuchModule(key))
+        Err(error!("no such module: {key}"))
     }
 
     pub fn run_script(&mut self, script_text: String, flags: InterpreterFlags) -> Result<()> {
@@ -455,7 +457,7 @@ impl VM {
                                 .collect();
                             let nf = NATIVE_FUNCS
                                 .get(&nfid)
-                                .ok_or(Error::NativeNoSuchFunction(nfid))?;
+                                .ok_or(error!("no such native function: {nfid}"))?;
                             let ret_val = nf(self, arg_values.as_slice())?;
                             values_buf[ndx] = ret_val;
                         }
@@ -476,7 +478,8 @@ impl VM {
                         panic!("ObjSet: not an object");
                     };
                     let key = get_operand(&values_buf, key);
-                    let key = ObjectKey::from_value(&key).ok_or(Error::InvalidObjectKey)?;
+                    let key = ObjectKey::from_value(&key)
+                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = get_operand(&values_buf, value);
                     obj.set(key, value);
                 }
@@ -487,7 +490,8 @@ impl VM {
                         panic!("ObjSet: not an object");
                     };
                     let key = get_operand(&values_buf, key);
-                    let key = ObjectKey::from_value(&key).ok_or(Error::InvalidObjectKey)?;
+                    let key = ObjectKey::from_value(&key)
+                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = obj.get(&key);
                     values_buf[ndx] = value
                         .unwrap_or_else(|| {
