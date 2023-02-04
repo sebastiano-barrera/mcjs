@@ -276,8 +276,8 @@ impl TraceBuilder {
                 ty: ValueType::Str,
                 cond: operand,
                 // TODO the String allocation could be avoided
-                if_true: Operand::Imm(BoxedValue::String("true".to_string())),
-                if_false: Operand::Imm(BoxedValue::String("false".to_string())),
+                if_true: Operand::Imm("true".into()),
+                if_false: Operand::Imm("false".into()),
             })?),
 
             (ValueType::Num, ValueType::Bool) => Some(
@@ -297,7 +297,7 @@ impl TraceBuilder {
                     op: CmpOp::EQ,
                     a: operand,
                     // TODO this string allocation could be avoided
-                    b: Operand::Imm(BoxedValue::String("".to_string())),
+                    b: Operand::Imm("".into()),
                 }
                 .into(),
             ),
@@ -309,15 +309,11 @@ impl TraceBuilder {
             (ValueType::Null, ValueType::Num) => Some(Operand::Imm(BoxedValue::Number(0.0))),
 
             // TODO this string allocation could be avoided
-            (ValueType::Null, ValueType::Str) => {
-                Some(Operand::Imm(BoxedValue::String("null".to_string())))
-            }
+            (ValueType::Null, ValueType::Str) => Some(Operand::Imm("null".into())),
 
             (ValueType::Undefined, ValueType::Bool) => Some(Operand::Imm(BoxedValue::Bool(false))),
             (ValueType::Undefined, ValueType::Num) => Some(Operand::Imm(BoxedValue::Number(0.0))),
-            (ValueType::Undefined, ValueType::Str) => {
-                Some(Operand::Imm(BoxedValue::String("undefined".to_string())))
-            }
+            (ValueType::Undefined, ValueType::Str) => Some(Operand::Imm("undefined".into())),
 
             (ValueType::Function, _) => None,
 

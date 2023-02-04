@@ -1,12 +1,12 @@
 use lazy_static::lazy_static;
 
-use std::cell::Ref;
-use std::rc::Rc;
 use std::{
-    cell::RefCell,
+    borrow::Cow,
+    cell::{Ref, RefCell},
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Mutex,
 };
 
@@ -22,7 +22,7 @@ use crate::{
 #[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     Number(f64),
-    String(String),
+    String(Cow<'static, str>),
     Bool(bool),
     Object(Object),
     Null,
@@ -34,7 +34,13 @@ pub enum Value {
 
 impl From<String> for Value {
     fn from(value: String) -> Self {
-        Value::String(value)
+        Value::String(Cow::Owned(value))
+    }
+}
+
+impl From<&'static str> for Value {
+    fn from(value: &'static str) -> Self {
+        Value::String(Cow::Borrowed(value))
     }
 }
 
@@ -53,7 +59,7 @@ impl Value {
             Value::NativeFunction(_) => "function",
         };
 
-        Value::String(ty_s.to_string())
+        ty_s.to_string().into()
     }
 
     pub(crate) fn expect_bool(&self) -> Result<bool> {
@@ -91,7 +97,7 @@ pub enum ObjectKey {
 impl ObjectKey {
     fn from_value(value: &Value) -> Option<ObjectKey> {
         if let Value::String(s) = value {
-            Some(ObjectKey::String(s.clone()))
+            Some(ObjectKey::String(s.to_string()))
         } else {
             None
         }
@@ -640,6 +646,9 @@ fn set_builtins(bc_compiler: &mut bytecode_compiler::Compiler) {
         "String".into(),
         Value::NativeFunction(VM::NFID_STRING_NEW).into(),
     );
+    // TODO pls impl all Node.js API, ok? thxbye
+    bc_compiler.bind_native("Object".into(), Value::Object(Object::new()).into());
+    bc_compiler.bind_native("Array".into(), Value::Object(Object::new()).into());
 }
 
 #[derive(Clone)]
@@ -792,12 +801,30 @@ mod tests {
         };
 
         let val = obj.get(&ObjectKey::String("aString".to_string())).unwrap();
-        assert_eq!(&*val, &Value::String("asdlol123".to_string()));
+        assert_eq!(&*val, &"asdlol123".into());
     }
 
     #[ignore]
     #[test]
     fn test_object_member_set() {
         panic!("not yet implemented");
+    }
+
+    #[test]
+    fn test_for_in() {
+        let output = quick_run(
+            "
+            const obj = {
+                x: 12.0,
+                y: 90.2,
+                name: 'THE SPOT',
+            };
+
+            for (const name in obj) sink(name);
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(&output.sink[..], &["x".into(), "y".into(), "name".into(),]);
     }
 }

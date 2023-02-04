@@ -556,7 +556,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                 Ok(result)
             }
             Lit::Str(s) => Ok(builder
-                .emit(Instr::Const(Value::String(s.value.to_string())))
+                .emit(Instr::Const(s.value.to_string().into()))
                 .into()),
             // Lit::Bool(_) => todo!(),
             Lit::Null(_) => Ok(builder.emit(Instr::Const(Value::Null)).into()),
@@ -588,11 +588,9 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                             let value = compile_expr(builder, &kv_expr.value)?;
                             let key = match &kv_expr.key {
                                 swc_ecma_ast::PropName::Ident(ident) => {
-                                    Value::String(ident.sym.to_string())
+                                    Value::from(ident.sym.to_string())
                                 }
-                                swc_ecma_ast::PropName::Str(s) => {
-                                    Value::String(s.value.to_string())
-                                }
+                                swc_ecma_ast::PropName::Str(s) => Value::from(s.value.to_string()),
                                 swc_ecma_ast::PropName::Num(num) => Value::Number(num.value),
                                 swc_ecma_ast::PropName::Computed(x) => {
                                     return Err(
@@ -821,7 +819,7 @@ fn compile_member_access(
 
     let obj = compile_expr(builder, member_expr.obj.as_ref())?;
     let key = match &member_expr.prop {
-        MemberProp::Ident(prop_ident) => Operand::Value(Value::String(prop_ident.sym.to_string())),
+        MemberProp::Ident(prop_ident) => Operand::Value(prop_ident.sym.to_string().into()),
         _ => {
             return Err(
                 error!("accessing an object with non-identifer key is unsupported")
@@ -989,10 +987,10 @@ mod tests {
         assert_eq!(
             keys.as_slice(),
             &[
-                Value::String("aString".to_owned()),
-                Value::String("aNumber".to_owned()),
-                Value::String("anotherObject".to_owned()),
-                Value::String("aFunction".to_owned()),
+                "aString".into(),
+                "aNumber".into(),
+                "anotherObject".into(),
+                "aFunction".into(),
             ]
         );
     }
