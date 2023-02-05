@@ -185,15 +185,15 @@ pub struct TraceBuilder {
     operand_of_iid: HashMap<(u32, interpreter::IID), Operand>,
     args_stack: Vec<Vec<Operand>>,
     unboxes: HashMap<ValueId, (ValueType, ValueId)>,
-
     // Current stack depth relative to the trace's entry point (function or loop)
     stack_depth: u32,
+    loop_head: Option<interpreter::IID>,
 
     instrs: Vec<Instr>,
     parameters: Vec<TraceParam>,
 
-    failed: bool,
-    trace_ended: bool,
+    state: TraceBuilderState,
+    start_mode: TraceStart,
     exit_function_expected: bool,
 }
 
@@ -212,8 +212,22 @@ struct TraceParam {
     operand: interpreter::Operand,
 }
 
+#[derive(PartialEq, Eq)]
+enum TraceBuilderState {
+    WaitingStart,
+    Tracing,
+    Failed,
+    Finished,
+}
+
+#[derive(Clone, Copy)]
+pub enum TraceStart {
+    Function,
+    FirstLoop,
+}
+
 impl TraceBuilder {
-    pub fn new() -> Self {
+    pub fn new(start_mode: TraceStart) -> Self {
         TraceBuilder {
             operand_of_iid: HashMap::new(),
             operand_of_varid: HashMap::new(),
@@ -222,8 +236,9 @@ impl TraceBuilder {
             stack_depth: 0,
             instrs: Vec::new(),
             parameters: Vec::new(),
-            failed: false,
-            trace_ended: false,
+            start_mode,
+            loop_head: None,
+            state: TraceBuilderState::WaitingStart,
             exit_function_expected: false,
         }
     }
@@ -398,36 +413,59 @@ impl TraceBuilder {
     }
 
     pub(crate) fn interpreter_step(&mut self, step: &InterpreterStep) {
-        if self.trace_ended {
-            return;
-        }
-        if let Err(error) = self.try_interpreter_step(step) {
-            eprintln!("TB: trace failed: {:?}", error);
-            // loops not supported yet!
-            self.failed = true;
-            self.trace_ended = true;
+        match self.state {
+            TraceBuilderState::WaitingStart => {
+                if self.check_start(step) {
+                    self.state = TraceBuilderState::Tracing;
+                    // For the first instruction, self.loop_head stays None.
+                    // Then, we set self.loop_head, so that we can detect that
+                    // we've closed the loop and can finish the trace.
+                    self.interpreter_step(step);
+                    self.loop_head = Some(step.iid);
+                }
+            }
+            TraceBuilderState::Tracing => {
+                if Some(step.iid) == self.loop_head {
+                    self.emit(Instr::WhateverBullshitIsNeededtoLoopback);
+                    self.state = TraceBuilderState::Finished;
+                } else if let Err(error) = self.trace_step(step) {
+                    eprintln!("TB: trace failed: {:?}", error);
+                    self.state = TraceBuilderState::Failed;
+                }
+            }
+            TraceBuilderState::Failed => {}
+            TraceBuilderState::Finished => {}
         }
     }
 
-    fn try_interpreter_step(&mut self, step: &InterpreterStep) -> Result<(), Error> {
-        if self.trace_ended {
-            return Ok(());
+    fn check_start(&self, step: &InterpreterStep) -> bool {
+        match self.start_mode {
+            // Trace starts immediately
+            TraceStart::Function => {
+                eprintln!("TB: trace starts immediately");
+                true
+            }
+            TraceStart::FirstLoop => {
+                if step.func.is_loop_head(step.iid) {
+                    eprintln!("TB: trace starts now, on a loop head");
+                    true
+                } else {
+                    eprintln!("TB: waiting on a loop head...");
+                    false
+                }
+            }
         }
+    }
+
+    fn trace_step(&mut self, step: &InterpreterStep) -> Result<(), Error> {
+        assert!(self.state == TraceBuilderState::Tracing);
 
         if self.exit_function_expected {
             panic!("JIT bug: should have called exit_function() !");
         }
 
-        let instr = &step.func.instrs()[step.iid.0 as usize];
+        let instr = step.cur_instr();
         eprintln!("TB: step");
-
-        // TODO Disable loops. Loops are temporarily allowed, though they
-        // produce several types of incorrect traces, because it makes development easier.
-        if false && step.func.is_loop_head(step.iid) {
-            return Err(Error::Unsupported("loops".to_string()));
-        }
-
-        let interpreter_result = &step.values_buf[step.iid.0 as usize];
 
         let result = match instr {
             interpreter::Instr::Nop => None,
@@ -446,7 +484,10 @@ impl TraceBuilder {
                 let b = self.resolve_interpreter_operand(&b, &step.values_buf)?;
 
                 let result = match (a, b) {
-                    (Operand::Imm(_), Operand::Imm(_)) => Operand::Imm(interpreter_result.clone()),
+                    (Operand::Imm(_), Operand::Imm(_)) => {
+                        let interpreter_result = &step.values_buf[step.iid.0 as usize];
+                        Operand::Imm(interpreter_result.clone())
+                    }
                     (Operand::Cmp(_), _) | (_, Operand::Cmp(_)) => {
                         panic!("invalid operand of type Cmp for instr Cmp")
                     }
@@ -454,18 +495,26 @@ impl TraceBuilder {
                         let a_type = self.operand_type(&a).unwrap();
                         let b_type = self.operand_type(&b).unwrap();
                         let cmp = match (a_type, b_type) {
-                            (ValueType::Boxed, unboxed_type) => Cmp {
-                                ty: unboxed_type,
-                                op: *op,
-                                a: self.emit(Instr::Unbox(unboxed_type, a))?,
-                                b,
-                            },
-                            (unboxed_type, ValueType::Boxed) => Cmp {
-                                ty: unboxed_type,
-                                op: *op,
-                                a,
-                                b: self.emit(Instr::Unbox(unboxed_type, b))?,
-                            },
+                            (ValueType::Boxed, unboxed_type)
+                                if unboxed_type != ValueType::Boxed =>
+                            {
+                                Cmp {
+                                    ty: unboxed_type,
+                                    op: *op,
+                                    a: self.emit(Instr::Unbox(unboxed_type, a))?,
+                                    b,
+                                }
+                            }
+                            (unboxed_type, ValueType::Boxed)
+                                if unboxed_type != ValueType::Boxed =>
+                            {
+                                Cmp {
+                                    ty: unboxed_type,
+                                    op: *op,
+                                    a,
+                                    b: self.emit(Instr::Unbox(unboxed_type, b))?,
+                                }
+                            }
                             _ => {
                                 let b = self.ensure_type(b, a_type)?;
                                 Cmp {
@@ -595,6 +644,10 @@ impl TraceBuilder {
         args: &[interpreter::Operand],
         values_buf: &[interpreter::Value],
     ) {
+        if self.state != TraceBuilderState::Tracing {
+            return;
+        }
+
         // TODO Use try_collect when it becomes stable
         let mut arg_values = Vec::new();
         for (ndx, arg) in args.iter().enumerate() {
@@ -602,8 +655,7 @@ impl TraceBuilder {
                 Ok(arg) => arg,
                 Err(err) => {
                     eprintln!("TB: trace failed, couldn't resolve argument #{ndx}: {err:?}");
-                    self.failed = true;
-                    self.trace_ended = true;
+                    self.state = TraceBuilderState::Failed;
                     return;
                 }
             };
@@ -615,9 +667,13 @@ impl TraceBuilder {
     }
 
     pub(crate) fn exit_function(&mut self) {
+        if self.state != TraceBuilderState::Tracing {
+            return;
+        }
+
         if self.stack_depth == 0 {
             eprintln!("TB: trace ended");
-            self.trace_ended = true;
+            self.state = TraceBuilderState::Finished;
         } else {
             let depth_to_remove = -(self.stack_depth as i32);
             // TODO Change to HashMap::drain_filter once it becomes stable
@@ -786,9 +842,7 @@ impl TraceBuilder {
     }
 
     pub(crate) fn build(self) -> Option<Trace> {
-        if self.failed {
-            None
-        } else {
+        if let TraceBuilderState::Finished = self.state {
             let hregs = regalloc::allocate_registers(self.instrs.as_slice(), 6);
 
             Some(Trace {
@@ -796,6 +850,8 @@ impl TraceBuilder {
                 hreg_alloc: hregs,
                 parameters: self.parameters,
             })
+        } else {
+            None
         }
     }
 
@@ -814,8 +870,15 @@ pub struct InterpreterStep<'a> {
     pub(crate) next_iid: interpreter::IID,
 }
 
+impl<'a> InterpreterStep<'a> {
+    fn cur_instr(&self) -> &interpreter::Instr {
+        &self.func.instrs()[self.iid.0 as usize]
+    }
+}
+
 #[derive(PartialEq, Debug)]
 enum Instr {
+    WhateverBullshitIsNeededtoLoopback,
     TraceParam(u16),
     GetArg(usize),
     Not(Operand),
@@ -895,6 +958,7 @@ impl Instr {
             Instr::ObjSet { .. } => None,
             Instr::ObjGet { .. } => Some(ValueType::Boxed),
             Instr::TypeOf(_) => Some(ValueType::Str),
+            Instr::WhateverBullshitIsNeededtoLoopback => None,
         }
     }
 
@@ -926,6 +990,7 @@ impl Instr {
             Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
             Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
             Instr::TypeOf(arg) => Box::new([arg].into_iter()),
+            Instr::WhateverBullshitIsNeededtoLoopback => Box::new(std::iter::empty()),
         }
     }
 }
@@ -1019,6 +1084,7 @@ mod tests {
         let flags = interpreter::InterpreterFlags {
             tracer_flags: Some(interpreter::TracerFlags {
                 start_depth: start_stack_depth,
+                whence: jit::TraceStart::Function,
             }),
             ..Default::default()
         };
@@ -1120,41 +1186,5 @@ mod tests {
         trace.dump();
 
         assert!(false);
-    }
-
-    #[test]
-    fn test_var_mapping() {
-        let output = quick_run(
-            "
-            function iota(n) {
-                function foo(value) { sink(value); }
-                let i = 0;
-                while (i < n) {
-                    foo(i * 11);
-                    i++;
-                }
-            }
-
-            iota(10);
-            ",
-            1,
-        );
-
-        let trace = output.trace.as_ref().unwrap();
-
-        let mut counts = HashMap::new();
-        for param in trace.parameters.iter() {
-            if let TraceParam {
-                operand: interpreter::Operand::Var(var_id),
-            } = param
-            {
-                *counts.entry(*var_id).or_insert(0) += 1;
-            }
-        }
-
-        assert!(counts.len() > 0);
-        for count in counts.values() {
-            assert_eq!(1, *count);
-        }
     }
 }

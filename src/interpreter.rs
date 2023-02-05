@@ -367,8 +367,8 @@ impl VM {
             module.dump();
         }
 
-        if flags.tracer_flags.is_some() {
-            self.trace_builder = Some(jit::TraceBuilder::new());
+        if let Some(tflags) = &flags.tracer_flags {
+            self.trace_builder = Some(jit::TraceBuilder::new(tflags.whence));
         }
         self.run_module_fn(&module, FnId::ROOT_FN, &[], flags)?;
         Ok(())
@@ -403,8 +403,8 @@ impl VM {
             module.dump();
         }
 
-        if flags.tracer_flags.is_some() {
-            self.trace_builder = Some(jit::TraceBuilder::new());
+        if let Some(tflags) = &flags.tracer_flags {
+            self.trace_builder = Some(jit::TraceBuilder::new(tflags.whence));
         }
         self.run_module_fn(&module, FnId::ROOT_FN, &[], flags)?;
         Ok(())
@@ -721,6 +721,7 @@ impl InterpreterFlags {
 #[derive(Clone)]
 pub struct TracerFlags {
     pub start_depth: u32,
+    pub whence: jit::TraceStart,
 }
 
 impl Default for InterpreterFlags {

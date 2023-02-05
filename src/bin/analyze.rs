@@ -31,7 +31,10 @@ pub fn main() {
     vm.options_mut().debug_dump_module = true;
     let flags = mcjs::InterpreterFlags {
         indent_level: 0,
-        tracer_flags: Some(mcjs::TracerFlags { start_depth: 1 }),
+        tracer_flags: Some(mcjs::TracerFlags {
+            start_depth: 1,
+            whence: mcjs::TraceStart::FirstLoop,
+        }),
     };
     vm.load_module_ex(&opts.script_filename, flags).unwrap();
 
