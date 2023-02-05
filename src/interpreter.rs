@@ -170,11 +170,11 @@ pub enum Instr {
     TypeOf(Operand),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StackFrameId(pub(crate) u16);
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VarIndex(pub(crate) u16);
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarId {
     pub(crate) stack_fid: StackFrameId,
     pub(crate) var_ndx: VarIndex,
@@ -246,6 +246,18 @@ pub struct VM {
     modules: HashMap<String, Module>,
     trace_builder: Option<jit::TraceBuilder>,
     sink: Vec<Value>,
+    opts: VMOptions,
+}
+
+pub struct VMOptions {
+    pub debug_dump_module: bool,
+}
+impl Default for VMOptions {
+    fn default() -> Self {
+        VMOptions {
+            debug_dump_module: false,
+        }
+    }
 }
 
 pub struct NotADirectoryError(PathBuf);
@@ -296,7 +308,12 @@ impl VM {
             modules: HashMap::new(),
             trace_builder: None,
             sink: Vec::new(),
+            opts: Default::default(),
         }
+    }
+
+    pub fn options_mut(&mut self) -> &mut VMOptions {
+        &mut self.opts
     }
 
     pub fn take_sink(&mut self) -> Vec<Value> {
@@ -322,6 +339,9 @@ impl VM {
     }
 
     pub fn load_module(&mut self, path: &str) -> Result<()> {
+        self.load_module_ex(path, Default::default())
+    }
+    pub fn load_module_ex(&mut self, path: &str, flags: InterpreterFlags) -> Result<()> {
         use std::io::Read;
 
         let (file_path, key): (PathBuf, String) = self.find_module(path.to_string())?;
@@ -338,12 +358,19 @@ impl VM {
         let module = bc_compiler.compile_file(key.clone(), text).unwrap();
 
         #[cfg(test)]
-        {
+        let dump_module = true;
+        #[cfg(not(test))]
+        let dump_module = self.opts.debug_dump_module;
+
+        if dump_module {
             eprintln!("=== loaded module: {}", key);
             module.dump();
         }
 
-        self.run_module_fn(&module, FnId::ROOT_FN, &[], Default::default())?;
+        if flags.tracer_flags.is_some() {
+            self.trace_builder = Some(jit::TraceBuilder::new());
+        }
+        self.run_module_fn(&module, FnId::ROOT_FN, &[], flags)?;
         Ok(())
     }
 
@@ -390,7 +417,13 @@ impl VM {
         args: &[Value],
         flags: InterpreterFlags,
     ) -> Result<Value> {
-        let indent = "     | ".repeat(flags.indent_level as usize);
+        let indent = "      | ".repeat(flags.indent_level as usize);
+
+        let should_trace = flags
+            .tracer_flags
+            .as_ref()
+            .map(|tf| tf.start_depth == 0)
+            .unwrap_or(false);
 
         let func = module.fns.get(&fnid).unwrap();
         let instrs = &func.instrs;
@@ -402,14 +435,16 @@ impl VM {
             Operand::Value(value) => value.clone(),
             Operand::IID(IID(ndx)) => {
                 let value = results[*ndx as usize].clone();
-                eprintln!("{}     ' {:?} = {:?}", indent, operand, value);
+                eprintln!("{}      ↓ {:?} = {:?}", indent, operand, value);
                 value
             }
-            Operand::Var(VarId { stack_fid, var_ndx }) => {
+            Operand::Var(var_id @ VarId { stack_fid, var_ndx }) => {
                 if stack_fid.0 == 0 {
                     let frame = stack_frame.0.borrow();
                     let var_ndx = var_ndx.0 as usize;
-                    frame.get(var_ndx).unwrap().clone()
+                    let value = frame.get(var_ndx).unwrap().clone();
+                    eprintln!("{}      ↓ {:?} = {:?}", indent, var_id, value);
+                    value
                 } else {
                     todo!("outer stack frames not passed yet!")
                 }
@@ -424,8 +459,6 @@ impl VM {
             }
             let instr = &instrs[ndx];
             let mut next_ndx = ndx + 1;
-
-            eprintln!("{}i{:<4} {:?}", indent, ndx, instr);
 
             match instr {
                 Instr::Const(value) => {
@@ -526,10 +559,6 @@ impl VM {
                 Instr::Return(value) => {
                     return_value = Some(get_operand(&values_buf, value));
                 }
-                Instr::GetArg(arg_ndx) => {
-                    values_buf[ndx] = args[*arg_ndx].clone();
-                }
-
                 Instr::Call { callee, args } => {
                     let callee = get_operand(&values_buf, callee);
                     match callee {
@@ -538,6 +567,12 @@ impl VM {
                                 .iter()
                                 .map(|oper| get_operand(&values_buf, oper))
                                 .collect();
+
+                            eprintln!("{indent}      : call");
+                            if should_trace {
+                                let tb = self.trace_builder.as_mut().unwrap();
+                                tb.enter_function(&args[..], &values_buf[..]);
+                            }
 
                             let ret_val = self.run_module_fn(
                                 module,
@@ -556,6 +591,7 @@ impl VM {
                             let nf = NATIVE_FUNCS
                                 .get(&nfid)
                                 .ok_or(error!("no such native function: {nfid}"))?;
+                            eprintln!("{indent}      : native call");
                             let ret_val = nf(self, arg_values.as_slice())?;
                             values_buf[ndx] = ret_val;
                         }
@@ -563,6 +599,10 @@ impl VM {
                             panic!("invalid callee (not a function): {:?}", callee);
                         }
                     }
+                }
+
+                Instr::GetArg(arg_ndx) => {
+                    values_buf[ndx] = args[*arg_ndx].clone();
                 }
 
                 Instr::ObjNew => {
@@ -618,21 +658,30 @@ impl VM {
                 }
             }
 
-            if let Some(trace_builder) = &mut self.trace_builder {
-                if flags.tracer_flags.as_ref().unwrap().start_depth == 0 {
-                    trace_builder.interpreter_step(&InterpreterStep {
-                        values_buf: &values_buf,
-                        fnid,
-                        func: &func,
-                        iid: IID(ndx as u32),
-                        next_iid: IID(next_ndx as u32),
-                    });
-                }
+            match instr {
+                Instr::Call { .. } => {}
+                _ => eprintln!("{}i{:<4} {:?}", indent, ndx, instr),
+            }
+
+            if should_trace {
+                let trace_builder = self.trace_builder.as_mut().unwrap();
+                trace_builder.interpreter_step(&InterpreterStep {
+                    values_buf: &values_buf,
+                    fnid,
+                    func: &func,
+                    iid: IID(ndx as u32),
+                    next_iid: IID(next_ndx as u32),
+                });
             }
 
             ndx = next_ndx;
         }
 
+        if should_trace {
+            if let Some(trace_builder) = self.trace_builder.as_mut() {
+                trace_builder.exit_function();
+            }
+        }
         Ok(return_value.unwrap_or(Value::Undefined))
     }
 }
@@ -705,7 +754,7 @@ impl Module {
     pub(crate) fn dump(&self) {
         eprintln!("=== module");
         for (fnid, func) in self.fns.iter() {
-            eprintln!("fn #{}():", fnid.0);
+            eprintln!("fn #{} [{} vars]:", fnid.0, func.n_slots);
             for (ndx, instr) in func.instrs.iter().enumerate() {
                 eprintln!(
                     "  {:4}{:4}: {:?}",

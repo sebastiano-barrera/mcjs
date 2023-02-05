@@ -60,8 +60,8 @@ impl Allocation {
             .iter()
             .filter_map(|opt| opt.map(|hreg| hreg.0))
             .max()
-            .unwrap()
-            + 1;
+            .map(|x| x + 1)
+            .unwrap_or(0);
         Allocation { hregs, n_hregs }
     }
 }

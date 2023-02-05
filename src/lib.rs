@@ -9,7 +9,7 @@ mod interpreter;
 mod jit;
 mod regalloc;
 
-pub use interpreter::VM;
+pub use interpreter::{InterpreterFlags, TracerFlags, VM};
 
 #[cfg(test)]
 mod tests {

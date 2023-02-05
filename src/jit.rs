@@ -12,17 +12,17 @@ use dynasm::dynasm;
 type BoxedValue = interpreter::Value;
 
 #[derive(Debug, Clone)]
-struct TypeError {
+pub struct TypeError {
     desired_type: ValueType,
 }
 
 #[derive(Debug, Clone)]
-struct InconsistentUnbox {
+pub struct InconsistentUnbox {
     desired_type: ValueType,
 }
 
 #[derive(Debug, Clone)]
-enum Error {
+pub enum Error {
     Type(TypeError),
     Unsupported(String),
     InconsistentUnbox(InconsistentUnbox),
@@ -154,18 +154,39 @@ impl ValueType {
 }
 
 pub struct TraceBuilder {
-    // This map associates Instruction IDs from the interpreter to ValueIds in
-    // the SSA trace we're building. Instruction IDs that are absent from this
-    // map are considered constant, and the corresponding value can be fetched
-    // directly from the interpreter's value buffer. (The case where it is
-    // "yet to be processed" is automatically excluded by the structure of the
-    // interpreter bytecode.)
+    // This map associates VarId's from the interpreter to ValueIds in
+    // the SSA trace we're building.
     //
-    // Key is (stack depth, IID)
-    // TODO change this name...
-    var_iid: HashMap<(u32, interpreter::IID), Operand>,
+    // Important: VarId's need to be "resolved" to an outer frame to the extent possible.
+    //
+    // For example, with the following JS code:
+    // ```js
+    // // some variable `far_away` is defined here as var[0:22]
+    // function f() {
+    //     let x = 1; // e.g. var[0:5]  in f
+    //     function g() {
+    //         function h() {
+    //             use(x);  // x is var[2:5] in h's b.ytecode
+    //             use(far_away); // far_away is var[3:22]
+    //         }
+    //     }
+    // }
+    // ```
+    //
+    // In the bytecode for function `h`, variable `x` is represented with VarId
+    // var[2:5]. But since tracing JIT inlines all function calls, it's important for
+    // the JIT compiler to detect that var[2:5] in h is the same as var[0:5] in f, and
+    // should resolve it to the same JIT IR register.  To do this, we track the stack
+    // depth of the calls we're inlining, and use it to convert VarId's to the lowest
+    // stack depth possible. Note that variables captures outside the trace's entry
+    // point (function or loop) will still have a stack depth component that is > 0
+    // (i.e. `far_away` is resolved to var[1:22]).
+    operand_of_varid: HashMap<VarId, Operand>,
+    operand_of_iid: HashMap<(u32, interpreter::IID), Operand>,
+    args_stack: Vec<Vec<Operand>>,
     unboxes: HashMap<ValueId, (ValueType, ValueId)>,
 
+    // Current stack depth relative to the trace's entry point (function or loop)
     stack_depth: u32,
 
     instrs: Vec<Instr>,
@@ -173,22 +194,37 @@ pub struct TraceBuilder {
 
     failed: bool,
     trace_ended: bool,
+    exit_function_expected: bool,
 }
 
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+struct VarId {
+    // Signed, unlike interpreter::VarId.  Negative values refer to values
+    // defined in inner scopes (i.e. functions currently being JIT-compiled), while
+    // positive values refer to variables captured from the trace's entry point
+    // function/loop.
+    stack_depth: i32,
+    var_ndx: u16,
+}
+
+#[derive(Debug)]
 struct TraceParam {
-    iid: interpreter::IID,
+    operand: interpreter::Operand,
 }
 
 impl TraceBuilder {
     pub fn new() -> Self {
         TraceBuilder {
-            var_iid: HashMap::new(),
+            operand_of_iid: HashMap::new(),
+            operand_of_varid: HashMap::new(),
             unboxes: HashMap::new(),
+            args_stack: Vec::new(),
             stack_depth: 0,
             instrs: Vec::new(),
             parameters: Vec::new(),
             failed: false,
             trace_ended: false,
+            exit_function_expected: false,
         }
     }
 
@@ -207,30 +243,54 @@ impl TraceBuilder {
             interpreter::Operand::IID(iid) => {
                 let key = (self.stack_depth, *iid);
 
-                if let Some(operand_for_var) = self.var_iid.get(&key) {
+                if let Some(operand_for_var) = self.operand_of_iid.get(&key) {
                     eprintln!("TB: {:?} is {:?}", iid, operand_for_var);
                     Ok(operand_for_var.clone())
                 } else {
                     eprintln!(
-                        "TB: {:?} is unresolved => considered parameter, adding guard",
+                        "TB: {:?} is unresolved => considered trace parameter, adding guard",
                         operand
                     );
-                    let param_ndx = self.add_parameter(*iid);
-                    let param = self.emit(Instr::TraceParam(param_ndx))?;
+
                     let observed_value = &value_buf[iid.0 as usize];
+
+                    let param_ndx = self.add_parameter(operand.clone());
+                    let param = self.emit(Instr::TraceParam(param_ndx))?;
+                    // TODO Question: Is this really necessary?
                     self.emit(Instr::AssertEqConst {
                         x: param.clone(),
                         expected: observed_value.clone(),
                     })?;
 
-                    self.var_iid.insert(key, param.clone());
+                    self.operand_of_iid.insert(key, param.clone());
                     Ok(param)
                 }
             }
 
-            interpreter::Operand::Var(_var_id) => {
-                todo!("resolve_interpreter_operand for Operand::Var")
+            interpreter::Operand::Var(intrp_varid) => {
+                // Resolve stack_fid to the outermost function/loop covered by
+                // the trace (see comment for operand_of_varid)
+                let resolved_varid = self.resolve_interpreter_varid(intrp_varid);
+                eprintln!("resolving {resolved_varid:?}");
+
+                match self.operand_of_varid.get(&resolved_varid) {
+                    Some(oper) => Ok(oper.clone()),
+                    None => {
+                        let param_ndx =
+                            self.add_parameter(interpreter::Operand::Var(intrp_varid.clone()));
+                        let oper = self.emit(Instr::TraceParam(param_ndx))?;
+                        self.operand_of_varid.insert(resolved_varid, oper.clone());
+                        Ok(oper)
+                    }
+                }
             }
+        }
+    }
+
+    fn resolve_interpreter_varid(&mut self, intrp_var_id: &interpreter::VarId) -> VarId {
+        VarId {
+            stack_depth: intrp_var_id.stack_fid.0 as i32 - self.stack_depth as i32,
+            var_ndx: intrp_var_id.var_ndx.0,
         }
     }
 
@@ -354,6 +414,10 @@ impl TraceBuilder {
             return Ok(());
         }
 
+        if self.exit_function_expected {
+            panic!("JIT bug: should have called exit_function() !");
+        }
+
         let instr = &step.func.instrs()[step.iid.0 as usize];
         eprintln!("TB: step");
 
@@ -446,8 +510,10 @@ impl TraceBuilder {
                 // unconditional jump.  Nothing to do, let's just follow the interpreter to the next instruction
                 None
             }
-            interpreter::Instr::Set { .. } => {
-                todo!("JIT of instruction Set");
+            interpreter::Instr::Set { var_id, value } => {
+                let resolved_varid = self.resolve_interpreter_varid(var_id);
+                let value = self.resolve_interpreter_operand(value, &step.values_buf)?;
+                self.operand_of_varid.insert(resolved_varid, value);
                 None
             }
             interpreter::Instr::PushSink(value) => {
@@ -456,18 +522,30 @@ impl TraceBuilder {
                 None
             }
             interpreter::Instr::Return(value) => {
-                let value = self.resolve_operand_as(&value, &step.values_buf, ValueType::Boxed)?;
-                if self.stack_depth == 0 {
-                    self.trace_ended = true;
+                self.exit_function_expected = true;
+
+                let value = if self.stack_depth == 0 {
+                    self.resolve_operand_as(&value, &step.values_buf, ValueType::Boxed)?
                 } else {
-                    self.stack_depth -= 1;
-                }
-                Some(self.emit(Instr::Return(value))?)
+                    self.resolve_interpreter_operand(&value, &step.values_buf)?
+                };
+                Some(value)
             }
-            interpreter::Instr::GetArg(index) => Some(self.emit(Instr::GetArg(*index))?),
-            interpreter::Instr::Call { .. } => {
-                eprintln!("TB: warning: following call no matter what (not correct in all cases!)");
-                self.stack_depth += 1;
+            interpreter::Instr::GetArg(index) => {
+                let value = if self.stack_depth == 0 {
+                    self.emit(Instr::GetArg(*index))?
+                } else {
+                    self.args_stack
+                        .last_mut()
+                        .expect("JIT bug: no arg vec on stack")
+                        .get(*index)
+                        .expect("bytecode_compiler bug: unbound arg var")
+                        .clone()
+                };
+                Some(value)
+            }
+            interpreter::Instr::Call { args, .. } => {
+                // TODO Something to do for the return value?
                 None
             }
 
@@ -512,9 +590,58 @@ impl TraceBuilder {
         Ok(())
     }
 
+    pub(crate) fn enter_function(
+        &mut self,
+        args: &[interpreter::Operand],
+        values_buf: &[interpreter::Value],
+    ) {
+        // TODO Use try_collect when it becomes stable
+        let mut arg_values = Vec::new();
+        for (ndx, arg) in args.iter().enumerate() {
+            let arg = match self.resolve_interpreter_operand(arg, &values_buf) {
+                Ok(arg) => arg,
+                Err(err) => {
+                    eprintln!("TB: trace failed, couldn't resolve argument #{ndx}: {err:?}");
+                    self.failed = true;
+                    self.trace_ended = true;
+                    return;
+                }
+            };
+            arg_values.push(arg);
+        }
+        self.args_stack.push(arg_values);
+        self.stack_depth += 1;
+        eprintln!("TB: call (stack depth -> {})", self.stack_depth);
+    }
+
+    pub(crate) fn exit_function(&mut self) {
+        if self.stack_depth == 0 {
+            eprintln!("TB: trace ended");
+            self.trace_ended = true;
+        } else {
+            let depth_to_remove = -(self.stack_depth as i32);
+            // TODO Change to HashMap::drain_filter once it becomes stable
+            let to_remove: Vec<_> = self
+                .operand_of_varid
+                .keys()
+                .filter(|var_id| var_id.stack_depth == depth_to_remove)
+                .copied()
+                .collect();
+            for key in to_remove.iter() {
+                self.operand_of_varid.remove(&key);
+            }
+            self.stack_depth -= 1;
+            self.args_stack.pop();
+            eprintln!("TB: returned from function");
+        }
+
+        self.exit_function_expected = false;
+    }
+
     fn map_iid(&mut self, iid: IID, jit_operand: Operand) {
         eprintln!("TB: map {:?} -> {:?}", iid, jit_operand);
-        self.var_iid.insert((self.stack_depth, iid), jit_operand);
+        self.operand_of_iid
+            .insert((self.stack_depth, iid), jit_operand);
     }
 
     fn emit(&mut self, instr: Instr) -> Result<Operand, Error> {
@@ -667,13 +794,14 @@ impl TraceBuilder {
             Some(Trace {
                 instrs: self.instrs,
                 hreg_alloc: hregs,
+                parameters: self.parameters,
             })
         }
     }
 
-    pub(crate) fn add_parameter(&mut self, iid: IID) -> u16 {
+    pub(crate) fn add_parameter(&mut self, operand: interpreter::Operand) -> u16 {
         let ndx = self.parameters.len() as u16;
-        self.parameters.push(TraceParam { iid });
+        self.parameters.push(TraceParam { operand });
         ndx
     }
 }
@@ -688,8 +816,8 @@ pub struct InterpreterStep<'a> {
 
 #[derive(PartialEq, Debug)]
 enum Instr {
-    GetArg(usize),
     TraceParam(u16),
+    GetArg(usize),
     Not(Operand),
     Arith {
         op: ArithOp,
@@ -815,14 +943,18 @@ impl regalloc::Instruction for Instr {
 pub struct Trace {
     instrs: Vec<Instr>,
     hreg_alloc: regalloc::Allocation,
+    parameters: Vec<TraceParam>,
 }
 
 impl Trace {
-    #[cfg(test)]
-    pub(crate) fn dump(&self) {
+    pub fn dump(&self) {
         use std::borrow::Cow;
 
-        eprintln!();
+        eprintln!(" === trace");
+        eprintln!(" {} parameters", self.parameters.len());
+        for (ndx, param) in self.parameters.iter().enumerate() {
+            eprintln!("    param[{}] = {:?}", ndx, param);
+        }
         for (ndx, instr) in self.instrs.iter().enumerate() {
             let hreg = self.hreg_alloc.hreg_of_instr(ndx);
 
@@ -988,5 +1120,41 @@ mod tests {
         trace.dump();
 
         assert!(false);
+    }
+
+    #[test]
+    fn test_var_mapping() {
+        let output = quick_run(
+            "
+            function iota(n) {
+                function foo(value) { sink(value); }
+                let i = 0;
+                while (i < n) {
+                    foo(i * 11);
+                    i++;
+                }
+            }
+
+            iota(10);
+            ",
+            1,
+        );
+
+        let trace = output.trace.as_ref().unwrap();
+
+        let mut counts = HashMap::new();
+        for param in trace.parameters.iter() {
+            if let TraceParam {
+                operand: interpreter::Operand::Var(var_id),
+            } = param
+            {
+                *counts.entry(*var_id).or_insert(0) += 1;
+            }
+        }
+
+        assert!(counts.len() > 0);
+        for count in counts.values() {
+            assert_eq!(1, *count);
+        }
     }
 }
