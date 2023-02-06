@@ -157,7 +157,8 @@ pub struct TraceBuilder {
     // This map associates VarId's from the interpreter to ValueIds in
     // the SSA trace we're building.
     //
-    // Important: VarId's need to be "resolved" to an outer frame to the extent possible.
+    // Important: VarId's need to be "resolved" to the outermost stack frame to
+    // the extent possible.
     //
     // For example, with the following JS code:
     // ```js
@@ -166,7 +167,7 @@ pub struct TraceBuilder {
     //     let x = 1; // e.g. var[0:5]  in f
     //     function g() {
     //         function h() {
-    //             use(x);  // x is var[2:5] in h's b.ytecode
+    //             use(x);  // x is var[2:5] in h's bytecode
     //             use(far_away); // far_away is var[3:22]
     //         }
     //     }
@@ -187,7 +188,7 @@ pub struct TraceBuilder {
     unboxes: HashMap<ValueId, (ValueType, ValueId)>,
     // Current stack depth relative to the trace's entry point (function or loop)
     stack_depth: u32,
-    loop_head: Option<interpreter::IID>,
+    loop_head: Option<interpreter::GlobalIID>,
 
     instrs: Vec<Instr>,
     parameters: Vec<TraceParam>,
@@ -220,7 +221,7 @@ enum TraceBuilderState {
     Finished,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum TraceStart {
     Function,
     FirstLoop,
@@ -421,12 +422,13 @@ impl TraceBuilder {
                     // Then, we set self.loop_head, so that we can detect that
                     // we've closed the loop and can finish the trace.
                     self.interpreter_step(step);
-                    self.loop_head = Some(step.iid);
+                    self.loop_head = Some(step.global_iid());
                 }
             }
             TraceBuilderState::Tracing => {
-                if Some(step.iid) == self.loop_head {
-                    self.emit(Instr::WhateverBullshitIsNeededtoLoopback);
+                if Some(step.global_iid()) == self.loop_head {
+                    self.emit(Instr::WhateverBullshitIsNeededtoLoopback)
+                        .unwrap();
                     self.state = TraceBuilderState::Finished;
                 } else if let Err(error) = self.trace_step(step) {
                     eprintln!("TB: trace failed: {:?}", error);
@@ -874,6 +876,13 @@ impl<'a> InterpreterStep<'a> {
     fn cur_instr(&self) -> &interpreter::Instr {
         &self.func.instrs()[self.iid.0 as usize]
     }
+
+    fn global_iid(&self) -> interpreter::GlobalIID {
+        interpreter::GlobalIID {
+            fn_id: self.fnid,
+            iid: self.iid,
+        }
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -1077,14 +1086,18 @@ mod tests {
         trace: Option<jit::Trace>,
     }
 
-    fn quick_run(code: &str, start_stack_depth: u32) -> Output {
-        use crate::bytecode_compiler;
-
+    fn quick_jit_func(code: &str, start_stack_depth: u32) -> Output {
+        quick_jit(start_stack_depth, jit::TraceStart::Function, code)
+    }
+    fn quick_jit_loop(code: &str, start_stack_depth: u32) -> Output {
+        quick_jit(start_stack_depth, jit::TraceStart::FirstLoop, code)
+    }
+    fn quick_jit(start_stack_depth: u32, whence: TraceStart, code: &str) -> Output {
         let mut vm = interpreter::VM::new();
         let flags = interpreter::InterpreterFlags {
             tracer_flags: Some(interpreter::TracerFlags {
                 start_depth: start_stack_depth,
-                whence: jit::TraceStart::Function,
+                whence,
             }),
             ..Default::default()
         };
@@ -1097,7 +1110,7 @@ mod tests {
 
     #[test]
     fn test_tracing_simple_constant_folding() {
-        let output = quick_run(
+        let output = quick_jit_func(
             "
             const x = 123;
             let y = 'a';
@@ -1131,7 +1144,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_tracing_one_func() {
-        let output = quick_run(
+        let output = quick_jit_func(
             "
             function foo(mode, a, b) { 
                 if (mode === 'sum')
@@ -1155,10 +1168,65 @@ mod tests {
         assert!(false);
     }
 
+    #[test]
+    fn test_while_loop() {
+        let code = "
+            function sum_range(n) {
+                let i = 0;
+                let ret = 0;
+                while (i <= n) {
+                    ret += i;
+                    sink(ret);
+                    i++;
+                }
+                return ret;
+            }
+
+            sink(sum_range(5));
+        ";
+        let output = quick_jit_loop(code, 1);
+
+        eprint!("trace = ");
+        let trace = output.trace.unwrap();
+        trace.dump();
+
+        // TODO: Run the trace (continue writing this test when traces can be run)
+        assert!(false);
+    }
+
+    #[test]
+    fn test_varid_resolution_with_inlining() {
+        let output = quick_jit_func(
+            "
+            const far_away = 'asd';
+            function f() {
+                const a_little_closer = 'lol';
+                function g() {
+                    function h() {
+                        sink(far_away);
+                        sink(a_little_closer);
+                    }
+                    h();
+                }
+                g();
+            }
+
+            f();
+            ",
+            1,
+        );
+
+        let trace = output.trace.unwrap();
+        trace.dump();
+
+        // TODO
+        assert!(false);
+    }
+
     #[ignore]
     #[test]
-    fn test_while() {
-        let output = quick_run(
+    fn test_loop_unrolling() {
+        let output = quick_jit_loop(
             "
             function sum_range(n) {
                 let i = 0;
@@ -1173,14 +1241,14 @@ mod tests {
 
             sink(sum_range(5));
             ",
-            0,
+            1,
         );
 
         eprint!("trace = ");
         let trace = output.trace.unwrap();
         trace.dump();
 
-        // TODO: Run the trace (continue writing this test when traces can be run)
+        // TODO
         assert!(false);
     }
 }
