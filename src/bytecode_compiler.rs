@@ -7,8 +7,9 @@ use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 pub use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::interpreter::{
-    self, ArithOp, BoolOp, CmpOp, FnId, Instr, Operand, StackFrameId, Value, VarId, VarIndex, IID,
+    self, ArithOp, BoolOp, CmpOp, FnId, FrameOffset, Instr, Operand, Value, VarId, VarIndex, IID,
 };
+use crate::util::Mask;
 
 macro_rules! unsupported_node {
     ($value:expr) => {{
@@ -60,6 +61,7 @@ struct FnBuilder {
     fnid: FnId,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
+    is_frame_captured: Mask,
     last_index: u16,
 }
 #[derive(Debug)]
@@ -73,6 +75,7 @@ impl FnBuilder {
             fnid: id,
             scopes: vec![Self::new_scope()],
             instrs: Vec::new(),
+            is_frame_captured: Mask::new(),
             last_index: 0,
         }
     }
@@ -146,7 +149,10 @@ impl Builder {
     }
 
     fn build(mut self) -> interpreter::Module {
-        self.end_function();
+        let fnid = self.end_function();
+        // The root function is the outermost scope, and therefore must capture
+        // nothing.  Otherwise, we have a bug.
+        assert!(self.fns.get(&fnid).unwrap().is_frame_captured.is_empty());
         assert!(self.fn_stack.is_empty());
 
         let fns = self
@@ -185,23 +191,39 @@ impl Builder {
         // eprintln!("define_var {name} [{depth}]");
         let var_ndx = self.cur_fnb().define(name);
         VarId {
-            stack_fid: StackFrameId(0),
+            stack_fid: FrameOffset(0),
             var_ndx,
         }
     }
 
     fn get_var(&mut self, sym: &JsWord) -> Option<VarId> {
         // Lookup sym in each scope, inner to outer
-        self.fn_stack
-            .iter()
-            .rev()
-            .enumerate()
-            .find_map(|(stack_frame_offset, fnb)| {
-                fnb.get_var(sym).map(|var_ndx| VarId {
-                    stack_fid: StackFrameId(stack_frame_offset as u16),
-                    var_ndx,
-                })
-            })
+        let var_id =
+            self.fn_stack
+                .iter()
+                .rev()
+                .enumerate()
+                .find_map(|(stack_frame_offset, fnb)| {
+                    fnb.get_var(sym).map(|var_ndx| VarId {
+                        stack_fid: FrameOffset(stack_frame_offset as u16),
+                        var_ndx,
+                    })
+                });
+
+        if let Some(VarId { stack_fid, .. }) = &var_id {
+            if stack_fid.0 > 0 {
+                // This variable is captured from one of the enclosing
+                // stack frames. Mark that frame as "captured", so that the
+                // ClosureNew instruction will be generated, and provide a
+                // pointer to that stack frame in the interpreter.
+                let parent_rel_stack_fid = stack_fid.0 as usize - 1;
+                self.cur_fnb()
+                    .is_frame_captured
+                    .set(parent_rel_stack_fid, true);
+            }
+        }
+
+        var_id
     }
 
     fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
@@ -399,36 +421,9 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
 
             let (name, _) = fn_decl.ident.to_id();
             let func = &fn_decl.function;
-
-            if !func.decorators.is_empty() {
-                panic!("unsupported: function decorators");
-            }
-            if func.is_async {
-                panic!("unsupported: async functions");
-            }
-            if func.is_generator {
-                panic!("unsupported: generator functions");
-            }
-            if func.return_type.is_some() {
-                panic!("unsupported: TypeScript syntax (return type)");
-            }
-            if func.type_params.is_some() {
-                panic!("unsupported: TypeScript syntax (return type)");
-            }
-
-            builder.start_function(Some(name.clone()), func.params.as_slice());
-            let stmts = &func.body.as_ref().expect("function without body?!").stmts;
-            for stmt in stmts {
-                compile_stmt(builder, stmt)
-                    .with_context(error!("in function declaration").with_span(func.span))?;
-            }
-            let fnid = builder.end_function();
-
+            let value = compile_function(builder, Some(name.clone()), func)?;
             let var_id = builder.define_var(name);
-            builder.emit(Instr::Set {
-                var_id,
-                value: Value::LocalFn(fnid).into(),
-            });
+            builder.emit(Instr::Set { var_id, value });
         }
 
         Decl::Var(var_decl) => {
@@ -446,10 +441,68 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
     Ok(())
 }
 
+fn compile_function(
+    builder: &mut Builder,
+    name: Option<JsWord>,
+    func: &Function,
+) -> Result<Operand> {
+    if !func.decorators.is_empty() {
+        panic!("unsupported: function decorators");
+    }
+    if func.is_async {
+        panic!("unsupported: async functions");
+    }
+    if func.is_generator {
+        panic!("unsupported: generator functions");
+    }
+    if func.return_type.is_some() {
+        panic!("unsupported: TypeScript syntax (return type)");
+    }
+    if func.type_params.is_some() {
+        panic!("unsupported: TypeScript syntax (return type)");
+    }
+
+    builder.start_function(name.clone(), func.params.as_slice());
+
+    let stmts = &func.body.as_ref().expect("function without body?!").stmts;
+    for stmt in stmts {
+        compile_stmt(builder, stmt)
+            .with_context(error!("in function declaration").with_span(func.span))?;
+    }
+
+    let fnid = builder.end_function();
+    let fnb = builder.fns.get(&fnid).unwrap();
+    let is_frame_captured = fnb.is_frame_captured.clone();
+
+    // TODO Unit test this property
+    // If a function literal captures one of the enclosing scopes,
+    // then the enclosing function also does. By induction, all
+    // further enclosing functions also do, up to the function literal
+    // corresponding to the captured scope.
+    //
+    // In terms of relative stack indices, if the inner function refers
+    // to any var[s:v] with s > 0, then it's said to capture the scope
+    // with index s. Then, the enclosing function captures the scope
+    // with index s - 1, unless s-1 == 0, in which case no capture happens.
+    //
+    // Note that if a function captures scope with index s, then it's
+    // is_frame_captured[s-1] that is true. In other words, the indices are
+    // already relative to the enclosing function, i.e. this one.
+    let cur_caps = &mut builder.cur_fnb().is_frame_captured;
+    for (rel_ndx, is_captured) in is_frame_captured.iter().enumerate() {
+        if *is_captured && rel_ndx > 1 {
+            cur_caps.set(rel_ndx - 1, true);
+        }
+    }
+
+    let instr = Instr::ClosureNew { fnid };
+    Ok(builder.emit(instr).into())
+}
+
 fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> Result<()> {
     use swc_ecma_ast::VarDeclKind;
 
-    let is_const = match var_decl.kind {
+    let _is_const = match var_decl.kind {
         VarDeclKind::Var => panic!("limitation: `var` bindings not supported"),
         VarDeclKind::Let => false,
         VarDeclKind::Const => true,
@@ -667,38 +720,16 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
             let name = fn_expr.ident.as_ref().map(|ident| ident.to_id().0);
             let func = &fn_expr.function;
 
-            if !func.decorators.is_empty() {
-                panic!("unsupported: function decorators");
-            }
-            if func.is_async {
-                panic!("unsupported: async functions");
-            }
-            if func.is_generator {
-                panic!("unsupported: generator functions");
-            }
-            if func.return_type.is_some() {
-                panic!("unsupported: TypeScript syntax (return type)");
-            }
-            if func.type_params.is_some() {
-                panic!("unsupported: TypeScript syntax (return type)");
-            }
+            let value = compile_function(builder, name.clone(), func)?;
 
-            builder.start_function(name.clone(), func.params.as_slice());
-            let stmts = &func.body.as_ref().expect("function without body?!").stmts;
-            for stmt in stmts {
-                compile_stmt(builder, stmt)?;
-            }
-            let fnid = builder.end_function();
-
-            let iid = builder.emit(Instr::Const(Value::LocalFn(fnid)));
             if let Some(name) = name {
                 let var_id = builder.define_var(name);
                 builder.emit(Instr::Set {
                     var_id,
-                    value: iid.into(),
+                    value: value.clone(),
                 });
             }
-            Ok(iid.into())
+            Ok(value.into())
         }
 
         Expr::Unary(unary_expr) => {

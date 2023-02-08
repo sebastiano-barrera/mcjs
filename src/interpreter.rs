@@ -2,7 +2,7 @@ use lazy_static::lazy_static;
 
 use std::{
     borrow::Cow,
-    cell::{Ref, RefCell},
+    cell::{Ref, RefCell, RefMut},
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -16,6 +16,8 @@ use crate::{
     common::Result,
     error,
     jit::{self, InterpreterStep},
+    stack,
+    util::Mask,
 };
 
 /// A value that can be input, output, or processed by the program at runtime.
@@ -27,9 +29,11 @@ pub enum Value {
     Object(Object),
     Null,
     Undefined,
+    // TODO Delete, Closure supersedes this
     SelfFunction,
-    LocalFn(FnId),
+    // TODO Delete, Closure supersedes this
     NativeFunction(u32),
+    Closure(Closure),
 }
 
 impl From<String> for Value {
@@ -55,8 +59,8 @@ impl Value {
             Value::Null => "object",
             Value::Undefined => "undefined",
             Value::SelfFunction => "function",
-            Value::LocalFn(_) => "function",
             Value::NativeFunction(_) => "function",
+            Value::Closure(_) => "function",
         };
 
         ty_s.to_string().into()
@@ -103,6 +107,19 @@ impl ObjectKey {
         }
     }
 }
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct Closure {
+    fnid: FnId,
+    lexical_parent: Option<stack::FrameHandle>,
+}
+
+impl std::fmt::Debug for Closure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<closure {:?}>", self.fnid)
+    }
+}
+
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
@@ -159,6 +176,10 @@ pub enum Instr {
         args: Vec<Operand>,
     },
 
+    ClosureNew {
+        fnid: FnId,
+    },
+
     ObjNew,
     ObjSet {
         obj: Operand,
@@ -206,17 +227,19 @@ impl Instr {
             Instr::ArrayNew => Box::new(std::iter::empty()),
             Instr::ArrayPush(arr, value) => Box::new([arr, value].into_iter()),
             Instr::TypeOf(arg) => Box::new(std::iter::once(arg)),
+            Instr::ClosureNew { .. } => Box::new(std::iter::empty()),
         }
     }
 }
 
+// TODO Rename this struct... the name "almost collides" mentally with stuff in crate::stack
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StackFrameId(pub(crate) u16);
+pub struct FrameOffset(pub(crate) u16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VarIndex(pub(crate) u16);
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarId {
-    pub(crate) stack_fid: StackFrameId,
+    pub(crate) stack_fid: FrameOffset,
     pub(crate) var_ndx: VarIndex,
 }
 
@@ -327,9 +350,6 @@ fn nf_require(intp: &mut Interpreter, args: &[Value]) -> Result<Value> {
         _ => Err(error!("invalid args for require()")),
     }
 }
-
-#[derive(Clone)]
-struct StackFrame(Box<[Value]>);
 
 impl VM {
     const NFID_REQUIRE: u32 = 1;
@@ -451,7 +471,8 @@ struct Interpreter<'a> {
     vm: &'a mut VM,
     flags: InterpreterFlags,
     trace_builder: Option<jit::TraceBuilder>,
-    stack: Vec<StackFrame>,
+    frame_graph: stack::FrameGraph,
+    stack_depth: u32,
     sink: Vec<Value>,
 }
 
@@ -469,63 +490,91 @@ impl<'a> Interpreter<'a> {
             vm: parent_vm,
             flags,
             trace_builder,
-            stack: Vec::new(),
+            frame_graph: stack::FrameGraph::new(),
+            stack_depth: 0,
             sink: Vec::new(),
         }
     }
 
     fn run_module(&mut self, module: &Module) -> Result<()> {
-        self.run_module_fn(module, FnId::ROOT_FN, &[])?;
+        let root_closure = Closure {
+            fnid: FnId::ROOT_FN,
+            lexical_parent: None,
+        };
+        self.run_module_fn(module, &root_closure, &[])?;
         Ok(())
     }
 
-    fn print_indent(&mut self) {
-        let indent_level = self.stack.len() as u32 - 1;
-        for _ in 0..indent_level {
+    fn print_indent(&self) {
+        for _ in 0..(self.stack_depth - 1) {
             eprint!("      | ");
         }
     }
 
-    fn get_operand(&mut self, operand: &Operand, results: &Vec<Value>) -> Value {
+    fn get_operand(
+        &mut self,
+        operand: &Operand,
+        values_buf: &Vec<Value>,
+        frame: &stack::FrameHandle,
+    ) -> Value {
         match operand {
             Operand::Value(value) => value.clone(),
             Operand::IID(IID(ndx)) => {
-                let value = results[*ndx as usize].clone();
+                let value = values_buf[*ndx as usize].clone();
                 self.print_indent();
-                eprintln!("      ↓ {:?} = {:?}", operand, value);
+                eprintln!("      ↑ {:?} = {:?}", operand, value);
                 value
             }
             Operand::Var(var_id @ VarId { stack_fid, var_ndx }) => {
-                // 0 is the lowest frame, (self.stack.len()-1) is the current frame
-                let cur_frame_ndx = self.stack.len() as u16 - 1;
-                let frame_ndx = cur_frame_ndx.checked_sub(stack_fid.0).unwrap();
-                let frame = &self.stack.get_mut(frame_ndx as usize).unwrap().0;
-
-                let var_ndx = var_ndx.0 as usize;
-                let value = frame.get(var_ndx).unwrap().clone();
+                let value = {
+                    let frame = self
+                        .frame_graph
+                        .get_lexical_scope(&frame, *stack_fid)
+                        .unwrap();
+                    self.frame_graph.get_var(&frame, var_ndx.0).unwrap().clone()
+                };
 
                 self.print_indent();
-                eprintln!("      ↓ {:?} = {:?}", var_id, value);
-
+                eprintln!("      ↑ {:?} = {:?}", var_id, value);
                 value
             }
         }
     }
 
-    fn run_module_fn(&mut self, module: &Module, fnid: FnId, args: &[Value]) -> Result<Value> {
-        let func = module.fns.get(&fnid).unwrap();
+    fn run_module_fn(
+        &mut self,
+        module: &Module,
+        closure: &Closure,
+        args: &[Value],
+    ) -> Result<Value> {
+        let func = module.fns.get(&closure.fnid).unwrap();
+
+        let lexical_parent = closure.lexical_parent.clone();
+        let frame = self
+            .frame_graph
+            .new_frame(func.n_slots as usize, lexical_parent);
+        self.stack_depth += 1;
+
+        let res = self._run_module_fn_inner(module, closure, frame, func, args);
+
+        self.stack_depth -= 1;
+        res
+    }
+
+    fn _run_module_fn_inner(
+        &mut self,
+        module: &Module,
+        closure: &Closure,
+        frame: stack::FrameHandle,
+        func: &Function,
+        args: &[Value],
+    ) -> Result<Value> {
         let instrs = &func.instrs;
 
         let mut values_buf = vec![Value::Undefined; instrs.len()];
-        self.stack.push({
-            let n_slots = func.n_slots as usize;
-            let frame = vec![Value::Undefined; n_slots].into_boxed_slice();
-            StackFrame(frame)
-        });
 
         let should_trace = if let Some(tf) = &self.flags.tracer_flags {
-            let cur_depth = self.stack.len() as u32 - 1;
-            tf.start_depth <= cur_depth
+            tf.start_depth <= self.stack_depth
         } else {
             false
         };
@@ -539,13 +588,16 @@ impl<'a> Interpreter<'a> {
             let instr = &instrs[ndx];
             let mut next_ndx = ndx + 1;
 
+            self.print_indent();
+            eprintln!("i{:<4} {:?}", ndx, instr);
+
             match instr {
                 Instr::Const(value) => {
                     values_buf[ndx] = value.clone();
                 }
                 Instr::Arith { op, a, b } => {
-                    let a = self.get_operand(a, &mut values_buf);
-                    let b = self.get_operand(b, &mut values_buf);
+                    let a = self.get_operand(a, &mut values_buf, &frame);
+                    let b = self.get_operand(b, &mut values_buf, &frame);
 
                     if let (Value::Number(a), Value::Number(b)) = (&a, &b) {
                         values_buf[ndx] = Value::Number(match op {
@@ -559,12 +611,12 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::PushSink(operand) => {
-                    let value = self.get_operand(operand, &mut values_buf);
+                    let value = self.get_operand(operand, &mut values_buf, &frame);
                     self.sink.push(value);
                 }
                 Instr::Cmp { op, a, b } => {
-                    let a = self.get_operand(a, &mut values_buf);
-                    let b = self.get_operand(b, &mut values_buf);
+                    let a = self.get_operand(a, &mut values_buf, &frame);
+                    let b = self.get_operand(b, &mut values_buf, &frame);
 
                     match (&a, &b) {
                         (Value::Number(a), Value::Number(b)) => {
@@ -600,7 +652,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::JmpIf { cond, dest } => {
-                    let cond_value = self.get_operand(cond, &mut values_buf);
+                    let cond_value = self.get_operand(cond, &mut values_buf, &frame);
                     match cond_value {
                         Value::Bool(true) => {
                             next_ndx = dest.0 as usize;
@@ -610,20 +662,17 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::Set { var_id, value } => {
+                    let value = self.get_operand(value, &values_buf, &frame);
                     let VarId { stack_fid, var_ndx } = var_id;
-                    if stack_fid.0 == 0 {
-                        let value = self.get_operand(value, &values_buf);
-                        let frame = &mut self.stack.last_mut().unwrap().0;
-                        let var_ndx = var_ndx.0 as usize;
-                        let slot = frame.get_mut(var_ndx).unwrap();
-                        *slot = value;
-                    } else {
-                        todo!("Set: outer stack frames not passed yet!")
-                    }
+                    let frame = self
+                        .frame_graph
+                        .get_lexical_scope(&frame, *stack_fid)
+                        .expect("invalid var_id (no lexical scope)");
+                    self.frame_graph.set_var(&frame, var_ndx.0 as u16, value);
                 }
                 Instr::Nop => {}
                 Instr::Not(value) => {
-                    let value = self.get_operand(value, &values_buf);
+                    let value = self.get_operand(value, &values_buf, &frame);
                     values_buf[ndx] = match value {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         _ => {
@@ -637,34 +686,27 @@ impl<'a> Interpreter<'a> {
                     next_ndx = dest.0 as usize;
                 }
                 Instr::Return(value) => {
-                    return_value = Some(self.get_operand(value, &values_buf));
+                    return_value = Some(self.get_operand(value, &values_buf, &frame));
                 }
                 Instr::Call { callee, args } => {
-                    let callee = self.get_operand(callee, &values_buf);
+                    let callee = self.get_operand(callee, &values_buf, &frame);
+                    let arg_values: Vec<Value> = args
+                        .iter()
+                        .map(|oper| self.get_operand(oper, &values_buf, &frame))
+                        .collect();
                     match callee {
-                        Value::LocalFn(callee_fnid) => {
-                            let arg_values: Vec<Value> = args
-                                .iter()
-                                .map(|oper| self.get_operand(oper, &values_buf))
-                                .collect();
-
+                        Value::Closure(closure) => {
                             self.print_indent();
-                            eprintln!("      : call");
+                            eprintln!("      : call {closure:?}",);
                             if should_trace {
                                 let tb = self.trace_builder.as_mut().unwrap();
                                 tb.enter_function(&args[..], &values_buf[..]);
                             }
 
-                            let ret_val =
-                                self.run_module_fn(module, callee_fnid, &arg_values[..])?;
-
+                            let ret_val = self.run_module_fn(module, &closure, &arg_values[..])?;
                             values_buf[ndx] = ret_val;
                         }
                         Value::NativeFunction(nfid) => {
-                            let arg_values: Vec<Value> = args
-                                .iter()
-                                .map(|oper| self.get_operand(oper, &values_buf))
-                                .collect();
                             let nf = NATIVE_FUNCS
                                 .get(&nfid)
                                 .ok_or(error!("no such native function: {nfid}"))?;
@@ -687,25 +729,26 @@ impl<'a> Interpreter<'a> {
                     values_buf[ndx] = Value::Object(Object::new());
                 }
                 Instr::ObjSet { obj, key, value } => {
-                    let obj = self.get_operand(obj, &values_buf);
+                    let obj = self.get_operand(obj, &values_buf, &frame);
                     let mut obj = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
-                    let key = self.get_operand(key, &values_buf);
+                    let key = self.get_operand(key, &values_buf, &frame);
                     let key = ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = self.get_operand(value, &values_buf);
+                    let value = self.get_operand(value, &values_buf, &frame);
                     obj.set(key, value);
                 }
                 Instr::ObjGet { obj, key } => {
-                    let obj = if let Value::Object(obj) = self.get_operand(obj, &values_buf) {
+                    let obj = self.get_operand(obj, &values_buf, &frame);
+                    let obj = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
-                    let key = self.get_operand(key, &values_buf);
+                    let key = self.get_operand(key, &values_buf, &frame);
                     let key = ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = obj.get(&key);
@@ -722,25 +765,26 @@ impl<'a> Interpreter<'a> {
                     eprintln!("ArrayPush does nothing for now");
                 }
                 Instr::TypeOf(arg) => {
-                    let value = self.get_operand(arg, &values_buf);
+                    let value = self.get_operand(arg, &values_buf, &frame);
                     values_buf[ndx] = value.js_typeof().into();
                 }
                 Instr::BoolOp { op, a, b } => {
-                    let a: bool = self.get_operand(a, &values_buf).expect_bool()?;
-                    let b: bool = self.get_operand(b, &values_buf).expect_bool()?;
+                    let a: bool = self.get_operand(a, &values_buf, &frame).expect_bool()?;
+                    let b: bool = self.get_operand(b, &values_buf, &frame).expect_bool()?;
                     let res = match op {
                         BoolOp::And => a && b,
                         BoolOp::Or => a || b,
                     };
                     values_buf[ndx] = Value::Bool(res);
                 }
-            }
-
-            match instr {
-                Instr::Call { .. } => {}
-                _ => {
+                Instr::ClosureNew { fnid } => {
+                    let closure = Closure {
+                        fnid: *fnid,
+                        lexical_parent: Some(frame.clone()),
+                    };
                     self.print_indent();
-                    eprintln!("i{:<4} {:?}", ndx, instr);
+                    eprintln!("      created closure: {closure:?}");
+                    values_buf[ndx] = Value::Closure(closure);
                 }
             }
 
@@ -748,7 +792,7 @@ impl<'a> Interpreter<'a> {
                 let trace_builder = self.trace_builder.as_mut().unwrap();
                 trace_builder.interpreter_step(&InterpreterStep {
                     values_buf: &values_buf,
-                    fnid,
+                    fnid: closure.fnid,
                     func: &func,
                     iid: IID(ndx as u32),
                     next_iid: IID(next_ndx as u32),

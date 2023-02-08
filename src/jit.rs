@@ -130,9 +130,9 @@ impl ValueType {
             interpreter::Value::Null => ValueType::Null,
             interpreter::Value::Undefined => ValueType::Undefined,
             interpreter::Value::SelfFunction => ValueType::Function,
-            interpreter::Value::LocalFn(_) => ValueType::Function,
             interpreter::Value::NativeFunction(_) => ValueType::Function,
             interpreter::Value::Object(_) => ValueType::Obj,
+            interpreter::Value::Closure(_) => ValueType::Function,
         }
     }
 
@@ -186,6 +186,9 @@ pub struct TraceBuilder {
     operand_of_iid: HashMap<(u32, interpreter::IID), Operand>,
     args_stack: Vec<Vec<Operand>>,
     unboxes: HashMap<ValueId, (ValueType, ValueId)>,
+    // "Parking spot" used to tranfer the return value from a returning
+    // function to the call instruction
+    return_value: Option<Operand>,
     // Current stack depth relative to the trace's entry point (function or loop)
     stack_depth: u32,
     loop_head: Option<interpreter::GlobalIID>,
@@ -206,6 +209,19 @@ struct VarId {
     // function/loop.
     stack_depth: i32,
     var_ndx: u16,
+}
+
+impl VarId {
+    fn to_interpreter_varid(&self) -> Option<interpreter::VarId> {
+        if self.stack_depth >= 0 {
+            Some(interpreter::VarId {
+                stack_fid: interpreter::FrameOffset(self.stack_depth as u16),
+                var_ndx: interpreter::VarIndex(self.var_ndx),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -233,6 +249,7 @@ impl TraceBuilder {
             operand_of_iid: HashMap::new(),
             operand_of_varid: HashMap::new(),
             unboxes: HashMap::new(),
+            return_value: None,
             args_stack: Vec::new(),
             stack_depth: 0,
             instrs: Vec::new(),
@@ -267,17 +284,10 @@ impl TraceBuilder {
                         "TB: {:?} is unresolved => considered trace parameter, adding guard",
                         operand
                     );
-
-                    let observed_value = &value_buf[iid.0 as usize];
+                    assert_eq!(0, self.stack_depth);
 
                     let param_ndx = self.add_parameter(operand.clone());
                     let param = self.emit(Instr::TraceParam(param_ndx))?;
-                    // TODO Question: Is this really necessary?
-                    self.emit(Instr::AssertEqConst {
-                        x: param.clone(),
-                        expected: observed_value.clone(),
-                    })?;
-
                     self.operand_of_iid.insert(key, param.clone());
                     Ok(param)
                 }
@@ -292,8 +302,9 @@ impl TraceBuilder {
                 match self.operand_of_varid.get(&resolved_varid) {
                     Some(oper) => Ok(oper.clone()),
                     None => {
-                        let param_ndx =
-                            self.add_parameter(interpreter::Operand::Var(intrp_varid.clone()));
+                        let param_ndx = self.add_parameter(interpreter::Operand::Var(
+                            resolved_varid.to_interpreter_varid().unwrap(),
+                        ));
                         let oper = self.emit(Instr::TraceParam(param_ndx))?;
                         self.operand_of_varid.insert(resolved_varid, oper.clone());
                         Ok(oper)
@@ -580,7 +591,9 @@ impl TraceBuilder {
                 } else {
                     self.resolve_interpreter_operand(&value, &step.values_buf)?
                 };
-                Some(value)
+
+                self.return_value = Some(value);
+                None
             }
             interpreter::Instr::GetArg(index) => {
                 let value = if self.stack_depth == 0 {
@@ -595,9 +608,24 @@ impl TraceBuilder {
                 };
                 Some(value)
             }
-            interpreter::Instr::Call { args, .. } => {
-                // TODO Something to do for the return value?
-                None
+            interpreter::Instr::Call { .. } => {
+                // We reach this point *after* the interpreter has completed the call, i.e.:
+                //   - intepreter gets instruction Call
+                //     - interpreter calls TraceBuilder::enter_function
+                //     - interpreter runs callee
+                //       - interpreter calls TraceBuilder::exit_function
+                //     - interpreter collects return value
+                //   - interpreter calls TraceBuilder::trace_step(call instruction)
+                //
+                // All that's left to do for us is to pick the return value
+                // from the JIT (not the interpreter), so that we can continue
+                // constant folding etc.
+
+                let ret_val = self
+                    .return_value
+                    .take()
+                    .unwrap_or(Operand::Imm(BoxedValue::Undefined));
+                Some(ret_val)
             }
 
             interpreter::Instr::ObjNew => Some(self.emit(Instr::ObjNew)?),
@@ -631,6 +659,7 @@ impl TraceBuilder {
                 let b = self.resolve_operand_as(b, &step.values_buf, ValueType::Bool)?;
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
+            interpreter::Instr::ClosureNew { .. } => Some(self.emit(Instr::ClosureNew)?),
         };
 
         // Map IID to the result operand
@@ -664,6 +693,7 @@ impl TraceBuilder {
             arg_values.push(arg);
         }
         self.args_stack.push(arg_values);
+
         self.stack_depth += 1;
         eprintln!("TB: call (stack depth -> {})", self.stack_depth);
     }
@@ -672,6 +702,9 @@ impl TraceBuilder {
         if self.state != TraceBuilderState::Tracing {
             return;
         }
+        // self.exit_function_expected might be false, if the source bytecode
+        // does not  have an explicit Return instruction. In this case, we do
+        // an implicit Return(undefined)
 
         if self.stack_depth == 0 {
             eprintln!("TB: trace ended");
@@ -689,7 +722,7 @@ impl TraceBuilder {
                 self.operand_of_varid.remove(&key);
             }
             self.stack_depth -= 1;
-            self.args_stack.pop();
+            self.args_stack.pop().unwrap();
             eprintln!("TB: returned from function");
         }
 
@@ -938,6 +971,8 @@ enum Instr {
 
     TypeOf(Operand),
 
+    ClosureNew,
+
     PushSink(Operand),
     Return(Operand),
 }
@@ -968,6 +1003,7 @@ impl Instr {
             Instr::ObjGet { .. } => Some(ValueType::Boxed),
             Instr::TypeOf(_) => Some(ValueType::Str),
             Instr::WhateverBullshitIsNeededtoLoopback => None,
+            Instr::ClosureNew => Some(ValueType::Function),
         }
     }
 
@@ -1000,6 +1036,7 @@ impl Instr {
             Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
             Instr::TypeOf(arg) => Box::new([arg].into_iter()),
             Instr::WhateverBullshitIsNeededtoLoopback => Box::new(std::iter::empty()),
+            Instr::ClosureNew => Box::new(std::iter::empty()),
         }
     }
 }
@@ -1108,6 +1145,18 @@ mod tests {
         }
     }
 
+    fn get_pushsink_operands(trace: &Trace) -> Vec<&Operand> {
+        let pushsink_operands: Vec<_> = trace
+            .instrs
+            .iter()
+            .filter_map(|i| match i {
+                Instr::PushSink(operand) => Some(operand),
+                _ => None,
+            })
+            .collect();
+        pushsink_operands
+    }
+
     #[test]
     fn test_tracing_simple_constant_folding() {
         let output = quick_jit_func(
@@ -1126,14 +1175,7 @@ mod tests {
         let trace = output.trace.unwrap();
         trace.dump();
 
-        let pushsink_operands: Vec<_> = trace
-            .instrs
-            .iter()
-            .filter_map(|i| match i {
-                Instr::PushSink(operand) => Some(operand),
-                _ => None,
-            })
-            .collect();
+        let pushsink_operands = get_pushsink_operands(&trace);
         assert_eq!(pushsink_operands.len(), 1);
         assert!(PartialEq::eq(
             pushsink_operands[0],
@@ -1213,14 +1255,53 @@ mod tests {
 
             f();
             ",
-            1,
+            2,
         );
 
         let trace = output.trace.unwrap();
         trace.dump();
 
-        // TODO
-        assert!(false);
+        let sink_operands = get_pushsink_operands(&trace);
+        assert_eq!(
+            sink_operands,
+            [&Operand::Imm("asd".into()), &Operand::Imm("lol".into()),]
+        );
+    }
+
+    #[test]
+    fn test_far_read_write() {
+        let output = quick_jit_func(
+            "
+            function main() {
+                let far_away = 'asd';
+                function f() {
+                    far_away = 'the good value';
+                    function g() {
+                        function h() {
+                            return far_away;
+                        }
+                        return h;
+                    }
+                    return g();
+                }
+                let func = f();
+                sink(func());
+            }
+
+            main();
+
+            ",
+            2,
+        );
+
+        let trace = output.trace.unwrap();
+        trace.dump();
+
+        let sink_operands = get_pushsink_operands(&trace);
+        assert_eq!(
+            sink_operands,
+            [&Operand::Imm("asd".into()), &Operand::Imm("lol".into()),]
+        );
     }
 
     #[ignore]
