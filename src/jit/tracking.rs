@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    cell::{Ref, RefCell},
+    collections::{HashMap, HashSet},
+};
 
 use crate::{
     interpreter::{self, VarIndex},
@@ -75,6 +78,10 @@ pub(super) struct FrameTracker {
     /// introduced as trace parameters when the JIT starts later than the start
     /// of the function's body.
     operand_of_varid: Box<[Option<Operand>]>,
+    // TODO More compact data structure
+    written_vars: RefCell<HashSet<VarIndex>>,
+    read_before_write: RefCell<HashSet<VarIndex>>,
+
     operand_of_iid: HashMap<interpreter::IID, Operand>,
     unboxes: HashMap<ValueId, (ValueType, ValueId)>,
 }
@@ -85,6 +92,8 @@ impl FrameTracker {
         FrameTracker {
             args,
             operand_of_varid,
+            written_vars: RefCell::new(HashSet::new()),
+            read_before_write: RefCell::new(HashSet::new()),
             operand_of_iid: HashMap::new(),
             unboxes: HashMap::new(),
         }
@@ -101,10 +110,20 @@ impl FrameTracker {
         self.operand_of_iid.get(&iid)
     }
     pub(super) fn set_result(&mut self, iid: interpreter::IID, value: Operand) {
-        self.operand_of_iid.insert(iid, value);
+        let prev = self.operand_of_iid.insert(iid, value);
+        assert!(
+            prev.is_none(),
+            "JIT bug: multiple results for the same instruction ({:?})",
+            iid
+        );
     }
 
     pub(super) fn get_var(&self, var_ndx: VarIndex) -> Option<&Operand> {
+        let ws = self.written_vars.borrow();
+        if !ws.contains(&var_ndx) {
+            let mut rbws = self.read_before_write.borrow_mut();
+            rbws.insert(var_ndx.clone());
+        }
         self.operand_of_varid
             .get(var_ndx.0 as usize)
             .expect("bug: invalid variable index for this frame")
@@ -117,6 +136,9 @@ impl FrameTracker {
             .get_mut(var_ndx.0 as usize)
             .expect("bug: invalid variable index for this frame");
         *slot = Some(value);
+
+        let mut ws = self.written_vars.borrow_mut();
+        ws.insert(var_ndx);
     }
 
     pub(super) fn get_unbox(&self, value_id: ValueId) -> Option<(ValueType, ValueId)> {
@@ -125,5 +147,9 @@ impl FrameTracker {
     pub(super) fn set_unbox(&mut self, value_id: ValueId, ty: ValueType, value: ValueId) {
         let prev = self.unboxes.insert(value_id, (ty, value));
         assert!(prev.is_none(), "JIT bug: multiple unboxes");
+    }
+
+    pub(super) fn get_read_before_written(&self) -> Ref<HashSet<VarIndex>> {
+        self.read_before_write.borrow()
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
 use crate::{
@@ -884,11 +884,27 @@ impl TraceBuilder {
 
     pub(crate) fn build(self) -> Option<Trace> {
         if let TraceBuilderState::Finished = self.state {
+            let instrs = self.instrs;
+
             if self.loop_head.is_some() {
-                todo!("add phis, generate looping code");
+                let rbw: &'_ HashSet<(FrameId, VarIndex)> = self.vars.get_reads_before_writes();
+                for (frame_id, var_ndx) in rbw.iter() {
+                    let frame = &self.vars.get(*frame_id);
+                    // TODO Each variable's first value *must* come from an
+                    // instruction (i.e. no constant folding), so that there
+                    // can be a ValueId that can be overwritten by the phi
+                    // instruction
+                    let first_value: ValueId = frame
+                        .get_first_write(*var_ndx)
+                        .expect("bug in VarsState: returned variable without a write");
+                    let cur_value = frame
+                        .get_var(*var_ndx)
+                        .expect("bug in VarsState: returned variable without a write");
+                    instrs.push(Instr::Phi(first_value, cur_value.clone()));
+                }
             }
 
-            let hregs = regalloc::allocate_registers(self.instrs.as_slice(), 6);
+            let hregs = regalloc::allocate_registers(instrs.as_slice(), 6);
 
             Some(Trace {
                 instrs: self.instrs,
@@ -986,6 +1002,8 @@ enum Instr {
 
     PushSink(Operand),
     Return(Operand),
+
+    Phi(ValueId, Operand),
 }
 
 type ArithOp = interpreter::ArithOp;
