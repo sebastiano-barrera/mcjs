@@ -213,7 +213,7 @@ struct TraceParam {
     operand: interpreter::Operand,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum TraceBuilderState {
     WaitingStart,
     Tracing,
@@ -705,14 +705,29 @@ impl TraceBuilder {
         eprintln!("[..tb call (stack depth -> {})]", self.stack_depth());
     }
 
+    /// Tell the JIT about the arguments passed to a function call that is
+    /// about to happen.
+    ///
+    /// It is mandatory that this method is called exactly once before each
+    /// call to `Self::enter_function`.
+    ///
+    /// If the TraceBuilder is not "active" (e.g. the trace is finished or
+    /// failed, or it is still waiting for the right start instruction), then
+    /// this function does nothing (if the arguments are needed later by the
+    /// trace, they will be acquired  as trace parameters).
     pub(crate) fn set_args<F>(&mut self, args: &[interpreter::Operand], fnid_to_frameid: &F)
     where
         F: Fn(FnId) -> FrameId,
     {
+        if self.state != TraceBuilderState::Tracing {
+            return;
+        }
+
         assert!(
             self.args_buf.is_none(),
             "set_args called twice before enter_function"
         );
+
         let args_values = args
             .iter()
             .map(|arg| self.resolve_interpreter_operand(arg, fnid_to_frameid))
@@ -758,8 +773,15 @@ impl TraceBuilder {
     }
 
     fn cur_frame_model(&self) -> &FrameTracker {
-        let fid = self.stack_model.last().unwrap();
-        self.frame_models.get(&fid).unwrap()
+        let fid = self.stack_model.last().unwrap_or_else(|| {
+            panic!(
+                "JIT bug: no frame model on stack (trace ended? state = {:?})",
+                self.state
+            )
+        });
+        self.frame_models
+            .get(&fid)
+            .expect("JIT bug: no frame model on stack")
     }
 
     fn emit(&mut self, instr: Instr) -> Result<Operand, Error> {
