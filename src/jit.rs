@@ -179,16 +179,21 @@ pub struct TraceBuilder {
 /// cares about.
 struct FrameTracker {
     args: Vec<Operand>,
-    // This map associates RUNTIME variable identifiers (current frame id, VarIndex)
-    // from the interpreter to ValueIds in the SSA trace we're building.
-    operand_of_varid: Box<[Operand]>,
+    /// Associates RUNTIME variable identifiers (current frame id, VarIndex)
+    /// from the interpreter to ValueIds in the SSA trace we're building.
+    ///
+    /// The stored value is optional, and present (Some) *only* when the
+    /// assignment has been "seen" by the JIT.  This allows variables to be
+    /// introduced as trace parameters when the JIT starts later than the start
+    /// of the function's body.
+    operand_of_varid: Box<[Option<Operand>]>,
     operand_of_iid: HashMap<interpreter::IID, Operand>,
     unboxes: HashMap<ValueId, (ValueType, ValueId)>,
 }
 
 impl FrameTracker {
     fn new(args: Vec<Operand>, n_vars: usize) -> Self {
-        let operand_of_varid = vec![Operand::Imm(BoxedValue::Undefined); n_vars].into_boxed_slice();
+        let operand_of_varid = vec![None; n_vars].into_boxed_slice();
         FrameTracker {
             args,
             operand_of_varid,
@@ -249,13 +254,13 @@ impl TraceBuilder {
 
     fn resolve_interpreter_operand<F>(
         &mut self,
-        operand: &interpreter::Operand,
+        intrp_operand: &interpreter::Operand,
         fnid_to_frameid: F,
     ) -> Result<Operand, Error>
     where
         F: Fn(FnId) -> FrameId,
     {
-        match operand {
+        match intrp_operand {
             // constants from the interpreter bytecode are simply preserved
             interpreter::Operand::Value(value) => Ok(Operand::Imm(value.clone())),
 
@@ -273,12 +278,12 @@ impl TraceBuilder {
                     self.print_indent();
                     eprintln!(
                         "[..tb {:?} is unresolved => considered trace parameter, adding guard]",
-                        operand
+                        intrp_operand
                     );
+                    // TODO Test that this is really necessary. If so, describe it here
                     assert_eq!(1, self.stack_depth());
 
-                    let param_ndx = self.add_parameter(operand.clone());
-                    let param = self.emit(Instr::TraceParam(param_ndx))?;
+                    let param = self.add_parameter(intrp_operand.clone())?;
                     self.cur_frame_model_mut()
                         .operand_of_iid
                         .insert(*iid, param.clone());
@@ -288,14 +293,29 @@ impl TraceBuilder {
 
             interpreter::Operand::Var(intrp_varid) => {
                 let frame_id = fnid_to_frameid(intrp_varid.fnid);
-                Ok(self
+                {
+                    let slot = self
+                        .frame_models
+                        .get_mut(&frame_id)
+                        .expect("no such frame")
+                        .operand_of_varid
+                        .get_mut(intrp_varid.var_ndx.0 as usize)
+                        .expect("invalid variable index for this frame");
+                    if let Some(value) = slot {
+                        return Ok(value.clone());
+                    }
+                }
+
+                let param = self.add_parameter(intrp_operand.clone())?;
+                let slot = self
                     .frame_models
-                    .get(&frame_id)
+                    .get_mut(&frame_id)
                     .expect("no such frame")
                     .operand_of_varid
-                    .get(intrp_varid.var_ndx.0 as usize)
-                    .expect("invalid variable index for this frame")
-                    .clone())
+                    .get_mut(intrp_varid.var_ndx.0 as usize)
+                    .expect("invalid variable index for this frame");
+                *slot = Some(param.clone());
+                Ok(param)
             }
         }
     }
@@ -584,7 +604,7 @@ impl TraceBuilder {
                             .operand_of_varid
                             .get_mut(var_id.var_ndx.0 as usize)
                             .unwrap();
-                        *slot = value;
+                        *slot = Some(value);
                     }
                     None => {
                         todo!(
@@ -945,10 +965,10 @@ impl TraceBuilder {
         }
     }
 
-    pub(crate) fn add_parameter(&mut self, operand: interpreter::Operand) -> u16 {
+    fn add_parameter(&mut self, operand: interpreter::Operand) -> Result<Operand, Error> {
         let ndx = self.parameters.len() as u16;
         self.parameters.push(TraceParam { operand });
-        ndx
+        self.emit(Instr::TraceParam(ndx))
     }
 
     fn print_indent(&self) {
