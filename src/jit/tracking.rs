@@ -64,6 +64,10 @@ impl VarsState {
     pub(super) fn get_mut(&mut self, frame_id: FrameId) -> &mut FrameTracker {
         self.frame_models.get_mut(&frame_id).unwrap()
     }
+
+    pub(crate) fn get_reads_before_writes(&self) -> &HashSet<(FrameId, VarIndex)> {
+        todo!()
+    }
 }
 
 /// A "model" of the interpreter's stack, represented in terms that the JIT
@@ -151,5 +155,9 @@ impl FrameTracker {
 
     pub(super) fn get_read_before_written(&self) -> Ref<HashSet<VarIndex>> {
         self.read_before_write.borrow()
+    }
+
+    pub(crate) fn get_first_write(&self, var_ndx: VarIndex) -> Option<ValueId> {
+        todo!()
     }
 }

@@ -65,7 +65,6 @@ impl Cmp {
 pub(super) enum Operand {
     ValueId(ValueId),
     Imm(BoxedValue),
-    Cmp(Box<Cmp>),
 }
 
 impl Operand {
@@ -73,10 +72,6 @@ impl Operand {
         match self {
             Operand::ValueId(vid) => Box::new(std::iter::once(vid.clone())),
             Operand::Imm(_) => Box::new(std::iter::empty()),
-            Operand::Cmp(boxed_cmp) => {
-                let Cmp { ty: _, op: _, a, b } = boxed_cmp.as_ref();
-                Box::new(a.value_ids().chain(b.value_ids()))
-            }
         }
     }
 }
@@ -87,18 +82,11 @@ impl From<ValueId> for Operand {
     }
 }
 
-impl From<Cmp> for Operand {
-    fn from(cmp: Cmp) -> Self {
-        Operand::Cmp(Box::new(cmp))
-    }
-}
-
 impl std::fmt::Debug for Operand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Operand::ValueId(vid) => vid.fmt(f),
             Operand::Imm(value) => value.fmt(f),
-            Operand::Cmp(cmp) => cmp.fmt(f),
         }
     }
 }
@@ -286,7 +274,6 @@ impl TraceBuilder {
                 instr.result_type()
             }
             Operand::Imm(value) => Some(ValueType::of(value)),
-            Operand::Cmp(_) => Some(ValueType::Bool),
         }
     }
 
@@ -325,27 +312,27 @@ impl TraceBuilder {
                 if_false: Operand::Imm("false".into()),
             })?),
 
-            (ValueType::Num, ValueType::Bool) => Some(
-                Cmp {
+            (ValueType::Num, ValueType::Bool) => {
+                let cmp = Cmp {
                     ty: ValueType::Num,
                     op: CmpOp::EQ,
                     a: operand,
                     b: Operand::Imm(BoxedValue::Number(0.0)),
-                }
-                .into(),
-            ),
+                };
+                Some(self.emit(cmp.into())?)
+            }
             (ValueType::Num, ValueType::Str) => Some(self.emit(Instr::Num2Str(operand))?),
 
-            (ValueType::Str, ValueType::Bool) => Some(
-                Cmp {
+            (ValueType::Str, ValueType::Bool) => {
+                let cmp = Cmp {
                     ty: ValueType::Str,
                     op: CmpOp::EQ,
                     a: operand,
                     // TODO this string allocation could be avoided
                     b: Operand::Imm("".into()),
-                }
-                .into(),
-            ),
+                };
+                Some(self.emit(cmp.into())?)
+            }
 
             // TODO Convert string to number
             (ValueType::Str, ValueType::Num) => None,
@@ -476,9 +463,6 @@ impl TraceBuilder {
                         let interpreter_result = &step.values_buf[step.iid.0 as usize];
                         Operand::Imm(interpreter_result.clone())
                     }
-                    (Operand::Cmp(_), _) | (_, Operand::Cmp(_)) => {
-                        panic!("invalid operand of type Cmp for instr Cmp")
-                    }
                     (a, b) => {
                         let a_type = self.operand_type(&a).unwrap();
                         let b_type = self.operand_type(&b).unwrap();
@@ -514,7 +498,7 @@ impl TraceBuilder {
                             }
                         };
 
-                        cmp.into()
+                        self.emit(cmp.into())?
                     }
                 };
 
@@ -526,7 +510,7 @@ impl TraceBuilder {
                 match cond {
                     // treat this the same as an unconditional jump
                     Operand::Imm(_) => None,
-                    Operand::Cmp(_) | Operand::ValueId(_) => {
+                    Operand::ValueId(_) => {
                         let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
 
                         print_indent(self.stack_depth());
@@ -731,7 +715,10 @@ impl TraceBuilder {
             Instr::Not(Operand::Imm(BoxedValue::Bool(value))) => {
                 Ok(Operand::Imm(BoxedValue::Bool(!value)))
             }
-            Instr::Not(Operand::Cmp(cmp)) => Ok(Operand::Cmp(Box::new(cmp.invert()))),
+            Instr::Not(Operand::ValueId(vid)) => match self.get_instr(vid) {
+                Instr::Cmp(cmp) => Ok(self.emit(Instr::Cmp(cmp.invert()))?),
+                _ => self.write(instr),
+            },
 
             Instr::Arith {
                 op,
@@ -816,7 +803,6 @@ impl TraceBuilder {
 
             Instr::Unbox(value_type, ref arg) => match arg {
                 Operand::Imm(_) => panic!("invalid operand for Unbox: immediate"),
-                Operand::Cmp(_) => panic!("invalid operand for Unbox: cmp"),
                 Operand::ValueId(arg_vid) => {
                     // TODO move some of this stuff in FrameTracker
                     if let Some((prev_unbox_type, unboxed)) =
@@ -855,7 +841,6 @@ impl TraceBuilder {
                         target_instr.result_type().and_then(|ty| ty.js_typeof())
                     }
                     Operand::Imm(value) => ValueType::of(value).js_typeof(),
-                    Operand::Cmp(_) => panic!("JIT bug: invalid operand of type Cmp for TypeOf"),
                 };
 
                 match ty {
@@ -884,7 +869,7 @@ impl TraceBuilder {
 
     pub(crate) fn build(self) -> Option<Trace> {
         if let TraceBuilderState::Finished = self.state {
-            let instrs = self.instrs;
+            let mut instrs = self.instrs;
 
             if self.loop_head.is_some() {
                 let rbw: &'_ HashSet<(FrameId, VarIndex)> = self.vars.get_reads_before_writes();
@@ -907,13 +892,18 @@ impl TraceBuilder {
             let hregs = regalloc::allocate_registers(instrs.as_slice(), 6);
 
             Some(Trace {
-                instrs: self.instrs,
+                instrs,
                 hreg_alloc: hregs,
                 parameters: self.parameters,
             })
         } else {
             None
         }
+    }
+
+    fn get_instr(&self, vid: ValueId) -> &Instr {
+        let ndx = vid.0 as usize;
+        self.instrs.get(ndx).unwrap()
     }
 }
 
@@ -956,12 +946,7 @@ enum Instr {
         a: Operand,
         b: Operand,
     },
-    Cmp {
-        ty: ValueType,
-        op: CmpOp,
-        a: Operand,
-        b: Operand,
-    },
+    Cmp(Cmp),
     BoolOp {
         op: BoolOp,
         a: Operand,
@@ -1010,6 +995,12 @@ type ArithOp = interpreter::ArithOp;
 type CmpOp = interpreter::CmpOp;
 type BoolOp = interpreter::BoolOp;
 
+impl From<Cmp> for Instr {
+    fn from(cmp: Cmp) -> Self {
+        Instr::Cmp(cmp)
+    }
+}
+
 impl Instr {
     fn result_type(&self) -> Option<ValueType> {
         match self {
@@ -1033,6 +1024,7 @@ impl Instr {
             Instr::TypeOf(_) => Some(ValueType::Str),
             Instr::WhateverBullshitIsNeededtoLoopback => None,
             Instr::ClosureNew => Some(ValueType::Function),
+            Instr::Phi(_, _) => todo!(),
         }
     }
 
@@ -1041,7 +1033,7 @@ impl Instr {
         match self {
             Instr::Not(arg) => Box::new(once(arg)),
             Instr::Arith { a, b, .. } => Box::new([a, b].into_iter()),
-            Instr::Cmp { a, b, .. } => Box::new([a, b].into_iter()),
+            Instr::Cmp(Cmp { a, b, .. }) => Box::new([a, b].into_iter()),
             Instr::BoolOp { a, b, .. } => Box::new([a, b].into_iter()),
             Instr::Choose {
                 cond,
@@ -1066,6 +1058,7 @@ impl Instr {
             Instr::TypeOf(arg) => Box::new([arg].into_iter()),
             Instr::WhateverBullshitIsNeededtoLoopback => Box::new(std::iter::empty()),
             Instr::ClosureNew => Box::new(std::iter::empty()),
+            Instr::Phi(_, _) => todo!(),
         }
     }
 }
