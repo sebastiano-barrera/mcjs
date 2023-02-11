@@ -1,10 +1,11 @@
 use slotmap::SlotMap;
-use std::{cell::Cell, marker::PhantomData};
+use std::{cell::Cell, marker::PhantomData, sync::atomic::AtomicUsize};
 
 pub(crate) use crate::interpreter::Value;
+use crate::interpreter::{FnId, VarIndex};
 
 slotmap::new_key_type! {
-    struct FrameId;
+    pub(crate) struct FrameId;
 }
 
 /// A graph of activation frames (with a terrible name; I'm avoiding the word
@@ -14,6 +15,12 @@ pub(crate) struct FrameGraph {
     frames: SlotMap<FrameId, Frame>,
 }
 
+pub(crate) struct Frame {
+    fnid: FnId,
+    lexical_parent: Option<FrameId>,
+    variables: Box<[Value]>,
+}
+
 impl FrameGraph {
     pub(crate) fn new() -> Self {
         FrameGraph {
@@ -21,59 +28,44 @@ impl FrameGraph {
         }
     }
 
-    pub(crate) fn new_frame(
-        &mut self,
+    pub(crate) fn new_frame<'a>(
+        &'a mut self,
+        fnid: FnId,
         n_local_vars: usize,
-        lexical_parent: Option<FrameHandle>,
-    ) -> FrameHandle {
+        lexical_parent: Option<FrameId>,
+    ) -> FrameId {
         let variables = vec![Value::Undefined; n_local_vars].into_boxed_slice();
-        let lexical_parent = lexical_parent.map(|handle| handle.0);
-        let key = self.frames.insert(Frame {
+        self.frames.insert(Frame {
+            fnid,
             lexical_parent,
             variables,
-        });
-
-        FrameHandle(key)
+        })
     }
 
-    pub(crate) fn get(&self, handle: &FrameHandle) -> Option<&Frame> {
-        self.frames.get(handle.0)
+    pub(crate) fn get(&self, fid: FrameId) -> Option<&Frame> {
+        self.frames.get(fid)
     }
 
-    pub(crate) fn get_mut(&mut self, handle: &FrameHandle) -> Option<&mut Frame> {
-        self.frames.get_mut(handle.0)
+    pub(crate) fn get_mut(&mut self, fid: FrameId) -> Option<&mut Frame> {
+        self.frames.get_mut(fid)
     }
 
-    pub(crate) fn get_lexical_scope(
-        &self,
-        handle: &FrameHandle,
-        offset: crate::interpreter::FrameOffset,
-    ) -> Option<FrameHandle> {
-        let mut key = handle.0;
+    pub(crate) fn get_var(&self, fid: FrameId, var_ndx: VarIndex) -> Option<Value> {
+        self.get(fid)?.variables.get(var_ndx.0 as usize).cloned()
+    }
 
-        for _ in 0..offset.0 {
-            let frame = self.frames.get(key)?;
-            key = frame.lexical_parent.clone()?;
+    pub(crate) fn set_var(&mut self, fid: FrameId, var_ndx: VarIndex, value: Value) {
+        let frame = self.get_mut(fid).unwrap();
+        *frame.variables.get_mut(var_ndx.0 as usize).unwrap() = value;
+    }
+
+    pub(crate) fn get_lexical_scope(&self, mut fid: FrameId, fnid: FnId) -> Option<FrameId> {
+        loop {
+            let frame = self.get(fid).unwrap();
+            if frame.fnid == fnid {
+                return Some(fid);
+            }
+            fid = frame.lexical_parent?.clone();
         }
-
-        Some(FrameHandle(key))
-    }
-
-    pub(crate) fn get_var(&self, handle: &FrameHandle, var_ndx: u16) -> Option<Value> {
-        let frame = self.get(handle)?;
-        frame.variables.get(var_ndx as usize).cloned()
-    }
-
-    pub(crate) fn set_var(&mut self, handle: &FrameHandle, var_ndx: u16, value: Value) {
-        let frame = self.get_mut(&handle).unwrap();
-        *frame.variables.get_mut(var_ndx as usize).unwrap() = value;
     }
 }
-
-pub(crate) struct Frame {
-    lexical_parent: Option<FrameId>,
-    variables: Box<[Value]>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct FrameHandle(FrameId);

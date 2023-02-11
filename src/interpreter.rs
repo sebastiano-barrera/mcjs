@@ -111,12 +111,12 @@ impl ObjectKey {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Closure {
     fnid: FnId,
-    lexical_parent: Option<stack::FrameHandle>,
+    lexical_parent: Option<stack::FrameId>,
 }
 
 impl std::fmt::Debug for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<closure {:?}>", self.fnid)
+        write!(f, "<closure {:?} <- {:?}>", self.fnid, self.lexical_parent)
     }
 }
 
@@ -164,7 +164,7 @@ pub enum Instr {
     },
     Jmp(IID),
     Set {
-        var_id: VarId,
+        var_id: StaticVarId,
         value: Operand,
     },
     PushSink(Operand),
@@ -199,7 +199,7 @@ pub enum Instr {
 }
 
 impl Instr {
-    fn read_vars<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = VarId>> {
+    fn read_vars<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = StaticVarId>> {
         Box::new(self.read_operands().filter_map(|oper| match oper {
             Operand::Var(var_id) => Some(var_id.clone()),
             _ => None,
@@ -232,20 +232,24 @@ impl Instr {
     }
 }
 
-// TODO Rename this struct... the name "almost collides" mentally with stuff in crate::stack
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FrameOffset(pub(crate) u16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VarIndex(pub(crate) u16);
+/// Static identifier for a variable, used in the bytecode as operand.  
+///
+/// Designates a variable in the bytecode, not at runtime.  If the function
+/// containing the variable declaration is called multiple times (e.g. via
+/// recursion, or by producing multiple closures from the same function
+/// literal), this identifier is the same every time, but the *runtime*
+/// identifier will change.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VarId {
-    pub(crate) stack_fid: FrameOffset,
+pub struct StaticVarId {
+    pub(crate) fnid: FnId,
     pub(crate) var_ndx: VarIndex,
 }
 
-impl std::fmt::Debug for VarId {
+impl std::fmt::Debug for StaticVarId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "var[{}:{}]", self.stack_fid.0, self.var_ndx.0)
+        write!(f, "var[{}:{}]", self.fnid.0, self.var_ndx.0)
     }
 }
 
@@ -255,7 +259,7 @@ pub enum Operand {
     // Evaluates immediately to a constant value.
     Value(Value),
     // Evaluates to the value of the indicated variable.
-    Var(VarId),
+    Var(StaticVarId),
     // Evaluates to the result of the indicated instruction.
     IID(IID),
 }
@@ -515,7 +519,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         operand: &Operand,
         values_buf: &Vec<Value>,
-        frame: &stack::FrameHandle,
+        cur_fid: stack::FrameId,
     ) -> Value {
         match operand {
             Operand::Value(value) => value.clone(),
@@ -525,14 +529,16 @@ impl<'a> Interpreter<'a> {
                 eprintln!("      ↑ {:?} = {:?}", operand, value);
                 value
             }
-            Operand::Var(var_id @ VarId { stack_fid, var_ndx }) => {
-                let value = {
-                    let frame = self
-                        .frame_graph
-                        .get_lexical_scope(&frame, *stack_fid)
-                        .unwrap();
-                    self.frame_graph.get_var(&frame, var_ndx.0).unwrap().clone()
-                };
+            Operand::Var(var_id) => {
+                let fid = self
+                    .frame_graph
+                    .get_lexical_scope(cur_fid, var_id.fnid)
+                    .unwrap();
+                let value = self
+                    .frame_graph
+                    .get_var(fid, var_id.var_ndx)
+                    .unwrap()
+                    .clone();
 
                 self.print_indent();
                 eprintln!("      ↑ {:?} = {:?}", var_id, value);
@@ -550,13 +556,15 @@ impl<'a> Interpreter<'a> {
         let func = module.fns.get(&closure.fnid).unwrap();
 
         let lexical_parent = closure.lexical_parent.clone();
+        let n_local_vars = func.n_slots as usize;
         let frame = self
             .frame_graph
-            .new_frame(func.n_slots as usize, lexical_parent);
+            .new_frame(closure.fnid, n_local_vars, lexical_parent);
         self.stack_depth += 1;
 
         let res = self._run_module_fn_inner(module, closure, frame, func, args);
 
+        // TODO Garbage collect stack frames
         self.stack_depth -= 1;
         res
     }
@@ -565,7 +573,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         module: &Module,
         closure: &Closure,
-        frame: stack::FrameHandle,
+        cur_frame_id: stack::FrameId,
         func: &Function,
         args: &[Value],
     ) -> Result<Value> {
@@ -578,6 +586,13 @@ impl<'a> Interpreter<'a> {
         } else {
             false
         };
+
+        if should_trace {
+            self.trace_builder
+                .as_mut()
+                .unwrap()
+                .enter_function(cur_frame_id, func.n_slots as usize);
+        }
 
         let mut ndx = 0;
         let mut return_value = None;
@@ -596,8 +611,8 @@ impl<'a> Interpreter<'a> {
                     values_buf[ndx] = value.clone();
                 }
                 Instr::Arith { op, a, b } => {
-                    let a = self.get_operand(a, &mut values_buf, &frame);
-                    let b = self.get_operand(b, &mut values_buf, &frame);
+                    let a = self.get_operand(a, &mut values_buf, cur_frame_id);
+                    let b = self.get_operand(b, &mut values_buf, cur_frame_id);
 
                     if let (Value::Number(a), Value::Number(b)) = (&a, &b) {
                         values_buf[ndx] = Value::Number(match op {
@@ -611,12 +626,12 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::PushSink(operand) => {
-                    let value = self.get_operand(operand, &mut values_buf, &frame);
+                    let value = self.get_operand(operand, &mut values_buf, cur_frame_id);
                     self.sink.push(value);
                 }
                 Instr::Cmp { op, a, b } => {
-                    let a = self.get_operand(a, &mut values_buf, &frame);
-                    let b = self.get_operand(b, &mut values_buf, &frame);
+                    let a = self.get_operand(a, &mut values_buf, cur_frame_id);
+                    let b = self.get_operand(b, &mut values_buf, cur_frame_id);
 
                     match (&a, &b) {
                         (Value::Number(a), Value::Number(b)) => {
@@ -652,7 +667,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::JmpIf { cond, dest } => {
-                    let cond_value = self.get_operand(cond, &mut values_buf, &frame);
+                    let cond_value = self.get_operand(cond, &mut values_buf, cur_frame_id);
                     match cond_value {
                         Value::Bool(true) => {
                             next_ndx = dest.0 as usize;
@@ -662,17 +677,18 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::Set { var_id, value } => {
-                    let value = self.get_operand(value, &values_buf, &frame);
-                    let VarId { stack_fid, var_ndx } = var_id;
-                    let frame = self
+                    let value = self.get_operand(value, &values_buf, cur_frame_id);
+
+                    let target_frame_id = self
                         .frame_graph
-                        .get_lexical_scope(&frame, *stack_fid)
+                        .get_lexical_scope(cur_frame_id, var_id.fnid)
                         .expect("invalid var_id (no lexical scope)");
-                    self.frame_graph.set_var(&frame, var_ndx.0 as u16, value);
+                    self.frame_graph
+                        .set_var(target_frame_id, var_id.var_ndx, value);
                 }
                 Instr::Nop => {}
                 Instr::Not(value) => {
-                    let value = self.get_operand(value, &values_buf, &frame);
+                    let value = self.get_operand(value, &values_buf, cur_frame_id);
                     values_buf[ndx] = match value {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         _ => {
@@ -686,23 +702,26 @@ impl<'a> Interpreter<'a> {
                     next_ndx = dest.0 as usize;
                 }
                 Instr::Return(value) => {
-                    return_value = Some(self.get_operand(value, &values_buf, &frame));
+                    return_value = Some(self.get_operand(value, &values_buf, cur_frame_id));
                 }
                 Instr::Call { callee, args } => {
-                    let callee = self.get_operand(callee, &values_buf, &frame);
+                    let callee = self.get_operand(callee, &values_buf, cur_frame_id);
                     let arg_values: Vec<Value> = args
                         .iter()
-                        .map(|oper| self.get_operand(oper, &values_buf, &frame))
+                        .map(|oper| self.get_operand(oper, &values_buf, cur_frame_id))
                         .collect();
                     match callee {
                         Value::Closure(closure) => {
                             self.print_indent();
                             eprintln!("      : call {closure:?}",);
-                            if should_trace {
-                                let tb = self.trace_builder.as_mut().unwrap();
-                                tb.enter_function(&args[..], &values_buf[..]);
-                            }
 
+                            if let Some(tb) = &mut self.trace_builder {
+                                tb.set_args(&args, &|fnid| {
+                                    self.frame_graph
+                                        .get_lexical_scope(cur_frame_id, fnid)
+                                        .unwrap()
+                                });
+                            }
                             let ret_val = self.run_module_fn(module, &closure, &arg_values[..])?;
                             values_buf[ndx] = ret_val;
                         }
@@ -711,6 +730,7 @@ impl<'a> Interpreter<'a> {
                                 .get(&nfid)
                                 .ok_or(error!("no such native function: {nfid}"))?;
                             self.print_indent();
+                            todo!("interpreter: tell the JIT about this native call");
                             eprintln!("      : native call");
                             let ret_val = nf(self, arg_values.as_slice())?;
                             values_buf[ndx] = ret_val;
@@ -729,26 +749,26 @@ impl<'a> Interpreter<'a> {
                     values_buf[ndx] = Value::Object(Object::new());
                 }
                 Instr::ObjSet { obj, key, value } => {
-                    let obj = self.get_operand(obj, &values_buf, &frame);
+                    let obj = self.get_operand(obj, &values_buf, cur_frame_id);
                     let mut obj = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
-                    let key = self.get_operand(key, &values_buf, &frame);
+                    let key = self.get_operand(key, &values_buf, cur_frame_id);
                     let key = ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = self.get_operand(value, &values_buf, &frame);
+                    let value = self.get_operand(value, &values_buf, cur_frame_id);
                     obj.set(key, value);
                 }
                 Instr::ObjGet { obj, key } => {
-                    let obj = self.get_operand(obj, &values_buf, &frame);
+                    let obj = self.get_operand(obj, &values_buf, cur_frame_id);
                     let obj = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
-                    let key = self.get_operand(key, &values_buf, &frame);
+                    let key = self.get_operand(key, &values_buf, cur_frame_id);
                     let key = ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = obj.get(&key);
@@ -765,12 +785,16 @@ impl<'a> Interpreter<'a> {
                     eprintln!("ArrayPush does nothing for now");
                 }
                 Instr::TypeOf(arg) => {
-                    let value = self.get_operand(arg, &values_buf, &frame);
+                    let value = self.get_operand(arg, &values_buf, cur_frame_id);
                     values_buf[ndx] = value.js_typeof().into();
                 }
                 Instr::BoolOp { op, a, b } => {
-                    let a: bool = self.get_operand(a, &values_buf, &frame).expect_bool()?;
-                    let b: bool = self.get_operand(b, &values_buf, &frame).expect_bool()?;
+                    let a: bool = self
+                        .get_operand(a, &values_buf, cur_frame_id)
+                        .expect_bool()?;
+                    let b: bool = self
+                        .get_operand(b, &values_buf, cur_frame_id)
+                        .expect_bool()?;
                     let res = match op {
                         BoolOp::And => a && b,
                         BoolOp::Or => a || b,
@@ -780,10 +804,10 @@ impl<'a> Interpreter<'a> {
                 Instr::ClosureNew { fnid } => {
                     let closure = Closure {
                         fnid: *fnid,
-                        lexical_parent: Some(frame.clone()),
+                        lexical_parent: Some(cur_frame_id.clone()),
                     };
                     self.print_indent();
-                    eprintln!("      created closure: {closure:?}");
+                    eprintln!("      created closure: {:?}", closure);
                     values_buf[ndx] = Value::Closure(closure);
                 }
             }
@@ -796,6 +820,11 @@ impl<'a> Interpreter<'a> {
                     func: &func,
                     iid: IID(ndx as u32),
                     next_iid: IID(next_ndx as u32),
+                    fnid_to_frameid: &|fnid| {
+                        self.frame_graph
+                            .get_lexical_scope(cur_frame_id, fnid)
+                            .unwrap()
+                    },
                 });
             }
 
@@ -899,7 +928,7 @@ pub struct LoopInfo {
     // Variables that change in value during each cycle, in such a way that
     // each cycle sees the value in  the previous cycle.  Phi instructions are
     // added based on this set.
-    interloop_vars: HashSet<VarId>,
+    interloop_vars: HashSet<StaticVarId>,
 }
 impl Function {
     pub(crate) fn new(instrs: Box<[Instr]>, n_slots: u16) -> Function {
@@ -917,6 +946,10 @@ impl Function {
 
     pub(crate) fn is_loop_head(&self, iid: IID) -> bool {
         self.loop_heads.contains_key(&iid)
+    }
+
+    pub(crate) fn n_slots(&self) -> u16 {
+        self.n_slots
     }
 }
 

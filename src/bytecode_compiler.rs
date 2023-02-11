@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, SourceMap, Span};
@@ -7,7 +7,7 @@ use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 pub use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::interpreter::{
-    self, ArithOp, BoolOp, CmpOp, FnId, FrameOffset, Instr, Operand, Value, VarId, VarIndex, IID,
+    self, ArithOp, BoolOp, CmpOp, FnId, Instr, Operand, StaticVarId, Value, VarIndex, IID,
 };
 use crate::util::Mask;
 
@@ -61,7 +61,8 @@ struct FnBuilder {
     fnid: FnId,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
-    is_frame_captured: Mask,
+    // TODO Maybe this needs to be more compact
+    captured_frames: HashSet<FnId>,
     last_index: u16,
 }
 #[derive(Debug)]
@@ -75,7 +76,7 @@ impl FnBuilder {
             fnid: id,
             scopes: vec![Self::new_scope()],
             instrs: Vec::new(),
-            is_frame_captured: Mask::new(),
+            captured_frames: HashSet::new(),
             last_index: 0,
         }
     }
@@ -152,7 +153,7 @@ impl Builder {
         let fnid = self.end_function();
         // The root function is the outermost scope, and therefore must capture
         // nothing.  Otherwise, we have a bug.
-        assert!(self.fns.get(&fnid).unwrap().is_frame_captured.is_empty());
+        assert!(self.fns.get(&fnid).unwrap().captured_frames.is_empty());
         assert!(self.fn_stack.is_empty());
 
         let fns = self
@@ -186,40 +187,33 @@ impl Builder {
         self.cur_fnb().instrs.get_mut(iid.0 as usize)
     }
 
-    fn define_var(&mut self, name: JsWord) -> VarId {
-        // let depth = self.cur_fnb().scopes.len() - 1;
-        // eprintln!("define_var {name} [{depth}]");
-        let var_ndx = self.cur_fnb().define(name);
-        VarId {
-            stack_fid: FrameOffset(0),
+    fn define_var(&mut self, name: JsWord) -> StaticVarId {
+        let fnb = self.cur_fnb();
+        let var_ndx = fnb.define(name);
+        StaticVarId {
+            fnid: fnb.fnid,
             var_ndx,
         }
     }
 
-    fn get_var(&mut self, sym: &JsWord) -> Option<VarId> {
+    fn get_var(&mut self, sym: &JsWord) -> Option<StaticVarId> {
         // Lookup sym in each scope, inner to outer
-        let var_id =
-            self.fn_stack
-                .iter()
-                .rev()
-                .enumerate()
-                .find_map(|(stack_frame_offset, fnb)| {
-                    fnb.get_var(sym).map(|var_ndx| VarId {
-                        stack_fid: FrameOffset(stack_frame_offset as u16),
-                        var_ndx,
-                    })
-                });
+        let var_id = self.fn_stack.iter().rev().find_map(|fnb| {
+            fnb.get_var(sym).map(|var_ndx| StaticVarId {
+                fnid: fnb.fnid,
+                var_ndx,
+            })
+        });
 
-        if let Some(VarId { stack_fid, .. }) = &var_id {
-            if stack_fid.0 > 0 {
+        let fnb = &mut self.cur_fnb();
+        let cur_fnid = fnb.fnid;
+        if let Some(StaticVarId { fnid, .. }) = var_id {
+            if fnid != cur_fnid {
                 // This variable is captured from one of the enclosing
                 // stack frames. Mark that frame as "captured", so that the
                 // ClosureNew instruction will be generated, and provide a
                 // pointer to that stack frame in the interpreter.
-                let parent_rel_stack_fid = stack_fid.0 as usize - 1;
-                self.cur_fnb()
-                    .is_frame_captured
-                    .set(parent_rel_stack_fid, true);
+                fnb.captured_frames.insert(fnid);
             }
         }
 
@@ -264,6 +258,18 @@ impl Builder {
         let fnid = fnb.fnid;
         self.fns.insert(fnid, fnb);
         fnid
+    }
+
+    fn add_captures(&mut self, other_fnid: FnId) {
+        let other_fnb = self.fns.get(&other_fnid).unwrap();
+        let fnb = self.fn_stack.last_mut().expect("no FnBuilder!");
+        let cur_fnid = fnb.fnid;
+        fnb.captured_frames.extend(
+            other_fnb
+                .captured_frames
+                .iter()
+                .filter(|fnid| **fnid != cur_fnid),
+        );
     }
 }
 
@@ -470,32 +476,16 @@ fn compile_function(
             .with_context(error!("in function declaration").with_span(func.span))?;
     }
 
-    let fnid = builder.end_function();
-    let fnb = builder.fns.get(&fnid).unwrap();
-    let is_frame_captured = fnb.is_frame_captured.clone();
+    let inner_fnid = builder.end_function();
 
     // TODO Unit test this property
     // If a function literal captures one of the enclosing scopes,
     // then the enclosing function also does. By induction, all
     // further enclosing functions also do, up to the function literal
     // corresponding to the captured scope.
-    //
-    // In terms of relative stack indices, if the inner function refers
-    // to any var[s:v] with s > 0, then it's said to capture the scope
-    // with index s. Then, the enclosing function captures the scope
-    // with index s - 1, unless s-1 == 0, in which case no capture happens.
-    //
-    // Note that if a function captures scope with index s, then it's
-    // is_frame_captured[s-1] that is true. In other words, the indices are
-    // already relative to the enclosing function, i.e. this one.
-    let cur_caps = &mut builder.cur_fnb().is_frame_captured;
-    for (rel_ndx, is_captured) in is_frame_captured.iter().enumerate() {
-        if *is_captured && rel_ndx > 1 {
-            cur_caps.set(rel_ndx - 1, true);
-        }
-    }
+    builder.add_captures(inner_fnid);
 
-    let instr = Instr::ClosureNew { fnid };
+    let instr = Instr::ClosureNew { fnid: inner_fnid };
     Ok(builder.emit(instr).into())
 }
 
@@ -922,7 +912,7 @@ fn compile_assignment_rhs(
     Ok(value)
 }
 
-fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<VarId> {
+fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<StaticVarId> {
     builder
         .get_var(&ident.sym)
         .ok_or_else(|| error!("unbound variable `{}`", ident.sym).with_span(ident.span))

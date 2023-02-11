@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use crate::{
-    interpreter::{self, IID},
+    interpreter::{self, FnId, VarIndex, IID},
     regalloc,
+    stack::{self, FrameId},
 };
 
 use dynasm::dynasm;
@@ -154,43 +155,16 @@ impl ValueType {
 }
 
 pub struct TraceBuilder {
-    // This map associates VarId's from the interpreter to ValueIds in
-    // the SSA trace we're building.
-    //
-    // Important: VarId's need to be "resolved" to the outermost stack frame to
-    // the extent possible.
-    //
-    // For example, with the following JS code:
-    // ```js
-    // // some variable `far_away` is defined here as var[0:22]
-    // function f() {
-    //     let x = 1; // e.g. var[0:5]  in f
-    //     function g() {
-    //         function h() {
-    //             use(x);  // x is var[2:5] in h's bytecode
-    //             use(far_away); // far_away is var[3:22]
-    //         }
-    //     }
-    // }
-    // ```
-    //
-    // In the bytecode for function `h`, variable `x` is represented with VarId
-    // var[2:5]. But since tracing JIT inlines all function calls, it's important for
-    // the JIT compiler to detect that var[2:5] in h is the same as var[0:5] in f, and
-    // should resolve it to the same JIT IR register.  To do this, we track the stack
-    // depth of the calls we're inlining, and use it to convert VarId's to the lowest
-    // stack depth possible. Note that variables captures outside the trace's entry
-    // point (function or loop) will still have a stack depth component that is > 0
-    // (i.e. `far_away` is resolved to var[1:22]).
-    operand_of_varid: HashMap<VarId, Operand>,
-    operand_of_iid: HashMap<(u32, interpreter::IID), Operand>,
-    args_stack: Vec<Vec<Operand>>,
-    unboxes: HashMap<ValueId, (ValueType, ValueId)>,
-    // "Parking spot" used to tranfer the return value from a returning
-    // function to the call instruction
+    stack_model: Vec<FrameId>,
+    // Frames are only ever added, never removed. We clean it up only when the
+    // whole TraceBuilder is deleted
+    frame_models: HashMap<FrameId, FrameTracker>,
+
+    // "Parking spot" used to tranfer the arguments from caller to callee
+    // frame, and the return value in the other direction
+    args_buf: Option<Vec<Operand>>,
     return_value: Option<Operand>,
-    // Current stack depth relative to the trace's entry point (function or loop)
-    stack_depth: u32,
+
     loop_head: Option<interpreter::GlobalIID>,
 
     instrs: Vec<Instr>,
@@ -201,6 +175,29 @@ pub struct TraceBuilder {
     exit_function_expected: bool,
 }
 
+/// A "model" of the interpreter's stack, represented in terms that the JIT
+/// cares about.
+struct FrameTracker {
+    args: Vec<Operand>,
+    // This map associates RUNTIME variable identifiers (current frame id, VarIndex)
+    // from the interpreter to ValueIds in the SSA trace we're building.
+    operand_of_varid: Box<[Operand]>,
+    operand_of_iid: HashMap<interpreter::IID, Operand>,
+    unboxes: HashMap<ValueId, (ValueType, ValueId)>,
+}
+
+impl FrameTracker {
+    fn new(args: Vec<Operand>, n_vars: usize) -> Self {
+        let operand_of_varid = vec![Operand::Imm(BoxedValue::Undefined); n_vars].into_boxed_slice();
+        FrameTracker {
+            args,
+            operand_of_varid,
+            operand_of_iid: HashMap::new(),
+            unboxes: HashMap::new(),
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 struct VarId {
     // Signed, unlike interpreter::VarId.  Negative values refer to values
@@ -209,19 +206,6 @@ struct VarId {
     // function/loop.
     stack_depth: i32,
     var_ndx: u16,
-}
-
-impl VarId {
-    fn to_interpreter_varid(&self) -> Option<interpreter::VarId> {
-        if self.stack_depth >= 0 {
-            Some(interpreter::VarId {
-                stack_fid: interpreter::FrameOffset(self.stack_depth as u16),
-                var_ndx: interpreter::VarIndex(self.var_ndx),
-            })
-        } else {
-            None
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -246,12 +230,10 @@ pub enum TraceStart {
 impl TraceBuilder {
     pub fn new(start_mode: TraceStart) -> Self {
         TraceBuilder {
-            operand_of_iid: HashMap::new(),
-            operand_of_varid: HashMap::new(),
-            unboxes: HashMap::new(),
             return_value: None,
-            args_stack: Vec::new(),
-            stack_depth: 0,
+            args_buf: None,
+            stack_model: Vec::new(),
+            frame_models: HashMap::new(),
             instrs: Vec::new(),
             parameters: Vec::new(),
             start_mode,
@@ -261,11 +243,18 @@ impl TraceBuilder {
         }
     }
 
-    fn resolve_interpreter_operand(
+    fn stack_depth(&self) -> usize {
+        self.stack_model.len()
+    }
+
+    fn resolve_interpreter_operand<F>(
         &mut self,
         operand: &interpreter::Operand,
-        value_buf: &[interpreter::Value],
-    ) -> Result<Operand, Error> {
+        fnid_to_frameid: F,
+    ) -> Result<Operand, Error>
+    where
+        F: Fn(FnId) -> FrameId,
+    {
         match operand {
             // constants from the interpreter bytecode are simply preserved
             interpreter::Operand::Value(value) => Ok(Operand::Imm(value.clone())),
@@ -274,50 +263,40 @@ impl TraceBuilder {
             // instruction that produced them) are mapped to the JIT instruction
             // that last assigned to it (the JIT trace is SSA)
             interpreter::Operand::IID(iid) => {
-                let key = (self.stack_depth, *iid);
+                let jit_operand = self.cur_frame_model().operand_of_iid.get(iid);
 
-                if let Some(operand_for_var) = self.operand_of_iid.get(&key) {
-                    eprintln!("TB: {:?} is {:?}", iid, operand_for_var);
+                if let Some(operand_for_var) = jit_operand {
+                    self.print_indent();
+                    eprintln!("[..tb {:?} is {:?}]", iid, operand_for_var);
                     Ok(operand_for_var.clone())
                 } else {
+                    self.print_indent();
                     eprintln!(
-                        "TB: {:?} is unresolved => considered trace parameter, adding guard",
+                        "[..tb {:?} is unresolved => considered trace parameter, adding guard]",
                         operand
                     );
-                    assert_eq!(0, self.stack_depth);
+                    assert_eq!(1, self.stack_depth());
 
                     let param_ndx = self.add_parameter(operand.clone());
                     let param = self.emit(Instr::TraceParam(param_ndx))?;
-                    self.operand_of_iid.insert(key, param.clone());
+                    self.cur_frame_model_mut()
+                        .operand_of_iid
+                        .insert(*iid, param.clone());
                     Ok(param)
                 }
             }
 
             interpreter::Operand::Var(intrp_varid) => {
-                // Resolve stack_fid to the outermost function/loop covered by
-                // the trace (see comment for operand_of_varid)
-                let resolved_varid = self.resolve_interpreter_varid(intrp_varid);
-                eprintln!("resolving {resolved_varid:?}");
-
-                match self.operand_of_varid.get(&resolved_varid) {
-                    Some(oper) => Ok(oper.clone()),
-                    None => {
-                        let param_ndx = self.add_parameter(interpreter::Operand::Var(
-                            resolved_varid.to_interpreter_varid().unwrap(),
-                        ));
-                        let oper = self.emit(Instr::TraceParam(param_ndx))?;
-                        self.operand_of_varid.insert(resolved_varid, oper.clone());
-                        Ok(oper)
-                    }
-                }
+                let frame_id = fnid_to_frameid(intrp_varid.fnid);
+                Ok(self
+                    .frame_models
+                    .get(&frame_id)
+                    .expect("no such frame")
+                    .operand_of_varid
+                    .get(intrp_varid.var_ndx.0 as usize)
+                    .expect("invalid variable index for this frame")
+                    .clone())
             }
-        }
-    }
-
-    fn resolve_interpreter_varid(&mut self, intrp_var_id: &interpreter::VarId) -> VarId {
-        VarId {
-            stack_depth: intrp_var_id.stack_fid.0 as i32 - self.stack_depth as i32,
-            var_ndx: intrp_var_id.var_ndx.0,
         }
     }
 
@@ -414,13 +393,16 @@ impl TraceBuilder {
         converted_operand.ok_or(type_error)
     }
 
-    fn resolve_operand_as(
+    fn resolve_operand_as<F>(
         &mut self,
         interp_oper: &interpreter::Operand,
-        values_buf: &[interpreter::Value],
+        fnid_to_frameid: F,
         desired_type: ValueType,
-    ) -> Result<Operand, Error> {
-        let oper = self.resolve_interpreter_operand(interp_oper, values_buf)?;
+    ) -> Result<Operand, Error>
+    where
+        F: Fn(FnId) -> FrameId,
+    {
+        let oper = self.resolve_interpreter_operand(interp_oper, fnid_to_frameid)?;
         self.ensure_type(oper, desired_type)
     }
 
@@ -429,6 +411,14 @@ impl TraceBuilder {
             TraceBuilderState::WaitingStart => {
                 if self.check_start(step) {
                     self.state = TraceBuilderState::Tracing;
+
+                    let fid = (step.fnid_to_frameid)(step.fnid);
+                    let n_vars = step.func.n_slots().into();
+                    let args = Vec::new();
+                    self.frame_models
+                        .insert(fid, FrameTracker::new(args, n_vars));
+                    self.stack_model.push(fid);
+
                     // For the first instruction, self.loop_head stays None.
                     // Then, we set self.loop_head, so that we can detect that
                     // we've closed the loop and can finish the trace.
@@ -442,7 +432,8 @@ impl TraceBuilder {
                         .unwrap();
                     self.state = TraceBuilderState::Finished;
                 } else if let Err(error) = self.trace_step(step) {
-                    eprintln!("TB: trace failed: {:?}", error);
+                    self.print_indent();
+                    eprintln!("[..tb trace failed: {:?}]", error);
                     self.state = TraceBuilderState::Failed;
                 }
             }
@@ -455,15 +446,18 @@ impl TraceBuilder {
         match self.start_mode {
             // Trace starts immediately
             TraceStart::Function => {
-                eprintln!("TB: trace starts immediately");
+                self.print_indent();
+                eprintln!("[..tb trace starts immediately]");
                 true
             }
             TraceStart::FirstLoop => {
                 if step.func.is_loop_head(step.iid) {
-                    eprintln!("TB: trace starts now, on a loop head");
+                    self.print_indent();
+                    eprintln!("[..tb trace starts now, on a loop head]");
                     true
                 } else {
-                    eprintln!("TB: waiting on a loop head...");
+                    self.print_indent();
+                    eprintln!("[..tb waiting on a loop head...]");
                     false
                 }
             }
@@ -478,23 +472,25 @@ impl TraceBuilder {
         }
 
         let instr = step.cur_instr();
-        eprintln!("TB: step");
+        self.print_indent();
+        eprintln!("[..tb step]");
 
         let result = match instr {
             interpreter::Instr::Nop => None,
             interpreter::Instr::Const(value) => Some(Operand::Imm(value.clone())),
             interpreter::Instr::Not(oper) => {
-                let oper = self.resolve_operand_as(&oper, &step.values_buf, ValueType::Bool)?;
+                let oper =
+                    self.resolve_operand_as(&oper, &step.fnid_to_frameid, ValueType::Bool)?;
                 Some(self.emit(Instr::Not(oper))?)
             }
             interpreter::Instr::Arith { op, a, b } => {
-                let a = self.resolve_operand_as(&a, &step.values_buf, ValueType::Num)?;
-                let b = self.resolve_operand_as(&b, &step.values_buf, ValueType::Num)?;
+                let a = self.resolve_operand_as(&a, &step.fnid_to_frameid, ValueType::Num)?;
+                let b = self.resolve_operand_as(&b, &step.fnid_to_frameid, ValueType::Num)?;
                 Some(self.emit(Instr::Arith { op: *op, a, b })?)
             }
             interpreter::Instr::Cmp { op, a, b } => {
-                let a = self.resolve_interpreter_operand(&a, &step.values_buf)?;
-                let b = self.resolve_interpreter_operand(&b, &step.values_buf)?;
+                let a = self.resolve_interpreter_operand(&a, &step.fnid_to_frameid)?;
+                let b = self.resolve_interpreter_operand(&b, &step.fnid_to_frameid)?;
 
                 let result = match (a, b) {
                     (Operand::Imm(_), Operand::Imm(_)) => {
@@ -546,14 +542,16 @@ impl TraceBuilder {
                 Some(result)
             }
             interpreter::Instr::JmpIf { cond, .. } => {
-                let cond = self.resolve_operand_as(&cond, &step.values_buf, ValueType::Bool)?;
+                let cond =
+                    self.resolve_operand_as(&cond, &step.fnid_to_frameid, ValueType::Bool)?;
                 match cond {
                     // treat this the same as an unconditional jump
                     Operand::Imm(_) => None,
                     Operand::Cmp(_) | Operand::ValueId(_) => {
                         let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
+                        self.print_indent();
                         eprintln!(
-                            "TB: jmpif: branch {}taken ({:?} -> {:?})",
+                            "[..tb jmpif: branch {}taken ({:?} -> {:?})]",
                             if branch_taken { "" } else { "not " },
                             step.iid,
                             step.next_iid,
@@ -573,35 +571,54 @@ impl TraceBuilder {
                 None
             }
             interpreter::Instr::Set { var_id, value } => {
-                let resolved_varid = self.resolve_interpreter_varid(var_id);
-                let value = self.resolve_interpreter_operand(value, &step.values_buf)?;
-                self.operand_of_varid.insert(resolved_varid, value);
+                let value = self.resolve_interpreter_operand(value, &step.fnid_to_frameid)?;
+                let frame_id = (step.fnid_to_frameid)(var_id.fnid);
+                self.print_indent();
+                match self.frame_models.get_mut(&frame_id) {
+                    Some(frame_model) => {
+                        eprintln!(
+                            "[..tb map var: {:?}:{} = {:?}]",
+                            frame_id, var_id.var_ndx.0, value
+                        );
+                        let slot = frame_model
+                            .operand_of_varid
+                            .get_mut(var_id.var_ndx.0 as usize)
+                            .unwrap();
+                        *slot = value;
+                    }
+                    None => {
+                        todo!(
+                            "JIT: set a variable outside the traced function {:?} {:?}",
+                            frame_id,
+                            var_id.var_ndx
+                        );
+                    }
+                }
                 None
             }
             interpreter::Instr::PushSink(value) => {
-                let value = self.resolve_interpreter_operand(&value, &step.values_buf)?;
+                let value = self.resolve_interpreter_operand(&value, &step.fnid_to_frameid)?;
                 self.emit(Instr::PushSink(value))?;
                 None
             }
             interpreter::Instr::Return(value) => {
                 self.exit_function_expected = true;
 
-                let value = if self.stack_depth == 0 {
-                    self.resolve_operand_as(&value, &step.values_buf, ValueType::Boxed)?
+                let value = if self.stack_depth() == 1 {
+                    self.resolve_operand_as(&value, &step.fnid_to_frameid, ValueType::Boxed)?
                 } else {
-                    self.resolve_interpreter_operand(&value, &step.values_buf)?
+                    self.resolve_interpreter_operand(&value, &step.fnid_to_frameid)?
                 };
 
                 self.return_value = Some(value);
                 None
             }
             interpreter::Instr::GetArg(index) => {
-                let value = if self.stack_depth == 0 {
+                let value = if self.stack_depth() == 1 {
                     self.emit(Instr::GetArg(*index))?
                 } else {
-                    self.args_stack
-                        .last_mut()
-                        .expect("JIT bug: no arg vec on stack")
+                    self.cur_frame_model_mut()
+                        .args
                         .get(*index)
                         .expect("bytecode_compiler bug: unbound arg var")
                         .clone()
@@ -630,16 +647,17 @@ impl TraceBuilder {
 
             interpreter::Instr::ObjNew => Some(self.emit(Instr::ObjNew)?),
             interpreter::Instr::ObjSet { obj, key, value } => {
-                let obj = self.resolve_operand_as(obj, &step.values_buf, ValueType::Obj)?;
-                let key = self.resolve_operand_as(key, &step.values_buf, ValueType::Str)?;
-                let value = self.resolve_operand_as(value, &step.values_buf, ValueType::Boxed)?;
+                let obj = self.resolve_operand_as(obj, &step.fnid_to_frameid, ValueType::Obj)?;
+                let key = self.resolve_operand_as(key, &step.fnid_to_frameid, ValueType::Str)?;
+                let value =
+                    self.resolve_operand_as(value, &step.fnid_to_frameid, ValueType::Boxed)?;
 
                 self.emit(Instr::ObjSet { obj, key, value })?;
                 None
             }
             interpreter::Instr::ObjGet { obj, key } => {
-                let obj = self.resolve_operand_as(obj, &step.values_buf, ValueType::Obj)?;
-                let key = self.resolve_operand_as(key, &step.values_buf, ValueType::Str)?;
+                let obj = self.resolve_operand_as(obj, &step.fnid_to_frameid, ValueType::Obj)?;
+                let key = self.resolve_operand_as(key, &step.fnid_to_frameid, ValueType::Str)?;
 
                 Some(self.emit(Instr::ObjGet { obj, key })?)
             }
@@ -650,13 +668,13 @@ impl TraceBuilder {
                 todo!("array push")
             }
             interpreter::Instr::TypeOf(arg) => {
-                let arg = self.resolve_interpreter_operand(arg, &step.values_buf)?;
+                let arg = self.resolve_interpreter_operand(arg, &step.fnid_to_frameid)?;
                 Some(self.emit(Instr::TypeOf(arg))?)
             }
 
             interpreter::Instr::BoolOp { op, a, b } => {
-                let a = self.resolve_operand_as(a, &step.values_buf, ValueType::Bool)?;
-                let b = self.resolve_operand_as(b, &step.values_buf, ValueType::Bool)?;
+                let a = self.resolve_operand_as(a, &step.fnid_to_frameid, ValueType::Bool)?;
+                let b = self.resolve_operand_as(b, &step.fnid_to_frameid, ValueType::Bool)?;
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
             interpreter::Instr::ClosureNew { .. } => Some(self.emit(Instr::ClosureNew)?),
@@ -670,32 +688,37 @@ impl TraceBuilder {
         Ok(())
     }
 
-    pub(crate) fn enter_function(
-        &mut self,
-        args: &[interpreter::Operand],
-        values_buf: &[interpreter::Value],
-    ) {
+    pub(crate) fn enter_function(&mut self, fid: FrameId, n_vars: usize) {
         if self.state != TraceBuilderState::Tracing {
             return;
         }
 
-        // TODO Use try_collect when it becomes stable
-        let mut arg_values = Vec::new();
-        for (ndx, arg) in args.iter().enumerate() {
-            let arg = match self.resolve_interpreter_operand(arg, &values_buf) {
-                Ok(arg) => arg,
-                Err(err) => {
-                    eprintln!("TB: trace failed, couldn't resolve argument #{ndx}: {err:?}");
-                    self.state = TraceBuilderState::Failed;
-                    return;
-                }
-            };
-            arg_values.push(arg);
-        }
-        self.args_stack.push(arg_values);
+        let args = self
+            .args_buf
+            .take()
+            .expect("enter_function called without calling set_args first");
 
-        self.stack_depth += 1;
-        eprintln!("TB: call (stack depth -> {})", self.stack_depth);
+        self.frame_models
+            .insert(fid, FrameTracker::new(args, n_vars));
+        self.stack_model.push(fid);
+        self.print_indent();
+        eprintln!("[..tb call (stack depth -> {})]", self.stack_depth());
+    }
+
+    pub(crate) fn set_args<F>(&mut self, args: &[interpreter::Operand], fnid_to_frameid: &F)
+    where
+        F: Fn(FnId) -> FrameId,
+    {
+        assert!(
+            self.args_buf.is_none(),
+            "set_args called twice before enter_function"
+        );
+        let args_values = args
+            .iter()
+            .map(|arg| self.resolve_interpreter_operand(arg, fnid_to_frameid))
+            .flatten()
+            .collect();
+        self.args_buf = Some(args_values);
     }
 
     pub(crate) fn exit_function(&mut self) {
@@ -703,36 +726,40 @@ impl TraceBuilder {
             return;
         }
         // self.exit_function_expected might be false, if the source bytecode
-        // does not  have an explicit Return instruction. In this case, we do
+        // does not have an explicit Return instruction. In this case, we do
         // an implicit Return(undefined)
 
-        if self.stack_depth == 0 {
-            eprintln!("TB: trace ended");
+        self.stack_model.pop().unwrap();
+        self.print_indent();
+        eprintln!("[..tb returned from function]");
+
+        if self.stack_model.is_empty() {
+            self.print_indent();
+            eprintln!("[..tb trace ended]");
             self.state = TraceBuilderState::Finished;
-        } else {
-            let depth_to_remove = -(self.stack_depth as i32);
-            // TODO Change to HashMap::drain_filter once it becomes stable
-            let to_remove: Vec<_> = self
-                .operand_of_varid
-                .keys()
-                .filter(|var_id| var_id.stack_depth == depth_to_remove)
-                .copied()
-                .collect();
-            for key in to_remove.iter() {
-                self.operand_of_varid.remove(&key);
-            }
-            self.stack_depth -= 1;
-            self.args_stack.pop().unwrap();
-            eprintln!("TB: returned from function");
         }
 
         self.exit_function_expected = false;
     }
 
     fn map_iid(&mut self, iid: IID, jit_operand: Operand) {
-        eprintln!("TB: map {:?} -> {:?}", iid, jit_operand);
-        self.operand_of_iid
-            .insert((self.stack_depth, iid), jit_operand);
+        self.print_indent();
+        eprintln!("[..tb map {:?} -> {:?}]", iid, jit_operand);
+        self.cur_frame_model_mut()
+            .operand_of_iid
+            .insert(iid, jit_operand);
+    }
+
+    fn cur_frame_model_mut(&mut self) -> &mut FrameTracker {
+        let fid = self.stack_model.last().unwrap();
+        self.frame_models
+            .get_mut(&fid)
+            .expect("JIT bug: no frame model on stack")
+    }
+
+    fn cur_frame_model(&self) -> &FrameTracker {
+        let fid = self.stack_model.last().unwrap();
+        self.frame_models.get(&fid).unwrap()
     }
 
     fn emit(&mut self, instr: Instr) -> Result<Operand, Error> {
@@ -827,10 +854,12 @@ impl TraceBuilder {
                 Operand::Imm(_) => panic!("invalid operand for Unbox: immediate"),
                 Operand::Cmp(_) => panic!("invalid operand for Unbox: cmp"),
                 Operand::ValueId(arg_vid) => {
-                    if let Some((prev_unbox_type, unboxed)) = self.unboxes.get(&arg_vid) {
+                    let unboxes = &self.cur_frame_model().unboxes;
+                    if let Some((prev_unbox_type, unboxed)) = unboxes.get(&arg_vid) {
                         if *prev_unbox_type == value_type {
+                            self.print_indent();
                             eprintln!(
-                                "TB: reuse unbox v{:<4} as {:?} is at {:?}",
+                                "[..tb reuse unbox v{:<4} as {:?} is at {:?}]",
                                 arg_vid.0, value_type, unboxed
                             );
                             Ok(Operand::ValueId(unboxed.clone()))
@@ -840,9 +869,12 @@ impl TraceBuilder {
                             }))
                         }
                     } else {
-                        eprintln!("TB: emit unbox: v{:<4} as {:?}", arg_vid.0, value_type);
+                        self.print_indent();
+                        eprintln!("[..tb emit unbox: v{:<4} as {:?}]", arg_vid.0, value_type);
                         let new_vid = ValueId(self.instrs.len() as u32);
-                        self.unboxes.insert(*arg_vid, (value_type, new_vid));
+                        self.cur_frame_model_mut()
+                            .unboxes
+                            .insert(*arg_vid, (value_type, new_vid));
                         self.instrs.push(instr);
                         Ok(new_vid.into())
                     }
@@ -871,7 +903,8 @@ impl TraceBuilder {
 
     fn write(&mut self, instr: Instr) -> Result<Operand, Error> {
         let vid = ValueId(self.instrs.len() as u32);
-        eprintln!("TB: emit: v{:<4} {:?}", vid.0, instr);
+        self.print_indent();
+        eprintln!("[..tb emit: v{:<4} {:?}]", vid.0, instr);
         self.instrs.push(instr);
         Ok(vid.into())
     }
@@ -895,6 +928,12 @@ impl TraceBuilder {
         self.parameters.push(TraceParam { operand });
         ndx
     }
+
+    fn print_indent(&self) {
+        for _ in 0..(self.stack_depth()) {
+            eprint!("      | ");
+        }
+    }
 }
 
 pub struct InterpreterStep<'a> {
@@ -903,6 +942,7 @@ pub struct InterpreterStep<'a> {
     pub(crate) func: &'a interpreter::Function,
     pub(crate) iid: interpreter::IID,
     pub(crate) next_iid: interpreter::IID,
+    pub(crate) fnid_to_frameid: &'a dyn Fn(FnId) -> FrameId,
 }
 
 impl<'a> InterpreterStep<'a> {
@@ -1269,29 +1309,32 @@ mod tests {
     }
 
     #[test]
-    fn test_far_read_write() {
+    fn test_closures() {
         let output = quick_jit_func(
             "
-            function main() {
-                let far_away = 'asd';
-                function f() {
-                    far_away = 'the good value';
-                    function g() {
-                        function h() {
-                            return far_away;
-                        }
-                        return h;
-                    }
-                    return g();
-                }
-                let func = f();
-                sink(func());
+            function iota(factor) {
+                let i = 0;
+                return function() {
+                    i += 1;
+                    return i * factor;
+                };
             }
 
-            main();
+            const next1 = iota(11);
+            const next2 = iota(7);
 
+            sink(next1()); // 11
+
+            sink(next2()); // 7
+
+            sink(next1()); // 22
+            sink(next1()); // 33
+
+            sink(next2()); // 14
+            sink(next2()); // 21
+            sink(next2()); // 28
             ",
-            2,
+            1,
         );
 
         let trace = output.trace.unwrap();
@@ -1300,11 +1343,18 @@ mod tests {
         let sink_operands = get_pushsink_operands(&trace);
         assert_eq!(
             sink_operands,
-            [&Operand::Imm("asd".into()), &Operand::Imm("lol".into()),]
+            [
+                &Operand::Imm(BoxedValue::Number(11.0)),
+                &Operand::Imm(BoxedValue::Number(7.0)),
+                &Operand::Imm(BoxedValue::Number(22.0)),
+                &Operand::Imm(BoxedValue::Number(33.0)),
+                &Operand::Imm(BoxedValue::Number(14.0)),
+                &Operand::Imm(BoxedValue::Number(21.0)),
+                &Operand::Imm(BoxedValue::Number(28.0)),
+            ]
         );
     }
 
-    #[ignore]
     #[test]
     fn test_loop_unrolling() {
         let output = quick_jit_loop(
