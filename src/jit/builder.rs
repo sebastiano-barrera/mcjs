@@ -9,8 +9,10 @@ use crate::{
 
 use dynasm::dynasm;
 
+use super::tracking;
+
 // This is going to be changed at some point
-type BoxedValue = interpreter::Value;
+pub(super) type BoxedValue = interpreter::Value;
 
 #[derive(Debug, Clone)]
 pub struct TypeError {
@@ -35,7 +37,7 @@ impl From<TypeError> for Error {
 }
 
 #[derive(PartialEq, Clone, Debug)]
-struct Cmp {
+pub(super) struct Cmp {
     ty: ValueType,
     op: CmpOp,
     a: Operand,
@@ -60,7 +62,7 @@ impl Cmp {
 }
 
 #[derive(PartialEq, Clone)]
-enum Operand {
+pub(super) enum Operand {
     ValueId(ValueId),
     Imm(BoxedValue),
     Cmp(Box<Cmp>),
@@ -111,7 +113,7 @@ impl std::fmt::Debug for ValueId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValueType {
+pub(super) enum ValueType {
     Boxed,
     Bool,
     Num,
@@ -154,66 +156,8 @@ impl ValueType {
     }
 }
 
-/// Stores a model (a "proxy" of sorts) of every stack frame and variable "seen" by the JIT.
-///
-/// This includes captured frames (by closure).  It also tracks which
-/// assignments were "seen" by the JIT (this allows detecting variables that
-/// should be resolved by trace parameter rather than by instruction ID or
-/// constant folding).
-struct VarsState {
-    stack_model: Vec<FrameId>,
-    // Frames are only ever added, never removed. We clean it up only when the
-    // whole VarsState is deleted
-    frame_models: HashMap<FrameId, FrameTracker>,
-}
-
-impl VarsState {
-    fn new() -> Self {
-        VarsState {
-            stack_model: Vec::new(),
-            frame_models: HashMap::new(),
-        }
-    }
-
-    fn stack_depth(&self) -> usize {
-        self.stack_model.len()
-    }
-
-    // TODO Garbage collection?
-
-    fn push_frame(&mut self, frame_id: FrameId, args: Vec<Operand>, n_vars: usize) {
-        let frame_model = FrameTracker::new(args, n_vars);
-        self.frame_models.insert(frame_id, frame_model);
-        self.stack_model.push(frame_id);
-    }
-
-    fn pop_frame(&mut self) {
-        self.stack_model.pop().unwrap();
-    }
-
-    fn cur_frame_id(&self) -> FrameId {
-        *self
-            .stack_model
-            .last()
-            .expect("JIT bug: no frame model on stack (trace ended?)")
-    }
-    fn cur_frame(&self) -> &FrameTracker {
-        self.get(self.cur_frame_id())
-    }
-    fn cur_frame_mut(&mut self) -> &mut FrameTracker {
-        self.get_mut(self.cur_frame_id())
-    }
-
-    fn get(&self, frame_id: FrameId) -> &FrameTracker {
-        self.frame_models.get(&frame_id).unwrap()
-    }
-    fn get_mut(&mut self, frame_id: FrameId) -> &mut FrameTracker {
-        self.frame_models.get_mut(&frame_id).unwrap()
-    }
-}
-
 pub struct TraceBuilder {
-    vars: VarsState,
+    vars: tracking::VarsState,
 
     // "Parking spot" used to tranfer the arguments from caller to callee
     // frame, and the return value in the other direction
@@ -228,56 +172,6 @@ pub struct TraceBuilder {
     state: TraceBuilderState,
     start_mode: TraceStart,
     exit_function_expected: bool,
-}
-
-/// A "model" of the interpreter's stack, represented in terms that the JIT
-/// cares about.
-struct FrameTracker {
-    args: Vec<Operand>,
-    /// Associates RUNTIME variable identifiers (current frame id, VarIndex)
-    /// from the interpreter to ValueIds in the SSA trace we're building.
-    ///
-    /// The stored value is optional, and present (Some) *only* when the
-    /// assignment has been "seen" by the JIT.  This allows variables to be
-    /// introduced as trace parameters when the JIT starts later than the start
-    /// of the function's body.
-    operand_of_varid: Box<[Option<Operand>]>,
-    operand_of_iid: HashMap<interpreter::IID, Operand>,
-    unboxes: HashMap<ValueId, (ValueType, ValueId)>,
-}
-
-impl FrameTracker {
-    fn new(args: Vec<Operand>, n_vars: usize) -> Self {
-        let operand_of_varid = vec![None; n_vars].into_boxed_slice();
-        FrameTracker {
-            args,
-            operand_of_varid,
-            operand_of_iid: HashMap::new(),
-            unboxes: HashMap::new(),
-        }
-    }
-
-    // TODO get_arg
-    fn get_arg(&self, arg_ndx: usize) -> &Operand {
-        self.args
-            .get(arg_ndx)
-            .expect("bytecode_compiler bug: unbound arg var")
-    }
-
-    fn get_var(&self, var_ndx: VarIndex) -> Option<&Operand> {
-        self.operand_of_varid
-            .get(var_ndx.0 as usize)
-            .expect("bug: invalid variable index for this frame")
-            .as_ref()
-    }
-
-    fn set_var(&mut self, var_ndx: VarIndex, value: Operand) {
-        let slot = self
-            .operand_of_varid
-            .get_mut(var_ndx.0 as usize)
-            .expect("bug: invalid variable index for this frame");
-        *slot = Some(value);
-    }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
@@ -303,7 +197,7 @@ enum TraceBuilderState {
     Finished,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TraceStart {
     Function,
     FirstLoop,
@@ -314,7 +208,7 @@ impl TraceBuilder {
         TraceBuilder {
             return_value: None,
             args_buf: None,
-            vars: VarsState::new(),
+            vars: tracking::VarsState::new(),
             instrs: Vec::new(),
             parameters: Vec::new(),
             start_mode,
@@ -345,28 +239,26 @@ impl TraceBuilder {
             // instruction that produced them) are mapped to the JIT instruction
             // that last assigned to it (the JIT trace is SSA)
             interpreter::Operand::IID(iid) => {
-                let jit_operand = self.vars.cur_frame().operand_of_iid.get(iid);
+                let stack_depth = self.stack_depth();
+                match self.vars.cur_frame_mut().get_result(*iid).cloned() {
+                    Some(operand_for_var) => {
+                        print_indent(stack_depth);
+                        eprintln!("[..tb {:?} is {:?}]", iid, operand_for_var);
+                        Ok(operand_for_var)
+                    }
+                    None => {
+                        print_indent(stack_depth);
+                        eprintln!(
+                            "[..tb {:?} is unresolved => considered trace parameter, adding guard]",
+                            intrp_operand
+                        );
+                        // TODO Test that this is really necessary. If so, describe it here
+                        assert_eq!(1, stack_depth);
 
-                if let Some(operand_for_var) = jit_operand {
-                    self.print_indent();
-                    eprintln!("[..tb {:?} is {:?}]", iid, operand_for_var);
-                    Ok(operand_for_var.clone())
-                } else {
-                    self.print_indent();
-                    eprintln!(
-                        "[..tb {:?} is unresolved => considered trace parameter, adding guard]",
-                        intrp_operand
-                    );
-                    // TODO Test that this is really necessary. If so, describe it here
-                    assert_eq!(1, self.stack_depth());
-
-                    let param = self.add_parameter(intrp_operand.clone())?;
-
-                    self.vars
-                        .cur_frame_mut()
-                        .operand_of_iid
-                        .insert(*iid, param.clone());
-                    Ok(param)
+                        let param = self.add_parameter(intrp_operand.clone())?;
+                        self.vars.cur_frame_mut().set_result(*iid, param.clone());
+                        Ok(param)
+                    }
                 }
             }
 
@@ -505,19 +397,22 @@ impl TraceBuilder {
                     self.vars.push_frame(fid, args, n_vars);
 
                     // For the first instruction, self.loop_head stays None.
-                    // Then, we set self.loop_head, so that we can detect that
-                    // we've closed the loop and can finish the trace.
+                    // Then (if the trace starts at a loop), we set
+                    // self.loop_head, so that we can detect that we've closed
+                    // the loop and can finish the trace.
                     self.interpreter_step(step);
-                    self.loop_head = Some(step.global_iid());
+                    if self.start_mode == TraceStart::FirstLoop {
+                        self.loop_head = Some(step.global_iid());
+                    } else {
+                        assert!(self.loop_head.is_none());
+                    }
                 }
             }
             TraceBuilderState::Tracing => {
                 if Some(step.global_iid()) == self.loop_head {
-                    self.emit(Instr::WhateverBullshitIsNeededtoLoopback)
-                        .unwrap();
                     self.state = TraceBuilderState::Finished;
                 } else if let Err(error) = self.trace_step(step) {
-                    self.print_indent();
+                    print_indent(self.stack_depth());
                     eprintln!("[..tb trace failed: {:?}]", error);
                     self.state = TraceBuilderState::Failed;
                 }
@@ -528,20 +423,18 @@ impl TraceBuilder {
     }
 
     fn check_start(&self, step: &InterpreterStep) -> bool {
+        print_indent(self.stack_depth());
         match self.start_mode {
             // Trace starts immediately
             TraceStart::Function => {
-                self.print_indent();
                 eprintln!("[..tb trace starts immediately]");
                 true
             }
             TraceStart::FirstLoop => {
                 if step.func.is_loop_head(step.iid) {
-                    self.print_indent();
                     eprintln!("[..tb trace starts now, on a loop head]");
                     true
                 } else {
-                    self.print_indent();
                     eprintln!("[..tb waiting on a loop head...]");
                     false
                 }
@@ -557,7 +450,8 @@ impl TraceBuilder {
         }
 
         let instr = step.cur_instr();
-        self.print_indent();
+
+        print_indent(self.stack_depth());
         eprintln!("[..tb step]");
 
         let result = match instr {
@@ -634,7 +528,8 @@ impl TraceBuilder {
                     Operand::Imm(_) => None,
                     Operand::Cmp(_) | Operand::ValueId(_) => {
                         let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
-                        self.print_indent();
+
+                        print_indent(self.stack_depth());
                         eprintln!(
                             "[..tb jmpif: branch {}taken ({:?} -> {:?})]",
                             if branch_taken { "" } else { "not " },
@@ -659,7 +554,7 @@ impl TraceBuilder {
                 let value = self.resolve_interpreter_operand(value, &step.fnid_to_frameid)?;
                 let frame_id = (step.fnid_to_frameid)(var_id.fnid);
 
-                self.print_indent();
+                print_indent(self.stack_depth());
                 eprintln!(
                     "[..tb map var: {:?}:{} = {:?}]",
                     frame_id, var_id.var_ndx.0, value
@@ -768,7 +663,7 @@ impl TraceBuilder {
             .expect("enter_function called without calling set_args first");
         self.vars.push_frame(fid, args, n_vars);
 
-        self.print_indent();
+        print_indent(self.stack_depth());
         eprintln!("[..tb call (stack depth -> {})]", self.stack_depth());
     }
 
@@ -811,13 +706,13 @@ impl TraceBuilder {
         // does not have an explicit Return instruction. In this case, we do
         // an implicit Return(undefined)
 
-        self.print_indent();
+        print_indent(self.stack_depth());
         eprintln!("[..tb exit function]");
 
         self.vars.pop_frame();
 
         if self.vars.stack_depth() == 0 {
-            self.print_indent();
+            print_indent(self.stack_depth());
             eprintln!("[..tb trace ended]");
             self.state = TraceBuilderState::Finished;
         }
@@ -826,12 +721,9 @@ impl TraceBuilder {
     }
 
     fn map_iid(&mut self, iid: IID, jit_operand: Operand) {
-        self.print_indent();
+        print_indent(self.stack_depth());
         eprintln!("[..tb map {:?} -> {:?}]", iid, jit_operand);
-        self.vars
-            .cur_frame_mut()
-            .operand_of_iid
-            .insert(iid, jit_operand);
+        self.vars.cur_frame_mut().set_result(iid, jit_operand);
     }
 
     fn emit(&mut self, instr: Instr) -> Result<Operand, Error> {
@@ -927,10 +819,11 @@ impl TraceBuilder {
                 Operand::Cmp(_) => panic!("invalid operand for Unbox: cmp"),
                 Operand::ValueId(arg_vid) => {
                     // TODO move some of this stuff in FrameTracker
-                    let unboxes = &self.vars.cur_frame().unboxes;
-                    if let Some((prev_unbox_type, unboxed)) = unboxes.get(&arg_vid) {
-                        if *prev_unbox_type == value_type {
-                            self.print_indent();
+                    if let Some((prev_unbox_type, unboxed)) =
+                        self.vars.cur_frame().get_unbox(*arg_vid)
+                    {
+                        if prev_unbox_type == value_type {
+                            print_indent(self.stack_depth());
                             eprintln!(
                                 "[..tb reuse unbox v{:<4} as {:?} is at {:?}]",
                                 arg_vid.0, value_type, unboxed
@@ -942,15 +835,14 @@ impl TraceBuilder {
                             }))
                         }
                     } else {
-                        self.print_indent();
+                        print_indent(self.stack_depth());
                         eprintln!("[..tb emit unbox: v{:<4} as {:?}]", arg_vid.0, value_type);
                         let new_vid = ValueId(self.instrs.len() as u32);
 
                         self.vars
                             .cur_frame_mut()
-                            .unboxes
-                            .insert(*arg_vid, (value_type, new_vid));
-                        self.instrs.push(instr);
+                            .set_unbox(*arg_vid, value_type, new_vid);
+                        self.write(instr)?;
                         Ok(new_vid.into())
                     }
                 }
@@ -978,14 +870,24 @@ impl TraceBuilder {
 
     fn write(&mut self, instr: Instr) -> Result<Operand, Error> {
         let vid = ValueId(self.instrs.len() as u32);
-        self.print_indent();
+        print_indent(self.stack_depth());
         eprintln!("[..tb emit: v{:<4} {:?}]", vid.0, instr);
         self.instrs.push(instr);
         Ok(vid.into())
     }
 
+    fn add_parameter(&mut self, operand: interpreter::Operand) -> Result<Operand, Error> {
+        let ndx = self.parameters.len() as u16;
+        self.parameters.push(TraceParam { operand });
+        self.emit(Instr::TraceParam(ndx))
+    }
+
     pub(crate) fn build(self) -> Option<Trace> {
         if let TraceBuilderState::Finished = self.state {
+            if self.loop_head.is_some() {
+                todo!("add phis, generate looping code");
+            }
+
             let hregs = regalloc::allocate_registers(self.instrs.as_slice(), 6);
 
             Some(Trace {
@@ -997,17 +899,11 @@ impl TraceBuilder {
             None
         }
     }
+}
 
-    fn add_parameter(&mut self, operand: interpreter::Operand) -> Result<Operand, Error> {
-        let ndx = self.parameters.len() as u16;
-        self.parameters.push(TraceParam { operand });
-        self.emit(Instr::TraceParam(ndx))
-    }
-
-    fn print_indent(&self) {
-        for _ in 0..(self.stack_depth()) {
-            eprint!("      | ");
-        }
+fn print_indent(stack_depth: usize) {
+    for _ in 0..stack_depth {
+        eprint!("      | ");
     }
 }
 
