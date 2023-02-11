@@ -154,11 +154,66 @@ impl ValueType {
     }
 }
 
-pub struct TraceBuilder {
+/// Stores a model (a "proxy" of sorts) of every stack frame and variable "seen" by the JIT.
+///
+/// This includes captured frames (by closure).  It also tracks which
+/// assignments were "seen" by the JIT (this allows detecting variables that
+/// should be resolved by trace parameter rather than by instruction ID or
+/// constant folding).
+struct VarsState {
     stack_model: Vec<FrameId>,
     // Frames are only ever added, never removed. We clean it up only when the
-    // whole TraceBuilder is deleted
+    // whole VarsState is deleted
     frame_models: HashMap<FrameId, FrameTracker>,
+}
+
+impl VarsState {
+    fn new() -> Self {
+        VarsState {
+            stack_model: Vec::new(),
+            frame_models: HashMap::new(),
+        }
+    }
+
+    fn stack_depth(&self) -> usize {
+        self.stack_model.len()
+    }
+
+    // TODO Garbage collection?
+
+    fn push_frame(&mut self, frame_id: FrameId, args: Vec<Operand>, n_vars: usize) {
+        let frame_model = FrameTracker::new(args, n_vars);
+        self.frame_models.insert(frame_id, frame_model);
+        self.stack_model.push(frame_id);
+    }
+
+    fn pop_frame(&mut self) {
+        self.stack_model.pop().unwrap();
+    }
+
+    fn cur_frame_id(&self) -> FrameId {
+        *self
+            .stack_model
+            .last()
+            .expect("JIT bug: no frame model on stack (trace ended?)")
+    }
+    fn cur_frame(&self) -> &FrameTracker {
+        self.get(self.cur_frame_id())
+    }
+    fn cur_frame_mut(&mut self) -> &mut FrameTracker {
+        self.get_mut(self.cur_frame_id())
+    }
+
+    fn get(&self, frame_id: FrameId) -> &FrameTracker {
+        self.frame_models.get(&frame_id).unwrap()
+    }
+    fn get_mut(&mut self, frame_id: FrameId) -> &mut FrameTracker {
+        self.frame_models.get_mut(&frame_id).unwrap()
+    }
+}
+
+pub struct TraceBuilder {
+    vars: VarsState,
 
     // "Parking spot" used to tranfer the arguments from caller to callee
     // frame, and the return value in the other direction
@@ -201,6 +256,28 @@ impl FrameTracker {
             unboxes: HashMap::new(),
         }
     }
+
+    // TODO get_arg
+    fn get_arg(&self, arg_ndx: usize) -> &Operand {
+        self.args
+            .get(arg_ndx)
+            .expect("bytecode_compiler bug: unbound arg var")
+    }
+
+    fn get_var(&self, var_ndx: VarIndex) -> Option<&Operand> {
+        self.operand_of_varid
+            .get(var_ndx.0 as usize)
+            .expect("bug: invalid variable index for this frame")
+            .as_ref()
+    }
+
+    fn set_var(&mut self, var_ndx: VarIndex, value: Operand) {
+        let slot = self
+            .operand_of_varid
+            .get_mut(var_ndx.0 as usize)
+            .expect("bug: invalid variable index for this frame");
+        *slot = Some(value);
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
@@ -237,8 +314,7 @@ impl TraceBuilder {
         TraceBuilder {
             return_value: None,
             args_buf: None,
-            stack_model: Vec::new(),
-            frame_models: HashMap::new(),
+            vars: VarsState::new(),
             instrs: Vec::new(),
             parameters: Vec::new(),
             start_mode,
@@ -248,8 +324,9 @@ impl TraceBuilder {
         }
     }
 
+    // TODO Inline into all callers
     fn stack_depth(&self) -> usize {
-        self.stack_model.len()
+        self.vars.stack_depth()
     }
 
     fn resolve_interpreter_operand<F>(
@@ -268,7 +345,7 @@ impl TraceBuilder {
             // instruction that produced them) are mapped to the JIT instruction
             // that last assigned to it (the JIT trace is SSA)
             interpreter::Operand::IID(iid) => {
-                let jit_operand = self.cur_frame_model().operand_of_iid.get(iid);
+                let jit_operand = self.vars.cur_frame().operand_of_iid.get(iid);
 
                 if let Some(operand_for_var) = jit_operand {
                     self.print_indent();
@@ -284,7 +361,9 @@ impl TraceBuilder {
                     assert_eq!(1, self.stack_depth());
 
                     let param = self.add_parameter(intrp_operand.clone())?;
-                    self.cur_frame_model_mut()
+
+                    self.vars
+                        .cur_frame_mut()
                         .operand_of_iid
                         .insert(*iid, param.clone());
                     Ok(param)
@@ -293,28 +372,16 @@ impl TraceBuilder {
 
             interpreter::Operand::Var(intrp_varid) => {
                 let frame_id = fnid_to_frameid(intrp_varid.fnid);
-                {
-                    let slot = self
-                        .frame_models
-                        .get_mut(&frame_id)
-                        .expect("no such frame")
-                        .operand_of_varid
-                        .get_mut(intrp_varid.var_ndx.0 as usize)
-                        .expect("invalid variable index for this frame");
-                    if let Some(value) = slot {
-                        return Ok(value.clone());
-                    }
+
+                let slot = self.vars.get(frame_id).get_var(intrp_varid.var_ndx);
+                if let Some(value) = slot {
+                    return Ok(value.clone());
                 }
 
                 let param = self.add_parameter(intrp_operand.clone())?;
-                let slot = self
-                    .frame_models
-                    .get_mut(&frame_id)
-                    .expect("no such frame")
-                    .operand_of_varid
-                    .get_mut(intrp_varid.var_ndx.0 as usize)
-                    .expect("invalid variable index for this frame");
-                *slot = Some(param.clone());
+                self.vars
+                    .get_mut(frame_id)
+                    .set_var(intrp_varid.var_ndx, param.clone());
                 Ok(param)
             }
         }
@@ -435,9 +502,7 @@ impl TraceBuilder {
                     let fid = (step.fnid_to_frameid)(step.fnid);
                     let n_vars = step.func.n_slots().into();
                     let args = Vec::new();
-                    self.frame_models
-                        .insert(fid, FrameTracker::new(args, n_vars));
-                    self.stack_model.push(fid);
+                    self.vars.push_frame(fid, args, n_vars);
 
                     // For the first instruction, self.loop_head stays None.
                     // Then, we set self.loop_head, so that we can detect that
@@ -593,27 +658,15 @@ impl TraceBuilder {
             interpreter::Instr::Set { var_id, value } => {
                 let value = self.resolve_interpreter_operand(value, &step.fnid_to_frameid)?;
                 let frame_id = (step.fnid_to_frameid)(var_id.fnid);
+
                 self.print_indent();
-                match self.frame_models.get_mut(&frame_id) {
-                    Some(frame_model) => {
-                        eprintln!(
-                            "[..tb map var: {:?}:{} = {:?}]",
-                            frame_id, var_id.var_ndx.0, value
-                        );
-                        let slot = frame_model
-                            .operand_of_varid
-                            .get_mut(var_id.var_ndx.0 as usize)
-                            .unwrap();
-                        *slot = Some(value);
-                    }
-                    None => {
-                        todo!(
-                            "JIT: set a variable outside the traced function {:?} {:?}",
-                            frame_id,
-                            var_id.var_ndx
-                        );
-                    }
-                }
+                eprintln!(
+                    "[..tb map var: {:?}:{} = {:?}]",
+                    frame_id, var_id.var_ndx.0, value
+                );
+
+                self.vars.get_mut(frame_id).set_var(var_id.var_ndx, value);
+
                 None
             }
             interpreter::Instr::PushSink(value) => {
@@ -637,11 +690,7 @@ impl TraceBuilder {
                 let value = if self.stack_depth() == 1 {
                     self.emit(Instr::GetArg(*index))?
                 } else {
-                    self.cur_frame_model_mut()
-                        .args
-                        .get(*index)
-                        .expect("bytecode_compiler bug: unbound arg var")
-                        .clone()
+                    self.vars.cur_frame_mut().get_arg(*index).clone()
                 };
                 Some(value)
             }
@@ -717,10 +766,8 @@ impl TraceBuilder {
             .args_buf
             .take()
             .expect("enter_function called without calling set_args first");
+        self.vars.push_frame(fid, args, n_vars);
 
-        self.frame_models
-            .insert(fid, FrameTracker::new(args, n_vars));
-        self.stack_model.push(fid);
         self.print_indent();
         eprintln!("[..tb call (stack depth -> {})]", self.stack_depth());
     }
@@ -764,11 +811,12 @@ impl TraceBuilder {
         // does not have an explicit Return instruction. In this case, we do
         // an implicit Return(undefined)
 
-        self.stack_model.pop().unwrap();
         self.print_indent();
-        eprintln!("[..tb returned from function]");
+        eprintln!("[..tb exit function]");
 
-        if self.stack_model.is_empty() {
+        self.vars.pop_frame();
+
+        if self.vars.stack_depth() == 0 {
             self.print_indent();
             eprintln!("[..tb trace ended]");
             self.state = TraceBuilderState::Finished;
@@ -780,28 +828,10 @@ impl TraceBuilder {
     fn map_iid(&mut self, iid: IID, jit_operand: Operand) {
         self.print_indent();
         eprintln!("[..tb map {:?} -> {:?}]", iid, jit_operand);
-        self.cur_frame_model_mut()
+        self.vars
+            .cur_frame_mut()
             .operand_of_iid
             .insert(iid, jit_operand);
-    }
-
-    fn cur_frame_model_mut(&mut self) -> &mut FrameTracker {
-        let fid = self.stack_model.last().unwrap();
-        self.frame_models
-            .get_mut(&fid)
-            .expect("JIT bug: no frame model on stack")
-    }
-
-    fn cur_frame_model(&self) -> &FrameTracker {
-        let fid = self.stack_model.last().unwrap_or_else(|| {
-            panic!(
-                "JIT bug: no frame model on stack (trace ended? state = {:?})",
-                self.state
-            )
-        });
-        self.frame_models
-            .get(&fid)
-            .expect("JIT bug: no frame model on stack")
     }
 
     fn emit(&mut self, instr: Instr) -> Result<Operand, Error> {
@@ -896,7 +926,8 @@ impl TraceBuilder {
                 Operand::Imm(_) => panic!("invalid operand for Unbox: immediate"),
                 Operand::Cmp(_) => panic!("invalid operand for Unbox: cmp"),
                 Operand::ValueId(arg_vid) => {
-                    let unboxes = &self.cur_frame_model().unboxes;
+                    // TODO move some of this stuff in FrameTracker
+                    let unboxes = &self.vars.cur_frame().unboxes;
                     if let Some((prev_unbox_type, unboxed)) = unboxes.get(&arg_vid) {
                         if *prev_unbox_type == value_type {
                             self.print_indent();
@@ -914,7 +945,9 @@ impl TraceBuilder {
                         self.print_indent();
                         eprintln!("[..tb emit unbox: v{:<4} as {:?}]", arg_vid.0, value_type);
                         let new_vid = ValueId(self.instrs.len() as u32);
-                        self.cur_frame_model_mut()
+
+                        self.vars
+                            .cur_frame_mut()
                             .unboxes
                             .insert(*arg_vid, (value_type, new_vid));
                         self.instrs.push(instr);
