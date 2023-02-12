@@ -9,7 +9,7 @@ use crate::{
 
 use dynasm::dynasm;
 
-use super::tracking;
+use super::{tracking, Trace};
 
 // This is going to be changed at some point
 pub(super) type BoxedValue = interpreter::Value;
@@ -61,8 +61,9 @@ impl Cmp {
     }
 }
 
+// TODO Move this to the super module
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ValueId(u32);
+pub struct ValueId(pub(super) u32);
 
 impl std::fmt::Debug for ValueId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -143,7 +144,7 @@ struct VarId {
 }
 
 #[derive(Debug)]
-struct TraceParam {
+pub(super) struct TraceParam {
     operand: interpreter::Operand,
 }
 
@@ -913,8 +914,9 @@ impl<'a> InterpreterStep<'a> {
     }
 }
 
+// TODO Move to jit/mod.rs
 #[derive(PartialEq, Debug)]
-enum Instr {
+pub(super) enum Instr {
     WhateverBullshitIsNeededtoLoopback,
     TraceParam(u16),
     GetArg(usize),
@@ -1042,6 +1044,33 @@ impl Instr {
             Instr::Const(_) => Box::new(std::iter::empty()),
         }
     }
+
+    pub(crate) fn has_side_effects(&self) -> bool {
+        match self {
+            Instr::WhateverBullshitIsNeededtoLoopback => true,
+            Instr::TraceParam(_) => false,
+            Instr::GetArg(_) => false,
+            Instr::Const(_) => false,
+            Instr::Not(_) => false,
+            Instr::Arith { .. } => false,
+            Instr::Cmp(_) => false,
+            Instr::BoolOp { .. } => false,
+            Instr::Choose { .. } => false,
+            Instr::AssertTrue { .. } => true,
+            Instr::AssertEqConst { .. } => true,
+            Instr::Unbox(_, _) => false,
+            Instr::Box(_) => false,
+            Instr::Num2Str(_) => false,
+            Instr::ObjNew => false,
+            Instr::ObjSet { .. } => false,
+            Instr::ObjGet { .. } => false,
+            Instr::TypeOf(_) => false,
+            Instr::ClosureNew => false,
+            Instr::PushSink(_) => true,
+            Instr::Return(_) => false,
+            Instr::Phi(_, _) => false,
+        }
+    }
 }
 
 impl regalloc::Instruction for Instr {
@@ -1049,73 +1078,6 @@ impl regalloc::Instruction for Instr {
         self.operands()
             .map(|ValueId(index)| regalloc::SoftReg(*index))
             .collect()
-    }
-}
-
-// A JIT trace, in SSA representation.
-pub struct Trace {
-    instrs: Vec<Instr>,
-    hreg_alloc: regalloc::Allocation,
-    parameters: Vec<TraceParam>,
-}
-
-impl Trace {
-    pub fn dump(&self) {
-        use std::borrow::Cow;
-
-        eprintln!(" === trace");
-        eprintln!(" {} parameters", self.parameters.len());
-        for (ndx, param) in self.parameters.iter().enumerate() {
-            eprintln!("    param[{}] = {:?}", ndx, param);
-        }
-        for (ndx, instr) in self.instrs.iter().enumerate() {
-            let hreg = self.hreg_alloc.hreg_of_instr(ndx);
-
-            let hreg = hreg
-                .map(|x| Cow::Owned(format!("{:?}", x)))
-                .unwrap_or_else(|| Cow::Borrowed("???"));
-            eprintln!(" {:4?} {:5} {:?}", ndx, hreg, instr);
-        }
-    }
-
-    pub(crate) fn compile(&self) -> NativeThunk {
-        use dynasmrt::{DynasmApi, DynasmLabelApi};
-        let mut asm = dynasmrt::x64::Assembler::new().unwrap();
-
-        dynasm!(asm
-        ; .arch x64
-        ; entry:
-        ; mov eax, 123
-        ; ret
-        );
-
-        let entry_offset = asm.labels().resolve_local("entry").unwrap();
-
-        let buf = asm.finalize().unwrap();
-
-        NativeThunk {
-            buf,
-            entry_offset,
-            sink: Vec::new(),
-        }
-    }
-
-    fn get_instr(&self, vid: ValueId) -> Option<&Instr> {
-        self.instrs.get(vid.0 as usize)
-    }
-}
-
-pub struct NativeThunk {
-    buf: dynasmrt::ExecutableBuffer,
-    entry_offset: dynasmrt::AssemblyOffset,
-    sink: Vec<BoxedValue>,
-}
-
-impl NativeThunk {
-    pub(crate) fn run(&self) -> u64 {
-        let ptr = self.buf.ptr(self.entry_offset);
-        let thunk: extern "C" fn() -> u64 = unsafe { std::mem::transmute(ptr) };
-        thunk()
     }
 }
 
