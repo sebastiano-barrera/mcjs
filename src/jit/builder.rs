@@ -40,8 +40,8 @@ impl From<TypeError> for Error {
 pub(super) struct Cmp {
     ty: ValueType,
     op: CmpOp,
-    a: Operand,
-    b: Operand,
+    a: ValueId,
+    b: ValueId,
 }
 
 impl Cmp {
@@ -57,33 +57,6 @@ impl Cmp {
         Cmp {
             op: inverted_op,
             ..self.clone()
-        }
-    }
-}
-
-#[derive(PartialEq, Clone)]
-pub(super) enum Operand {
-    ValueId(ValueId),
-}
-
-impl Operand {
-    fn value_ids(&self) -> Box<dyn Iterator<Item = ValueId>> {
-        match self {
-            Operand::ValueId(vid) => Box::new(std::iter::once(vid.clone())),
-        }
-    }
-}
-
-impl From<ValueId> for Operand {
-    fn from(vid: ValueId) -> Self {
-        Operand::ValueId(vid)
-    }
-}
-
-impl std::fmt::Debug for Operand {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Operand::ValueId(vid) => vid.fmt(f),
         }
     }
 }
@@ -146,8 +119,8 @@ pub struct TraceBuilder {
 
     // "Parking spot" used to tranfer the arguments from caller to callee
     // frame, and the return value in the other direction
-    args_buf: Option<Vec<Operand>>,
-    return_value: Option<Operand>,
+    args_buf: Option<Vec<ValueId>>,
+    return_value: Option<ValueId>,
 
     loop_head: Option<interpreter::GlobalIID>,
 
@@ -212,7 +185,7 @@ impl TraceBuilder {
         &mut self,
         intrp_operand: &interpreter::Operand,
         fnid_to_frameid: F,
-    ) -> Result<Operand, Error>
+    ) -> Result<ValueId, Error>
     where
         F: Fn(FnId) -> FrameId,
     {
@@ -226,10 +199,10 @@ impl TraceBuilder {
             interpreter::Operand::IID(iid) => {
                 let stack_depth = self.stack_depth();
                 match self.vars.cur_frame_mut().get_result(*iid).cloned() {
-                    Some(operand_for_var) => {
+                    Some(vid_for_var) => {
                         print_indent(stack_depth);
-                        eprintln!("[..tb {:?} is {:?}]", iid, operand_for_var);
-                        Ok(operand_for_var)
+                        eprintln!("[..tb {:?} is {:?}]", iid, vid_for_var);
+                        Ok(vid_for_var)
                     }
                     None => {
                         print_indent(stack_depth);
@@ -264,21 +237,16 @@ impl TraceBuilder {
         }
     }
 
-    fn operand_type(&mut self, operand: &Operand) -> Option<ValueType> {
-        match operand {
-            Operand::ValueId(vid) => {
-                let instr = self.instrs.get(vid.0 as usize).unwrap();
-                instr.result_type()
-            }
-        }
+    fn value_type(&mut self, vid: &ValueId) -> Option<ValueType> {
+        self.instrs.get(vid.0 as usize).unwrap().result_type()
     }
 
-    fn ensure_type(&mut self, operand: Operand, desired_type: ValueType) -> Result<Operand, Error> {
+    fn ensure_type(&mut self, vid: ValueId, desired_type: ValueType) -> Result<ValueId, Error> {
         let type_error = Error::Type(TypeError { desired_type });
-        let input_type = self.operand_type(&operand).ok_or(type_error.clone())?;
+        let input_type = self.value_type(&vid).ok_or(type_error.clone())?;
 
         let converted_operand = match (input_type, desired_type) {
-            (a, b) if a == b => Some(operand),
+            (a, b) if a == b => Some(vid),
 
             (_, ValueType::Null) => Some(self.emit(Instr::Const(BoxedValue::Null))?),
             (_, ValueType::Undefined) => Some(self.emit(Instr::Const(BoxedValue::Undefined))?),
@@ -286,12 +254,12 @@ impl TraceBuilder {
 
             (ValueType::Boxed, desired_type) => {
                 assert_ne!(ValueType::Boxed, desired_type);
-                Some(self.emit(Instr::Unbox(desired_type, operand))?)
+                Some(self.emit(Instr::Unbox(desired_type, vid))?)
             }
 
             (input_type, ValueType::Boxed) => {
                 assert_ne!(ValueType::Boxed, input_type);
-                Some(self.emit(Instr::Box(operand))?)
+                Some(self.emit(Instr::Box(vid))?)
             }
 
             (ValueType::Bool, ValueType::Num) => {
@@ -299,7 +267,7 @@ impl TraceBuilder {
                 let if_false = self.emit(Instr::Const(BoxedValue::Number(0.0)))?;
                 Some(self.emit(Instr::Choose {
                     ty: ValueType::Num,
-                    cond: operand,
+                    cond: vid,
                     if_true,
                     if_false,
                 })?)
@@ -309,7 +277,7 @@ impl TraceBuilder {
                 let if_false = self.emit(Instr::Const("false".into()))?;
                 Some(self.emit(Instr::Choose {
                     ty: ValueType::Str,
-                    cond: operand,
+                    cond: vid,
                     if_true,
                     if_false,
                 })?)
@@ -319,18 +287,18 @@ impl TraceBuilder {
                 let cmp = Cmp {
                     ty: ValueType::Num,
                     op: CmpOp::EQ,
-                    a: operand,
+                    a: vid,
                     b: self.emit(Instr::Const(BoxedValue::Number(0.0)))?,
                 };
                 Some(self.emit(cmp.into())?)
             }
-            (ValueType::Num, ValueType::Str) => Some(self.emit(Instr::Num2Str(operand))?),
+            (ValueType::Num, ValueType::Str) => Some(self.emit(Instr::Num2Str(vid))?),
 
             (ValueType::Str, ValueType::Bool) => {
                 let cmp = Cmp {
                     ty: ValueType::Str,
                     op: CmpOp::EQ,
-                    a: operand,
+                    a: vid,
                     // TODO this string allocation could be avoided
                     b: self.emit(Instr::Const("".into()))?,
                 };
@@ -366,7 +334,7 @@ impl TraceBuilder {
         };
 
         if let Some(converted_operand) = &converted_operand {
-            assert_eq!(Some(desired_type), self.operand_type(converted_operand));
+            assert_eq!(Some(desired_type), self.value_type(converted_operand));
         }
 
         converted_operand.ok_or(type_error)
@@ -377,7 +345,7 @@ impl TraceBuilder {
         interp_oper: &interpreter::Operand,
         fnid_to_frameid: F,
         desired_type: ValueType,
-    ) -> Result<Operand, Error>
+    ) -> Result<ValueId, Error>
     where
         F: Fn(FnId) -> FrameId,
     {
@@ -468,10 +436,8 @@ impl TraceBuilder {
                 Some(self.emit(Instr::Arith { op: *op, a, b })?)
             }
             interpreter::Instr::Cmp { op, a, b } => {
-                let Operand::ValueId(a) =
-                    self.resolve_interpreter_operand(&a, &step.fnid_to_frameid)?;
-                let Operand::ValueId(b) =
-                    self.resolve_interpreter_operand(&b, &step.fnid_to_frameid)?;
+                let a = self.resolve_interpreter_operand(&a, &step.fnid_to_frameid)?;
+                let b = self.resolve_interpreter_operand(&b, &step.fnid_to_frameid)?;
 
                 let instr = if let (Instr::Const(_), Instr::Const(_)) =
                     (self.get_instr(a), self.get_instr(b))
@@ -487,24 +453,24 @@ impl TraceBuilder {
                             Cmp {
                                 ty: unboxed_type,
                                 op: *op,
-                                a: self.emit(Instr::Unbox(unboxed_type, Operand::ValueId(a)))?,
-                                b: Operand::ValueId(b),
+                                a: self.emit(Instr::Unbox(unboxed_type, a))?,
+                                b,
                             }
                         }
                         (unboxed_type, ValueType::Boxed) if unboxed_type != ValueType::Boxed => {
                             Cmp {
                                 ty: unboxed_type,
                                 op: *op,
-                                a: Operand::ValueId(a),
-                                b: self.emit(Instr::Unbox(unboxed_type, Operand::ValueId(b)))?,
+                                a,
+                                b: self.emit(Instr::Unbox(unboxed_type, b))?,
                             }
                         }
                         _ => {
-                            let b = self.ensure_type(Operand::ValueId(b), a_type)?;
+                            let b = self.ensure_type(b, a_type)?;
                             Cmp {
                                 ty: a_type,
                                 op: *op,
-                                a: Operand::ValueId(a),
+                                a,
                                 b,
                             }
                         }
@@ -518,26 +484,27 @@ impl TraceBuilder {
             interpreter::Instr::JmpIf { cond, .. } => {
                 let cond =
                     self.resolve_operand_as(&cond, &step.fnid_to_frameid, ValueType::Bool)?;
-                let Operand::ValueId(cond_vid) = cond;
-                if let Instr::Const(_) = self.get_instr(cond_vid) {
-                    None
-                } else {
-                    let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
 
-                    print_indent(self.stack_depth());
-                    eprintln!(
-                        "[..tb jmpif: branch {}taken ({:?} -> {:?})]",
-                        if branch_taken { "" } else { "not " },
-                        step.iid,
-                        step.next_iid,
-                    );
+                match self.get_instr(cond) {
+                    Instr::Const(_) => None,
+                    _ => {
+                        let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
 
-                    let cond = if branch_taken {
-                        cond
-                    } else {
-                        self.emit(Instr::Not(cond))?
-                    };
-                    Some(self.emit(Instr::AssertTrue { cond })?)
+                        print_indent(self.stack_depth());
+                        eprintln!(
+                            "[..tb jmpif: branch {}taken ({:?} -> {:?})]",
+                            if branch_taken { "" } else { "not " },
+                            step.iid,
+                            step.next_iid,
+                        );
+
+                        let cond = if branch_taken {
+                            cond
+                        } else {
+                            self.emit(Instr::Not(cond))?
+                        };
+                        Some(self.emit(Instr::AssertTrue { cond })?)
+                    }
                 }
             }
             interpreter::Instr::Jmp(_) => {
@@ -714,15 +681,15 @@ impl TraceBuilder {
         self.exit_function_expected = false;
     }
 
-    fn map_iid(&mut self, iid: IID, jit_operand: Operand) {
+    fn map_iid(&mut self, iid: IID, jit_vid: ValueId) {
         print_indent(self.stack_depth());
-        eprintln!("[..tb map {:?} -> {:?}]", iid, jit_operand);
-        self.vars.cur_frame_mut().set_result(iid, jit_operand);
+        eprintln!("[..tb map {:?} -> {:?}]", iid, jit_vid);
+        self.vars.cur_frame_mut().set_result(iid, jit_vid);
     }
 
-    fn emit(&mut self, instr: Instr) -> Result<Operand, Error> {
+    fn emit(&mut self, instr: Instr) -> Result<ValueId, Error> {
         match instr {
-            Instr::Not(Operand::ValueId(vid)) => match self.get_instr(vid) {
+            Instr::Not(vid) => match self.get_instr(vid) {
                 Instr::Const(BoxedValue::Bool(value)) => {
                     Ok(self.emit(Instr::Const(BoxedValue::Bool(!value)))?)
                 }
@@ -731,7 +698,6 @@ impl TraceBuilder {
             },
 
             Instr::Arith { op, ref a, ref b } => {
-                let (Operand::ValueId(a), Operand::ValueId(b)) = (a, b);
                 let (a, b) = (self.get_instr(*a), self.get_instr(*b));
 
                 if let (Instr::Const(BoxedValue::Number(a)), Instr::Const(BoxedValue::Number(b))) =
@@ -750,6 +716,7 @@ impl TraceBuilder {
                 }
             }
 
+            // TODO TODO Re-enable this feature
             // Instr::Arith {
             //     op: ArithOp::Add,
             //     a: Operand::Imm(BoxedValue::Number(a_const)),
@@ -819,7 +786,7 @@ impl TraceBuilder {
             //     a: Operand::Imm(BoxedValue::Bool(false)),
             //     b: Operand::Imm(BoxedValue::Bool(false)),
             // } => Ok(Operand::Imm(BoxedValue::Bool(false))),
-            Instr::Unbox(value_type, Operand::ValueId(ref arg_vid)) => {
+            Instr::Unbox(value_type, ref arg_vid) => {
                 // TODO move some of this stuff in FrameTracker
                 if let Some((prev_unbox_type, unboxed)) = self.vars.cur_frame().get_unbox(*arg_vid)
                 {
@@ -829,7 +796,7 @@ impl TraceBuilder {
                             "[..tb reuse unbox v{:<4} as {:?} is at {:?}]",
                             arg_vid.0, value_type, unboxed
                         );
-                        Ok(Operand::ValueId(unboxed.clone()))
+                        Ok(unboxed.clone())
                     } else {
                         Err(Error::InconsistentUnbox(InconsistentUnbox {
                             desired_type: value_type.clone(),
@@ -848,7 +815,7 @@ impl TraceBuilder {
                 }
             }
 
-            Instr::TypeOf(Operand::ValueId(ref vid)) => {
+            Instr::TypeOf(ref vid) => {
                 let target_instr = self.instrs.get(vid.0 as usize).unwrap();
                 let ty = target_instr.result_type().and_then(|ty| ty.js_typeof());
 
@@ -864,7 +831,7 @@ impl TraceBuilder {
         }
     }
 
-    fn write(&mut self, instr: Instr) -> Result<Operand, Error> {
+    fn write(&mut self, instr: Instr) -> Result<ValueId, Error> {
         let vid = ValueId(self.instrs.len() as u32);
         print_indent(self.stack_depth());
         eprintln!("[..tb emit: v{:<4} {:?}]", vid.0, instr);
@@ -872,7 +839,7 @@ impl TraceBuilder {
         Ok(vid.into())
     }
 
-    fn add_parameter(&mut self, operand: interpreter::Operand) -> Result<Operand, Error> {
+    fn add_parameter(&mut self, operand: interpreter::Operand) -> Result<ValueId, Error> {
         let ndx = self.parameters.len() as u16;
         self.parameters.push(TraceParam { operand });
         self.emit(Instr::TraceParam(ndx))
@@ -952,55 +919,55 @@ enum Instr {
     TraceParam(u16),
     GetArg(usize),
     Const(BoxedValue),
-    Not(Operand),
+    Not(ValueId),
     Arith {
         op: ArithOp,
-        a: Operand,
-        b: Operand,
+        a: ValueId,
+        b: ValueId,
     },
     Cmp(Cmp),
     BoolOp {
         op: BoolOp,
-        a: Operand,
-        b: Operand,
+        a: ValueId,
+        b: ValueId,
     },
     Choose {
         ty: ValueType,
-        cond: Operand,
-        if_true: Operand,
-        if_false: Operand,
+        cond: ValueId,
+        if_true: ValueId,
+        if_false: ValueId,
     },
     AssertTrue {
-        cond: Operand,
+        cond: ValueId,
     },
     AssertEqConst {
-        x: Operand,
+        x: ValueId,
         expected: BoxedValue,
     },
 
-    Unbox(ValueType, Operand),
-    Box(Operand),
-    Num2Str(Operand),
+    Unbox(ValueType, ValueId),
+    Box(ValueId),
+    Num2Str(ValueId),
 
     ObjNew,
     ObjSet {
-        obj: Operand,
-        key: Operand,
-        value: Operand,
+        obj: ValueId,
+        key: ValueId,
+        value: ValueId,
     },
     ObjGet {
-        obj: Operand,
-        key: Operand,
+        obj: ValueId,
+        key: ValueId,
     },
 
-    TypeOf(Operand),
+    TypeOf(ValueId),
 
     ClosureNew,
 
-    PushSink(Operand),
-    Return(Operand),
+    PushSink(ValueId),
+    Return(ValueId),
 
-    Phi(ValueId, Operand),
+    Phi(ValueId, ValueId),
 }
 
 type ArithOp = interpreter::ArithOp;
@@ -1041,7 +1008,7 @@ impl Instr {
         }
     }
 
-    fn operands<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = &'a Operand>> {
+    fn operands<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = &'a ValueId>> {
         use std::iter::once;
         match self {
             Instr::Not(arg) => Box::new(once(arg)),
@@ -1080,8 +1047,7 @@ impl Instr {
 impl regalloc::Instruction for Instr {
     fn inputs(&self) -> Vec<regalloc::SoftReg> {
         self.operands()
-            .flat_map(|operand| operand.value_ids())
-            .map(|ValueId(index)| regalloc::SoftReg(index))
+            .map(|ValueId(index)| regalloc::SoftReg(*index))
             .collect()
     }
 }
@@ -1193,7 +1159,7 @@ mod tests {
                 Instr::PushSink(operand) => Some(operand),
                 _ => None,
             })
-            .filter_map(|Operand::ValueId(vid)| match trace.get_instr(*vid) {
+            .filter_map(|vid| match trace.get_instr(*vid) {
                 Some(Instr::Const(value)) => Some(value),
                 _ => None,
             })

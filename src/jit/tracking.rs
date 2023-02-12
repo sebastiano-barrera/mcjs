@@ -8,7 +8,7 @@ use crate::{
     stack::FrameId,
 };
 
-use super::builder::{BoxedValue, Operand, ValueId, ValueType};
+use super::builder::{BoxedValue, ValueId, ValueType};
 
 /// Stores a model (a "proxy" of sorts) of every stack frame and variable "seen" by the JIT.
 ///
@@ -35,7 +35,7 @@ impl VarsState {
 
     // TODO Garbage collection?
 
-    pub(super) fn push_frame(&mut self, frame_id: FrameId, args: Vec<Operand>, n_vars: usize) {
+    pub(super) fn push_frame(&mut self, frame_id: FrameId, args: Vec<ValueId>, n_vars: usize) {
         let frame_model = FrameTracker::new(args, n_vars);
         self.frame_models.insert(frame_id, frame_model);
         self.stack_model.push(frame_id);
@@ -73,7 +73,7 @@ impl VarsState {
 /// A "model" of the interpreter's stack, represented in terms that the JIT
 /// cares about.
 pub(super) struct FrameTracker {
-    args: Vec<Operand>,
+    args: Vec<ValueId>,
     /// Associates RUNTIME variable identifiers (current frame id, VarIndex)
     /// from the interpreter to ValueIds in the SSA trace we're building.
     ///
@@ -81,40 +81,40 @@ pub(super) struct FrameTracker {
     /// assignment has been "seen" by the JIT.  This allows variables to be
     /// introduced as trace parameters when the JIT starts later than the start
     /// of the function's body.
-    operand_of_varid: Box<[Option<Operand>]>,
+    vid_of_varid: Box<[Option<ValueId>]>,
     // TODO More compact data structure
     written_vars: RefCell<HashSet<VarIndex>>,
     read_before_write: RefCell<HashSet<VarIndex>>,
 
-    operand_of_iid: HashMap<interpreter::IID, Operand>,
+    vid_of_iid: HashMap<interpreter::IID, ValueId>,
     unboxes: HashMap<ValueId, (ValueType, ValueId)>,
 }
 
 impl FrameTracker {
-    fn new(args: Vec<Operand>, n_vars: usize) -> Self {
-        let operand_of_varid = vec![None; n_vars].into_boxed_slice();
+    fn new(args: Vec<ValueId>, n_vars: usize) -> Self {
+        let vid_of_varid = vec![None; n_vars].into_boxed_slice();
         FrameTracker {
             args,
-            operand_of_varid,
+            vid_of_varid,
             written_vars: RefCell::new(HashSet::new()),
             read_before_write: RefCell::new(HashSet::new()),
-            operand_of_iid: HashMap::new(),
+            vid_of_iid: HashMap::new(),
             unboxes: HashMap::new(),
         }
     }
 
     // TODO get_arg
-    pub(super) fn get_arg(&self, arg_ndx: usize) -> &Operand {
+    pub(super) fn get_arg(&self, arg_ndx: usize) -> &ValueId {
         self.args
             .get(arg_ndx)
             .expect("bytecode_compiler bug: unbound arg var")
     }
 
-    pub(super) fn get_result(&self, iid: interpreter::IID) -> Option<&Operand> {
-        self.operand_of_iid.get(&iid)
+    pub(super) fn get_result(&self, iid: interpreter::IID) -> Option<&ValueId> {
+        self.vid_of_iid.get(&iid)
     }
-    pub(super) fn set_result(&mut self, iid: interpreter::IID, value: Operand) {
-        let prev = self.operand_of_iid.insert(iid, value);
+    pub(super) fn set_result(&mut self, iid: interpreter::IID, value: ValueId) {
+        let prev = self.vid_of_iid.insert(iid, value);
         assert!(
             prev.is_none(),
             "JIT bug: multiple results for the same instruction ({:?})",
@@ -122,21 +122,21 @@ impl FrameTracker {
         );
     }
 
-    pub(super) fn get_var(&self, var_ndx: VarIndex) -> Option<&Operand> {
+    pub(super) fn get_var(&self, var_ndx: VarIndex) -> Option<&ValueId> {
         let ws = self.written_vars.borrow();
         if !ws.contains(&var_ndx) {
             let mut rbws = self.read_before_write.borrow_mut();
             rbws.insert(var_ndx.clone());
         }
-        self.operand_of_varid
+        self.vid_of_varid
             .get(var_ndx.0 as usize)
             .expect("bug: invalid variable index for this frame")
             .as_ref()
     }
 
-    pub(super) fn set_var(&mut self, var_ndx: VarIndex, value: Operand) {
+    pub(super) fn set_var(&mut self, var_ndx: VarIndex, value: ValueId) {
         let slot = self
-            .operand_of_varid
+            .vid_of_varid
             .get_mut(var_ndx.0 as usize)
             .expect("bug: invalid variable index for this frame");
         *slot = Some(value);
