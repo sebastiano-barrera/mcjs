@@ -848,31 +848,33 @@ impl TraceBuilder {
 
     pub(crate) fn build(self) -> Option<Trace> {
         if let TraceBuilderState::Finished = self.state {
-            let mut instrs = self.instrs;
-
+            let mut phis = HashMap::new();
             let is_loop = self.loop_head.is_some();
+
             if is_loop {
                 let rbw = self.vars.get_reads_before_writes();
                 for (frame_id, var_ndx) in rbw.iter() {
                     let frame = &self.vars.get(*frame_id);
-                    let first_value = frame
+                    let first_vid = frame
                         .get_first_write(*var_ndx)
                         .expect("bug in VarsState: returned variable without a first write");
-                    let cur_value = frame
+                    let last_vid = frame
                         .get_var(*var_ndx)
                         .expect("bug in VarsState: returned variable without a current write");
-                    assert_ne!(
-                        first_value, *cur_value,
-                        "this is just weird, why would this happen?"
+                    assert_ne!(first_vid, *last_vid);
+                    let prev = phis.insert(first_vid, *last_vid);
+                    assert!(
+                        prev.is_none(),
+                        "JIT bug: tried to place multiple phis for the same variable"
                     );
-                    instrs.push(Instr::Phi(first_value, cur_value.clone()));
                 }
             }
 
-            let hregs = regalloc::allocate_registers(instrs.as_slice(), 6);
+            let hregs = regalloc::allocate_registers(self.instrs.as_slice(), 6);
 
             Some(Trace {
-                instrs,
+                instrs: self.instrs,
+                phis,
                 is_loop,
                 hreg_alloc: hregs,
                 parameters: self.parameters,
@@ -969,8 +971,6 @@ pub(super) enum Instr {
 
     PushSink(ValueId),
     Return(ValueId),
-
-    Phi(ValueId, ValueId),
 }
 
 type ArithOp = interpreter::ArithOp;
@@ -1005,7 +1005,6 @@ impl Instr {
             Instr::ObjGet { .. } => Some(ValueType::Boxed),
             Instr::TypeOf(_) => Some(ValueType::Str),
             Instr::ClosureNew => Some(ValueType::Function),
-            Instr::Phi(_, _) => todo!(),
             Instr::Const(val) => Some(ValueType::of(val)),
         }
     }
@@ -1039,7 +1038,6 @@ impl Instr {
             Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
             Instr::TypeOf(arg) => Box::new([arg].into_iter()),
             Instr::ClosureNew => Box::new(std::iter::empty()),
-            Instr::Phi(old, new) => Box::new([old, new].into_iter()),
             Instr::Const(_) => Box::new(std::iter::empty()),
         }
     }
@@ -1066,7 +1064,6 @@ impl Instr {
             Instr::ClosureNew => false,
             Instr::PushSink(_) => true,
             Instr::Return(_) => false,
-            Instr::Phi(_, _) => true,
         }
     }
 }

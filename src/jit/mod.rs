@@ -17,6 +17,7 @@ pub struct Trace {
     hreg_alloc: regalloc::Allocation,
     parameters: Vec<TraceParam>,
     is_loop: bool,
+    pub(crate) phis: std::collections::HashMap<ValueId, ValueId>,
 }
 
 impl Trace {
@@ -42,6 +43,12 @@ impl Trace {
                 .unwrap_or_else(|| Cow::Borrowed("???"));
             eprintln!(" {:4?} {:5} {:?}", ndx, hreg, instr);
         }
+
+        eprintln!("      phis [");
+        for (old, new) in self.phis.iter() {
+            eprintln!("           {:?} <- {:?}", old, new);
+        }
+        eprintln!("      ]");
     }
 
     pub(crate) fn compile(&self) -> NativeThunk {
