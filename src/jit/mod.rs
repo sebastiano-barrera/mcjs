@@ -16,6 +16,7 @@ pub struct Trace {
     instrs: Vec<Instr>,
     hreg_alloc: regalloc::Allocation,
     parameters: Vec<TraceParam>,
+    is_loop: bool,
 }
 
 impl Trace {

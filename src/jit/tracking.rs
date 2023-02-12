@@ -65,8 +65,18 @@ impl VarsState {
         self.frame_models.get_mut(&frame_id).unwrap()
     }
 
-    pub(crate) fn get_reads_before_writes(&self) -> &HashSet<(FrameId, VarIndex)> {
-        todo!()
+    pub(crate) fn get_reads_before_writes<'a>(&'a self) -> HashSet<(FrameId, VarIndex)> {
+        // TODO Can we avoid a whole new data structure for this? Maybe it's OK
+        // anyway, since this is only done once per trace
+        let mut ret = HashSet::new();
+
+        for (frm_id, frm) in self.frame_models.iter() {
+            for var_ndx in frm.get_read_before_overwritten().iter() {
+                ret.insert((*frm_id, *var_ndx));
+            }
+        }
+
+        ret
     }
 }
 
@@ -82,9 +92,10 @@ pub(super) struct FrameTracker {
     /// introduced as trace parameters when the JIT starts later than the start
     /// of the function's body.
     vid_of_varid: Box<[Option<ValueId>]>,
-    // TODO More compact data structure
-    written_vars: RefCell<HashSet<VarIndex>>,
-    read_before_write: RefCell<HashSet<VarIndex>>,
+    // TODO More compact data structures
+    first_write_of_varid: Box<[Option<ValueId>]>,
+    overwritten_vars: RefCell<HashSet<VarIndex>>,
+    read_before_overwrite: RefCell<HashSet<VarIndex>>,
 
     vid_of_iid: HashMap<interpreter::IID, ValueId>,
     unboxes: HashMap<ValueId, (ValueType, ValueId)>,
@@ -93,11 +104,13 @@ pub(super) struct FrameTracker {
 impl FrameTracker {
     fn new(args: Vec<ValueId>, n_vars: usize) -> Self {
         let vid_of_varid = vec![None; n_vars].into_boxed_slice();
+        let first_write_of_varid = vec![None; n_vars].into_boxed_slice();
         FrameTracker {
             args,
             vid_of_varid,
-            written_vars: RefCell::new(HashSet::new()),
-            read_before_write: RefCell::new(HashSet::new()),
+            first_write_of_varid,
+            overwritten_vars: RefCell::new(HashSet::new()),
+            read_before_overwrite: RefCell::new(HashSet::new()),
             vid_of_iid: HashMap::new(),
             unboxes: HashMap::new(),
         }
@@ -123,9 +136,9 @@ impl FrameTracker {
     }
 
     pub(super) fn get_var(&self, var_ndx: VarIndex) -> Option<&ValueId> {
-        let ws = self.written_vars.borrow();
+        let ws = self.overwritten_vars.borrow();
         if !ws.contains(&var_ndx) {
-            let mut rbws = self.read_before_write.borrow_mut();
+            let mut rbws = self.read_before_overwrite.borrow_mut();
             rbws.insert(var_ndx.clone());
         }
         self.vid_of_varid
@@ -141,8 +154,12 @@ impl FrameTracker {
             .expect("bug: invalid variable index for this frame");
         *slot = Some(value);
 
-        let mut ws = self.written_vars.borrow_mut();
-        ws.insert(var_ndx);
+        let fw = &mut self.first_write_of_varid[var_ndx.0 as usize];
+        if fw.is_none() {
+            *fw = Some(value);
+        } else {
+            self.overwritten_vars.get_mut().insert(var_ndx);
+        }
     }
 
     pub(super) fn get_unbox(&self, value_id: ValueId) -> Option<(ValueType, ValueId)> {
@@ -153,11 +170,16 @@ impl FrameTracker {
         assert!(prev.is_none(), "JIT bug: multiple unboxes");
     }
 
-    pub(super) fn get_read_before_written(&self) -> Ref<HashSet<VarIndex>> {
-        self.read_before_write.borrow()
+    pub(super) fn get_read_before_overwritten(&self) -> HashSet<VarIndex> {
+        let rbw = self.read_before_overwrite.borrow();
+        let ws = self.overwritten_vars.borrow();
+        rbw.intersection(&ws).copied().collect()
     }
 
     pub(crate) fn get_first_write(&self, var_ndx: VarIndex) -> Option<ValueId> {
-        todo!()
+        self.first_write_of_varid
+            .get(var_ndx.0 as usize)
+            .cloned()
+            .flatten()
     }
 }

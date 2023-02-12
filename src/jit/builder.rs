@@ -850,20 +850,21 @@ impl TraceBuilder {
         if let TraceBuilderState::Finished = self.state {
             let mut instrs = self.instrs;
 
-            if self.loop_head.is_some() {
-                let rbw: &'_ HashSet<(FrameId, VarIndex)> = self.vars.get_reads_before_writes();
+            let is_loop = self.loop_head.is_some();
+            if is_loop {
+                let rbw = self.vars.get_reads_before_writes();
                 for (frame_id, var_ndx) in rbw.iter() {
                     let frame = &self.vars.get(*frame_id);
-                    // TODO Each variable's first value *must* come from an
-                    // instruction (i.e. no constant folding), so that there
-                    // can be a ValueId that can be overwritten by the phi
-                    // instruction
-                    let first_value: ValueId = frame
+                    let first_value = frame
                         .get_first_write(*var_ndx)
-                        .expect("bug in VarsState: returned variable without a write");
+                        .expect("bug in VarsState: returned variable without a first write");
                     let cur_value = frame
                         .get_var(*var_ndx)
-                        .expect("bug in VarsState: returned variable without a write");
+                        .expect("bug in VarsState: returned variable without a current write");
+                    assert_ne!(
+                        first_value, *cur_value,
+                        "this is just weird, why would this happen?"
+                    );
                     instrs.push(Instr::Phi(first_value, cur_value.clone()));
                 }
             }
@@ -872,6 +873,7 @@ impl TraceBuilder {
 
             Some(Trace {
                 instrs,
+                is_loop,
                 hreg_alloc: hregs,
                 parameters: self.parameters,
             })
@@ -917,7 +919,6 @@ impl<'a> InterpreterStep<'a> {
 // TODO Move to jit/mod.rs
 #[derive(PartialEq, Debug)]
 pub(super) enum Instr {
-    WhateverBullshitIsNeededtoLoopback,
     TraceParam(u16),
     GetArg(usize),
     Const(BoxedValue),
@@ -1003,7 +1004,6 @@ impl Instr {
             Instr::ObjSet { .. } => None,
             Instr::ObjGet { .. } => Some(ValueType::Boxed),
             Instr::TypeOf(_) => Some(ValueType::Str),
-            Instr::WhateverBullshitIsNeededtoLoopback => None,
             Instr::ClosureNew => Some(ValueType::Function),
             Instr::Phi(_, _) => todo!(),
             Instr::Const(val) => Some(ValueType::of(val)),
@@ -1038,16 +1038,14 @@ impl Instr {
             Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
             Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
             Instr::TypeOf(arg) => Box::new([arg].into_iter()),
-            Instr::WhateverBullshitIsNeededtoLoopback => Box::new(std::iter::empty()),
             Instr::ClosureNew => Box::new(std::iter::empty()),
-            Instr::Phi(_, _) => todo!(),
+            Instr::Phi(old, new) => Box::new([old, new].into_iter()),
             Instr::Const(_) => Box::new(std::iter::empty()),
         }
     }
 
     pub(crate) fn has_side_effects(&self) -> bool {
         match self {
-            Instr::WhateverBullshitIsNeededtoLoopback => true,
             Instr::TraceParam(_) => false,
             Instr::GetArg(_) => false,
             Instr::Const(_) => false,
@@ -1068,7 +1066,7 @@ impl Instr {
             Instr::ClosureNew => false,
             Instr::PushSink(_) => true,
             Instr::Return(_) => false,
-            Instr::Phi(_, _) => false,
+            Instr::Phi(_, _) => true,
         }
     }
 }
@@ -1201,8 +1199,7 @@ mod tests {
         let trace = output.trace.unwrap();
         trace.dump();
 
-        // TODO: Run the trace (continue writing this test when traces can be run)
-        assert!(false);
+        todo!("Run the trace (continue writing this test when traces can be run)")
     }
 
     #[test]
@@ -1279,8 +1276,6 @@ mod tests {
                 &BoxedValue::Number(28.0),
             ]
         );
-
-        assert!(false);
     }
 
     #[test]
@@ -1307,7 +1302,6 @@ mod tests {
         let trace = output.trace.unwrap();
         trace.dump();
 
-        // TODO
-        assert!(false);
+        todo!()
     }
 }
