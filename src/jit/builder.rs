@@ -8,6 +8,7 @@ use crate::{
 };
 
 use dynasm::dynasm;
+use strum_macros::EnumIter;
 
 use super::{tracking, Trace};
 
@@ -38,10 +39,10 @@ impl From<TypeError> for Error {
 
 #[derive(PartialEq, Clone, Debug)]
 pub(super) struct Cmp {
-    ty: ValueType,
-    op: CmpOp,
-    a: ValueId,
-    b: ValueId,
+    pub(super) ty: ValueType,
+    pub(super) op: CmpOp,
+    pub(super) a: ValueId,
+    pub(super) b: ValueId,
 }
 
 impl Cmp {
@@ -71,7 +72,7 @@ impl std::fmt::Debug for ValueId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
 pub(super) enum ValueType {
     Boxed,
     Bool,
@@ -984,7 +985,7 @@ impl From<Cmp> for Instr {
 }
 
 impl Instr {
-    fn result_type(&self) -> Option<ValueType> {
+    pub(super) fn result_type(&self) -> Option<ValueType> {
         match self {
             Instr::Not(_) => Some(ValueType::Bool),
             Instr::Arith { .. } => Some(ValueType::Num),
@@ -1195,6 +1196,8 @@ mod tests {
         eprint!("trace = ");
         let trace = output.trace.unwrap();
         trace.dump();
+
+        jit::codegen::to_native(&trace);
 
         todo!("Run the trace (continue writing this test when traces can be run)")
     }
