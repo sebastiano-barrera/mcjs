@@ -39,8 +39,8 @@ enum ArchReg {
     R11,
     R12,
     R13,
-    R14,
-    R15,
+    // R14 is the scratch register.  Never allocated.
+    // R15 is the type tags register.  Never allocated.
 }
 
 pub(super) fn to_native(trace: &Trace) -> NativeThunk {
@@ -272,15 +272,9 @@ mod tests {
         };
 
         for (a_id, a) in ArchReg::iter().enumerate() {
-            if a == ArchReg::R15 || a == ArchReg::R14 {
-                continue;
-            }
             let a_id = a_id as u8;
 
             for (b_id, b) in ArchReg::iter().enumerate() {
-                if b == ArchReg::R15 || b == ArchReg::R14 {
-                    continue;
-                }
                 let b_id = b_id as u8;
 
                 use dynasmrt::{DynasmApi, DynasmLabelApi};
