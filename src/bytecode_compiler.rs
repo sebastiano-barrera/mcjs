@@ -591,27 +591,29 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
             Ok(builder.emit(instr).into())
         }
 
-        Expr::Lit(lit) => match lit {
-            Lit::Num(number) => {
-                let result = builder
-                    .emit(Instr::Const(Value::Number(number.value)))
-                    .into();
-                Ok(result)
-            }
-            Lit::Str(s) => Ok(builder
-                .emit(Instr::Const(s.value.to_string().into()))
-                .into()),
-            // Lit::Bool(_) => todo!(),
-            Lit::Null(_) => Ok(builder.emit(Instr::Const(Value::Null)).into()),
-            // Lit::BigInt(_) => todo!(),
-            // Lit::Regex(_) => todo!(),
-            // Lit::JSXText(_) => todo!(),
-            other => unsupported_node!(other),
-        },
+        Expr::Lit(lit) => {
+            let value = match lit {
+                Lit::Num(number) => Value::Number(number.value),
+                Lit::Str(s) => s.value.to_string().into(),
+                Lit::Bool(bv) => Value::Bool(bv.value),
+                Lit::Null(_) => Value::Null,
+                // Lit::BigInt(_) => todo!(),
+                // Lit::Regex(_) => todo!(),
+                // Lit::JSXText(_) => todo!(),
+                other => unsupported_node!(other),
+            };
+
+            Ok(builder.emit(Instr::Const(value)).into())
+        }
 
         Expr::Ident(ident) => {
-            let var_id = get_var(builder, ident)?;
-            Ok(Operand::Var(var_id))
+            let value = if ident.sym == JsWord::from("undefined") {
+                Operand::Value(Value::Undefined)
+            } else {
+                let var_id = get_var(builder, ident)?;
+                Operand::Var(var_id)
+            };
+            Ok(value)
         }
 
         Expr::Assign(asmt) => compile_assignment(asmt, builder)
@@ -732,8 +734,11 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                     let arg = compile_expr(builder, &unary_expr.arg)?;
                     Ok(builder.emit(Instr::TypeOf(arg)).into())
                 }
+                swc_ecma_ast::UnaryOp::Minus => {
+                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    Ok(builder.emit(Instr::UnaryMinus(arg)).into())
+                }
                 other => unsupported_node!(other),
-                // swc_ecma_ast::UnaryOp::Minus => todo!(),
                 // swc_ecma_ast::UnaryOp::Plus => todo!(),
                 // swc_ecma_ast::UnaryOp::Tilde => todo!(),
                 // swc_ecma_ast::UnaryOp::Void => todo!(),

@@ -67,10 +67,16 @@ impl Value {
     }
 
     pub(crate) fn expect_bool(&self) -> Result<bool> {
-        if let Value::Bool(val) = self {
-            Ok(*val)
-        } else {
-            Err(error!("expected a boolean"))
+        match self {
+            Value::Bool(val) => Ok(*val),
+            _ => Err(error!("expected a boolean")),
+        }
+    }
+
+    pub(crate) fn expect_num(&self) -> Result<f64> {
+        match self {
+            Value::Number(val) => Ok(*val),
+            _ => Err(error!("expected a number")),
         }
     }
 }
@@ -143,6 +149,7 @@ pub enum Instr {
     Nop,
     Const(Value),
     Not(Operand),
+    UnaryMinus(Operand),
     Arith {
         op: ArithOp,
         a: Operand,
@@ -211,6 +218,7 @@ impl Instr {
             Instr::Nop => Box::new(std::iter::empty()),
             Instr::Const(_) => Box::new(std::iter::empty()),
             Instr::Not(oper) => Box::new([oper].into_iter()),
+            Instr::UnaryMinus(oper) => Box::new([oper].into_iter()),
             Instr::Arith { op: _, a, b } => Box::new([a, b].into_iter()),
             Instr::Cmp { op: _, a, b } => Box::new([a, b].into_iter()),
             Instr::BoolOp { op: _, a, b } => Box::new([a, b].into_iter()),
@@ -226,7 +234,7 @@ impl Instr {
             Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
             Instr::ArrayNew => Box::new(std::iter::empty()),
             Instr::ArrayPush(arr, value) => Box::new([arr, value].into_iter()),
-            Instr::TypeOf(arg) => Box::new(std::iter::once(arg)),
+            Instr::TypeOf(arg) => Box::new([arg].into_iter()),
             Instr::ClosureNew { .. } => Box::new(std::iter::empty()),
         }
     }
@@ -414,12 +422,7 @@ impl VM {
         set_builtins(&mut bc_compiler);
         let module = bc_compiler.compile_file(key.clone(), text).unwrap();
 
-        #[cfg(test)]
-        let dump_module = true;
-        #[cfg(not(test))]
-        let dump_module = self.opts.debug_dump_module;
-
-        if dump_module {
+        if self.opts.debug_dump_module {
             eprintln!("=== loaded module: {}", key);
             module.dump();
         }
@@ -691,11 +694,14 @@ impl<'a> Interpreter<'a> {
                     let value = self.get_operand(value, &values_buf, cur_frame_id);
                     values_buf[ndx] = match value {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
-                        _ => {
-                            Value::Bool(false)
-
-                            // panic!("invalid operand for `not` (not boolean): {:?}", other);
-                        }
+                        Value::Number(num) => Value::Bool(num == 0.0),
+                        Value::String(str) => Value::Bool(str.is_empty()),
+                        Value::Object(_) => Value::Bool(false),
+                        Value::Null => Value::Bool(true),
+                        Value::Undefined => Value::Bool(true),
+                        Value::SelfFunction => Value::Bool(false),
+                        Value::NativeFunction(_) => Value::Bool(false),
+                        Value::Closure(_) => Value::Bool(false),
                     };
                 }
                 Instr::Jmp(dest) => {
@@ -809,6 +815,12 @@ impl<'a> Interpreter<'a> {
                     self.print_indent();
                     eprintln!("      created closure: {:?}", closure);
                     values_buf[ndx] = Value::Closure(closure);
+                }
+                Instr::UnaryMinus(arg) => {
+                    let arg: f64 = self
+                        .get_operand(arg, &values_buf, cur_frame_id)
+                        .expect_num()?;
+                    values_buf[ndx] = Value::Number(-arg);
                 }
             }
 
@@ -1008,6 +1020,147 @@ mod tests {
     }
 
     #[test]
+    fn test_simple_call() {
+        let output = quick_run("/* Here is some simple code: */ sink(1 + 4 + 99); ").unwrap();
+        assert_eq!(&[Value::Number(104.0)], &output.sink[..]);
+    }
+
+    #[test]
+    fn test_multiple_calls() {
+        let output =
+            quick_run("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ").unwrap();
+        assert_eq!(
+            &[Value::Number(12. * 5.), Value::Number(99. - 15.)],
+            &output.sink[..]
+        );
+    }
+
+    #[test]
+    fn test_if() {
+        let output = quick_run(
+            "
+            const x = 123;
+            let y = 'a';
+            if (x < 200) {
+                y = 'b';
+            }
+            sink(y);
+            ",
+        )
+        .unwrap();
+
+        let val: Value = "b".to_string().into();
+        assert_eq!(&[val], &output.sink[..]);
+    }
+
+    #[test]
+    fn test_simple_fn() {
+        let output = quick_run(
+            "
+            function foo(a, b) { return a + b; }
+            sink(foo(1, 2));
+            ",
+        )
+        .unwrap();
+
+        // 0    const 123
+        // 1    const 'a'
+        // 2    cmp v0 < v1
+        // 3    jmpif v2 -> #5
+        // 4    set v2 <- 'b'
+        // 5    push_sink v2
+
+        assert_eq!(&[Value::Number(3.0)], &output.sink[..]);
+    }
+
+    #[test]
+    fn test_fn_with_branch() {
+        let output = quick_run(
+            "
+            function foo(mode, a, b) { 
+                if (mode === 'sum')
+                    return a + b;
+                else if (mode === 'product')
+                    return a * b;
+                else
+                    return 'something else';
+            }
+
+            sink(foo('product', 9, 8));
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(&[Value::Number(9.0 * 8.0)], &output.sink[..]);
+    }
+
+    #[test]
+    fn test_while() {
+        let output = quick_run(
+            "
+            function sum_range(n) {
+                let i = 0;
+                let ret = 0;
+                while (i <= n) {
+                    ret += i;
+                    i++;
+                }
+                return ret;
+            }
+            
+            sink(sum_range(4));
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(&[Value::Number(10.0)], &output.sink[..]);
+    }
+
+    fn try_casting_bool(code: &str, expected_value: bool) {
+        let output = quick_run(code).unwrap();
+        assert_eq!(&[Value::Bool(expected_value)], &output.sink[..]);
+    }
+    #[test]
+    fn test_boolean_cast_from_number() {
+        try_casting_bool("sink(!123.994);", false);
+        try_casting_bool("sink(!-123.994);", false);
+        try_casting_bool("sink(!0.0);", true);
+    }
+    #[test]
+    fn test_boolean_cast_from_string() {
+        try_casting_bool("sink(!'');", true);
+        try_casting_bool("sink(!'asdlol');", false);
+    }
+    #[test]
+    fn test_boolean_cast_from_bool() {
+        try_casting_bool("sink(!false);", true);
+        try_casting_bool("sink(!true);", false);
+    }
+    #[test]
+    fn test_boolean_cast_from_object() {
+        try_casting_bool("sink(!{a: 1, b: 2});", false);
+        try_casting_bool("sink(!{});", false);
+    }
+    #[test]
+    fn test_boolean_cast_from_null() {
+        try_casting_bool("sink(!null);", true);
+    }
+    #[test]
+    fn test_boolean_cast_from_undefined() {
+        try_casting_bool("sink(!undefined);", true);
+    }
+    #[test]
+    fn test_boolean_cast_from_function() {
+        try_casting_bool(
+            "
+            function my_fun() { }
+            sink(!my_fun);
+            ",
+            false,
+        );
+    }
+
+    #[test]
     fn test_object_init() {
         let output = quick_run(
             "sink({
@@ -1039,6 +1192,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_for_in() {
+        // TODO This syntax is not yet implemented
         let output = quick_run(
             "
             const obj = {

@@ -605,6 +605,10 @@ impl TraceBuilder {
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
             interpreter::Instr::ClosureNew { .. } => Some(self.emit(Instr::ClosureNew)?),
+
+            interpreter::Instr::UnaryMinus(arg) => {
+                todo!("jit::builder: UnaryMinus")
+            }
         };
 
         // Map IID to the result operand
