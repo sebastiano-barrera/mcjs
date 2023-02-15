@@ -33,15 +33,13 @@ impl Trace {
         }
 
         for (ndx, instr) in self.instrs.iter().enumerate() {
-            if !is_enabled[ndx] {
-                continue;
-            }
+            let enb_prefix = if is_enabled[ndx] { "    " } else { "OFF " };
 
             let hreg = self.hreg_alloc.hreg_of_instr(ndx);
             let hreg = hreg
                 .map(|x| Cow::Owned(format!("{:?}", x)))
                 .unwrap_or_else(|| Cow::Borrowed("???"));
-            eprintln!(" {:4?} {:5} {:?}", ndx, hreg, instr);
+            eprintln!(" {}{:4?} {:5} {:?}", enb_prefix, ndx, hreg, instr);
         }
 
         eprintln!("      phis [");

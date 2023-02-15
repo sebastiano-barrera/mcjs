@@ -847,7 +847,7 @@ impl TraceBuilder {
         self.emit(Instr::TraceParam(ndx))
     }
 
-    pub(crate) fn build(self) -> Option<Trace> {
+    pub(crate) fn build(mut self) -> Option<Trace> {
         if let TraceBuilderState::Finished = self.state {
             let mut phis = HashMap::new();
             let is_loop = self.loop_head.is_some();
@@ -863,7 +863,9 @@ impl TraceBuilder {
                         .get_var(*var_ndx)
                         .expect("bug in VarsState: returned variable without a current write");
                     assert_ne!(first_vid, *last_vid);
-                    let prev = phis.insert(first_vid, *last_vid);
+
+                    let phi_instr = self.write(Instr::Phi(first_vid, *last_vid)).unwrap();
+                    let prev = phis.insert(first_vid, phi_instr);
                     assert!(
                         prev.is_none(),
                         "JIT bug: tried to place multiple phis for the same variable"
@@ -972,6 +974,7 @@ pub(super) enum Instr {
 
     PushSink(ValueId),
     Return(ValueId),
+    Phi(ValueId, ValueId),
 }
 
 type ArithOp = interpreter::ArithOp;
@@ -1007,6 +1010,7 @@ impl Instr {
             Instr::TypeOf(_) => Some(ValueType::Str),
             Instr::ClosureNew => Some(ValueType::Function),
             Instr::Const(val) => Some(ValueType::of(val)),
+            Instr::Phi(_, _) => None,
         }
     }
 
@@ -1040,6 +1044,7 @@ impl Instr {
             Instr::TypeOf(arg) => Box::new([arg].into_iter()),
             Instr::ClosureNew => Box::new(std::iter::empty()),
             Instr::Const(_) => Box::new(std::iter::empty()),
+            Instr::Phi(_tgt, new_value) => Box::new(std::iter::once(new_value)),
         }
     }
 
@@ -1065,6 +1070,7 @@ impl Instr {
             Instr::ClosureNew => false,
             Instr::PushSink(_) => true,
             Instr::Return(_) => false,
+            Instr::Phi(_, _) => true,
         }
     }
 }
@@ -1197,7 +1203,8 @@ mod tests {
         let trace = output.trace.unwrap();
         trace.dump();
 
-        jit::codegen::to_native(&trace);
+        let native_thunk = jit::codegen::to_native(&trace);
+        native_thunk.dump();
 
         todo!("Run the trace (continue writing this test when traces can be run)")
     }
