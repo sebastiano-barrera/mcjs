@@ -1,4 +1,4 @@
-use crate::regalloc;
+use crate::{interpreter, regalloc};
 
 mod builder;
 mod codegen;
@@ -15,7 +15,7 @@ use self::builder::ValueId;
 pub struct Trace {
     instrs: Vec<Instr>,
     hreg_alloc: regalloc::Allocation,
-    parameters: Vec<TraceParam>,
+    snapshot_map: Vec<interpreter::Operand>,
     is_loop: bool,
     pub(crate) phis: std::collections::HashMap<ValueId, ValueId>,
 }
@@ -27,10 +27,7 @@ impl Trace {
         let is_enabled = self.enabled_mask();
 
         eprintln!(" === trace");
-        eprintln!(" {} parameters", self.parameters.len());
-        for (ndx, param) in self.parameters.iter().enumerate() {
-            eprintln!("    param[{}] = {:?}", ndx, param);
-        }
+        eprintln!(" snapshot: {:?}", self.snapshot_map);
 
         for (ndx, instr) in self.instrs.iter().enumerate() {
             let enb_prefix = if is_enabled[ndx] { "    " } else { "OFF " };

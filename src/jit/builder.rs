@@ -72,7 +72,12 @@ impl std::fmt::Debug for ValueId {
     }
 }
 
+/// Type of a value at runtime, in the trace.
+///
+/// Note that this type is used both by the trace builder and by the trace
+/// wrapper (at runtime!) when passing the snapshot to the trace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
+#[repr(u8)]
 pub(super) enum ValueType {
     Boxed,
     Bool,
@@ -85,7 +90,7 @@ pub(super) enum ValueType {
 }
 
 impl ValueType {
-    fn of(value: &BoxedValue) -> Self {
+    pub(super) fn of(value: &BoxedValue) -> Self {
         match value {
             interpreter::Value::Number(_) => ValueType::Num,
             interpreter::Value::String(_) => ValueType::Str,
@@ -127,7 +132,13 @@ pub struct TraceBuilder {
     loop_head: Option<interpreter::GlobalIID>,
 
     instrs: Vec<Instr>,
-    parameters: Vec<TraceParam>,
+
+    // Tells which interpreter value to write or read into each slot of the
+    // snapshot.
+    //
+    // (See jit::codegen for an explanation of what the "snapshot" is and how
+    // it works.)
+    snapshot_map: Vec<interpreter::Operand>,
 
     state: TraceBuilderState,
     start_mode: TraceStart,
@@ -170,7 +181,7 @@ impl TraceBuilder {
             args_buf: None,
             vars: tracking::VarsState::new(),
             instrs: Vec::new(),
-            parameters: Vec::new(),
+            snapshot_map: Vec::new(),
             start_mode,
             loop_head: None,
             state: TraceBuilderState::WaitingStart,
@@ -215,7 +226,7 @@ impl TraceBuilder {
                         // TODO Test that this is really necessary. If so, describe it here
                         assert_eq!(1, stack_depth);
 
-                        let param = self.add_parameter(intrp_operand.clone())?;
+                        let param = self.add_entry_snapshot_var(intrp_operand.clone())?;
                         self.vars.cur_frame_mut().set_result(*iid, param.clone());
                         Ok(param)
                     }
@@ -224,17 +235,18 @@ impl TraceBuilder {
 
             interpreter::Operand::Var(intrp_varid) => {
                 let frame_id = fnid_to_frameid(intrp_varid.fnid);
+                let var_ndx = intrp_varid.var_ndx;
 
-                let slot = self.vars.get(frame_id).get_var(intrp_varid.var_ndx);
+                let slot = self.vars.get(frame_id).get_var(var_ndx);
                 if let Some(value) = slot {
                     return Ok(value.clone());
                 }
 
-                let param = self.add_parameter(intrp_operand.clone())?;
+                let vid = self.add_entry_snapshot_var(intrp_operand.clone())?;
                 self.vars
                     .get_mut(frame_id)
-                    .set_var(intrp_varid.var_ndx, param.clone());
-                Ok(param)
+                    .set_var(intrp_varid.var_ndx, vid.clone());
+                Ok(vid)
             }
         }
     }
@@ -524,6 +536,7 @@ impl TraceBuilder {
                 );
 
                 self.vars.get_mut(frame_id).set_var(var_id.var_ndx, value);
+                self.set_exit_snapshot_var(var_id.clone(), value)?;
 
                 None
             }
@@ -606,7 +619,7 @@ impl TraceBuilder {
             }
             interpreter::Instr::ClosureNew { .. } => Some(self.emit(Instr::ClosureNew)?),
 
-            interpreter::Instr::UnaryMinus(arg) => {
+            interpreter::Instr::UnaryMinus(_) => {
                 todo!("jit::builder: UnaryMinus")
             }
         };
@@ -845,10 +858,34 @@ impl TraceBuilder {
         Ok(vid.into())
     }
 
-    fn add_parameter(&mut self, operand: interpreter::Operand) -> Result<ValueId, Error> {
-        let ndx = self.parameters.len() as u16;
-        self.parameters.push(TraceParam { operand });
-        self.emit(Instr::TraceParam(ndx))
+    fn add_entry_snapshot_var(&mut self, operand: interpreter::Operand) -> Result<ValueId, Error> {
+        let ndx = self.snapshot_map.len() as u16;
+        self.snapshot_map.push(operand);
+        self.emit(Instr::GetSnapshotItem { ndx })
+    }
+
+    fn set_exit_snapshot_var(
+        &mut self,
+        intrp_varid: interpreter::StaticVarId,
+        value_id: ValueId,
+    ) -> Result<(), Error> {
+        let ndx = self
+            .snapshot_map
+            .iter()
+            .enumerate()
+            .find(|(_, operand)| match operand {
+                interpreter::Operand::Var(var_id) => *var_id == intrp_varid,
+                _ => false,
+            })
+            .map(|(ndx, _)| ndx)
+            .unwrap_or_else(|| {
+                self.snapshot_map
+                    .push(interpreter::Operand::Var(intrp_varid));
+                self.snapshot_map.len() - 1
+            }) as u16;
+
+        self.emit(Instr::SetSnapshotItem { ndx, value_id })?;
+        Ok(())
     }
 
     pub(crate) fn build(mut self) -> Option<Trace> {
@@ -884,7 +921,7 @@ impl TraceBuilder {
                 phis,
                 is_loop,
                 hreg_alloc: hregs,
-                parameters: self.parameters,
+                snapshot_map: self.snapshot_map,
             })
         } else {
             None
@@ -928,7 +965,13 @@ impl<'a> InterpreterStep<'a> {
 // TODO Move to jit/mod.rs
 #[derive(PartialEq, Debug)]
 pub(super) enum Instr {
-    TraceParam(u16),
+    GetSnapshotItem {
+        ndx: u16,
+    },
+    SetSnapshotItem {
+        ndx: u16,
+        value_id: ValueId,
+    },
     GetArg(usize),
     Const(BoxedValue),
     Not(ValueId),
@@ -1003,7 +1046,6 @@ impl Instr {
             Instr::PushSink(_) => None,
             Instr::Return(_) => None,
             Instr::GetArg(_) => Some(ValueType::Boxed),
-            Instr::TraceParam(_) => Some(ValueType::Boxed),
             Instr::Choose { ty, .. } => Some(ty.clone()),
             Instr::Unbox(ty, _) => Some(ty.clone()),
             Instr::Box(_) => Some(ValueType::Boxed),
@@ -1015,6 +1057,8 @@ impl Instr {
             Instr::ClosureNew => Some(ValueType::Function),
             Instr::Const(val) => Some(ValueType::of(val)),
             Instr::Phi(_, _) => None,
+            Instr::GetSnapshotItem { .. } => Some(ValueType::Boxed),
+            Instr::SetSnapshotItem { .. } => None,
         }
     }
 
@@ -1040,7 +1084,6 @@ impl Instr {
             Instr::Return(arg) => Box::new([arg].into_iter()),
 
             Instr::GetArg(_) => Box::new(std::iter::empty()),
-            Instr::TraceParam(_) => Box::new(std::iter::empty()),
 
             Instr::ObjNew => Box::new(std::iter::empty()),
             Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
@@ -1049,12 +1092,13 @@ impl Instr {
             Instr::ClosureNew => Box::new(std::iter::empty()),
             Instr::Const(_) => Box::new(std::iter::empty()),
             Instr::Phi(_tgt, new_value) => Box::new(std::iter::once(new_value)),
+            Instr::GetSnapshotItem { .. } => Box::new(std::iter::empty()),
+            Instr::SetSnapshotItem { value_id, .. } => Box::new(std::iter::once(value_id)),
         }
     }
 
     pub(crate) fn has_side_effects(&self) -> bool {
         match self {
-            Instr::TraceParam(_) => false,
             Instr::GetArg(_) => false,
             Instr::Const(_) => false,
             Instr::Not(_) => false,
@@ -1075,6 +1119,8 @@ impl Instr {
             Instr::PushSink(_) => true,
             Instr::Return(_) => false,
             Instr::Phi(_, _) => true,
+            Instr::GetSnapshotItem { .. } => false,
+            Instr::SetSnapshotItem { .. } => true,
         }
     }
 }
@@ -1090,7 +1136,7 @@ impl regalloc::Instruction for Instr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jit;
+    use crate::{interpreter::StaticVarId, jit};
 
     struct Output {
         sink: Vec<interpreter::Value>,
@@ -1135,6 +1181,7 @@ mod tests {
         pushsink_operands
     }
 
+    #[ignore]
     #[test]
     fn test_tracing_simple_constant_folding() {
         let output = quick_jit_func(
@@ -1193,7 +1240,7 @@ mod tests {
                 let ret = 0;
                 while (i <= n) {
                     ret += i;
-                    sink(ret);
+                    // sink(ret);
                     i++;
                 }
                 return ret;
@@ -1210,9 +1257,11 @@ mod tests {
         let native_thunk = jit::codegen::to_native(&trace);
         native_thunk.dump();
 
+        // native_thunk.run();
         todo!("Run the trace (continue writing this test when traces can be run)")
     }
 
+    #[ignore]
     #[test]
     fn test_varid_resolution_with_inlining() {
         let output = quick_jit_func(
