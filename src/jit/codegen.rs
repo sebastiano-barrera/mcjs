@@ -300,21 +300,19 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 }
 
                 // -- Snapshots
-                // Variables are passed to and retrieved from the trace via an
-                // array of interpreter::Value named "snapshot" (of length N).
+                // Variables are passed to and retrieved from the trace via the
+                // "snapshot", which is a the 'juxtaposition' of two arrays:
+                //   * values: [u64; N]        -- runtime-encoded values
+                //   * types: [ValueType; N]   -- repr as u8
                 //
-                // This array is allocated at runtime before starting the trace
-                // proper. A pointer to the array is passed as register RBP.
+                // These arrays are allocated at runtime before starting the
+                // trace proper. A pointer to the array is passed as the first
+                // argument to the C function that wraps the trace (reg RDI).
                 //
-                // The interpeter initializes the snapshot with the values
-                // indicated in the trace's snapshot_map (encoded in "native"
-                // format, i.e. the format understood at runtime by the trace),
-                // to allow the trace to read those values.
-                //
-                // When the trace exits, it updates the snapshot with the
-                // values that have been mutated, in  order to allow the
-                // interpreter to "apply" those changes to its own data
-                // structures and continue execution.
+                // `snapshot_map` tells which variable corresponds to each
+                // index in the above values and types array.  The interpeter
+                // uses this map to initialize the snapshot at trace start, and
+                // to read values back from the snapshot at trace exit.
                 Instr::GetSnapshotItem { ndx: snap_ndx } => {
                     let snap_ndx = *snap_ndx as i32;
                     assert!(snap_ndx < snap_len as i32);
