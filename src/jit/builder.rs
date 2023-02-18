@@ -1016,10 +1016,6 @@ pub(super) enum Instr {
     AssertTrue {
         cond: Cmp,
     },
-    AssertEqConst {
-        x: ValueId,
-        expected: BoxedValue,
-    },
 
     Num2Str(ValueId),
 
@@ -1061,7 +1057,6 @@ impl Instr {
             Instr::Cmp { .. } => Some(ValueType::Bool),
             Instr::BoolOp { .. } => Some(ValueType::Bool),
             Instr::AssertTrue { .. } => None,
-            Instr::AssertEqConst { .. } => None,
             Instr::PushSink(_) => None,
             Instr::Return(_) => None,
             Instr::GetArg { ty, .. } => Some(ty.clone()),
@@ -1095,7 +1090,6 @@ impl Instr {
             Instr::AssertTrue {
                 cond: Cmp { a, b, .. },
             } => Box::new([a, b].into_iter()),
-            Instr::AssertEqConst { x, .. } => Box::new([x].into_iter()),
             Instr::Num2Str(arg) => Box::new([arg].into_iter()),
             Instr::PushSink(arg) => Box::new([arg].into_iter()),
             Instr::Return(arg) => Box::new([arg].into_iter()),
@@ -1124,7 +1118,6 @@ impl Instr {
             Instr::BoolOp { .. } => false,
             Instr::Choose { .. } => false,
             Instr::AssertTrue { .. } => true,
-            Instr::AssertEqConst { .. } => true,
             Instr::Num2Str(_) => false,
             Instr::ObjNew => false,
             Instr::ObjSet { .. } => false,

@@ -263,7 +263,6 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     let b = hreg_of(cmp.b);
                     trace_assert_cmp(&mut asm, cmp.ty, cmp.op, a, b);
                 }
-                Instr::AssertEqConst { .. } => todo!(),
                 Instr::Num2Str(_) => todo!(),
                 Instr::ObjNew => todo!(),
                 Instr::ObjSet { .. } => todo!(),
