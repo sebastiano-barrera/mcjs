@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
@@ -28,7 +29,7 @@ pub struct InconsistentUnbox {
 #[derive(Debug, Clone)]
 pub enum Error {
     Type(TypeError),
-    Unsupported(String),
+    Unsupported(Cow<'static, str>),
     InconsistentUnbox(InconsistentUnbox),
 }
 impl From<TypeError> for Error {
@@ -455,6 +456,21 @@ impl TraceBuilder {
                 Some(self.emit(Instr::Arith { op: *op, a, b })?)
             }
             interpreter::Instr::Cmp { op, a, b } => {
+                let a_rt_type = {
+                    // TODO fix: This causes allocations with strings
+                    let rt_value = (step.get_operand)(a);
+                    let rt_ty = ValueType::of(&rt_value);
+                    assert_ne!(rt_ty, ValueType::Boxed);
+                    rt_ty
+                };
+                let b_rt_type = {
+                    // TODO fix: This causes allocations with strings
+                    let rt_value = (step.get_operand)(b);
+                    let rt_ty = ValueType::of(&rt_value);
+                    assert_ne!(rt_ty, ValueType::Boxed);
+                    rt_ty
+                };
+
                 let a = self.resolve_interpreter_operand(&a, &step.fnid_to_frameid)?;
                 let b = self.resolve_interpreter_operand(&b, &step.fnid_to_frameid)?;
 
@@ -464,34 +480,25 @@ impl TraceBuilder {
                     let interpreter_result = &step.values_buf[step.iid.0 as usize];
                     Instr::Const(interpreter_result.clone())
                 } else {
-                    let a_type = self.get_instr(a).result_type().unwrap();
-                    let b_type = self.get_instr(b).result_type().unwrap();
-
-                    let cmp = match (a_type, b_type) {
-                        (ValueType::Boxed, unboxed_type) if unboxed_type != ValueType::Boxed => {
-                            Cmp {
-                                ty: unboxed_type,
-                                op: *op,
-                                a: self.emit(Instr::Unbox(unboxed_type, a))?,
-                                b,
-                            }
-                        }
-                        (unboxed_type, ValueType::Boxed) if unboxed_type != ValueType::Boxed => {
-                            Cmp {
-                                ty: unboxed_type,
-                                op: *op,
-                                a,
-                                b: self.emit(Instr::Unbox(unboxed_type, b))?,
-                            }
-                        }
-                        _ => {
-                            let b = self.ensure_type(b, a_type)?;
-                            Cmp {
-                                ty: a_type,
-                                op: *op,
-                                a,
-                                b,
-                            }
+                    // We always unbox before Cmp.
+                    // This is because  it's smarter to check the boxed
+                    // type now (at trace building time), and have the trace
+                    // rely on it (as an unbox assert).  This creates a more
+                    // specialized trace that doesn't waste time and code
+                    // checking a box type (which is likely to pass!)
+                    let cmp = match (a_rt_type, b_rt_type) {
+                        (ValueType::Num, ValueType::Num) => Cmp {
+                            ty: ValueType::Num,
+                            op: *op,
+                            a: self.emit(Instr::Unbox(ValueType::Num, a))?,
+                            b: self.emit(Instr::Unbox(ValueType::Num, b))?,
+                        },
+                        (at, bt) => {
+                            let msg = format!(
+                                "unsupported operands for comparison: {:?} and {:?}",
+                                at, bt
+                            );
+                            return Err(Error::Unsupported(msg.into()));
                         }
                     };
 
@@ -957,6 +964,7 @@ pub struct InterpreterStep<'a> {
     pub(crate) iid: interpreter::IID,
     pub(crate) next_iid: interpreter::IID,
     pub(crate) fnid_to_frameid: &'a dyn Fn(FnId) -> FrameId,
+    pub(crate) get_operand: &'a dyn Fn(&interpreter::Operand) -> BoxedValue,
 }
 
 impl<'a> InterpreterStep<'a> {
@@ -1127,7 +1135,8 @@ impl Instr {
             Instr::Return(_) => false,
             Instr::Phi(_, _) => true,
             Instr::GetSnapshotItem { .. } => false,
-            Instr::WriteSnapshot(_) => true,
+            // The instruction can be elided if the snap is "empty"
+            Instr::WriteSnapshot(snap) => snap.iter().any(|slot| slot.is_some()),
         }
     }
 }

@@ -518,36 +518,16 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    // TODO Change this to return &Value instead
     fn get_operand(
         &mut self,
         operand: &Operand,
         values_buf: &Vec<Value>,
         cur_fid: stack::FrameId,
     ) -> Value {
-        match operand {
-            Operand::Value(value) => value.clone(),
-            Operand::IID(IID(ndx)) => {
-                let value = values_buf[*ndx as usize].clone();
-                self.print_indent();
-                eprintln!("      ↑ {:?} = {:?}", operand, value);
-                value
-            }
-            Operand::Var(var_id) => {
-                let fid = self
-                    .frame_graph
-                    .get_lexical_scope(cur_fid, var_id.fnid)
-                    .unwrap();
-                let value = self
-                    .frame_graph
-                    .get_var(fid, var_id.var_ndx)
-                    .unwrap()
-                    .clone();
-
-                self.print_indent();
-                eprintln!("      ↑ {:?} = {:?}", var_id, value);
-                value
-            }
-        }
+        // TODO Refactor this mess
+        let frame_graph = &mut self.frame_graph;
+        resolve_operand(operand, values_buf, frame_graph, cur_fid)
     }
 
     fn run_module_fn(
@@ -825,6 +805,7 @@ impl<'a> Interpreter<'a> {
             }
 
             if should_trace {
+                let frame_graph = &self.frame_graph;
                 let trace_builder = self.trace_builder.as_mut().unwrap();
                 trace_builder.interpreter_step(&InterpreterStep {
                     values_buf: &values_buf,
@@ -836,6 +817,9 @@ impl<'a> Interpreter<'a> {
                         self.frame_graph
                             .get_lexical_scope(cur_frame_id, fnid)
                             .unwrap()
+                    },
+                    get_operand: &|operand| {
+                        resolve_operand(operand, &values_buf, frame_graph, cur_frame_id)
                     },
                 });
             }
@@ -849,6 +833,32 @@ impl<'a> Interpreter<'a> {
             }
         }
         Ok(return_value.unwrap_or(Value::Undefined))
+    }
+}
+
+fn resolve_operand(
+    operand: &Operand,
+    values_buf: &Vec<Value>,
+    frame_graph: &stack::FrameGraph,
+    cur_fid: stack::FrameId,
+) -> Value {
+    match operand {
+        Operand::Value(value) => value.clone(),
+        Operand::IID(IID(ndx)) => {
+            let value = values_buf[*ndx as usize].clone();
+            //  TODO Move to a global logger. This is just for debugging!
+            //  self.print_indent();
+            eprintln!("      ↑ {:?} = {:?}", operand, value);
+            value
+        }
+        Operand::Var(var_id) => {
+            let fid = frame_graph.get_lexical_scope(cur_fid, var_id.fnid).unwrap();
+            let value = frame_graph.get_var(fid, var_id.var_ndx).unwrap().clone();
+            //  TODO Move to a global logger. This is just for debugging!
+            //  self.print_indent();
+            eprintln!("      ↑ {:?} = {:?}", var_id, value);
+            value
+        }
     }
 }
 
