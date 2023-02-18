@@ -985,15 +985,6 @@ impl<'a> InterpreterStep<'a> {
 // TODO Move to jit/mod.rs
 #[derive(PartialEq, Debug)]
 pub(super) enum Instr {
-    GetSnapshotItem {
-        ndx: u16,
-        ty: ValueType,
-    },
-    WriteSnapshot(Vec<Option<ValueId>>),
-    GetArg {
-        ndx: usize, // TODO Change to u16
-        ty: ValueType,
-    },
     Const(BoxedValue),
     Not(ValueId),
     Arith {
@@ -1013,11 +1004,20 @@ pub(super) enum Instr {
         if_true: ValueId,
         if_false: ValueId,
     },
+
+    GetSnapshotItem {
+        ndx: u16,
+        ty: ValueType,
+    },
+    WriteSnapshot(Vec<Option<ValueId>>),
+    GetArg {
+        ndx: usize, // TODO Change to u16
+        ty: ValueType,
+    },
+
     AssertTrue {
         cond: Cmp,
     },
-
-    Num2Str(ValueId),
 
     ObjNew,
     ObjSet {
@@ -1031,6 +1031,7 @@ pub(super) enum Instr {
     },
 
     TypeOf(ValueId),
+    Num2Str(ValueId),
 
     ClosureNew,
 
