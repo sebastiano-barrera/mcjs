@@ -224,7 +224,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
         if !processing_phis {
             match instr {
-                Instr::GetArg(_) => todo!(),
+                Instr::GetArg { .. } => todo!(),
                 Instr::Const(value) => {
                     // It is assumed that the IR already "knows" the type of
                     // this value, so we can discard it here
@@ -258,27 +258,12 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 }
                 Instr::BoolOp { .. } => todo!(),
                 Instr::Choose { .. } => todo!(),
-                Instr::AssertTrue { cond } => {
-                    assert_type(trace, *cond, ValueType::Bool);
-                    let cond_instr = trace.get_instr(*cond).unwrap();
-
-                    // TODO Refactor: move this somewhere else?
-                    let cmp = if let Instr::Cmp(cmp) = cond_instr {
-                        cmp
-                    } else {
-                        todo!("unsupported instruction for condition: {:?}", cond_instr);
-                    };
-
+                Instr::AssertTrue { cond: cmp } => {
                     let a = hreg_of(cmp.a);
                     let b = hreg_of(cmp.b);
                     trace_assert_cmp(&mut asm, cmp.ty, cmp.op, a, b);
                 }
                 Instr::AssertEqConst { .. } => todo!(),
-                Instr::Unbox(ty, vid) => {
-                    let areg = hreg_of(*vid);
-                    trace_assert_type(&mut asm, snap_len, areg, *ty);
-                }
-                Instr::Box(_) => todo!(),
                 Instr::Num2Str(_) => todo!(),
                 Instr::ObjNew => todo!(),
                 Instr::ObjSet { .. } => todo!(),
@@ -313,17 +298,16 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 // index in the above values and types array.  The interpeter
                 // uses this map to initialize the snapshot at trace start, and
                 // to read values back from the snapshot at trace exit.
-                Instr::GetSnapshotItem { ndx: snap_ndx } => {
+                Instr::GetSnapshotItem { ndx: snap_ndx, ty } => {
                     let snap_ndx = *snap_ndx as i32;
                     assert!(snap_ndx < snap_len as i32);
 
                     let tgt = hreg_of(vid).code();
-                    let arr_ndx = (snap_len + tgt as usize) as _;
 
                     dynasm!(asm
-                        ; mov Rq (tgt), [rdi + 8 * snap_ndx]
-                        ; mov r15b, BYTE [rsi + snap_ndx]
-                        ; mov BYTE [rsi + arr_ndx], r15b
+                        ; cmp BYTE [rsi + snap_ndx], *ty as i8
+                        ; jne >abort_trace
+                        ; mov Rq (tgt), QWORD [rdi + 8 * snap_ndx]
                     );
                 }
                 Instr::WriteSnapshot(snap) => {
@@ -340,7 +324,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         }
 
         if processing_phis {
-            match instr {
+            match &instr {
                 Instr::Phi(old, new) => {
                     let old = hreg_of(*old).code();
                     let new = hreg_of(*new).code();

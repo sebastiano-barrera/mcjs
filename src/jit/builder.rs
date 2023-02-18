@@ -257,30 +257,47 @@ impl TraceBuilder {
         }
     }
 
-    fn value_type(&mut self, vid: &ValueId) -> Option<ValueType> {
-        self.instrs.get(vid.0 as usize).unwrap().result_type()
-    }
-
     fn ensure_type(&mut self, vid: ValueId, desired_type: ValueType) -> Result<ValueId, Error> {
         let type_error = Error::Type(TypeError { desired_type });
-        let input_type = self.value_type(&vid).ok_or(type_error.clone())?;
 
+        let src_ins = self.instrs.get_mut(vid.0 as usize).unwrap();
+        let input_type_field = match src_ins {
+            Instr::GetSnapshotItem { ty, .. } => Some(ty),
+            Instr::GetArg { ty, .. } => Some(ty),
+            _ => None,
+        };
+
+        if let Some(input_type_field) = input_type_field {
+            // Source instruction has an implicit unbox phase
+            if *input_type_field == ValueType::Boxed {
+                if desired_type != ValueType::Boxed {
+                    print_indent(self.vars.stack_depth());
+                    eprintln!("[..tb emit unbox: v{:<4} as {:?}]", vid.0, desired_type);
+                    *input_type_field = desired_type;
+                }
+
+                return Ok(vid);
+            }
+        }
+
+        // We're now either in a non-unboxing instruction, or in an unboxing
+        // instruction that was already set to a non-box type
+
+        let input_type = src_ins
+            .result_type()
+            .unwrap_or_else(|| panic!("JIT bug: src instr has no result: {:?}", src_ins));
+
+        // There should never be an instruction that has Boxed as its *fixed*
+        // result type.  Rather, it should have an implicit unbox phase and a
+        // 'result type' field that allows us to control the result type of the
+        // unboxing.
+        assert_ne!(input_type, ValueType::Boxed);
         let converted_operand = match (input_type, desired_type) {
             (a, b) if a == b => Some(vid),
 
             (_, ValueType::Null) => Some(self.emit(Instr::Const(BoxedValue::Null))?),
             (_, ValueType::Undefined) => Some(self.emit(Instr::Const(BoxedValue::Undefined))?),
             (_, ValueType::Function) => None,
-
-            (ValueType::Boxed, desired_type) => {
-                assert_ne!(ValueType::Boxed, desired_type);
-                Some(self.emit(Instr::Unbox(desired_type, vid))?)
-            }
-
-            (input_type, ValueType::Boxed) => {
-                assert_ne!(ValueType::Boxed, input_type);
-                Some(self.emit(Instr::Box(vid))?)
-            }
 
             (ValueType::Bool, ValueType::Num) => {
                 let if_true = self.emit(Instr::Const(BoxedValue::Number(1.0)))?;
@@ -353,8 +370,11 @@ impl TraceBuilder {
             _ => unreachable!(),
         };
 
-        if let Some(converted_operand) = &converted_operand {
-            assert_eq!(Some(desired_type), self.value_type(converted_operand));
+        if converted_operand.is_some() {
+            assert_eq!(
+                Some(desired_type),
+                self.instrs.get(vid.0 as usize).unwrap().result_type()
+            );
         }
 
         converted_operand.ok_or(type_error)
@@ -486,12 +506,14 @@ impl TraceBuilder {
                     // rely on it (as an unbox assert).  This creates a more
                     // specialized trace that doesn't waste time and code
                     // checking a box type (which is likely to pass!)
+                    let a = self.ensure_type(a, ValueType::Num)?;
+                    let b = self.ensure_type(b, ValueType::Num)?;
                     let cmp = match (a_rt_type, b_rt_type) {
                         (ValueType::Num, ValueType::Num) => Cmp {
                             ty: ValueType::Num,
                             op: *op,
-                            a: self.emit(Instr::Unbox(ValueType::Num, a))?,
-                            b: self.emit(Instr::Unbox(ValueType::Num, b))?,
+                            a,
+                            b,
                         },
                         (at, bt) => {
                             let msg = format!(
@@ -513,7 +535,7 @@ impl TraceBuilder {
 
                 match self.get_instr(cond) {
                     Instr::Const(_) => None,
-                    _ => {
+                    Instr::Cmp(cmp) => {
                         let branch_taken = step.next_iid.0 != (step.iid.0 + 1);
 
                         print_indent(self.stack_depth());
@@ -524,13 +546,17 @@ impl TraceBuilder {
                             step.next_iid,
                         );
 
-                        let cond = if branch_taken {
-                            cond
+                        let cmp = if branch_taken {
+                            cmp.clone()
                         } else {
-                            self.emit(Instr::Not(cond))?
+                            cmp.invert()
                         };
 
-                        Some(self.emit(Instr::AssertTrue { cond })?)
+                        Some(self.emit(Instr::AssertTrue { cond: cmp })?)
+                    }
+
+                    _ => {
+                        panic!("JIT bug: jmpif's cond operand should resolve to a Cmp instruction")
                     }
                 }
             }
@@ -572,7 +598,10 @@ impl TraceBuilder {
             }
             interpreter::Instr::GetArg(index) => {
                 let value = if self.stack_depth() == 1 {
-                    self.emit(Instr::GetArg(*index))?
+                    self.emit(Instr::GetArg {
+                        ndx: *index,
+                        ty: ValueType::Boxed,
+                    })?
                 } else {
                     self.vars.cur_frame_mut().get_arg(*index).clone()
                 };
@@ -818,39 +847,9 @@ impl TraceBuilder {
             //     a: Operand::Imm(BoxedValue::Bool(false)),
             //     b: Operand::Imm(BoxedValue::Bool(false)),
             // } => Ok(Operand::Imm(BoxedValue::Bool(false))),
-            Instr::AssertTrue { .. } => {
+            Instr::GetSnapshotItem { .. } | Instr::GetArg { .. } | Instr::AssertTrue { .. } => {
                 self.write(Instr::WriteSnapshot(self.exit_snapshot_changes.clone()))?;
                 self.write(instr)
-            }
-            Instr::Unbox(value_type, ref arg_vid) => {
-                self.write(Instr::WriteSnapshot(self.exit_snapshot_changes.clone()))?;
-
-                // TODO move some of this stuff in FrameTracker
-                if let Some((prev_unbox_type, unboxed)) = self.vars.cur_frame().get_unbox(*arg_vid)
-                {
-                    if prev_unbox_type == value_type {
-                        print_indent(self.stack_depth());
-                        eprintln!(
-                            "[..tb reuse unbox v{:<4} as {:?} is at {:?}]",
-                            arg_vid.0, value_type, unboxed
-                        );
-                        Ok(unboxed.clone())
-                    } else {
-                        Err(Error::InconsistentUnbox(InconsistentUnbox {
-                            desired_type: value_type.clone(),
-                        }))
-                    }
-                } else {
-                    print_indent(self.stack_depth());
-                    eprintln!("[..tb emit unbox: v{:<4} as {:?}]", arg_vid.0, value_type);
-                    let new_vid = ValueId(self.instrs.len() as u32);
-
-                    self.vars
-                        .cur_frame_mut()
-                        .set_unbox(*arg_vid, value_type, new_vid);
-                    self.write(instr)?;
-                    Ok(new_vid.into())
-                }
             }
 
             Instr::TypeOf(ref vid) => {
@@ -880,7 +879,10 @@ impl TraceBuilder {
     fn add_entry_snapshot_var(&mut self, operand: interpreter::Operand) -> Result<ValueId, Error> {
         let ndx = self.snapshot_map.len() as u16;
         self.snapshot_map.push(operand);
-        self.emit(Instr::GetSnapshotItem { ndx })
+        self.emit(Instr::GetSnapshotItem {
+            ndx,
+            ty: ValueType::Boxed,
+        })
     }
 
     fn set_exit_snapshot_var(&mut self, intrp_varid: interpreter::StaticVarId, value_id: ValueId) {
@@ -985,9 +987,13 @@ impl<'a> InterpreterStep<'a> {
 pub(super) enum Instr {
     GetSnapshotItem {
         ndx: u16,
+        ty: ValueType,
     },
     WriteSnapshot(Vec<Option<ValueId>>),
-    GetArg(usize),
+    GetArg {
+        ndx: usize, // TODO Change to u16
+        ty: ValueType,
+    },
     Const(BoxedValue),
     Not(ValueId),
     Arith {
@@ -1008,15 +1014,13 @@ pub(super) enum Instr {
         if_false: ValueId,
     },
     AssertTrue {
-        cond: ValueId,
+        cond: Cmp,
     },
     AssertEqConst {
         x: ValueId,
         expected: BoxedValue,
     },
 
-    Unbox(ValueType, ValueId),
-    Box(ValueId),
     Num2Str(ValueId),
 
     ObjNew,
@@ -1060,10 +1064,8 @@ impl Instr {
             Instr::AssertEqConst { .. } => None,
             Instr::PushSink(_) => None,
             Instr::Return(_) => None,
-            Instr::GetArg(_) => Some(ValueType::Boxed),
+            Instr::GetArg { ty, .. } => Some(ty.clone()),
             Instr::Choose { ty, .. } => Some(ty.clone()),
-            Instr::Unbox(ty, _) => Some(ty.clone()),
-            Instr::Box(_) => Some(ValueType::Boxed),
             Instr::Num2Str(_) => Some(ValueType::Str),
             Instr::ObjNew => Some(ValueType::Obj),
             Instr::ObjSet { .. } => None,
@@ -1072,7 +1074,7 @@ impl Instr {
             Instr::ClosureNew => Some(ValueType::Function),
             Instr::Const(val) => Some(ValueType::of(val)),
             Instr::Phi(_, _) => None,
-            Instr::GetSnapshotItem { .. } => Some(ValueType::Boxed),
+            Instr::GetSnapshotItem { ty, .. } => Some(ty.clone()),
             Instr::WriteSnapshot(_) => None,
         }
     }
@@ -1090,15 +1092,15 @@ impl Instr {
                 if_false,
                 ..
             } => Box::new([cond, if_true, if_false].into_iter()),
-            Instr::AssertTrue { cond } => Box::new([cond].into_iter()),
+            Instr::AssertTrue {
+                cond: Cmp { a, b, .. },
+            } => Box::new([a, b].into_iter()),
             Instr::AssertEqConst { x, .. } => Box::new([x].into_iter()),
-            Instr::Unbox(_, arg) => Box::new([arg].into_iter()),
-            Instr::Box(arg) => Box::new([arg].into_iter()),
             Instr::Num2Str(arg) => Box::new([arg].into_iter()),
             Instr::PushSink(arg) => Box::new([arg].into_iter()),
             Instr::Return(arg) => Box::new([arg].into_iter()),
 
-            Instr::GetArg(_) => Box::new(std::iter::empty()),
+            Instr::GetArg { .. } => Box::new(std::iter::empty()),
 
             Instr::ObjNew => Box::new(std::iter::empty()),
             Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
@@ -1114,7 +1116,7 @@ impl Instr {
 
     pub(crate) fn has_side_effects(&self) -> bool {
         match self {
-            Instr::GetArg(_) => false,
+            Instr::GetArg { .. } => false,
             Instr::Const(_) => false,
             Instr::Not(_) => false,
             Instr::Arith { .. } => false,
@@ -1123,8 +1125,6 @@ impl Instr {
             Instr::Choose { .. } => false,
             Instr::AssertTrue { .. } => true,
             Instr::AssertEqConst { .. } => true,
-            Instr::Unbox(_, _) => false,
-            Instr::Box(_) => false,
             Instr::Num2Str(_) => false,
             Instr::ObjNew => false,
             Instr::ObjSet { .. } => false,
