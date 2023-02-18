@@ -133,12 +133,16 @@ pub struct TraceBuilder {
 
     instrs: Vec<Instr>,
 
-    // Tells which interpreter value to write or read into each slot of the
+    // Tells which interpreter value to write into or read from each slot of the
     // snapshot.
     //
     // (See jit::codegen for an explanation of what the "snapshot" is and how
     // it works.)
     snapshot_map: Vec<interpreter::Operand>,
+    // Temporary buffer used to set snapshot updates "coordinates" into trace-
+    // exiting instructions (such as AssertTrue and Unbox).  These will result
+    // in snapshot update instructions in the native code.
+    exit_snapshot_changes: Vec<Option<ValueId>>,
 
     state: TraceBuilderState,
     start_mode: TraceStart,
@@ -182,6 +186,7 @@ impl TraceBuilder {
             vars: tracking::VarsState::new(),
             instrs: Vec::new(),
             snapshot_map: Vec::new(),
+            exit_snapshot_changes: Vec::new(),
             start_mode,
             loop_head: None,
             state: TraceBuilderState::WaitingStart,
@@ -517,6 +522,7 @@ impl TraceBuilder {
                         } else {
                             self.emit(Instr::Not(cond))?
                         };
+
                         Some(self.emit(Instr::AssertTrue { cond })?)
                     }
                 }
@@ -536,7 +542,7 @@ impl TraceBuilder {
                 );
 
                 self.vars.get_mut(frame_id).set_var(var_id.var_ndx, value);
-                self.set_exit_snapshot_var(var_id.clone(), value)?;
+                self.set_exit_snapshot_var(var_id.clone(), value);
 
                 None
             }
@@ -805,7 +811,13 @@ impl TraceBuilder {
             //     a: Operand::Imm(BoxedValue::Bool(false)),
             //     b: Operand::Imm(BoxedValue::Bool(false)),
             // } => Ok(Operand::Imm(BoxedValue::Bool(false))),
+            Instr::AssertTrue { .. } => {
+                self.write(Instr::WriteSnapshot(self.exit_snapshot_changes.clone()))?;
+                self.write(instr)
+            }
             Instr::Unbox(value_type, ref arg_vid) => {
+                self.write(Instr::WriteSnapshot(self.exit_snapshot_changes.clone()))?;
+
                 // TODO move some of this stuff in FrameTracker
                 if let Some((prev_unbox_type, unboxed)) = self.vars.cur_frame().get_unbox(*arg_vid)
                 {
@@ -864,11 +876,7 @@ impl TraceBuilder {
         self.emit(Instr::GetSnapshotItem { ndx })
     }
 
-    fn set_exit_snapshot_var(
-        &mut self,
-        intrp_varid: interpreter::StaticVarId,
-        value_id: ValueId,
-    ) -> Result<(), Error> {
+    fn set_exit_snapshot_var(&mut self, intrp_varid: interpreter::StaticVarId, value_id: ValueId) {
         let ndx = self
             .snapshot_map
             .iter()
@@ -882,10 +890,12 @@ impl TraceBuilder {
                 self.snapshot_map
                     .push(interpreter::Operand::Var(intrp_varid));
                 self.snapshot_map.len() - 1
-            }) as u16;
+            });
 
-        self.emit(Instr::SetSnapshotItem { ndx, value_id })?;
-        Ok(())
+        if self.exit_snapshot_changes.len() <= ndx {
+            self.exit_snapshot_changes.resize(ndx + 1, None);
+        }
+        self.exit_snapshot_changes[ndx] = Some(value_id);
     }
 
     pub(crate) fn build(mut self) -> Option<Trace> {
@@ -968,10 +978,7 @@ pub(super) enum Instr {
     GetSnapshotItem {
         ndx: u16,
     },
-    SetSnapshotItem {
-        ndx: u16,
-        value_id: ValueId,
-    },
+    WriteSnapshot(Vec<Option<ValueId>>),
     GetArg(usize),
     Const(BoxedValue),
     Not(ValueId),
@@ -1058,7 +1065,7 @@ impl Instr {
             Instr::Const(val) => Some(ValueType::of(val)),
             Instr::Phi(_, _) => None,
             Instr::GetSnapshotItem { .. } => Some(ValueType::Boxed),
-            Instr::SetSnapshotItem { .. } => None,
+            Instr::WriteSnapshot(_) => None,
         }
     }
 
@@ -1093,7 +1100,7 @@ impl Instr {
             Instr::Const(_) => Box::new(std::iter::empty()),
             Instr::Phi(_tgt, new_value) => Box::new(std::iter::once(new_value)),
             Instr::GetSnapshotItem { .. } => Box::new(std::iter::empty()),
-            Instr::SetSnapshotItem { value_id, .. } => Box::new(std::iter::once(value_id)),
+            Instr::WriteSnapshot(_) => Box::new(std::iter::empty()),
         }
     }
 
@@ -1120,7 +1127,7 @@ impl Instr {
             Instr::Return(_) => false,
             Instr::Phi(_, _) => true,
             Instr::GetSnapshotItem { .. } => false,
-            Instr::SetSnapshotItem { .. } => true,
+            Instr::WriteSnapshot(_) => true,
         }
     }
 }
@@ -1322,6 +1329,9 @@ mod tests {
 
         let trace = output.trace.unwrap();
         trace.dump();
+
+        let native_thunk = jit::codegen::to_native(&trace);
+        native_thunk.dump();
 
         let sink_operands = get_pushsink_consts(&trace);
         assert_eq!(

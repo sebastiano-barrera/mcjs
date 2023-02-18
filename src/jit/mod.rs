@@ -29,7 +29,13 @@ impl Trace {
         eprintln!(" === trace");
         eprintln!(" snapshot: {:?}", self.snapshot_map);
 
+        let skip_disabled = true;
+
         for (ndx, instr) in self.instrs.iter().enumerate() {
+            if skip_disabled && !is_enabled[ndx] {
+                continue;
+            }
+
             let enb_prefix = if is_enabled[ndx] { "    " } else { "OFF " };
 
             let hreg = self.hreg_alloc.hreg_of_instr(ndx);

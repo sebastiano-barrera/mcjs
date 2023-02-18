@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use dynasm::dynasm;
 use dynasmrt::x64::Rq;
-use dynasmrt::Register;
+use dynasmrt::{DynamicLabel, Register};
 use dynasmrt::{DynasmApi, DynasmLabelApi};
 use strum::EnumCount;
 use strum_macros::{EnumCount, EnumIter, FromRepr};
@@ -196,25 +196,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     };
     let hreg_of = |vid| hreg_of_opt(vid).unwrap_or_else(|| panic!("no hreg for {vid:?}"));
 
-    let used_archregs: Vec<Rq> = {
-        // establish an order. any order is fine, as long as we use it the
-        // same in the trace exit
-        let mut order = Vec::new();
-
-        // the HashSet is used to dedup
-        let mut used_archregs = HashSet::new();
-        for indx in 0..trace.instrs.len() {
-            if is_enabled[indx] {
-                if let Some(areg) = hreg_of_opt(ValueId(indx as _)) {
-                    used_archregs.insert(areg);
-                }
-            }
-        }
-        order.extend(used_archregs.into_iter());
-
-        order.push(Rq::R15);
-        order
-    };
+    let used_archregs = order_used_aregs(trace, &is_enabled);
 
     for areg in used_archregs.iter() {
         dynasm!(asm; push Rq (areg.code()));
@@ -292,9 +274,9 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     trace_assert_cmp(&mut asm, cmp.ty, cmp.op, a, b);
                 }
                 Instr::AssertEqConst { .. } => todo!(),
-                Instr::Unbox(ty, value) => {
-                    let areg = hreg_of(*value);
-                    gen_check_tag(&mut asm, snap_len, areg, *ty);
+                Instr::Unbox(ty, vid) => {
+                    let areg = hreg_of(*vid);
+                    trace_assert_type(&mut asm, snap_len, areg, *ty);
                 }
                 Instr::Box(_) => todo!(),
                 Instr::Num2Str(_) => todo!(),
@@ -346,11 +328,15 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                         ; mov BYTE [rsi + arr_ndx], r15b
                     );
                 }
-                Instr::SetSnapshotItem { ndx, value_id } => {
-                    let argreg = hreg_of(*value_id).code();
-                    dynasm!(asm
-                    ; mov [rbp + 8 * (*ndx as i32)], Rq (argreg)
-                    );
+                Instr::WriteSnapshot(snap) => {
+                    for (ndx, vid_opt) in snap.iter().enumerate() {
+                        if let Some(vid) = vid_opt {
+                            let argreg = hreg_of(*vid).code();
+                            dynasm!(asm
+                            ; mov [rbp + 8 * (ndx as i32)], Rq (argreg)
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -402,7 +388,28 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     }
 }
 
-fn gen_check_tag(asm: &mut dynasmrt::x64::Assembler, snap_len: usize, reg: Rq, ty: ValueType) {
+fn order_used_aregs(trace: &Trace, is_enabled: &[bool]) -> Vec<Rq> {
+    let mut order = Vec::new();
+    let mut used_archregs = HashSet::new();
+    for indx in 0..trace.instrs.len() {
+        if !is_enabled[indx] {
+            continue;
+        }
+
+        if let Some(areg) = trace
+            .hreg_alloc
+            .hreg_of_instr(indx)
+            .and_then(|hreg| GP_REGS.get(hreg.0 as usize).copied())
+        {
+            used_archregs.insert(areg);
+        }
+    }
+    order.extend(used_archregs.into_iter());
+    order.push(Rq::R15);
+    order
+}
+
+fn trace_assert_type(asm: &mut dynasmrt::x64::Assembler, snap_len: usize, reg: Rq, ty: ValueType) {
     let expected_tag = ty as u8;
     let type_arr_ndx = (snap_len + reg.code() as usize) as i32;
 
@@ -412,11 +419,7 @@ fn gen_check_tag(asm: &mut dynasmrt::x64::Assembler, snap_len: usize, reg: Rq, t
 }
 
 fn trace_assert_cmp(asm: &mut dynasmrt::x64::Assembler, ty: ValueType, op: CmpOp, a: Rq, b: Rq) {
-    if ValueType::Boxed == ty {
-        trace_assert_typetag(asm, a, b);
-    }
-
-    dynasm!(asm; cmp Rq (a.code()), Rq(b.code()));
+    gen_cmp(ty, asm, a, b);
     match op {
         CmpOp::GE => dynasm!(asm; jl >abort_trace),
         CmpOp::GT => dynasm!(asm; jle >abort_trace),
@@ -425,6 +428,13 @@ fn trace_assert_cmp(asm: &mut dynasmrt::x64::Assembler, ty: ValueType, op: CmpOp
         CmpOp::EQ => dynasm!(asm; jne >abort_trace),
         CmpOp::NE => dynasm!(asm; je >abort_trace),
     };
+}
+
+fn gen_cmp(ty: ValueType, asm: &mut dynasmrt::x64::Assembler, a: Rq, b: Rq) {
+    if ValueType::Boxed == ty {
+        trace_assert_typetag(asm, a, b);
+    }
+    dynasm!(asm; cmp Rq (a.code()), Rq(b.code()));
 }
 
 fn decode_tag(val: u8) -> Option<ValueType> {
