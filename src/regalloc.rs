@@ -45,6 +45,10 @@ impl Allocation {
             .unwrap_or(0);
         Allocation { hregs, n_hregs }
     }
+
+    pub(super) fn reordered(&self, new_order: &[usize]) -> Allocation {
+        todo!()
+    }
 }
 
 pub fn allocate_registers<I: Instruction>(code: &[I], num_hregs: u32) -> Allocation {

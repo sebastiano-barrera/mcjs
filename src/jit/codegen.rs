@@ -190,6 +190,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     assert_eq!(trace.instrs.len(), trace.hreg_alloc.n_instrs());
 
     let is_enabled = trace.enabled_mask();
+
     let hreg_of_opt = |vid: ValueId| -> Option<Rq> {
         let reg_ndx = trace.hreg_alloc.hreg_of_instr(vid.0 as usize)?.0;
         GP_REGS.get(reg_ndx as usize).copied()
@@ -258,7 +259,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 }
                 Instr::BoolOp { .. } => todo!(),
                 Instr::Choose { .. } => todo!(),
-                Instr::AssertTrue { cond: cmp } => {
+                Instr::ExitUnless { cond: cmp } => {
                     let a = hreg_of(cmp.a);
                     let b = hreg_of(cmp.b);
                     trace_assert_cmp(&mut asm, cmp.ty, cmp.op, a, b);
@@ -356,8 +357,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     for areg in used_archregs.iter().rev() {
         dynasm!(asm; pop Rq (areg.code()));
     }
-    // TODO This just won't work...
-    dynasm!(asm; hlt);
+    dynasm!(asm; ret);
 
     let entry_offset = asm.labels().resolve_local("entry").unwrap();
     let buf = asm.finalize().unwrap();

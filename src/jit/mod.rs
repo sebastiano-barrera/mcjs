@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use crate::{interpreter, regalloc};
 
 mod builder;
 mod codegen;
+mod loop_hoist;
 mod tracking;
 
 use builder::{BoxedValue, Instr, TraceParam};
@@ -18,6 +21,7 @@ pub struct Trace {
     snapshot_map: Vec<interpreter::Operand>,
     is_loop: bool,
     pub(crate) phis: std::collections::HashMap<ValueId, ValueId>,
+    pub(crate) n_loop_invariant: usize,
 }
 
 impl Trace {
@@ -29,20 +33,32 @@ impl Trace {
         eprintln!(" === trace");
         eprintln!(" snapshot: {:?}", self.snapshot_map);
 
-        let skip_disabled = true;
+        let skip_disabled = false;
 
         for (ndx, instr) in self.instrs.iter().enumerate() {
             if skip_disabled && !is_enabled[ndx] {
                 continue;
             }
 
+            if ndx == self.n_loop_invariant {
+                eprintln!("  ----- loop");
+            }
+
             let enb_prefix = if is_enabled[ndx] { "    " } else { "OFF " };
+
+            let exp_type: Cow<'static, _> = match instr.result_type() {
+                Some(ty) => format!("{:?}", ty).into(),
+                None => "--".into(),
+            };
 
             let hreg = self.hreg_alloc.hreg_of_instr(ndx);
             let hreg = hreg
                 .map(|x| Cow::Owned(format!("{:?}", x)))
                 .unwrap_or_else(|| Cow::Borrowed("???"));
-            eprintln!(" {}{:4?} {:5} {:?}", enb_prefix, ndx, hreg, instr);
+            eprintln!(
+                " {}{:4?} {:5} {:6} {:?}",
+                enb_prefix, ndx, hreg, exp_type, instr
+            );
         }
 
         eprintln!("      phis [");

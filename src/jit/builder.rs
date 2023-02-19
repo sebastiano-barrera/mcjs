@@ -552,7 +552,7 @@ impl TraceBuilder {
                             cmp.invert()
                         };
 
-                        Some(self.emit(Instr::AssertTrue { cond: cmp })?)
+                        Some(self.emit(Instr::ExitUnless { cond: cmp })?)
                     }
 
                     _ => {
@@ -847,8 +847,29 @@ impl TraceBuilder {
             //     a: Operand::Imm(BoxedValue::Bool(false)),
             //     b: Operand::Imm(BoxedValue::Bool(false)),
             // } => Ok(Operand::Imm(BoxedValue::Bool(false))),
-            Instr::GetSnapshotItem { .. } | Instr::GetArg { .. } | Instr::AssertTrue { .. } => {
-                self.write(Instr::WriteSnapshot(self.exit_snapshot_changes.clone()))?;
+
+            // ASSERTS: on failure, they exit the trace with a "failure", i.e.
+            // a snapshot rollback (i.e. the interpreter restores an earlier
+            // snapshot, the last committed one)
+            Instr::GetSnapshotItem { .. } | Instr::GetArg { .. } => {
+                // TODO Refactor this operation.  The whole snapshot tracking might go to a new struct
+                let mut snap_changes = Vec::new();
+                std::mem::swap(&mut snap_changes, &mut self.exit_snapshot_changes);
+                let res = self.write(instr)?;
+                eprintln!("pre-write snapshot: {:?}", snap_changes);
+                self.write(Instr::WriteSnapshot(snap_changes))?;
+                Ok(res)
+            }
+
+            // EXITS: on failure, they exit the trace with a "success", i.e.
+            // every effect on local variables that happened before this
+            // instruction becomes visible by the interpreter.
+            Instr::ExitUnless { .. } => {
+                // TODO Refactor this operation.  The whole snapshot tracking might go to a new struct
+                let mut snap_changes = Vec::new();
+                std::mem::swap(&mut snap_changes, &mut self.exit_snapshot_changes);
+                eprintln!("post-write snapshot: {:?}", snap_changes);
+                self.write(Instr::WriteSnapshot(snap_changes))?;
                 self.write(instr)
             }
 
@@ -907,12 +928,15 @@ impl TraceBuilder {
         self.exit_snapshot_changes[ndx] = Some(value_id);
     }
 
-    pub(crate) fn build(mut self) -> Option<Trace> {
+    pub(crate) fn build(self) -> Option<Trace> {
         if let TraceBuilderState::Finished = self.state {
             let mut phis = HashMap::new();
             let is_loop = self.loop_head.is_some();
+            let mut instrs = self.instrs;
+            let mut n_loop_invariant = 0;
 
             if is_loop {
+                // Add phi nodes
                 let rbw = self.vars.get_reads_before_writes();
                 for (frame_id, var_ndx) in rbw.iter() {
                     let frame = &self.vars.get(*frame_id);
@@ -924,21 +948,25 @@ impl TraceBuilder {
                         .expect("bug in VarsState: returned variable without a current write");
                     assert_ne!(first_vid, *last_vid);
 
-                    let phi_instr = self.write(Instr::Phi(first_vid, *last_vid)).unwrap();
+                    instrs.push(Instr::Phi(first_vid, *last_vid));
+                    let phi_instr = ValueId((instrs.len() - 1) as u32);
                     let prev = phis.insert(first_vid, phi_instr);
                     assert!(
                         prev.is_none(),
                         "JIT bug: tried to place multiple phis for the same variable"
                     );
                 }
+
+                // TODO Move loop-invariant instructions before the ---loop line
             }
 
-            let hregs = regalloc::allocate_registers(self.instrs.as_slice(), 6);
+            let hregs = regalloc::allocate_registers(instrs.as_slice(), 6);
 
             Some(Trace {
-                instrs: self.instrs,
+                instrs,
                 phis,
                 is_loop,
+                n_loop_invariant,
                 hreg_alloc: hregs,
                 snapshot_map: self.snapshot_map,
             })
@@ -1015,7 +1043,7 @@ pub(super) enum Instr {
         ty: ValueType,
     },
 
-    AssertTrue {
+    ExitUnless {
         cond: Cmp,
     },
 
@@ -1040,6 +1068,8 @@ pub(super) enum Instr {
     Phi(ValueId, ValueId),
 }
 
+pub(super) type SnapshotUpdate = Vec<Option<ValueId>>;
+
 type ArithOp = interpreter::ArithOp;
 type CmpOp = interpreter::CmpOp;
 type BoolOp = interpreter::BoolOp;
@@ -1057,7 +1087,7 @@ impl Instr {
             Instr::Arith { .. } => Some(ValueType::Num),
             Instr::Cmp { .. } => Some(ValueType::Bool),
             Instr::BoolOp { .. } => Some(ValueType::Bool),
-            Instr::AssertTrue { .. } => None,
+            Instr::ExitUnless { .. } => None,
             Instr::PushSink(_) => None,
             Instr::Return(_) => None,
             Instr::GetArg { ty, .. } => Some(ty.clone()),
@@ -1075,7 +1105,7 @@ impl Instr {
         }
     }
 
-    fn operands<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = &'a ValueId>> {
+    pub(super) fn operands<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = &'a ValueId>> {
         use std::iter::once;
         match self {
             Instr::Not(arg) => Box::new(once(arg)),
@@ -1088,7 +1118,7 @@ impl Instr {
                 if_false,
                 ..
             } => Box::new([cond, if_true, if_false].into_iter()),
-            Instr::AssertTrue {
+            Instr::ExitUnless {
                 cond: Cmp { a, b, .. },
             } => Box::new([a, b].into_iter()),
             Instr::Num2Str(arg) => Box::new([arg].into_iter()),
@@ -1118,7 +1148,7 @@ impl Instr {
             Instr::Cmp(_) => false,
             Instr::BoolOp { .. } => false,
             Instr::Choose { .. } => false,
-            Instr::AssertTrue { .. } => true,
+            Instr::ExitUnless { .. } => true,
             Instr::Num2Str(_) => false,
             Instr::ObjNew => false,
             Instr::ObjSet { .. } => false,
