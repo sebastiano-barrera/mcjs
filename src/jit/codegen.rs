@@ -243,7 +243,10 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     let tgt = hreg_of(vid).code();
                     // TODO This would benefit from pin-pointing the target
                     // register to the first operand register
-                    dynasm!(asm; mov Rq (tgt), Rq (a));
+                    if tgt != a {
+                        dynasm!(asm; mov Rq (tgt), Rq (a));
+                    }
+                    // TODO This is completely wrong. The instructions for double-precision floating point numbers is MOVSD, ADDSD, VADDSD & co.
                     match op {
                         ArithOp::Add => dynasm!(asm; add Rq (tgt), Rq (b)),
                         ArithOp::Sub => dynasm!(asm; sub Rq (tgt), Rq (b)),
