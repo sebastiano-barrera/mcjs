@@ -21,44 +21,32 @@ pub struct Trace {
     snapshot_map: Vec<interpreter::Operand>,
     is_loop: bool,
     pub(crate) phis: std::collections::HashMap<ValueId, ValueId>,
-    pub(crate) n_loop_invariant: usize,
+    pub(crate) loop_head_vid: ValueId,
+    order: Vec<ValueId>,
 }
 
 impl Trace {
     pub fn dump(&self) {
         use std::borrow::Cow;
 
-        let is_enabled = self.enabled_mask();
-
         eprintln!(" === trace");
         eprintln!(" snapshot: {:?}", self.snapshot_map);
 
-        let skip_disabled = false;
-
-        for (ndx, instr) in self.instrs.iter().enumerate() {
-            if skip_disabled && !is_enabled[ndx] {
-                continue;
-            }
-
-            if ndx == self.n_loop_invariant {
+        for (vid, instr) in self.iter_instrs() {
+            if vid == self.loop_head_vid {
                 eprintln!("  ----- loop");
             }
-
-            let enb_prefix = if is_enabled[ndx] { "    " } else { "OFF " };
 
             let exp_type: Cow<'static, _> = match instr.result_type() {
                 Some(ty) => format!("{:?}", ty).into(),
                 None => "--".into(),
             };
 
-            let hreg = self.hreg_alloc.hreg_of_instr(ndx);
+            let hreg = self.hreg_alloc.hreg_of_instr(vid.clone().into());
             let hreg = hreg
                 .map(|x| Cow::Owned(format!("{:?}", x)))
                 .unwrap_or_else(|| Cow::Borrowed("???"));
-            eprintln!(
-                " {}{:4?} {:5} {:6} {:?}",
-                enb_prefix, ndx, hreg, exp_type, instr
-            );
+            eprintln!("v{:<4} {:5} {:6} {:?}", vid.0, hreg, exp_type, instr);
         }
 
         eprintln!("      phis [");
@@ -76,13 +64,10 @@ impl Trace {
         self.instrs.get(vid.0 as usize)
     }
 
-    fn enabled_mask(&self) -> Box<[bool]> {
-        self.instrs
-            .iter()
-            .enumerate()
-            .map(|(ndx, instr)| {
-                self.hreg_alloc.hreg_of_instr(ndx).is_some() || instr.has_side_effects()
-            })
-            .collect()
+    fn iter_instrs(&self) -> impl Iterator<Item = (ValueId, &Instr)> {
+        self.order.iter().map(|vid| {
+            let instr = self.instrs.get(vid.0 as usize).unwrap();
+            (*vid, instr)
+        })
     }
 }

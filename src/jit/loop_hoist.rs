@@ -4,7 +4,10 @@ use crate::jit::builder::ValueId;
 
 use super::{builder::Instr, Trace};
 
-pub(super) fn find_loop_variant(instrs: &[Instr], phis: &HashMap<ValueId, ValueId>) -> Vec<bool> {
+pub(super) fn find_loop_variant<F>(instrs: &[Instr], is_phi_target: F) -> Vec<bool>
+where
+    F: Fn(ValueId) -> bool,
+{
     let mut is_loop_variant = vec![false; instrs.len()];
 
     // for each phi(old, new), old is NOT loop variant; all its dependents are! (and new is *supposed* to be)
@@ -16,7 +19,7 @@ pub(super) fn find_loop_variant(instrs: &[Instr], phis: &HashMap<ValueId, ValueI
 
         is_loop_variant[ndx] = instr
             .operands()
-            .any(|operand| is_loop_variant[operand.0 as usize] || phis.contains_key(operand));
+            .any(|operand| is_loop_variant[operand.0 as usize] || is_phi_target(*operand));
     }
 
     eprint!("loop variant: ");

@@ -32,8 +32,8 @@ impl Allocation {
         self.hregs.len()
     }
 
-    pub(crate) fn hreg_of_instr(&self, instr_ndx: usize) -> Option<HardReg> {
-        self.hregs.get(instr_ndx).copied().flatten()
+    pub(crate) fn hreg_of_instr(&self, sreg: SoftReg) -> Option<HardReg> {
+        self.hregs.get(sreg.0 as usize).copied().flatten()
     }
 
     fn new(hregs: Box<[Option<HardReg>]>) -> Allocation {
@@ -44,10 +44,6 @@ impl Allocation {
             .map(|x| x + 1)
             .unwrap_or(0);
         Allocation { hregs, n_hregs }
-    }
-
-    pub(super) fn reordered(&self, new_order: &[usize]) -> Allocation {
-        todo!()
     }
 }
 

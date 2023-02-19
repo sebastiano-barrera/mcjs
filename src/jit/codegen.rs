@@ -189,15 +189,13 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     assert_eq!(trace.instrs.len(), trace.hreg_alloc.n_instrs());
 
-    let is_enabled = trace.enabled_mask();
-
     let hreg_of_opt = |vid: ValueId| -> Option<Rq> {
-        let reg_ndx = trace.hreg_alloc.hreg_of_instr(vid.0 as usize)?.0;
+        let reg_ndx = trace.hreg_alloc.hreg_of_instr(vid.clone().into())?.0;
         GP_REGS.get(reg_ndx as usize).copied()
     };
     let hreg_of = |vid| hreg_of_opt(vid).unwrap_or_else(|| panic!("no hreg for {vid:?}"));
 
-    let used_archregs = order_used_aregs(trace, &is_enabled);
+    let used_archregs = order_used_aregs(trace);
 
     for areg in used_archregs.iter() {
         dynasm!(asm; push Rq (areg.code()));
@@ -216,13 +214,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     };
 
     let mut processing_phis = false;
-    for (indx, instr) in trace.instrs.iter().enumerate() {
-        if !is_enabled[indx] {
-            continue;
-        }
-
-        let vid = ValueId(indx as u32);
-
+    for (vid, instr) in trace.iter_instrs() {
         if !processing_phis {
             match instr {
                 Instr::GetArg { .. } => todo!(),
@@ -385,17 +377,13 @@ where
     }
 }
 
-fn order_used_aregs(trace: &Trace, is_enabled: &[bool]) -> Vec<Rq> {
+fn order_used_aregs(trace: &Trace) -> Vec<Rq> {
     let mut order = Vec::new();
     let mut used_archregs = HashSet::new();
-    for indx in 0..trace.instrs.len() {
-        if !is_enabled[indx] {
-            continue;
-        }
-
+    for (vid, instr) in trace.iter_instrs() {
         if let Some(areg) = trace
             .hreg_alloc
-            .hreg_of_instr(indx)
+            .hreg_of_instr(vid.clone().into())
             .and_then(|hreg| GP_REGS.get(hreg.0 as usize).copied())
         {
             used_archregs.insert(areg);
