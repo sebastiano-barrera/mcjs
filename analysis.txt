@@ -1,0 +1,10 @@
+   Compiling mcjs v0.1.0 (/home/sebastiano/Code/mcjs)
+warning: unused variable: `is_const`
+   --> src/bytecode_compiler.rs:452:9
+    |
+452 |     let is_const = match var_decl.kind {
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_is_const`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: `mcjs` (lib) generated 1 warning

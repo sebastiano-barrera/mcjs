@@ -61,12 +61,6 @@ impl Trace {
         for (ndx, instr) in self.instrs.iter().enumerate() {
             pr_inst(ValueId(ndx as u32), instr);
         }
-
-        // eprintln!("      phis [");
-        // for (old, new) in self.phis.iter() {
-        //     eprintln!("           {:?} <- {:?}", old, new);
-        // }
-        // eprintln!("      ]");
     }
 
     pub(crate) fn compile(&self) -> NativeThunk {

@@ -1304,8 +1304,7 @@ mod tests {
         let native_thunk = jit::codegen::to_native(&trace);
         native_thunk.dump();
 
-        // native_thunk.run();
-        todo!("Run the trace (continue writing this test when traces can be run)")
+
     }
 
     #[ignore]

@@ -1,0 +1,12 @@
+
+- Overhaul variable IDs
+	The current scheme is too complicated.
+	
+- for..of and for..
+  - "traces have no control flow" implies that a single trace spans either a single function or a single loop with all inner nested loops unrolled.
+  - ... but "inner nested loop unrolled" implies that the number of iterations (e.g. length of iterated collections) is fixed and known ahead of time, unless there is some sort of trick in place.
+  - If a trace spans a specific loop (herein called the trace's "main loop"), then that loop *can* have a variable number of iterations without a problem
+
+- Remove particular instructions for Array, replace with better native APIs
+	- Native APIs: simplify internal mechanism for calling them?
+
