@@ -173,38 +173,19 @@ extern "C" fn ext_push_sink(value: u64) -> () {
 }
 
 pub(super) fn to_native(trace: &Trace) -> NativeThunk {
-    use strum_macros::FromRepr;
-
-    let snap_len = trace.snapshot_map.len();
-
-    let mut asm = dynasmrt::x64::Assembler::new().unwrap();
-
-    dynasm!(asm
-    ; entry:
-    );
-
     if trace.hreg_alloc.n_hregs() as usize > GP_REGS.len() {
         panic!("too many hardregs used in reg allocation!");
     }
-
     assert_eq!(trace.instrs.len(), trace.hreg_alloc.n_instrs());
+
+    let snap_len = trace.snapshot_map.len();
+    let mut asm = dynasmrt::x64::Assembler::new().unwrap();
 
     let hreg_of_opt = |vid: ValueId| -> Option<Rq> {
         let reg_ndx = trace.hreg_alloc.hreg_of_instr(vid.clone().into())?.0;
         GP_REGS.get(reg_ndx as usize).copied()
     };
     let hreg_of = |vid| hreg_of_opt(vid).unwrap_or_else(|| panic!("no hreg for {vid:?}"));
-
-    let used_archregs = order_used_aregs(trace);
-
-    for areg in used_archregs.iter() {
-        dynasm!(asm; push Rq (areg.code()));
-    }
-    if trace.is_loop {
-        dynasm!(asm
-        ; loop_start:
-        );
-    }
 
     let assert_type = |trace: &Trace, vid: ValueId, expected_type: ValueType| {
         assert_eq!(
@@ -213,128 +194,127 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         );
     };
 
-    let mut processing_phis = false;
-    for (vid, instr) in trace.iter_instrs() {
-        if !processing_phis {
-            match instr {
-                Instr::GetArg { .. } => todo!(),
-                Instr::Const(value) => {
-                    // It is assumed that the IR already "knows" the type of
-                    // this value, so we can discard it here
-                    let (encoded_value, _) = encode_value(&value);
-                    let areg = hreg_of(vid);
-                    dynasm!(asm; mov Rq (areg.code()), QWORD encoded_value);
-                }
-                Instr::Not(_) => todo!(),
-                Instr::Arith { op, a, b } => {
-                    assert_type(trace, *a, ValueType::Num);
-                    assert_type(trace, *b, ValueType::Num);
+    let translate_instr = |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| match instr {
+        Instr::GetArg { .. } => todo!(),
+        Instr::Const(value) => {
+            // It is assumed that the IR already "knows" the type of
+            // this value, so we can discard it here
+            let (encoded_value, _) = encode_value(&value);
+            let areg = hreg_of(vid);
+            dynasm!(asm; mov Rq (areg.code()), QWORD encoded_value);
+        }
+        Instr::Not(_) => todo!(),
+        Instr::Arith { op, a, b } => {
+            assert_type(trace, *a, ValueType::Num);
+            assert_type(trace, *b, ValueType::Num);
 
-                    let a = hreg_of(*a).code();
-                    let b = hreg_of(*b).code();
-                    let tgt = hreg_of(vid).code();
-                    // TODO This would benefit from pin-pointing the target
-                    // register to the first operand register
-                    if tgt != a {
-                        dynasm!(asm; mov Rq (tgt), Rq (a));
-                    }
-                    // TODO This is completely wrong. The instructions for double-precision floating point numbers is MOVSD, ADDSD, VADDSD & co.
-                    match op {
-                        ArithOp::Add => dynasm!(asm; add Rq (tgt), Rq (b)),
-                        ArithOp::Sub => dynasm!(asm; sub Rq (tgt), Rq (b)),
-                        ArithOp::Mul => todo!("mul"),
-                        ArithOp::Div => todo!("div"),
-                    }
-                }
-                Instr::Cmp(_) => {
-                    // Do nothing.  Rather, when an instruction *using* this result
-                    // occurs later, we'll do something about it. In particular,
-                    // we'll choose whether to do a cmp + jz/ja/je/etc. (using a
-                    // flag) or store the result in a dedicated boolean register.
-                }
-                Instr::BoolOp { .. } => todo!(),
-                Instr::Choose { .. } => todo!(),
-                Instr::ExitUnless {
-                    cond: cmp,
-                    pre_snap_update,
-                } => {
-                    write_snapshot(&mut asm, &pre_snap_update, hreg_of);
-                    let a = hreg_of(cmp.a);
-                    let b = hreg_of(cmp.b);
-                    trace_assert_cmp(&mut asm, cmp.ty, cmp.op, a, b);
-                }
-                Instr::Num2Str(_) => todo!(),
-                Instr::ObjNew => todo!(),
-                Instr::ObjSet { .. } => todo!(),
-                Instr::ObjGet { .. } => todo!(),
-                Instr::TypeOf(_) => todo!(),
-                Instr::ClosureNew => todo!(),
-                Instr::PushSink(vid) => {
-                    let operand = hreg_of(*vid).code();
-                    dynasm!(asm
-                    ; push rsi
-                    ; mov rsi, Rq (operand)
-                    ; call ext_push_sink as _
-                    ; pop rsi
-                    );
-                }
-                Instr::Return(_) => todo!(),
-                Instr::Phi(_, _) => {
-                    processing_phis = true;
-                }
-
-                // -- Snapshots
-                // Variables are passed to and retrieved from the trace via the
-                // "snapshot", which is a the 'juxtaposition' of two arrays:
-                //   * values: [u64; N]        -- runtime-encoded values
-                //   * types: [ValueType; N]   -- repr as u8
-                //
-                // These arrays are allocated at runtime before starting the
-                // trace proper. A pointer to the array is passed as the first
-                // argument to the C function that wraps the trace (reg RDI).
-                //
-                // `snapshot_map` tells which variable corresponds to each
-                // index in the above values and types array.  The interpeter
-                // uses this map to initialize the snapshot at trace start, and
-                // to read values back from the snapshot at trace exit.
-                Instr::GetSnapshotItem {
-                    ndx: snap_ndx,
-                    ty,
-                    post_snap_update,
-                } => {
-                    let snap_ndx = *snap_ndx as i32;
-                    assert!(snap_ndx < snap_len as i32);
-
-                    let tgt = hreg_of(vid).code();
-
-                    dynasm!(asm
-                        ; cmp BYTE [rsi + snap_ndx], *ty as i8
-                        ; jne >abort_trace
-                        ; mov Rq (tgt), QWORD [rdi + 8 * snap_ndx]
-                    );
-                    write_snapshot(&mut asm, &post_snap_update, hreg_of);
-                }
+            let a = hreg_of(*a).code();
+            let b = hreg_of(*b).code();
+            let tgt = hreg_of(vid).code();
+            // TODO This would benefit from pin-pointing the target
+            // register to the first operand register
+            if tgt != a {
+                dynasm!(asm; mov Rq (tgt), Rq (a));
+            }
+            // TODO This is completely wrong. The instructions for double-precision floating point numbers is MOVSD, ADDSD, VADDSD & co.
+            match op {
+                ArithOp::Add => dynasm!(asm; add Rq (tgt), Rq (b)),
+                ArithOp::Sub => dynasm!(asm; sub Rq (tgt), Rq (b)),
+                ArithOp::Mul => todo!("mul"),
+                ArithOp::Div => todo!("div"),
+            }
+        }
+        Instr::Cmp(_) => {
+            // Do nothing.  Rather, when an instruction *using* this result
+            // occurs later, we'll do something about it. In particular,
+            // we'll choose whether to do a cmp + jz/ja/je/etc. (using a
+            // flag) or store the result in a dedicated boolean register.
+        }
+        Instr::BoolOp { .. } => todo!(),
+        Instr::Choose { .. } => todo!(),
+        Instr::ExitUnless {
+            cond: cmp,
+            pre_snap_update,
+        } => {
+            write_snapshot(asm, &pre_snap_update, hreg_of);
+            let a = hreg_of(cmp.a);
+            let b = hreg_of(cmp.b);
+            trace_assert_cmp(asm, cmp.ty, cmp.op, a, b);
+        }
+        Instr::Num2Str(_) => todo!(),
+        Instr::ObjNew => todo!(),
+        Instr::ObjSet { .. } => todo!(),
+        Instr::ObjGet { .. } => todo!(),
+        Instr::TypeOf(_) => todo!(),
+        Instr::ClosureNew => todo!(),
+        Instr::PushSink(vid) => {
+            let operand = hreg_of(*vid).code();
+            dynasm!(asm
+             ; push rsi
+             ; mov rsi, Rq (operand)
+             ; call ext_push_sink as _
+             ; pop rsi
+            );
+        }
+        Instr::Return(_) => todo!(),
+        Instr::Phi(old, new) => {
+            let old = hreg_of(*old).code();
+            let new = hreg_of(*new).code();
+            if old != new {
+                dynasm!(asm; mov Rq (old), Rq (new));
+            } else {
+                eprintln!("JIT codegen: phi old hreg = new hreg; no machine instr necessary");
             }
         }
 
-        if processing_phis {
-            match &instr {
-                Instr::Phi(old, new) => {
-                    let old = hreg_of(*old).code();
-                    let new = hreg_of(*new).code();
-                    if old != new {
-                        dynasm!(asm; mov Rq (old), Rq (new));
-                    } else {
-                        eprintln!(
-                            "JIT codegen: phi old hreg = new hreg; no machine instr necessary"
-                        );
-                    }
-                }
-                _ => {
-                    panic!("JIT bug: phi instructions must be located at the end of the trace")
-                }
-            }
+        // -- Snapshots
+        // Variables are passed to and retrieved from the trace via the
+        // "snapshot", which is a the 'juxtaposition' of two arrays:
+        //   * values: [u64; N]        -- runtime-encoded values
+        //   * types: [ValueType; N]   -- repr as u8
+        //
+        // These arrays are allocated at runtime before starting the
+        // trace proper. A pointer to the array is passed as the first
+        // argument to the C function that wraps the trace (reg RDI).
+        //
+        // `snapshot_map` tells which variable corresponds to each
+        // index in the above values and types array.  The interpeter
+        // uses this map to initialize the snapshot at trace start, and
+        // to read values back from the snapshot at trace exit.
+        Instr::GetSnapshotItem {
+            ndx: snap_ndx,
+            ty,
+            post_snap_update,
+        } => {
+            let snap_ndx = *snap_ndx as i32;
+            assert!(snap_ndx < snap_len as i32);
+
+            let tgt = hreg_of(vid).code();
+
+            dynasm!(asm
+             ; cmp BYTE [rsi + snap_ndx], *ty as i8
+             ; jne >abort_trace
+             ; mov Rq (tgt), QWORD [rdi + 8 * snap_ndx]
+            );
+            write_snapshot(asm, &post_snap_update, hreg_of);
         }
+    };
+
+    dynasm!(asm ; entry: );
+
+    let used_archregs = order_used_aregs(trace);
+    for areg in used_archregs.iter() {
+        dynasm!(asm; push Rq (areg.code()));
+    }
+
+    for (vid, instr) in trace.iter_header() {
+        translate_instr(&mut asm, vid, instr);
+    }
+    if trace.is_loop {
+        dynasm!(asm; loop_start:);
+    }
+    for (vid, instr) in trace.iter_loop_body() {
+        translate_instr(&mut asm, vid, instr);
     }
 
     if trace.is_loop {
@@ -380,7 +360,7 @@ where
 fn order_used_aregs(trace: &Trace) -> Vec<Rq> {
     let mut order = Vec::new();
     let mut used_archregs = HashSet::new();
-    for (vid, instr) in trace.iter_instrs() {
+    for vid in trace.iter_vids() {
         if let Some(areg) = trace
             .hreg_alloc
             .hreg_of_instr(vid.clone().into())

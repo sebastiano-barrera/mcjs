@@ -914,35 +914,35 @@ impl TraceBuilder {
     pub(crate) fn build(self) -> Option<Trace> {
         if let TraceBuilderState::Finished = self.state {
             let is_loop = self.loop_head.is_some();
-            let instrs = self.instrs;
+            let mut instrs = self.instrs;
 
-            let phis = if is_loop {
-                compute_phis(&self.vars)
+            let is_loop_variant = if is_loop {
+                let phis = compute_phis(&self.vars);
+                for (old, new) in phis.iter() {
+                    instrs.push(Instr::Phi(*old, *new));
+                }
+
+                loop_hoist::find_loop_variant(&instrs, |vid| phis.contains_key(&vid))
             } else {
-                HashMap::new()
+                vec![false; instrs.len()]
             };
 
-            let (loop_head_vid, order) = reorder_instrs(&instrs, |vid| phis.contains_key(&vid));
-
             let hreg_alloc = regalloc::allocate_registers(instrs.as_slice(), 6);
-
-            // TODO use drain_filter once it becomes stable
-            // Remove useless instructions (never read, have no side effects)
-            let order: Vec<_> = order
-                .into_iter()
-                .filter(|vid| {
-                    let instr = instrs.get(vid.0 as usize).unwrap();
-                    hreg_alloc.hreg_of_instr(vid.clone().into()).is_some()
-                        || instr.has_side_effects()
+            let is_enabled: Vec<_> = instrs
+                .iter()
+                .enumerate()
+                .map(|(ndx, instr)| {
+                    let sreg = regalloc::SoftReg(ndx as u32);
+                    hreg_alloc.hreg_of_instr(sreg).is_some() || instr.has_side_effects()
                 })
                 .collect();
 
             Some(Trace {
                 instrs,
-                order,
-                phis,
+                // phis,
                 is_loop,
-                loop_head_vid,
+                is_loop_variant,
+                is_enabled,
                 hreg_alloc,
                 snapshot_map: self.snapshot_map,
             })
@@ -955,41 +955,6 @@ impl TraceBuilder {
         let ndx = vid.0 as usize;
         self.instrs.get(ndx).unwrap()
     }
-}
-
-/// Given a sequence of instructions, builds a new "version" of the same sequence where:
-///   - dead values (ones never read) are removed
-///   - loop invariant values are all placed at the beginning
-fn reorder_instrs<F>(instrs: &[Instr], is_phi_target: F) -> (usize, Vec<ValueId>)
-where
-    F: Fn(ValueId) -> bool,
-{
-    // Detect loop-(in)variant values
-    let is_loop_variant = loop_hoist::find_loop_variant(instrs, is_phi_target);
-    assert_eq!(is_loop_variant.len(), instrs.len());
-
-    let mut order = Vec::with_capacity(instrs.len());
-
-    for (ndx, &is_lv) in is_loop_variant.iter().enumerate() {
-        if !is_lv {
-            order.push(ValueId(ndx as u32));
-        }
-    }
-
-    let n_loop_invariant = order.len();
-
-    for (ndx, &is_lv) in is_loop_variant.iter().enumerate() {
-        if is_lv {
-            order.push(ValueId(ndx as u32));
-        }
-    }
-
-    (n_loop_invariant, order)
-}
-
-struct Reordered {
-    new_instrs: Vec<Instr>,
-    new_phi_targets: Vec<ValueId>,
 }
 
 fn compute_phis(vars_state: &tracking::VarsState) -> HashMap<ValueId, ValueId> {
