@@ -259,7 +259,11 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 }
                 Instr::BoolOp { .. } => todo!(),
                 Instr::Choose { .. } => todo!(),
-                Instr::ExitUnless { cond: cmp } => {
+                Instr::ExitUnless {
+                    cond: cmp,
+                    pre_snap_update,
+                } => {
+                    write_snapshot(&mut asm, &pre_snap_update, hreg_of);
                     let a = hreg_of(cmp.a);
                     let b = hreg_of(cmp.b);
                     trace_assert_cmp(&mut asm, cmp.ty, cmp.op, a, b);
@@ -298,7 +302,11 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 // index in the above values and types array.  The interpeter
                 // uses this map to initialize the snapshot at trace start, and
                 // to read values back from the snapshot at trace exit.
-                Instr::GetSnapshotItem { ndx: snap_ndx, ty } => {
+                Instr::GetSnapshotItem {
+                    ndx: snap_ndx,
+                    ty,
+                    post_snap_update,
+                } => {
                     let snap_ndx = *snap_ndx as i32;
                     assert!(snap_ndx < snap_len as i32);
 
@@ -309,16 +317,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                         ; jne >abort_trace
                         ; mov Rq (tgt), QWORD [rdi + 8 * snap_ndx]
                     );
-                }
-                Instr::WriteSnapshot(snap) => {
-                    for (ndx, vid_opt) in snap.iter().enumerate() {
-                        if let Some(vid) = vid_opt {
-                            let argreg = hreg_of(*vid).code();
-                            dynasm!(asm
-                            ; mov [rbp + 8 * (ndx as i32)], Rq (argreg)
-                            );
-                        }
-                    }
+                    write_snapshot(&mut asm, &post_snap_update, hreg_of);
                 }
             }
         }
@@ -366,6 +365,20 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         entry_offset,
         sink: Vec::new(),
         snapshot_len: trace.snapshot_map.len() as u16,
+    }
+}
+
+fn write_snapshot<H>(asm: &mut dynasmrt::x64::Assembler, snap: &[Option<ValueId>], hreg_of: H)
+where
+    H: Fn(ValueId) -> Rq,
+{
+    for (ndx, vid_opt) in snap.iter().enumerate() {
+        if let Some(vid) = vid_opt {
+            let argreg = hreg_of(*vid).code();
+            dynasm!(asm
+            ; mov [rbp + 8 * (ndx as i32)], Rq (argreg)
+            );
+        }
     }
 }
 

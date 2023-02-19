@@ -552,7 +552,11 @@ impl TraceBuilder {
                             cmp.invert()
                         };
 
-                        Some(self.emit(Instr::ExitUnless { cond: cmp })?)
+                        let pre_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
+                        Some(self.emit(Instr::ExitUnless {
+                            cond: cmp,
+                            pre_snap_update,
+                        })?)
                     }
 
                     _ => {
@@ -598,9 +602,11 @@ impl TraceBuilder {
             }
             interpreter::Instr::GetArg(index) => {
                 let value = if self.stack_depth() == 1 {
+                    let post_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
                     self.emit(Instr::GetArg {
                         ndx: *index,
                         ty: ValueType::Boxed,
+                        post_snap_update,
                     })?
                 } else {
                     self.vars.cur_frame_mut().get_arg(*index).clone()
@@ -847,32 +853,6 @@ impl TraceBuilder {
             //     a: Operand::Imm(BoxedValue::Bool(false)),
             //     b: Operand::Imm(BoxedValue::Bool(false)),
             // } => Ok(Operand::Imm(BoxedValue::Bool(false))),
-
-            // ASSERTS: on failure, they exit the trace with a "failure", i.e.
-            // a snapshot rollback (i.e. the interpreter restores an earlier
-            // snapshot, the last committed one)
-            Instr::GetSnapshotItem { .. } | Instr::GetArg { .. } => {
-                // TODO Refactor this operation.  The whole snapshot tracking might go to a new struct
-                let mut snap_changes = Vec::new();
-                std::mem::swap(&mut snap_changes, &mut self.exit_snapshot_changes);
-                let res = self.write(instr)?;
-                eprintln!("pre-write snapshot: {:?}", snap_changes);
-                self.write(Instr::WriteSnapshot(snap_changes))?;
-                Ok(res)
-            }
-
-            // EXITS: on failure, they exit the trace with a "success", i.e.
-            // every effect on local variables that happened before this
-            // instruction becomes visible by the interpreter.
-            Instr::ExitUnless { .. } => {
-                // TODO Refactor this operation.  The whole snapshot tracking might go to a new struct
-                let mut snap_changes = Vec::new();
-                std::mem::swap(&mut snap_changes, &mut self.exit_snapshot_changes);
-                eprintln!("post-write snapshot: {:?}", snap_changes);
-                self.write(Instr::WriteSnapshot(snap_changes))?;
-                self.write(instr)
-            }
-
             Instr::TypeOf(ref vid) => {
                 let target_instr = self.instrs.get(vid.0 as usize).unwrap();
                 let ty = target_instr.result_type().and_then(|ty| ty.js_typeof());
@@ -900,9 +880,12 @@ impl TraceBuilder {
     fn add_entry_snapshot_var(&mut self, operand: interpreter::Operand) -> Result<ValueId, Error> {
         let ndx = self.snapshot_map.len() as u16;
         self.snapshot_map.push(operand);
+
+        let post_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
         self.emit(Instr::GetSnapshotItem {
             ndx,
             ty: ValueType::Boxed,
+            post_snap_update,
         })
     }
 
@@ -1033,18 +1016,26 @@ pub(super) enum Instr {
         if_false: ValueId,
     },
 
+    // ASSERTS: on failure, they exit the trace with a "failure", i.e.
+    // a snapshot rollback (i.e. the interpreter restores an earlier
+    // snapshot, the last committed one)
     GetSnapshotItem {
         ndx: u16,
         ty: ValueType,
+        post_snap_update: SnapshotUpdate,
     },
-    WriteSnapshot(Vec<Option<ValueId>>),
     GetArg {
         ndx: usize, // TODO Change to u16
         ty: ValueType,
+        post_snap_update: SnapshotUpdate,
     },
 
+    // EXITS: on failure, they exit the trace with a "success", i.e.
+    // every effect on local variables that happened before this
+    // instruction becomes visible by the interpreter.
     ExitUnless {
         cond: Cmp,
+        pre_snap_update: SnapshotUpdate,
     },
 
     ObjNew,
@@ -1101,7 +1092,6 @@ impl Instr {
             Instr::Const(val) => Some(ValueType::of(val)),
             Instr::Phi(_, _) => None,
             Instr::GetSnapshotItem { ty, .. } => Some(ty.clone()),
-            Instr::WriteSnapshot(_) => None,
         }
     }
 
@@ -1120,6 +1110,7 @@ impl Instr {
             } => Box::new([cond, if_true, if_false].into_iter()),
             Instr::ExitUnless {
                 cond: Cmp { a, b, .. },
+                ..
             } => Box::new([a, b].into_iter()),
             Instr::Num2Str(arg) => Box::new([arg].into_iter()),
             Instr::PushSink(arg) => Box::new([arg].into_iter()),
@@ -1135,7 +1126,6 @@ impl Instr {
             Instr::Const(_) => Box::new(std::iter::empty()),
             Instr::Phi(_tgt, new_value) => Box::new(std::iter::once(new_value)),
             Instr::GetSnapshotItem { .. } => Box::new(std::iter::empty()),
-            Instr::WriteSnapshot(_) => Box::new(std::iter::empty()),
         }
     }
 
@@ -1159,8 +1149,6 @@ impl Instr {
             Instr::Return(_) => false,
             Instr::Phi(_, _) => true,
             Instr::GetSnapshotItem { .. } => false,
-            // The instruction can be elided if the snap is "empty"
-            Instr::WriteSnapshot(snap) => snap.iter().any(|slot| slot.is_some()),
         }
     }
 }
