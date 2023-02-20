@@ -316,16 +316,12 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         dynasm!(asm; push Rq (areg.code()));
     }
 
-    for (vid, instr) in trace.iter_header() {
-        translate_instr(&mut asm, vid, instr);
-    }
     if trace.is_loop {
         dynasm!(asm; loop_start:);
     }
-    for (vid, instr) in trace.iter_loop_body() {
+    for (vid, instr) in trace.iter_instrs() {
         translate_instr(&mut asm, vid, instr);
     }
-
     if trace.is_loop {
         dynasm!(asm; jmp <loop_start);
     }

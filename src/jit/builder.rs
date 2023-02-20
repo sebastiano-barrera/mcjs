@@ -11,7 +11,7 @@ use crate::{
 use dynasm::dynasm;
 use strum_macros::EnumIter;
 
-use super::{loop_hoist, tracking, Trace};
+use super::{tracking, Trace};
 
 // This is going to be changed at some point
 pub(super) type BoxedValue = interpreter::Value;
@@ -901,16 +901,12 @@ impl TraceBuilder {
             let is_loop = self.loop_head.is_some();
             let mut instrs = self.instrs;
 
-            let is_loop_variant = if is_loop {
+            if is_loop {
                 let phis = compute_phis(&self.vars);
                 for (old, new) in phis.iter() {
                     instrs.push(Instr::Phi(*old, *new));
                 }
-
-                loop_hoist::find_loop_variant(&instrs, |vid| phis.contains_key(&vid))
-            } else {
-                vec![false; instrs.len()]
-            };
+            }
 
             let hreg_alloc = regalloc::allocate_registers(instrs.as_slice(), 6);
             let is_enabled: Vec<_> = instrs
@@ -926,7 +922,6 @@ impl TraceBuilder {
                 instrs,
                 // phis,
                 is_loop,
-                is_loop_variant,
                 is_enabled,
                 hreg_alloc,
                 snapshot_map: self.snapshot_map,

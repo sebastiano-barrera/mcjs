@@ -4,10 +4,9 @@ use crate::{interpreter, regalloc};
 
 mod builder;
 mod codegen;
-mod loop_hoist;
 mod tracking;
 
-pub use builder::{InterpreterStep, TraceBuilder, CloseMode};
+pub use builder::{CloseMode, InterpreterStep, TraceBuilder};
 // TODO Move some of these from `builder` to this module?
 pub use codegen::NativeThunk;
 
@@ -22,7 +21,6 @@ pub struct Trace {
     instrs: Vec<Instr>,
     is_loop: bool,
     // phis: std::collections::HashMap<ValueId, ValueId>,
-    is_loop_variant: Vec<bool>,
     is_enabled: Vec<bool>,
 }
 
@@ -48,9 +46,8 @@ impl Trace {
 
             let ndx = vid.0 as usize;
             eprintln!(
-                " {}{} {:4} {:5} {:6} {:?}",
+                " {} {:4} {:5} {:6} {:?}",
                 if self.is_enabled[ndx] { ' ' } else { 'X' },
-                if self.is_loop_variant[ndx] { ' ' } else { 'H' },
                 vid.0,
                 hreg,
                 exp_type,
@@ -71,38 +68,13 @@ impl Trace {
         self.instrs.get(vid.0 as usize)
     }
 
-    fn iter_header_vids<'a>(&'a self) -> impl 'a + Iterator<Item = ValueId> {
-        (0..self.instrs.len())
-            .filter(|ndx| self.is_enabled[*ndx])
-            .filter(|ndx| !self.is_loop_variant[*ndx])
-            .map(|ndx| ValueId(ndx as u32))
-    }
-    fn iter_header(&self) -> impl Iterator<Item = (ValueId, &Instr)> {
-        self.iter_add_instr(self.iter_header_vids())
-    }
-
-    /// Iterate over the trace's "loop body": the enabled loop-variant instructions
-    fn iter_loop_body_vids<'a>(&'a self) -> impl 'a + Iterator<Item = ValueId> {
-        (0..self.instrs.len())
-            .filter(|ndx| self.is_enabled[*ndx])
-            .filter(|ndx| self.is_loop_variant[*ndx])
-            .map(|ndx| ValueId(ndx as u32))
-    }
-    fn iter_loop_body(&self) -> impl Iterator<Item = (ValueId, &Instr)> {
-        self.iter_add_instr(self.iter_loop_body_vids())
-    }
-
     fn iter_vids<'a>(&'a self) -> impl 'a + Iterator<Item = ValueId> {
-        self.iter_header_vids().chain(self.iter_loop_body_vids())
+        (0..self.instrs.len())
+            .filter(|ndx| self.is_enabled[*ndx])
+            .map(|ndx| ValueId(ndx as u32))
     }
     fn iter_instrs<'a>(&'a self) -> impl 'a + Iterator<Item = (ValueId, &Instr)> {
-        self.iter_add_instr(self.iter_vids())
-    }
-
-    fn iter_add_instr<'a, I>(&'a self, iter: I) -> impl 'a + Iterator<Item = (ValueId, &Instr)>
-    where
-        I: 'a + Iterator<Item = ValueId>,
-    {
-        iter.map(|vid| (vid, self.instrs.get(vid.0 as usize).unwrap()))
+        self.iter_vids()
+            .map(|vid| (vid, self.instrs.get(vid.0 as usize).unwrap()))
     }
 }
