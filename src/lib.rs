@@ -7,7 +7,6 @@ mod bytecode_compiler;
 mod common;
 mod interpreter;
 mod jit;
-mod regalloc;
 mod stack;
 mod util;
 

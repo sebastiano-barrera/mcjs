@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use crate::{interpreter, regalloc};
+use crate::interpreter;
 
 mod builder;
 mod codegen;
 mod tracking;
+mod regalloc;
 
 pub use builder::{CloseMode, InterpreterStep, TraceBuilder};
 // TODO Move some of these from `builder` to this module?

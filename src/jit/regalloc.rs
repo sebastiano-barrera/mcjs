@@ -1,3 +1,7 @@
+use crate::jit::builder::ValueId;
+
+use super::builder::Instr;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct HardReg(pub u32);
 
@@ -5,19 +9,6 @@ impl std::fmt::Debug for HardReg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "h{}", self.0)
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SoftReg(pub u32);
-
-impl std::fmt::Debug for SoftReg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "S{}", self.0)
-    }
-}
-
-pub trait Instruction {
-    fn inputs(&self) -> Vec<SoftReg>;
 }
 
 pub struct Allocation {
@@ -32,8 +23,8 @@ impl Allocation {
         self.hregs.len()
     }
 
-    pub(crate) fn hreg_of_instr(&self, sreg: SoftReg) -> Option<HardReg> {
-        self.hregs.get(sreg.0 as usize).copied().flatten()
+    pub(crate) fn hreg_of_instr(&self, vid: ValueId) -> Option<HardReg> {
+        self.hregs.get(vid.0 as usize).copied().flatten()
     }
 
     fn new(hregs: Box<[Option<HardReg>]>) -> Allocation {
@@ -47,11 +38,12 @@ impl Allocation {
     }
 }
 
-pub fn allocate_registers<I: Instruction>(code: &[I], num_hregs: u32) -> Allocation {
+pub(super) fn allocate_registers(code: &[Instr], num_hregs: u32) -> Allocation {
     struct State {
         free_regs: Vec<HardReg>,
         is_free: Vec<bool>,
     }
+
     impl State {
         fn new(num_hregs: u32) -> Self {
             let free_regs = (0..num_hregs).map(|ndx| HardReg(ndx)).rev().collect();
@@ -77,19 +69,14 @@ pub fn allocate_registers<I: Instruction>(code: &[I], num_hregs: u32) -> Allocat
     }
 
     let mut state = State::new(num_hregs);
-
     let mut allocation = vec![None; code.len()].into_boxed_slice();
 
     for (ndx, instr) in code.iter().enumerate().rev() {
-        let sreg = SoftReg(ndx as u32);
-        let inputs = instr.inputs();
-        eprintln!("regalloc: {:2} {:?}", sreg.0, inputs);
-
         if let Some(hreg) = allocation.get(ndx).unwrap() {
             state.set_free(hreg);
         }
 
-        for &SoftReg(input_ndx) in inputs.iter() {
+        for &ValueId(input_ndx) in instr.operands() {
             let alloc = allocation.get_mut(input_ndx as usize).unwrap();
             if alloc.is_none() {
                 *alloc = Some(state.pick_free());
@@ -99,25 +86,3 @@ pub fn allocate_registers<I: Instruction>(code: &[I], num_hregs: u32) -> Allocat
 
     Allocation::new(allocation)
 }
-
-//    0 GetArg(0)
-//    1 Unbox(Num, v0)
-//    2 Cmp { ty: Num, op: GT, a: v1, b: Number(0.0) }
-//    3 Not(v2)
-//    4 Not(v3)
-//    5 AssertTrue { cond: v4 }
-//    6 Unbox(Num, v0)
-//    7 Arith { op: Add, a: Number(0.0), b: v6 }
-//    8 Unbox(Num, v0)
-//    9 Arith { op: Sub, a: v8, b: Number(1.0) }
-//   10 Cmp { ty: Num, op: GT, a: v9, b: Number(0.0) }
-//   11 Not(v10)
-//   12 Not(v11)
-//   13 AssertTrue { cond: v12 }
-//   14 Arith { op: Add, a: v7, b: v9 }
-//   15 Arith { op: Sub, a: v9, b: Number(1.0) }
-//   16 Cmp { ty: Num, op: GT, a: v15, b: Number(0.0) }
-//   17 Not(v16)
-//   18 AssertTrue { cond: v17 }
-//   19 Box(v14)
-//   20 Return(v19)

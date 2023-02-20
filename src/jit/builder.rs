@@ -4,14 +4,13 @@ use std::fmt::Debug;
 
 use crate::{
     interpreter::{self, FnId, VarIndex, IID},
-    regalloc,
     stack::{self, FrameId},
 };
 
 use dynasm::dynasm;
 use strum_macros::EnumIter;
 
-use super::{tracking, Trace};
+use super::{regalloc, tracking, Trace};
 
 // This is going to be changed at some point
 pub(super) type BoxedValue = interpreter::Value;
@@ -913,8 +912,8 @@ impl TraceBuilder {
                 .iter()
                 .enumerate()
                 .map(|(ndx, instr)| {
-                    let sreg = regalloc::SoftReg(ndx as u32);
-                    hreg_alloc.hreg_of_instr(sreg).is_some() || instr.has_side_effects()
+                    let vid = ValueId(ndx as u32);
+                    hreg_alloc.hreg_of_instr(vid).is_some() || instr.has_side_effects()
                 })
                 .collect();
 
@@ -1149,18 +1148,6 @@ impl Instr {
             Instr::GetSnapshotItem { .. } => false,
             Instr::Box(_) => false,
         }
-    }
-}
-
-impl Into<regalloc::SoftReg> for ValueId {
-    fn into(self) -> regalloc::SoftReg {
-        regalloc::SoftReg(self.0)
-    }
-}
-
-impl regalloc::Instruction for Instr {
-    fn inputs(&self) -> Vec<regalloc::SoftReg> {
-        self.operands().cloned().map(Into::into).collect()
     }
 }
 
