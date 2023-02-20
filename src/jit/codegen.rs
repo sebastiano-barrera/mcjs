@@ -7,6 +7,7 @@ use dynasmrt::{DynasmApi, DynasmLabelApi};
 use strum::EnumCount;
 use strum_macros::{EnumCount, EnumIter, FromRepr};
 
+use crate::jit::regalloc::HardReg;
 use crate::{
     interpreter::{self, ArithOp, CmpOp},
     jit::builder::{Cmp, Instr, ValueId, ValueType},
@@ -180,7 +181,7 @@ extern "C" fn ext_push_sink(value: u64) -> () {
 }
 
 pub(super) fn to_native(trace: &Trace) -> NativeThunk {
-    if trace.hreg_alloc.n_hregs() as usize > GP_REGS.len() {
+    if trace.hreg_alloc.n_general() as usize > GP_REGS.len() {
         panic!("too many hardregs used in reg allocation!");
     }
     assert_eq!(trace.instrs.len(), trace.hreg_alloc.n_instrs());
@@ -189,8 +190,10 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     let mut asm = dynasmrt::x64::Assembler::new().unwrap();
 
     let hreg_of_opt = |vid: ValueId| -> Option<Rq> {
-        let reg_ndx = trace.hreg_alloc.hreg_of_instr(vid.clone().into())?.0;
-        GP_REGS.get(reg_ndx as usize).copied()
+        let hreg = trace.hreg_alloc.hreg_of_instr(vid.clone().into())?;
+        match hreg {
+            HardReg::General(reg_ndx) => GP_REGS.get(reg_ndx as usize).copied(),
+        }
     };
     let hreg_of = |vid| hreg_of_opt(vid).unwrap_or_else(|| panic!("no hreg for {vid:?}"));
 
@@ -364,7 +367,9 @@ fn order_used_aregs(trace: &Trace) -> Vec<Rq> {
         if let Some(areg) = trace
             .hreg_alloc
             .hreg_of_instr(vid.clone().into())
-            .and_then(|hreg| GP_REGS.get(hreg.0 as usize).copied())
+            .and_then(|hreg| match hreg {
+                HardReg::General(ndx) => GP_REGS.get(ndx as usize).copied(),
+            })
         {
             used_archregs.insert(areg);
         }
