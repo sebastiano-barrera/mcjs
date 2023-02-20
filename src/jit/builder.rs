@@ -1184,13 +1184,6 @@ mod tests {
         }
     }
 
-    // TODO Inline these into all callers
-    fn quick_jit_func(code: &str) -> Output {
-        quick_jit(code)
-    }
-    fn quick_jit_loop(code: &str) -> Output {
-        quick_jit(code)
-    }
     fn quick_jit(code: &str) -> Output {
         let mut vm = interpreter::VM::new();
         let flags = Default::default();
@@ -1220,7 +1213,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_tracing_simple_constant_folding() {
-        let output = quick_jit_func(
+        let output = quick_jit(
             "
             __start_trace('the-trace');
             const x = 123;
@@ -1301,7 +1294,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_varid_resolution_with_inlining() {
-        let output = quick_jit_func(
+        let output = quick_jit(
             "
             const far_away = 'asd';
             function f() {
@@ -1332,7 +1325,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_closures() {
-        let output = quick_jit_func(
+        let output = quick_jit(
             "
             function iota(factor) {
                 let i = 0;
@@ -1380,10 +1373,9 @@ mod tests {
         );
     }
 
-    #[ignore]
     #[test]
     fn test_loop_unrolling() {
-        let output = quick_jit_loop(
+        let output = quick_jit(
             "
             function sum_range(n) {
                 let i = 0;
