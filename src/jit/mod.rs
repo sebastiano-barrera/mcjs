@@ -7,7 +7,7 @@ mod codegen;
 mod loop_hoist;
 mod tracking;
 
-pub use builder::{InterpreterStep, TraceBuilder, TraceStart};
+pub use builder::{InterpreterStep, TraceBuilder, CloseMode};
 // TODO Move some of these from `builder` to this module?
 pub use codegen::NativeThunk;
 

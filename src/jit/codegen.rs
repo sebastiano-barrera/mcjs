@@ -203,6 +203,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     let translate_instr =
         |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| match instr {
+            Instr::Box(_) => todo!(),
             Instr::GetArg { .. } => todo!(),
             Instr::Const(value) => {
                 // It is assumed that the IR already "knows" the type of

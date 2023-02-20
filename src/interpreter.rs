@@ -203,6 +203,11 @@ pub enum Instr {
     ArrayPush(Operand, Operand),
 
     TypeOf(Operand),
+
+    StartTrace {
+        trace_id: String,
+        wait_loop: bool,
+    },
 }
 
 impl Instr {
@@ -236,6 +241,7 @@ impl Instr {
             Instr::ArrayPush(arr, value) => Box::new([arr, value].into_iter()),
             Instr::TypeOf(arg) => Box::new([arg].into_iter()),
             Instr::ClosureNew { .. } => Box::new(std::iter::empty()),
+            Instr::StartTrace { .. } => Box::new(std::iter::empty()),
         }
     }
 }
@@ -320,8 +326,9 @@ pub struct VM {
     include_paths: Vec<PathBuf>,
     modules: HashMap<String, Module>,
     opts: VMOptions,
-    trace: Option<jit::Trace>,
     sink: Vec<Value>,
+
+    traces: HashMap<String, jit::Trace>,
 }
 
 pub struct VMOptions {
@@ -372,8 +379,8 @@ impl VM {
             include_paths: Vec::new(),
             modules: HashMap::new(),
             opts: Default::default(),
-            trace: None,
             sink: Vec::new(),
+            traces: HashMap::new(),
         }
     }
 
@@ -388,7 +395,11 @@ impl VM {
     }
 
     pub fn take_trace(&mut self) -> Option<jit::Trace> {
-        self.trace.take()
+        todo!("delete this method")
+    }
+
+    pub fn get_trace(&self, trace_id: &str) -> Option<&jit::Trace> {
+        self.traces.get(trace_id)
     }
 
     pub fn add_include_path(
@@ -465,11 +476,22 @@ impl VM {
     fn run_module(&mut self, module: &Module, flags: InterpreterFlags) -> Result<()> {
         let mut intrp = Interpreter::new(self, flags);
         intrp.run_module(module)?;
-        let sink = intrp.sink;
-        let mut trace_builder = intrp.trace_builder;
+        let Interpreter {
+            sink,
+            trace_builder,
+            mut trace_id,
+            ..
+        } = intrp;
+
+        if let Some(tb) = trace_builder {
+            if let Some(trace) = tb.build() {
+                let tid = trace_id.take().unwrap();
+                let prev = self.traces.insert(tid, trace);
+                assert!(prev.is_none());
+            }
+        }
 
         self.sink = sink;
-        self.trace = trace_builder.take().and_then(|tb| tb.build());
         Ok(())
     }
 }
@@ -478,6 +500,7 @@ struct Interpreter<'a> {
     vm: &'a mut VM,
     flags: InterpreterFlags,
     trace_builder: Option<jit::TraceBuilder>,
+    trace_id: Option<String>,
     frame_graph: stack::FrameGraph,
     stack_depth: u32,
     sink: Vec<Value>,
@@ -485,18 +508,13 @@ struct Interpreter<'a> {
 
 impl<'a> Interpreter<'a> {
     fn new(parent_vm: &'a mut VM, flags: InterpreterFlags) -> Self {
-        let trace_builder = flags
-            .tracer_flags
-            .as_ref()
-            .map(|tflags| jit::TraceBuilder::new(tflags.whence));
-
         eprintln!("Interpreter: flags: {:?}", flags);
-        eprintln!("Interpreter: JIT mode: {}", trace_builder.is_some());
 
         Interpreter {
             vm: parent_vm,
             flags,
-            trace_builder,
+            trace_builder: None,
+            trace_id: None,
             frame_graph: stack::FrameGraph::new(),
             stack_depth: 0,
             sink: Vec::new(),
@@ -564,27 +582,22 @@ impl<'a> Interpreter<'a> {
 
         let mut values_buf = vec![Value::Undefined; instrs.len()];
 
-        let should_trace = if let Some(tf) = &self.flags.tracer_flags {
-            tf.start_depth <= self.stack_depth
-        } else {
-            false
-        };
-
-        if should_trace {
-            self.trace_builder
-                .as_mut()
-                .unwrap()
-                .enter_function(cur_frame_id, func.n_slots as usize);
+        if let Some(tb) = &mut self.trace_builder {
+            tb.enter_function(cur_frame_id, func.n_slots as usize);
         }
 
         let mut ndx = 0;
         let mut return_value = None;
+        let mut jit_waiting_loop = false;
+
         while return_value.is_none() {
             if ndx >= instrs.len() {
                 break;
             }
             let instr = &instrs[ndx];
             let mut next_ndx = ndx + 1;
+            let iid = IID(ndx as u32);
+            let next_iid = IID(next_ndx as u32);
 
             self.print_indent();
             eprintln!("i{:<4} {:?}", ndx, instr);
@@ -802,17 +815,49 @@ impl<'a> Interpreter<'a> {
                         .expect_num()?;
                     values_buf[ndx] = Value::Number(-arg);
                 }
+
+                Instr::StartTrace {
+                    trace_id,
+                    wait_loop,
+                } => {
+                    if self.trace_builder.is_none() {
+                        assert!(self.trace_id.is_none());
+                        self.trace_id = Some(trace_id.clone());
+
+                        if *wait_loop {
+                            jit_waiting_loop = true;
+                        } else {
+                            self.trace_builder = Some(jit::TraceBuilder::start(
+                                cur_frame_id,
+                                func.n_slots as usize,
+                                jit::CloseMode::FunctionExit,
+                            ));
+                        }
+                    }
+                }
             }
 
-            if should_trace {
+            if jit_waiting_loop && func.is_loop_head(iid) {
+                let global_iid = GlobalIID {
+                    fn_id: closure.fnid,
+                    iid,
+                };
+                self.trace_builder = Some(jit::TraceBuilder::start(
+                    cur_frame_id,
+                    func.n_slots as usize,
+                    jit::CloseMode::Loop(global_iid),
+                ));
+                jit_waiting_loop = false;
+            }
+
+            if let Some(tb) = &mut self.trace_builder {
                 let frame_graph = &self.frame_graph;
-                let trace_builder = self.trace_builder.as_mut().unwrap();
-                trace_builder.interpreter_step(&InterpreterStep {
+                tb.interpreter_step(&InterpreterStep {
                     values_buf: &values_buf,
                     fnid: closure.fnid,
                     func: &func,
-                    iid: IID(ndx as u32),
-                    next_iid: IID(next_ndx as u32),
+                    iid,
+                    next_iid,
                     fnid_to_frameid: &|fnid| {
                         self.frame_graph
                             .get_lexical_scope(cur_frame_id, fnid)
@@ -827,10 +872,8 @@ impl<'a> Interpreter<'a> {
             ndx = next_ndx;
         }
 
-        if should_trace {
-            if let Some(trace_builder) = self.trace_builder.as_mut() {
-                trace_builder.exit_function();
-            }
+        if let Some(trace_builder) = self.trace_builder.as_mut() {
+            trace_builder.exit_function();
         }
         Ok(return_value.unwrap_or(Value::Undefined))
     }
@@ -879,21 +922,16 @@ fn set_builtins(bc_compiler: &mut bytecode_compiler::Compiler) {
 #[derive(Clone, Debug)]
 pub struct InterpreterFlags {
     pub indent_level: u8,
-    pub tracer_flags: Option<TracerFlags>,
 }
 
 #[derive(Clone, Debug)]
 pub struct TracerFlags {
     pub start_depth: u32,
-    pub whence: jit::TraceStart,
 }
 
 impl Default for InterpreterFlags {
     fn default() -> Self {
-        Self {
-            indent_level: 0,
-            tracer_flags: None,
-        }
+        Self { indent_level: 0 }
     }
 }
 

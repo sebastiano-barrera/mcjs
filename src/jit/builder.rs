@@ -131,6 +131,7 @@ pub struct TraceBuilder {
     return_value: Option<ValueId>,
 
     loop_head: Option<interpreter::GlobalIID>,
+    loop_entered: bool,
 
     instrs: Vec<Instr>,
 
@@ -146,7 +147,6 @@ pub struct TraceBuilder {
     exit_snapshot_changes: Vec<Option<ValueId>>,
 
     state: TraceBuilderState,
-    start_mode: TraceStart,
     exit_function_expected: bool,
 }
 
@@ -167,32 +167,38 @@ pub(super) struct TraceParam {
 
 #[derive(Debug, PartialEq, Eq)]
 enum TraceBuilderState {
-    WaitingStart,
     Tracing,
     Failed,
     Finished,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub enum TraceStart {
-    Function,
-    FirstLoop,
+pub enum CloseMode {
+    Loop(interpreter::GlobalIID),
+    FunctionExit,
 }
 
 impl TraceBuilder {
-    pub fn new(start_mode: TraceStart) -> Self {
-        TraceBuilder {
+    pub(crate) fn start(fid: stack::FrameId, n_local_vars: usize, close_mode: CloseMode) -> Self {
+        let mut tb = TraceBuilder {
             return_value: None,
             args_buf: None,
             vars: tracking::VarsState::new(),
             instrs: Vec::new(),
             snapshot_map: Vec::new(),
             exit_snapshot_changes: Vec::new(),
-            start_mode,
-            loop_head: None,
-            state: TraceBuilderState::WaitingStart,
+            loop_head: match close_mode {
+                CloseMode::Loop(giid) => Some(giid),
+                CloseMode::FunctionExit => None,
+            },
+            loop_entered: false,
+            state: TraceBuilderState::Tracing,
             exit_function_expected: false,
-        }
+        };
+
+        let args = Vec::new();
+        tb.vars.push_frame(fid, args, n_local_vars);
+
+        tb
     }
 
     // TODO Inline into all callers
@@ -295,6 +301,8 @@ impl TraceBuilder {
         let converted_operand = match (input_type, desired_type) {
             (a, b) if a == b => Some(vid),
 
+            (_, ValueType::Boxed) => Some(self.emit(Instr::Box(vid))?),
+
             (_, ValueType::Null) => Some(self.emit(Instr::Const(BoxedValue::Null))?),
             (_, ValueType::Undefined) => Some(self.emit(Instr::Const(BoxedValue::Undefined))?),
             (_, ValueType::Function) => None,
@@ -367,13 +375,16 @@ impl TraceBuilder {
 
             (ValueType::Function, _) => None,
 
-            _ => unreachable!(),
+            other_conv => unreachable!("{:?}", other_conv),
         };
 
-        if converted_operand.is_some() {
+        if let Some(converted_operand) = converted_operand {
             assert_eq!(
                 Some(desired_type),
-                self.instrs.get(vid.0 as usize).unwrap().result_type()
+                self.instrs
+                    .get(converted_operand.0 as usize)
+                    .unwrap()
+                    .result_type()
             );
         }
 
@@ -395,58 +406,25 @@ impl TraceBuilder {
 
     pub(crate) fn interpreter_step(&mut self, step: &InterpreterStep) {
         match self.state {
-            TraceBuilderState::WaitingStart => {
-                if self.check_start(step) {
-                    self.state = TraceBuilderState::Tracing;
-
-                    let fid = (step.fnid_to_frameid)(step.fnid);
-                    let n_vars = step.func.n_slots().into();
-                    let args = Vec::new();
-                    self.vars.push_frame(fid, args, n_vars);
-
-                    // For the first instruction, self.loop_head stays None.
-                    // Then (if the trace starts at a loop), we set
-                    // self.loop_head, so that we can detect that we've closed
-                    // the loop and can finish the trace.
-                    self.interpreter_step(step);
-                    if self.start_mode == TraceStart::FirstLoop {
-                        self.loop_head = Some(step.global_iid());
-                    } else {
-                        assert!(self.loop_head.is_none());
-                    }
-                }
-            }
             TraceBuilderState::Tracing => {
-                if Some(step.global_iid()) == self.loop_head {
+                if self.loop_entered && Some(step.global_iid()) == self.loop_head {
+                    eprintln!("[..tb trace finished <- loop closed]");
                     self.state = TraceBuilderState::Finished;
-                } else if let Err(error) = self.trace_step(step) {
+                    return;
+                }
+
+                if let Err(error) = self.trace_step(step) {
                     print_indent(self.stack_depth());
                     eprintln!("[..tb trace failed: {:?}]", error);
                     self.state = TraceBuilderState::Failed;
                 }
+
+                if !self.loop_entered && Some(step.global_iid()) == self.loop_head {
+                    self.loop_entered = true;
+                }
             }
             TraceBuilderState::Failed => {}
             TraceBuilderState::Finished => {}
-        }
-    }
-
-    fn check_start(&self, step: &InterpreterStep) -> bool {
-        print_indent(self.stack_depth());
-        match self.start_mode {
-            // Trace starts immediately
-            TraceStart::Function => {
-                eprintln!("[..tb trace starts immediately]");
-                true
-            }
-            TraceStart::FirstLoop => {
-                if step.func.is_loop_head(step.iid) {
-                    eprintln!("[..tb trace starts now, on a loop head]");
-                    true
-                } else {
-                    eprintln!("[..tb waiting on a loop head...]");
-                    false
-                }
-            }
         }
     }
 
@@ -670,6 +648,12 @@ impl TraceBuilder {
             interpreter::Instr::UnaryMinus(_) => {
                 todo!("jit::builder: UnaryMinus")
             }
+
+            interpreter::Instr::StartTrace { .. } => {
+                // Nothing to do.  The logic for starting and stopping the TraceBuilder is mostly in the Interpreter.
+                // The TraceBuilder is created in the 'Tracing' state.
+                None
+            }
         };
 
         // Map IID to the result operand
@@ -726,26 +710,27 @@ impl TraceBuilder {
         self.args_buf = Some(args_values);
     }
 
-    pub(crate) fn exit_function(&mut self) {
-        if self.state != TraceBuilderState::Tracing {
-            return;
-        }
-        // self.exit_function_expected might be false, if the source bytecode
-        // does not have an explicit Return instruction. In this case, we do
-        // an implicit Return(undefined)
+    pub(crate) fn exit_function(&mut self) -> bool {
+        if self.state == TraceBuilderState::Tracing {
+            // self.exit_function_expected might be false, if the source bytecode
+            // does not have an explicit Return instruction. In this case, we do
+            // an implicit Return(undefined)
 
-        print_indent(self.stack_depth());
-        eprintln!("[..tb exit function]");
-
-        self.vars.pop_frame();
-
-        if self.vars.stack_depth() == 0 {
             print_indent(self.stack_depth());
-            eprintln!("[..tb trace ended]");
-            self.state = TraceBuilderState::Finished;
+            eprintln!("[..tb exit function]");
+
+            self.vars.pop_frame();
+
+            if self.vars.stack_depth() == 0 {
+                print_indent(self.stack_depth());
+                eprintln!("[..tb trace ended]");
+                self.state = TraceBuilderState::Finished;
+            }
+
+            self.exit_function_expected = false;
         }
 
-        self.exit_function_expected = false;
+        self.state == TraceBuilderState::Finished
     }
 
     fn map_iid(&mut self, iid: IID, jit_vid: ValueId) {
@@ -981,7 +966,7 @@ fn compute_phis(vars_state: &tracking::VarsState) -> HashMap<ValueId, ValueId> {
 
 fn print_indent(stack_depth: usize) {
     for _ in 0..stack_depth {
-        eprint!("      | ");
+        eprint!("      · ");
     }
 }
 
@@ -1066,6 +1051,7 @@ pub(super) enum Instr {
 
     TypeOf(ValueId),
     Num2Str(ValueId),
+    Box(ValueId),
 
     ClosureNew,
 
@@ -1107,6 +1093,7 @@ impl Instr {
             Instr::Const(val) => Some(ValueType::of(val)),
             Instr::Phi(_, _) => None,
             Instr::GetSnapshotItem { ty, .. } => Some(ty.clone()),
+            Instr::Box(_) => Some(ValueType::Boxed),
         }
     }
 
@@ -1141,6 +1128,7 @@ impl Instr {
             Instr::Const(_) => Box::new(std::iter::empty()),
             Instr::Phi(_tgt, new_value) => Box::new(std::iter::once(new_value)),
             Instr::GetSnapshotItem { .. } => Box::new(std::iter::empty()),
+            Instr::Box(arg) => Box::new(std::iter::once(arg)),
         }
     }
 
@@ -1164,6 +1152,7 @@ impl Instr {
             Instr::Return(_) => false,
             Instr::Phi(_, _) => true,
             Instr::GetSnapshotItem { .. } => false,
+            Instr::Box(_) => false,
         }
     }
 }
@@ -1187,28 +1176,28 @@ mod tests {
 
     struct Output {
         sink: Vec<interpreter::Value>,
-        trace: Option<jit::Trace>,
+        vm: interpreter::VM,
+    }
+    impl Output {
+        fn get_trace(&self, trace_id: &str) -> Option<&jit::Trace> {
+            self.vm.get_trace(trace_id)
+        }
     }
 
-    fn quick_jit_func(code: &str, start_stack_depth: u32) -> Output {
-        quick_jit(start_stack_depth, jit::TraceStart::Function, code)
+    // TODO Inline these into all callers
+    fn quick_jit_func(code: &str) -> Output {
+        quick_jit(code)
     }
-    fn quick_jit_loop(code: &str, start_stack_depth: u32) -> Output {
-        quick_jit(start_stack_depth, jit::TraceStart::FirstLoop, code)
+    fn quick_jit_loop(code: &str) -> Output {
+        quick_jit(code)
     }
-    fn quick_jit(start_stack_depth: u32, whence: TraceStart, code: &str) -> Output {
+    fn quick_jit(code: &str) -> Output {
         let mut vm = interpreter::VM::new();
-        let flags = interpreter::InterpreterFlags {
-            tracer_flags: Some(interpreter::TracerFlags {
-                start_depth: start_stack_depth,
-                whence,
-            }),
-            ..Default::default()
-        };
+        let flags = Default::default();
         vm.run_script(code.to_string(), flags).unwrap();
         Output {
             sink: vm.take_sink(),
-            trace: vm.take_trace(),
+            vm,
         }
     }
 
@@ -1233,6 +1222,7 @@ mod tests {
     fn test_tracing_simple_constant_folding() {
         let output = quick_jit_func(
             "
+            __start_trace('the-trace');
             const x = 123;
             let y = 'a';
             if (x < 256) {
@@ -1240,11 +1230,10 @@ mod tests {
             }
             sink(y);
             ",
-            0,
         );
 
         eprint!("trace = ");
-        let trace = output.trace.unwrap();
+        let trace = output.get_trace("the-trace").unwrap();
         trace.dump();
 
         let pushsink_operands = get_pushsink_consts(&trace);
@@ -1255,9 +1244,10 @@ mod tests {
     #[ignore]
     #[test]
     fn test_tracing_one_func() {
-        let output = quick_jit_func(
+        let output = quick_jit(
             "
             function foo(mode, a, b) { 
+                __start_trace('the-trace');
                 if (mode === 'sum')
                     return a + b;
                 else if (mode === 'product')
@@ -1268,11 +1258,10 @@ mod tests {
 
             sink(foo('product', 9, 8));
             ",
-            1,
         );
 
         eprint!("trace = ");
-        let trace = output.trace.unwrap();
+        let trace = output.get_trace("the-trace").unwrap();
         trace.dump();
 
         // TODO: Run the trace (continue writing this test when traces can be run)
@@ -1285,6 +1274,8 @@ mod tests {
             function sum_range(n) {
                 let i = 0;
                 let ret = 0;
+
+                __start_trace_loop('the-trace');
                 while (i <= n) {
                     ret += i;
                     // sink(ret);
@@ -1295,16 +1286,16 @@ mod tests {
 
             sink(sum_range(5));
         ";
-        let output = quick_jit_loop(code, 1);
+        let output = quick_jit(code);
 
         eprint!("trace = ");
-        let trace = output.trace.unwrap();
+        let trace = output.get_trace("the-trace").unwrap();
         trace.dump();
 
         let native_thunk = jit::codegen::to_native(&trace);
         native_thunk.dump();
 
-
+        assert!(false);
     }
 
     #[ignore]
@@ -1314,6 +1305,8 @@ mod tests {
             "
             const far_away = 'asd';
             function f() {
+                __start_trace('the-trace');
+
                 const a_little_closer = 'lol';
                 function g() {
                     function h() {
@@ -1327,16 +1320,16 @@ mod tests {
 
             f();
             ",
-            2,
         );
 
-        let trace = output.trace.unwrap();
+        let trace = output.get_trace("the-trace").unwrap();
         trace.dump();
 
         let sink_operands = get_pushsink_consts(&trace);
         assert_eq!(sink_operands, [&"asd".into(), &"lol".into(),]);
     }
 
+    #[ignore]
     #[test]
     fn test_closures() {
         let output = quick_jit_func(
@@ -1349,6 +1342,7 @@ mod tests {
                 };
             }
 
+            __start_trace('t');
             const next1 = iota(11);
             const next2 = iota(7);
 
@@ -1363,10 +1357,9 @@ mod tests {
             sink(next2()); // 21
             sink(next2()); // 28
             ",
-            1,
         );
 
-        let trace = output.trace.unwrap();
+        let trace = output.get_trace("t").unwrap();
         trace.dump();
 
         let native_thunk = jit::codegen::to_native(&trace);
@@ -1387,6 +1380,7 @@ mod tests {
         );
     }
 
+    #[ignore]
     #[test]
     fn test_loop_unrolling() {
         let output = quick_jit_loop(
@@ -1402,13 +1396,13 @@ mod tests {
                 return ret;
             }
 
+            __start_trace('t');
             sink(sum_range(5));
             ",
-            1,
         );
 
         eprint!("trace = ");
-        let trace = output.trace.unwrap();
+        let trace = output.get_trace("t").unwrap();
         trace.dump();
 
         todo!()

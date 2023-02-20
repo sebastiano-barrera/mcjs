@@ -526,13 +526,33 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
         Expr::Call(call_expr @ CallExpr { callee, args, .. }) => {
             if let Some(callee) = callee.as_expr() {
                 if let Some(callee) = callee.as_ident() {
-                    if callee.sym.as_ref() == "sink" {
+                    let sym = callee.sym.as_ref();
+                    if sym == "sink" {
                         for arg in args {
                             let value = compile_expr(builder, &arg.expr)?.into();
                             builder.emit(Instr::PushSink(value));
                         }
 
                         return Ok(builder.emit(Instr::Const(Value::Null)).into());
+                    } else if sym.starts_with("__start_trace") {
+                        let trace_id = match args[0].expr.as_ref() {
+                            Expr::Lit(Lit::Str(trace_id)) => trace_id.value.to_string(),
+                            _ => {
+                                panic!("__start_trace must be called with a trace ID: __start_trace('the-name-of-the-trace')")
+                            }
+                        };
+
+                        let wait_loop = match sym {
+                            "__start_trace" => false,
+                            "__start_trace_loop" => true,
+                            _ => panic!("no such JIT builtin function: {sym}"),
+                        };
+
+                        builder.emit(Instr::StartTrace {
+                            trace_id,
+                            wait_loop,
+                        });
+                        return Ok(builder.emit(Instr::Const(Value::Undefined)).into());
                     }
                 }
 

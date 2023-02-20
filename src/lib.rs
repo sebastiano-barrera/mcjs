@@ -12,7 +12,6 @@ mod stack;
 mod util;
 
 pub use interpreter::{InterpreterFlags, TracerFlags, VM};
-pub use jit::TraceStart;
 
 #[cfg(test)]
 mod tests {
