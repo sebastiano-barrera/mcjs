@@ -1,4 +1,4 @@
-use crate::jit::builder::ValueId;
+use crate::jit::builder::{ValueId, ValueType};
 
 use super::builder::Instr;
 
@@ -7,12 +7,14 @@ type RegIndex = u16;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HardReg {
     General(RegIndex),
+    Numeric(RegIndex),
 }
 
 impl std::fmt::Debug for HardReg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::General(ndx) => write!(f, "hg{ndx}"),
+            HardReg::General(ndx) => write!(f, "hg{ndx}"),
+            HardReg::Numeric(ndx) => write!(f, "hn{ndx}"),
         }
     }
 }
@@ -20,6 +22,7 @@ impl std::fmt::Debug for HardReg {
 pub struct Allocation {
     hregs: Box<[Option<HardReg>]>,
     n_general: RegIndex,
+    n_numeric: RegIndex,
 }
 impl Allocation {
     pub(crate) fn n_general(&self) -> RegIndex {
@@ -35,20 +38,32 @@ impl Allocation {
 
     fn new(hregs: Box<[Option<HardReg>]>) -> Allocation {
         let mut n_general = 0;
+        let mut n_numeric = 0;
         for hreg in hregs.iter() {
             match hreg {
                 Some(HardReg::General(ndx)) => {
                     n_general = n_general.max(*ndx + 1);
                 }
+                Some(HardReg::Numeric(ndx)) => {
+                    n_numeric = n_numeric.max(*ndx + 1);
+                }
                 None => {}
             }
         }
 
-        Allocation { hregs, n_general }
+        Allocation {
+            hregs,
+            n_general,
+            n_numeric,
+        }
     }
 }
 
-pub(super) fn allocate_registers(code: &[Instr], num_general: RegIndex) -> Allocation {
+pub(super) fn allocate_registers(
+    code: &[Instr],
+    num_general: RegIndex,
+    num_numeric: RegIndex,
+) -> Allocation {
     struct RegGroup {
         free_regs: Vec<RegIndex>,
         is_free: Vec<bool>,
@@ -78,19 +93,36 @@ pub(super) fn allocate_registers(code: &[Instr], num_general: RegIndex) -> Alloc
         }
     }
 
-    let mut state = RegGroup::new(num_general);
+    let mut state_gen = RegGroup::new(num_general);
+    let mut state_num = RegGroup::new(num_numeric);
     let mut allocation = vec![None; code.len()].into_boxed_slice();
 
     for (ndx, instr) in code.iter().enumerate().rev() {
-        if let Some(HardReg::General(hreg)) = allocation.get(ndx).unwrap() {
-            state.set_free(*hreg);
+        match allocation.get(ndx).unwrap() {
+            Some(HardReg::General(regndx)) => state_gen.set_free(*regndx),
+            Some(HardReg::Numeric(regndx)) => state_num.set_free(*regndx),
+            _ => {}
         }
 
         for &ValueId(input_ndx) in instr.operands() {
             let alloc = allocation.get_mut(input_ndx as usize).unwrap();
             if alloc.is_none() {
-                let hreg_ndx = state.pick_free();
-                *alloc = Some(HardReg::General(hreg_ndx));
+                let src_instr = code.get(input_ndx as usize).unwrap_or_else(|| {
+                    panic!("JIT bug: used value but no corresponding instr: {input_ndx}",)
+                });
+                let value_type = src_instr.result_type().unwrap_or_else(|| {
+                    panic!(
+                        "JIT bug: value used but instruction has no value: {:?}",
+                        instr
+                    )
+                });
+                if value_type == ValueType::Num {
+                    let hreg_ndx = state_num.pick_free();
+                    *alloc = Some(HardReg::Numeric(hreg_ndx));
+                } else {
+                    let hreg_ndx = state_gen.pick_free();
+                    *alloc = Some(HardReg::General(hreg_ndx));
+                }
             }
         }
     }

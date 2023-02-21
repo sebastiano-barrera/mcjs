@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use dynasm::dynasm;
-use dynasmrt::x64::Rq;
+use dynasmrt::x64::{Rq, Rx};
 use dynasmrt::{DynamicLabel, Register};
 use dynasmrt::{DynasmApi, DynasmLabelApi};
 use strum::EnumCount;
@@ -20,6 +20,7 @@ pub struct NativeThunk {
     snapshot_len: u16,
     entry_offset: dynasmrt::AssemblyOffset,
     sink: Vec<BoxedValue>,
+    code_size: usize,
 }
 
 fn encode_values(
@@ -125,9 +126,10 @@ impl NativeThunk {
     pub(crate) fn dump(&self) {
         use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction};
 
-        let bytes = &self.buf[..];
+        let offset = self.entry_offset.0;
+        let bytes = &self.buf[offset..];
         let bitness = 64;
-        let start_rip = 0; // self.buf.as_ptr() as _;
+        let start_rip = offset as u64;
         let decoder = Decoder::with_ip(bitness, bytes, start_rip, DecoderOptions::NONE);
 
         let mut formatter = iced_x86::NasmFormatter::new();
@@ -136,8 +138,10 @@ impl NativeThunk {
             opts.set_show_branch_size(false);
             opts.set_branch_leading_zeros(false);
             opts.set_uppercase_hex(false);
+            opts.set_signed_memory_displacements(true);
         }
 
+        println!("-- Native ({} bytes)", self.code_size);
         // String implements FormatterOutput
         let mut line = String::new();
 
@@ -176,8 +180,48 @@ const GP_REGS: [Rq; 14] = [
     Rq::R14,
 ];
 
+const NUM_REGS: [Rx; 16] = [
+    Rx::XMM0,
+    Rx::XMM1,
+    Rx::XMM2,
+    Rx::XMM3,
+    Rx::XMM4,
+    Rx::XMM5,
+    Rx::XMM6,
+    Rx::XMM7,
+    Rx::XMM8,
+    Rx::XMM9,
+    Rx::XMM10,
+    Rx::XMM11,
+    Rx::XMM12,
+    Rx::XMM13,
+    Rx::XMM14,
+    Rx::XMM15,
+];
+
 extern "C" fn ext_push_sink(value: u64) -> () {
     eprintln!("TODO: trace: push sink: {value} = {value:064b}");
+}
+
+trait HardRegExt {
+    fn expect_general(&self) -> Rq;
+    fn expect_numeric(&self) -> Rx;
+}
+
+impl HardRegExt for HardReg {
+    fn expect_general(&self) -> Rq {
+        match self {
+            HardReg::General(ndx) => GP_REGS[*ndx as usize],
+            _ => panic!("expected a general reg"),
+        }
+    }
+
+    fn expect_numeric(&self) -> Rx {
+        match self {
+            HardReg::Numeric(ndx) => NUM_REGS[*ndx as usize],
+            _ => panic!("expected a numeric reg"),
+        }
+    }
 }
 
 pub(super) fn to_native(trace: &Trace) -> NativeThunk {
@@ -189,13 +233,12 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     let snap_len = trace.snapshot_map.len();
     let mut asm = dynasmrt::x64::Assembler::new().unwrap();
 
-    let hreg_of_opt = |vid: ValueId| -> Option<Rq> {
-        let hreg = trace.hreg_alloc.hreg_of_instr(vid.clone().into())?;
-        match hreg {
-            HardReg::General(reg_ndx) => GP_REGS.get(reg_ndx as usize).copied(),
-        }
+    let get_hreg = |vid| {
+        trace
+            .hreg_alloc
+            .hreg_of_instr(vid)
+            .unwrap_or_else(|| panic!("no hreg for {vid:?}"))
     };
-    let hreg_of = |vid| hreg_of_opt(vid).unwrap_or_else(|| panic!("no hreg for {vid:?}"));
 
     let assert_type = |trace: &Trace, vid: ValueId, expected_type: ValueType| {
         assert_eq!(
@@ -204,34 +247,68 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         );
     };
 
-    let translate_instr =
-        |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| match instr {
+    // TODO Another good idea from LuaJIT: group all the constants at the start of the trace
+    let num_consts = {
+        let mut map = HashMap::new();
+        for (vid, instr) in trace.iter_instrs() {
+            if let Instr::Const(value) = instr {
+                if let BoxedValue::Number(num) = value {
+                    let lbl = asm.new_dynamic_label();
+                    let num_raw = num.to_bits() as i64;
+                    dynasm!(asm; =>lbl; .qword num_raw);
+                    map.insert(vid, lbl);
+                }
+            }
+        }
+
+        map
+    };
+
+    dynasm!(asm ; entry: );
+
+    let (used_gps, used_nums) = order_used_aregs(trace);
+    for areg in used_gps.iter() {
+        dynasm!(asm; push Rq (areg.code()));
+    }
+
+    let translate_instr = |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| {
+        match instr {
             Instr::Box(_) => todo!(),
             Instr::GetArg { .. } => todo!(),
             Instr::Const(value) => {
                 // It is assumed that the IR already "knows" the type of
                 // this value, so we can discard it here
                 let (encoded_value, _) = encode_value(&value);
-                let areg = hreg_of(vid);
-                dynasm!(asm; mov Rq (areg.code()), QWORD encoded_value);
+
+                match get_hreg(vid) {
+                    HardReg::General(regndx) => {
+                        let reg = GP_REGS[regndx as usize];
+                        dynasm!(asm; mov Rq (reg.code()), QWORD encoded_value);
+                    }
+                    HardReg::Numeric(regndx) => {
+                        let reg = NUM_REGS[regndx as usize];
+                        let mem = *num_consts.get(&vid).unwrap();
+                        dynasm!(asm; movsd Rx (reg.code()), [=>mem]);
+                    }
+                }
             }
             Instr::Not(_) => todo!(),
             Instr::Arith { op, a, b } => {
                 assert_type(trace, *a, ValueType::Num);
                 assert_type(trace, *b, ValueType::Num);
 
-                let a = hreg_of(*a).code();
-                let b = hreg_of(*b).code();
-                let tgt = hreg_of(vid).code();
+                let a = get_hreg(*a).expect_numeric();
+                let b = get_hreg(*b).expect_numeric();
+                let tgt = get_hreg(vid).expect_numeric();
                 // TODO This would benefit from pin-pointing the target
                 // register to the first operand register
                 if tgt != a {
-                    dynasm!(asm; mov Rq (tgt), Rq (a));
+                    dynasm!(asm; movsd Rx (tgt.code()), Rx (a.code()));
                 }
                 // TODO This is completely wrong. The instructions for double-precision floating point numbers is MOVSD, ADDSD, VADDSD & co.
                 match op {
-                    ArithOp::Add => dynasm!(asm; add Rq (tgt), Rq (b)),
-                    ArithOp::Sub => dynasm!(asm; sub Rq (tgt), Rq (b)),
+                    ArithOp::Add => dynasm!(asm; addsd Rx (tgt.code()), Rx (b.code())),
+                    ArithOp::Sub => dynasm!(asm; subsd Rx (tgt.code()), Rx (b.code())),
                     ArithOp::Mul => todo!("mul"),
                     ArithOp::Div => todo!("div"),
                 }
@@ -248,9 +325,9 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 cond: cmp,
                 pre_snap_update,
             } => {
-                write_snapshot(asm, &pre_snap_update, hreg_of);
-                let a = hreg_of(cmp.a);
-                let b = hreg_of(cmp.b);
+                write_snapshot(asm, &pre_snap_update, get_hreg);
+                let a = get_hreg(cmp.a);
+                let b = get_hreg(cmp.b);
                 trace_assert_cmp(asm, cmp.ty, cmp.op, a, b);
             }
             Instr::Num2Str(_) => todo!(),
@@ -260,20 +337,36 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             Instr::TypeOf(_) => todo!(),
             Instr::ClosureNew => todo!(),
             Instr::PushSink(vid) => {
-                let operand = hreg_of(*vid).code();
+                dynasm!(asm; push rsi);
+                match get_hreg(*vid) {
+                    HardReg::General(regndx) => dynasm!(asm; mov rsi, Rq (regndx as u8)),
+                    HardReg::Numeric(regndx) => dynasm!(asm; movq rsi, Rx (regndx as u8)),
+                }
+
+                // NOTE We rely on ext_push_sink never touching any xmm*  register.
+                // Otherwise, we would have to save and restore them, and that takes
+                // quite a bit of code!q
                 dynasm!(asm
-                 ; push rsi
-                 ; mov rsi, Rq (operand)
-                 ; call ext_push_sink as _
-                 ; pop rsi
+                ; call ext_push_sink as _
+                ; pop rsi
                 );
             }
             Instr::Return(_) => todo!(),
             Instr::Phi(old, new) => {
-                let old = hreg_of(*old).code();
-                let new = hreg_of(*new).code();
+                let old = get_hreg(*old);
+                let new = get_hreg(*new);
                 if old != new {
-                    dynasm!(asm; mov Rq (old), Rq (new));
+                    match (old, new) {
+                        (HardReg::General(old), HardReg::General(new)) =>
+                            dynasm!(asm; mov Rq (old as u8), Rq (new as u8)),
+
+                        (HardReg::Numeric(old), HardReg::Numeric(new)) =>
+                            dynasm!(asm; movsd Rx (old as u8), Rx (new as u8)),
+
+                        _ => panic!(
+                            "JIT bug: comparisons must be between either general or numeric registers, no mix"
+                        ),
+                    }
                 } else {
                     eprintln!("JIT codegen: phi old hreg = new hreg; no machine instr necessary");
                 }
@@ -301,23 +394,23 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 let snap_ndx = *snap_ndx as i32;
                 assert!(snap_ndx < snap_len as i32);
 
-                let tgt = hreg_of(vid).code();
-
                 dynasm!(asm
                  ; cmp BYTE [rsi + snap_ndx], *ty as i8
                  ; jne >abort_trace
-                 ; mov Rq (tgt), QWORD [rdi + 8 * snap_ndx]
                 );
-                write_snapshot(asm, &post_snap_update, hreg_of);
+
+                match get_hreg(vid) {
+                    HardReg::General(tgt) => {
+                        dynasm!(asm; mov Rq (tgt as u8), QWORD [rdi + 8 * snap_ndx])
+                    }
+                    HardReg::Numeric(tgt) => {
+                        dynasm!(asm; movsd Rx (tgt as u8), QWORD [rdi + 8 * snap_ndx])
+                    }
+                }
+                write_snapshot(asm, &post_snap_update, get_hreg);
             }
-        };
-
-    dynasm!(asm ; entry: );
-
-    let used_archregs = order_used_aregs(trace);
-    for areg in used_archregs.iter() {
-        dynasm!(asm; push Rq (areg.code()));
-    }
+        }
+    };
 
     if trace.is_loop {
         dynasm!(asm; loop_start:);
@@ -331,52 +424,62 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     dynasm!(asm ; abort_trace:);
     // TODO Any chance of reusing this bit of code with the `!trace.is_loop` case?
-    for areg in used_archregs.iter().rev() {
+    for areg in used_gps.iter().rev() {
         dynasm!(asm; pop Rq (areg.code()));
     }
     dynasm!(asm; ret);
 
     let entry_offset = asm.labels().resolve_local("entry").unwrap();
+    let code_size = asm.offset().0;
     let buf = asm.finalize().unwrap();
     NativeThunk {
         buf,
         entry_offset,
         sink: Vec::new(),
         snapshot_len: trace.snapshot_map.len() as u16,
+        code_size,
     }
 }
 
 fn write_snapshot<H>(asm: &mut dynasmrt::x64::Assembler, snap: &[Option<ValueId>], hreg_of: H)
 where
-    H: Fn(ValueId) -> Rq,
+    H: Fn(ValueId) -> HardReg,
 {
     for (ndx, vid_opt) in snap.iter().enumerate() {
         if let Some(vid) = vid_opt {
-            let argreg = hreg_of(*vid).code();
-            dynasm!(asm
-            ; mov [rbp + 8 * (ndx as i32)], Rq (argreg)
-            );
+            match hreg_of(*vid) {
+                HardReg::General(regndx) => {
+                    dynasm!(asm; mov [rbp + 8 * (ndx as i32)], Rq (regndx as u8))
+                }
+                HardReg::Numeric(regndx) => {
+                    dynasm!(asm; movsd [rbp + 8 * (ndx as i32)], Rx (regndx as u8))
+                }
+            }
         }
     }
 }
 
-fn order_used_aregs(trace: &Trace) -> Vec<Rq> {
-    let mut order = Vec::new();
-    let mut used_archregs = HashSet::new();
+fn order_used_aregs(trace: &Trace) -> (Vec<Rq>, Vec<Rx>) {
+    let mut used_gps = HashSet::new();
+    let mut used_nums = HashSet::new();
     for vid in trace.iter_vids() {
-        if let Some(areg) = trace
-            .hreg_alloc
-            .hreg_of_instr(vid.clone().into())
-            .and_then(|hreg| match hreg {
-                HardReg::General(ndx) => GP_REGS.get(ndx as usize).copied(),
-            })
-        {
-            used_archregs.insert(areg);
+        if let Some(hreg) = trace.hreg_alloc.hreg_of_instr(vid.clone().into()) {
+            match hreg {
+                HardReg::General(ndx) => {
+                    used_gps.insert(GP_REGS.get(ndx as usize).copied().unwrap());
+                }
+                HardReg::Numeric(ndx) => {
+                    used_nums.insert(NUM_REGS.get(ndx as usize).copied().unwrap());
+                }
+            }
         }
     }
-    order.extend(used_archregs.into_iter());
-    order.push(Rq::R15);
-    order
+
+    let mut order_gps: Vec<_> = used_gps.into_iter().collect();
+    order_gps.push(Rq::R15);
+
+    let order_nums = used_nums.into_iter().collect();
+    (order_gps, order_nums)
 }
 
 fn trace_assert_type(asm: &mut dynasmrt::x64::Assembler, snap_len: usize, reg: Rq, ty: ValueType) {
@@ -388,7 +491,13 @@ fn trace_assert_type(asm: &mut dynasmrt::x64::Assembler, snap_len: usize, reg: R
         ; jne >abort_trace);
 }
 
-fn trace_assert_cmp(asm: &mut dynasmrt::x64::Assembler, ty: ValueType, op: CmpOp, a: Rq, b: Rq) {
+fn trace_assert_cmp(
+    asm: &mut dynasmrt::x64::Assembler,
+    ty: ValueType,
+    op: CmpOp,
+    a: HardReg,
+    b: HardReg,
+) {
     gen_cmp(ty, asm, a, b);
     match op {
         CmpOp::GE => dynasm!(asm; jl >abort_trace),
@@ -400,11 +509,22 @@ fn trace_assert_cmp(asm: &mut dynasmrt::x64::Assembler, ty: ValueType, op: CmpOp
     };
 }
 
-fn gen_cmp(ty: ValueType, asm: &mut dynasmrt::x64::Assembler, a: Rq, b: Rq) {
+fn gen_cmp(ty: ValueType, asm: &mut dynasmrt::x64::Assembler, a: HardReg, b: HardReg) {
     if ValueType::Boxed == ty {
+        let a = a.expect_general();
+        let b = b.expect_general();
         trace_assert_typetag(asm, a, b);
     }
-    dynasm!(asm; cmp Rq (a.code()), Rq(b.code()));
+
+    match (a, b) {
+        (HardReg::General(a), HardReg::General(b)) => dynasm!(asm; cmp Rq (a as u8), Rq (b as u8)),
+        (HardReg::Numeric(a), HardReg::Numeric(b)) => {
+            dynasm!(asm; ucomisd Rx (a as u8), Rx (b as u8))
+        }
+        _ => panic!(
+            "JIT bug: comparisons must be between either general or numeric registers, no mix"
+        ),
+    }
 }
 
 fn decode_tag(val: u8) -> Option<ValueType> {

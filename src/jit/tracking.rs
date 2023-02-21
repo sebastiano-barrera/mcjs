@@ -127,12 +127,7 @@ impl FrameTracker {
         self.vid_of_iid.get(&iid)
     }
     pub(super) fn set_result(&mut self, iid: interpreter::IID, value: ValueId) {
-        let prev = self.vid_of_iid.insert(iid, value);
-        // assert!(
-        //     prev.is_none(),
-        //     "JIT bug: multiple results for the same instruction ({:?})",
-        //     iid
-        // );
+        self.vid_of_iid.insert(iid, value);
     }
 
     pub(super) fn get_var(&self, var_ndx: VarIndex) -> Option<&ValueId> {

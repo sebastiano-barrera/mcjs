@@ -907,7 +907,7 @@ impl TraceBuilder {
                 }
             }
 
-            let hreg_alloc = regalloc::allocate_registers(instrs.as_slice(), 6);
+            let hreg_alloc = regalloc::allocate_registers(instrs.as_slice(), 6, 8);
             let is_enabled: Vec<_> = instrs
                 .iter()
                 .enumerate()
@@ -1253,7 +1253,7 @@ mod tests {
                 __start_trace_loop('the-trace');
                 while (i <= n) {
                     ret += i;
-                    // sink(ret);
+                    sink(ret);
                     i++;
                 }
                 return ret;
