@@ -91,11 +91,10 @@ fn decode_value(rt_val: i64, typ: ValueType) -> interpreter::Value {
 impl NativeThunk {
     pub(crate) fn run(&self, interp_snapshot: &mut [interpreter::Value]) -> interpreter::Value {
         let snap_len = interp_snapshot.len();
-        if snap_len != self.snapshot_len as usize {
+        if snap_len != (self.snapshot_len as usize) {
             panic!(
                 "wrong number of values for snapshot: {} instead of {}",
-                interp_snapshot.len(),
-                snap_len,
+                snap_len, self.snapshot_len
             );
         }
 

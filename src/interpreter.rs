@@ -134,7 +134,7 @@ pub struct IID(pub u32);
 /// NOTE cross-module function calls are unsupported yet
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlobalIID {
-    pub fn_id: FnId,
+    pub fnid: FnId,
     pub iid: IID,
 }
 
@@ -328,7 +328,7 @@ pub struct VM {
     opts: VMOptions,
     sink: Vec<Value>,
 
-    traces: HashMap<String, jit::Trace>,
+    traces: HashMap<String, (jit::Trace, jit::NativeThunk)>,
 }
 
 pub struct VMOptions {
@@ -398,7 +398,7 @@ impl VM {
         todo!("delete this method")
     }
 
-    pub fn get_trace(&self, trace_id: &str) -> Option<&jit::Trace> {
+    pub fn get_trace(&self, trace_id: &str) -> Option<&(jit::Trace, jit::NativeThunk)> {
         self.traces.get(trace_id)
     }
 
@@ -476,17 +476,12 @@ impl VM {
     fn run_module(&mut self, module: &Module, flags: InterpreterFlags) -> Result<()> {
         let mut intrp = Interpreter::new(self, flags);
         intrp.run_module(module)?;
-        let Interpreter {
-            sink,
-            trace_builder,
-            mut trace_id,
-            ..
-        } = intrp;
+        let Interpreter { sink, jitting, .. } = intrp;
 
-        if let Some(tb) = trace_builder {
-            if let Some(trace) = tb.build() {
-                let tid = trace_id.take().unwrap();
-                let prev = self.traces.insert(tid, trace);
+        if let Some(jitting) = jitting {
+            if let Some(trace) = jitting.builder.build() {
+                let native_thunk = trace.compile();
+                let prev = self.traces.insert(jitting.trace_id, (trace, native_thunk));
                 assert!(prev.is_none());
             }
         }
@@ -499,11 +494,17 @@ impl VM {
 struct Interpreter<'a> {
     vm: &'a mut VM,
     flags: InterpreterFlags,
-    trace_builder: Option<jit::TraceBuilder>,
-    trace_id: Option<String>,
+    jitting: Option<Jitting>,
     frame_graph: stack::FrameGraph,
     stack_depth: u32,
     sink: Vec<Value>,
+}
+
+struct Jitting {
+    fnid: FnId,
+    iid: IID,
+    trace_id: String,
+    builder: jit::TraceBuilder,
 }
 
 impl<'a> Interpreter<'a> {
@@ -513,8 +514,7 @@ impl<'a> Interpreter<'a> {
         Interpreter {
             vm: parent_vm,
             flags,
-            trace_builder: None,
-            trace_id: None,
+            jitting: None,
             frame_graph: stack::FrameGraph::new(),
             stack_depth: 0,
             sink: Vec::new(),
@@ -538,14 +538,13 @@ impl<'a> Interpreter<'a> {
 
     // TODO Change this to return &Value instead
     fn get_operand(
-        &mut self,
+        &self,
         operand: &Operand,
         values_buf: &Vec<Value>,
         cur_fid: stack::FrameId,
     ) -> Value {
         // TODO Refactor this mess
-        let frame_graph = &mut self.frame_graph;
-        resolve_operand(operand, values_buf, frame_graph, cur_fid)
+        resolve_operand(operand, values_buf, &self.frame_graph, cur_fid)
     }
 
     fn run_module_fn(
@@ -582,13 +581,15 @@ impl<'a> Interpreter<'a> {
 
         let mut values_buf = vec![Value::Undefined; instrs.len()];
 
-        if let Some(tb) = &mut self.trace_builder {
-            tb.enter_function(cur_frame_id, func.n_slots as usize);
+        if let Some(jitting) = &mut self.jitting {
+            jitting
+                .builder
+                .enter_function(cur_frame_id, func.n_slots as usize);
         }
 
         let mut ndx = 0;
         let mut return_value = None;
-        let mut jit_waiting_loop = false;
+        let mut jit_waiting_loop = None;
 
         while return_value.is_none() {
             if ndx >= instrs.len() {
@@ -714,8 +715,8 @@ impl<'a> Interpreter<'a> {
                             self.print_indent();
                             eprintln!("      : call {closure:?}",);
 
-                            if let Some(tb) = &mut self.trace_builder {
-                                tb.set_args(&args, &|fnid| {
+                            if let Some(jitting) = &mut self.jitting {
+                                jitting.builder.set_args(&args, &|fnid| {
                                     self.frame_graph
                                         .get_lexical_scope(cur_frame_id, fnid)
                                         .unwrap()
@@ -819,40 +820,66 @@ impl<'a> Interpreter<'a> {
                 Instr::StartTrace {
                     trace_id,
                     wait_loop,
-                } => {
-                    if self.trace_builder.is_none() {
-                        assert!(self.trace_id.is_none());
-                        self.trace_id = Some(trace_id.clone());
-
-                        if *wait_loop {
-                            jit_waiting_loop = true;
-                        } else {
-                            self.trace_builder = Some(jit::TraceBuilder::start(
-                                cur_frame_id,
-                                func.n_slots as usize,
-                                jit::CloseMode::FunctionExit,
-                            ));
+                } => match self.flags.jit_mode {
+                    JitMode::Compile => {
+                        if self.jitting.is_none() {
+                            if *wait_loop {
+                                jit_waiting_loop = Some(trace_id);
+                            } else {
+                                let builder = jit::TraceBuilder::start(
+                                    cur_frame_id,
+                                    func.n_slots as usize,
+                                    jit::CloseMode::FunctionExit,
+                                );
+                                self.jitting = Some(Jitting {
+                                    builder,
+                                    fnid: closure.fnid,
+                                    iid,
+                                    trace_id: trace_id.clone(),
+                                });
+                            }
                         }
                     }
+                    JitMode::UseTraces => {
+                        let (trace, thunk) = self
+                            .vm
+                            .get_trace(trace_id)
+                            .unwrap_or_else(|| panic!("no such trace with ID `{trace_id}`"));
+
+                        let mut snap: Vec<_> = trace
+                            .snapshot_map()
+                            .iter()
+                            .map(|value| self.get_operand(value, &mut values_buf, cur_frame_id))
+                            .collect();
+
+                        // TODO Use return value
+                        thunk.run(&mut snap);
+                    }
+                },
+            }
+
+            if let Some(trace_id) = jit_waiting_loop {
+                if func.is_loop_head(iid) {
+                    let fnid = closure.fnid;
+                    let global_iid = GlobalIID { fnid, iid };
+                    let builder = jit::TraceBuilder::start(
+                        cur_frame_id,
+                        func.n_slots as usize,
+                        jit::CloseMode::Loop(global_iid),
+                    );
+                    self.jitting = Some(Jitting {
+                        builder,
+                        fnid,
+                        iid,
+                        trace_id: trace_id.clone(),
+                    });
+                    jit_waiting_loop = None;
                 }
             }
 
-            if jit_waiting_loop && func.is_loop_head(iid) {
-                let global_iid = GlobalIID {
-                    fn_id: closure.fnid,
-                    iid,
-                };
-                self.trace_builder = Some(jit::TraceBuilder::start(
-                    cur_frame_id,
-                    func.n_slots as usize,
-                    jit::CloseMode::Loop(global_iid),
-                ));
-                jit_waiting_loop = false;
-            }
-
-            if let Some(tb) = &mut self.trace_builder {
+            if let Some(jitting) = &mut self.jitting {
                 let frame_graph = &self.frame_graph;
-                tb.interpreter_step(&InterpreterStep {
+                jitting.builder.interpreter_step(&InterpreterStep {
                     values_buf: &values_buf,
                     fnid: closure.fnid,
                     func: &func,
@@ -872,8 +899,8 @@ impl<'a> Interpreter<'a> {
             ndx = next_ndx;
         }
 
-        if let Some(trace_builder) = self.trace_builder.as_mut() {
-            trace_builder.exit_function();
+        if let Some(jitting) = self.jitting.as_mut() {
+            jitting.builder.exit_function();
         }
         Ok(return_value.unwrap_or(Value::Undefined))
     }
@@ -922,6 +949,13 @@ fn set_builtins(bc_compiler: &mut bytecode_compiler::Compiler) {
 #[derive(Clone, Debug)]
 pub struct InterpreterFlags {
     pub indent_level: u8,
+    pub jit_mode: JitMode,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum JitMode {
+    Compile,
+    UseTraces,
 }
 
 #[derive(Clone, Debug)]
@@ -931,7 +965,10 @@ pub struct TracerFlags {
 
 impl Default for InterpreterFlags {
     fn default() -> Self {
-        Self { indent_level: 0 }
+        Self {
+            indent_level: 0,
+            jit_mode: JitMode::UseTraces,
+        }
     }
 }
 

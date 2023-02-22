@@ -29,7 +29,10 @@ pub fn main() {
     vm.add_include_path(std::env::current_dir().unwrap())
         .unwrap();
     vm.options_mut().debug_dump_module = true;
-    let flags = mcjs::InterpreterFlags { indent_level: 0 };
+    let flags = mcjs::InterpreterFlags {
+        indent_level: 0,
+        jit_mode: mcjs::JitMode::Compile,
+    };
     vm.load_module_ex(&opts.script_filename, flags).unwrap();
 
     let trace = vm.take_trace();

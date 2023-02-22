@@ -10,7 +10,7 @@ mod jit;
 mod stack;
 mod util;
 
-pub use interpreter::{InterpreterFlags, TracerFlags, VM};
+pub use interpreter::{InterpreterFlags, JitMode, TracerFlags, VM};
 
 #[cfg(test)]
 mod tests {

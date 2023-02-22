@@ -4,8 +4,8 @@ use crate::interpreter;
 
 mod builder;
 mod codegen;
-mod tracking;
 mod regalloc;
+mod tracking;
 
 pub use builder::{CloseMode, InterpreterStep, TraceBuilder};
 // TODO Move some of these from `builder` to this module?
@@ -77,5 +77,10 @@ impl Trace {
     fn iter_instrs<'a>(&'a self) -> impl 'a + Iterator<Item = (ValueId, &Instr)> {
         self.iter_vids()
             .map(|vid| (vid, self.instrs.get(vid.0 as usize).unwrap()))
+    }
+
+    #[must_use]
+    pub fn snapshot_map(&self) -> &[interpreter::Operand] {
+        self.snapshot_map.as_ref()
     }
 }

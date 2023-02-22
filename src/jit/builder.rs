@@ -981,7 +981,7 @@ impl<'a> InterpreterStep<'a> {
 
     fn global_iid(&self) -> interpreter::GlobalIID {
         interpreter::GlobalIID {
-            fn_id: self.fnid,
+            fnid: self.fnid,
             iid: self.iid,
         }
     }
@@ -1162,14 +1162,36 @@ mod tests {
     }
     impl Output {
         fn get_trace(&self, trace_id: &str) -> Option<&jit::Trace> {
-            self.vm.get_trace(trace_id)
+            let (trace, _) = self.vm.get_trace(trace_id)?;
+            Some(trace)
         }
     }
 
     fn quick_jit(code: &str) -> Output {
         let mut vm = interpreter::VM::new();
-        let flags = Default::default();
-        vm.run_script(code.to_string(), flags).unwrap();
+
+        let base_flags = Default::default();
+
+        {
+            let flags = interpreter::InterpreterFlags {
+                jit_mode: interpreter::JitMode::Compile,
+                ..base_flags
+            };
+            vm.run_script(code.to_string(), flags)
+                .expect("first run (jit compilation) failed");
+        }
+
+        vm.take_sink(); // ... and discard it
+
+        {
+            let flags = interpreter::InterpreterFlags {
+                jit_mode: interpreter::JitMode::UseTraces,
+                ..base_flags
+            };
+            vm.run_script(code.to_string(), flags)
+                .expect("second run (trace run) failed");
+        }
+
         Output {
             sink: vm.take_sink(),
             vm,
@@ -1267,10 +1289,22 @@ mod tests {
         let trace = output.get_trace("the-trace").unwrap();
         trace.dump();
 
-        let native_thunk = jit::codegen::to_native(&trace);
-        native_thunk.dump();
+        // let native_thunk = jit::codegen::to_native(&trace);
+        // native_thunk.dump();
 
-        assert!(false);
+        assert_eq!(
+            &output.sink,
+            &[
+                BoxedValue::Number(0.0),
+                BoxedValue::Number(1.0),
+                BoxedValue::Number(3.0),
+                BoxedValue::Number(6.0),
+                BoxedValue::Number(10.0),
+                BoxedValue::Number(15.0),
+                // sum_range's return value
+                BoxedValue::Number(15.0),
+            ]
+        );
     }
 
     #[ignore]
