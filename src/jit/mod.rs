@@ -11,14 +11,14 @@ pub use builder::{CloseMode, InterpreterStep, TraceBuilder};
 // TODO Move some of these from `builder` to this module?
 pub use codegen::NativeThunk;
 
-use self::builder::{Instr, ValueId};
+use self::builder::{Instr, SnapshotMap, ValueId};
 
 type BoxedValue = interpreter::Value;
 
 // A JIT trace, in SSA representation.
 pub struct Trace {
     hreg_alloc: regalloc::Allocation,
-    snapshot_map: Vec<interpreter::Operand>,
+    snapshot_map: SnapshotMap,
     instrs: Vec<Instr>,
     is_loop: bool,
     // phis: std::collections::HashMap<ValueId, ValueId>,
@@ -80,7 +80,7 @@ impl Trace {
     }
 
     #[must_use]
-    pub fn snapshot_map(&self) -> &[interpreter::Operand] {
-        self.snapshot_map.as_ref()
+    pub(crate) fn snapshot_map(&self) -> &SnapshotMap {
+        &self.snapshot_map
     }
 }

@@ -134,12 +134,8 @@ pub struct TraceBuilder {
 
     instrs: Vec<Instr>,
 
-    // Tells which interpreter value to write into or read from each slot of the
-    // snapshot.
-    //
-    // (See jit::codegen for an explanation of what the "snapshot" is and how
-    // it works.)
-    snapshot_map: Vec<interpreter::Operand>,
+    snapshot_map: SnapshotMap,
+
     // Temporary buffer used to set snapshot updates "coordinates" into trace-
     // exiting instructions (such as AssertTrue and Unbox).  These will result
     // in snapshot update instructions in the native code.
@@ -147,6 +143,93 @@ pub struct TraceBuilder {
 
     state: TraceBuilderState,
     exit_function_expected: bool,
+}
+
+// Tells which interpreter value to write into or read from each slot of the
+// snapshot.
+//
+// Items that are `None` are "exit-only" slots: they're written by the
+// trace on (some of) its exits, and the interpreter can simply ignore
+// those when "initializing" the trace.
+//
+// (See jit::codegen for an explanation of what the "snapshot" is and how
+// it works.)
+pub(crate) struct SnapshotMap {
+    items: Vec<SnapshotMapItem>,
+}
+
+pub(crate) struct SnapshotMapItem {
+    pub(crate) write_on_entry: bool,
+    pub(crate) write_on_exit: bool,
+    pub(crate) operand: interpreter::Operand,
+}
+
+impl SnapshotMap {
+    fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    pub(super) fn len(&self) -> u16 {
+        self.items.len() as u16
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &SnapshotMapItem> {
+        self.items.iter()
+    }
+
+    pub(super) fn get(&self, ndx: usize) -> &SnapshotMapItem {
+        &self.items[ndx]
+    }
+
+    pub(super) fn find(&mut self, operand: &interpreter::Operand) -> Option<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .find(|(_, item)| &item.operand == operand)
+            .map(|(ndx, _)| ndx)
+    }
+
+    fn find_or_insert(&mut self, operand: &interpreter::Operand) -> usize {
+        self.find(operand).unwrap_or_else(|| {
+            // TODO on building, assert that no item has both write_on_ flags set to false
+            self.items.push(SnapshotMapItem {
+                operand: operand.clone(),
+                write_on_entry: false,
+                write_on_exit: false,
+            });
+            self.items.len() - 1
+        })
+    }
+
+    fn set_entry(&mut self, operand: &interpreter::Operand) -> u16 {
+        eprintln!("[..tb snapshot: set written-on-entry: {:?}]", operand);
+        let ndx = self.find_or_insert(operand);
+        self.items[ndx].write_on_entry = true;
+        ndx as u16
+    }
+
+    fn set_exit(&mut self, operand: &interpreter::Operand) -> u16 {
+        eprintln!("[..tb snapshot: set written-on-exit: {:?}]", operand);
+        let ndx = self.find_or_insert(operand);
+        self.items[ndx].write_on_exit = true;
+        ndx as u16
+    }
+}
+
+impl std::fmt::Debug for SnapshotMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<snapshot ")?;
+        for item in self.items.iter() {
+            write!(
+                f,
+                "{}{:?}{}, ",
+                if item.write_on_entry { '>' } else { ' ' },
+                item.operand,
+                if item.write_on_exit { '>' } else { ' ' },
+            )?;
+        }
+        write!(f, ">")
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
@@ -183,7 +266,7 @@ impl TraceBuilder {
             args_buf: None,
             vars: tracking::VarsState::new(),
             instrs: Vec::new(),
-            snapshot_map: Vec::new(),
+            snapshot_map: SnapshotMap::new(),
             exit_snapshot_changes: Vec::new(),
             loop_head: match close_mode {
                 CloseMode::Loop(giid) => Some(giid),
@@ -237,7 +320,7 @@ impl TraceBuilder {
                         // TODO Test that this is really necessary. If so, describe it here
                         assert_eq!(1, stack_depth);
 
-                        let param = self.add_entry_snapshot_var(intrp_operand.clone())?;
+                        let param = self.add_entry_snapshot_var(intrp_operand)?;
                         self.vars.cur_frame_mut().set_result(*iid, param.clone());
                         Ok(param)
                     }
@@ -253,7 +336,7 @@ impl TraceBuilder {
                     return Ok(value.clone());
                 }
 
-                let vid = self.add_entry_snapshot_var(intrp_operand.clone())?;
+                let vid = self.add_entry_snapshot_var(intrp_operand)?;
                 self.vars
                     .get_mut(frame_id)
                     .set_var(intrp_varid.var_ndx, vid.clone());
@@ -861,9 +944,10 @@ impl TraceBuilder {
         Ok(vid.into())
     }
 
-    fn add_entry_snapshot_var(&mut self, operand: interpreter::Operand) -> Result<ValueId, Error> {
-        let ndx = self.snapshot_map.len() as u16;
-        self.snapshot_map.push(operand);
+    fn add_entry_snapshot_var(&mut self, operand: &interpreter::Operand) -> Result<ValueId, Error> {
+        eprintln!("[..tb add entry snap var {:?}]", operand);
+
+        let ndx = self.snapshot_map.set_entry(operand);
 
         let post_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
         self.emit(Instr::GetSnapshotItem {
@@ -874,20 +958,11 @@ impl TraceBuilder {
     }
 
     fn set_exit_snapshot_var(&mut self, intrp_varid: interpreter::StaticVarId, value_id: ValueId) {
+        eprintln!("[..tb add exit snap var {value_id:?} -> {intrp_varid:?}]");
+
         let ndx = self
             .snapshot_map
-            .iter()
-            .enumerate()
-            .find(|(_, operand)| match operand {
-                interpreter::Operand::Var(var_id) => *var_id == intrp_varid,
-                _ => false,
-            })
-            .map(|(ndx, _)| ndx)
-            .unwrap_or_else(|| {
-                self.snapshot_map
-                    .push(interpreter::Operand::Var(intrp_varid));
-                self.snapshot_map.len() - 1
-            });
+            .set_exit(&interpreter::Operand::Var(intrp_varid)) as usize;
 
         if self.exit_snapshot_changes.len() <= ndx {
             self.exit_snapshot_changes.resize(ndx + 1, None);
@@ -1181,6 +1256,7 @@ mod tests {
                 .expect("first run (jit compilation) failed");
         }
 
+        assert!(vm.trace_ids().len() > 0);
         vm.take_sink(); // ... and discard it
 
         {
@@ -1289,8 +1365,8 @@ mod tests {
         let trace = output.get_trace("the-trace").unwrap();
         trace.dump();
 
-        // let native_thunk = jit::codegen::to_native(&trace);
-        // native_thunk.dump();
+        let native_thunk = jit::codegen::to_native(&trace);
+        native_thunk.dump();
 
         assert_eq!(
             &output.sink,
@@ -1413,6 +1489,18 @@ mod tests {
         let trace = output.get_trace("t").unwrap();
         trace.dump();
 
-        todo!()
+        assert_eq!(
+            &output.sink,
+            &[
+                BoxedValue::Number(0.0),
+                BoxedValue::Number(1.0),
+                BoxedValue::Number(3.0),
+                BoxedValue::Number(6.0),
+                BoxedValue::Number(10.0),
+                BoxedValue::Number(15.0),
+                // last sink item: sum_range's return value
+                BoxedValue::Number(15.0),
+            ]
+        );
     }
 }

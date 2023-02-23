@@ -268,7 +268,7 @@ impl std::fmt::Debug for StaticVarId {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Operand {
     // Evaluates immediately to a constant value.
     Value(Value),
@@ -400,6 +400,10 @@ impl VM {
 
     pub fn get_trace(&self, trace_id: &str) -> Option<&(jit::Trace, jit::NativeThunk)> {
         self.traces.get(trace_id)
+    }
+
+    pub fn trace_ids(&self) -> impl ExactSizeIterator<Item = &String> {
+        self.traces.keys()
     }
 
     pub fn add_include_path(
@@ -849,7 +853,17 @@ impl<'a> Interpreter<'a> {
                         let mut snap: Vec<_> = trace
                             .snapshot_map()
                             .iter()
-                            .map(|value| self.get_operand(value, &mut values_buf, cur_frame_id))
+                            .map(|snapitem| {
+                                if snapitem.write_on_entry {
+                                    self.get_operand(
+                                        &snapitem.operand,
+                                        &mut values_buf,
+                                        cur_frame_id,
+                                    )
+                                } else {
+                                    Value::Undefined
+                                }
+                            })
                             .collect();
 
                         // TODO Use return value

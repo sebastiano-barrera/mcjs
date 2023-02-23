@@ -198,8 +198,8 @@ const NUM_REGS: [Rx; 16] = [
     Rx::XMM15,
 ];
 
-extern "C" fn ext_push_sink(value: u64) -> () {
-    eprintln!("TODO: trace: push sink: {value} = {value:064b}");
+pub extern "C" fn ext_push_sink(value: u64) -> () {
+    println!("TODO: trace: push sink: {value} = {value:064b}");
 }
 
 trait HardRegExt {
@@ -267,7 +267,9 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     let (used_gps, used_nums) = order_used_aregs(trace);
     for areg in used_gps.iter() {
-        dynasm!(asm; push Rq (areg.code()));
+        if is_callee_saved(*areg) {
+            dynasm!(asm; push Rq (areg.code()));
+        }
     }
 
     let translate_instr = |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| {
@@ -336,17 +338,43 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             Instr::TypeOf(_) => todo!(),
             Instr::ClosureNew => todo!(),
             Instr::PushSink(vid) => {
-                dynasm!(asm; push rsi);
+                dynasm!(asm
+                ; push rsi
+                ; push rdi
+                ; push rax
+                );
+                for &areg in used_gps.iter() {
+                    if areg != Rq::RSI && areg != Rq::RAX && !is_callee_saved(areg) {
+                        dynasm!(asm; push Rq (areg.code()));
+                    }
+                }
+                dynasm!(asm; sub rsp, (8 * used_nums.len()) as _);
+                for (ndx, nreg) in used_nums.iter().enumerate() {
+                    dynasm!(asm; movsd [rsp + 8 * (ndx as i32)], Rx (nreg.code()));
+                }
+
                 match get_hreg(*vid) {
                     HardReg::General(regndx) => dynasm!(asm; mov rsi, Rq (regndx as u8)),
                     HardReg::Numeric(regndx) => dynasm!(asm; movq rsi, Rx (regndx as u8)),
                 }
 
-                // NOTE We rely on ext_push_sink never touching any xmm*  register.
-                // Otherwise, we would have to save and restore them, and that takes
-                // quite a bit of code!q
                 dynasm!(asm
-                ; call ext_push_sink as _
+                ; mov rax, QWORD ext_push_sink as _
+                ; call rax
+                );
+
+                for (ndx, nreg) in used_nums.iter().enumerate() {
+                    dynasm!(asm; movsd Rx (nreg.code()), [rsp + (ndx as i32) * 8]);
+                }
+                dynasm!(asm; add rsp, (8 * used_nums.len()) as _);
+                for &areg in used_gps.iter().rev() {
+                    if areg != Rq::RSI && areg != Rq::RAX && !is_callee_saved(areg) {
+                        dynasm!(asm; pop Rq (areg.code()));
+                    }
+                }
+                dynasm!(asm
+                ; pop rax
+                ; pop rdi
                 ; pop rsi
                 );
             }
@@ -393,8 +421,9 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 let snap_ndx = *snap_ndx as i32;
                 assert!(snap_ndx < snap_len as i32);
 
+                // `+ 1` because the first slot is reserved for the return value
                 dynasm!(asm
-                 ; cmp BYTE [rsi + snap_ndx], *ty as i8
+                 ; cmp BYTE [rsi + snap_ndx + 1], *ty as i8
                  ; jne >abort_trace
                 );
 
@@ -424,7 +453,9 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     dynasm!(asm ; abort_trace:);
     // TODO Any chance of reusing this bit of code with the `!trace.is_loop` case?
     for areg in used_gps.iter().rev() {
-        dynasm!(asm; pop Rq (areg.code()));
+        if is_callee_saved(*areg) {
+            dynasm!(asm; pop Rq (areg.code()));
+        }
     }
     dynasm!(asm; ret);
 
@@ -437,6 +468,13 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         sink: Vec::new(),
         snapshot_len: trace.snapshot_map.len() as u16,
         code_size,
+    }
+}
+
+fn is_callee_saved(areg: Rq) -> bool {
+    match areg {
+        Rq::RBX | Rq::RSP | Rq::RBP | Rq::R12 | Rq::R13 | Rq::R14 | Rq::R15 => true,
+        _ => false,
     }
 }
 
@@ -483,7 +521,8 @@ fn order_used_aregs(trace: &Trace) -> (Vec<Rq>, Vec<Rx>) {
 
 fn trace_assert_type(asm: &mut dynasmrt::x64::Assembler, snap_len: usize, reg: Rq, ty: ValueType) {
     let expected_tag = ty as u8;
-    let type_arr_ndx = (snap_len + reg.code() as usize) as i32;
+    // + 1 because the first slot is reserved for the return value
+    let type_arr_ndx = (snap_len + 1 + reg.code() as usize) as i32;
 
     dynasm!(asm
         ; cmp BYTE [rsi + type_arr_ndx], expected_tag as _
@@ -549,8 +588,8 @@ fn decode_tag(val: u8) -> Option<ValueType> {
 /// iff the type tags are the same.
 fn trace_assert_typetag(asm: &mut dynasmrt::x64::Assembler, a: Rq, b: Rq) {
     dynasm!(asm
-        ; mov r15b, [rsi + a.code() as _]
-        ; cmp r15b, [rsi + b.code() as _]
+        ; mov r15b, [rsi + (a.code() + 1) as _]
+        ; cmp r15b, [rsi + (b.code() + 1) as _]
         ; jne >abort_trace
     );
 }
