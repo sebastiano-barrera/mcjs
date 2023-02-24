@@ -33,7 +33,7 @@ impl VarsState {
         self.stack_model.len()
     }
 
-    // TODO Garbage collection?
+    // TODO(big feat) Garbage collection?
 
     pub(super) fn push_frame(&mut self, frame_id: FrameId, args: Vec<ValueId>, n_vars: usize) {
         let frame_model = FrameTracker::new(args, n_vars);
@@ -66,7 +66,7 @@ impl VarsState {
     }
 
     pub(crate) fn get_reads_before_writes<'a>(&'a self) -> HashSet<(FrameId, VarIndex)> {
-        // TODO Can we avoid a whole new data structure for this? Maybe it's OK
+        // TODO(opt) Can we avoid a whole new data structure for this? Maybe it's OK
         // anyway, since this is only done once per trace
         let mut ret = HashSet::new();
 
@@ -92,7 +92,7 @@ pub(super) struct FrameTracker {
     /// introduced as trace parameters when the JIT starts later than the start
     /// of the function's body.
     vid_of_varid: Box<[Option<ValueId>]>,
-    // TODO More compact data structures
+    // TODO(opt) More compact data structures
     first_write_of_varid: Box<[Option<ValueId>]>,
     overwritten_vars: RefCell<HashSet<VarIndex>>,
     read_before_overwrite: RefCell<HashSet<VarIndex>>,
@@ -116,7 +116,7 @@ impl FrameTracker {
         }
     }
 
-    // TODO get_arg
+
     pub(super) fn get_arg(&self, arg_ndx: usize) -> &ValueId {
         self.args
             .get(arg_ndx)

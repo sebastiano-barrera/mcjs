@@ -42,7 +42,7 @@ fn encode_values(
 fn encode_value(value: &interpreter::Value) -> (i64, ValueType) {
     let rt_val: i64 = match value {
         BoxedValue::Number(num) => unsafe { std::mem::transmute_copy(num) },
-        BoxedValue::String(_) => todo!(),
+        BoxedValue::String(_) => todo!("(big feat) encode string ref (remember the GC!)"),
         BoxedValue::Bool(bv) => {
             if *bv {
                 1
@@ -50,12 +50,12 @@ fn encode_value(value: &interpreter::Value) -> (i64, ValueType) {
                 0
             }
         }
-        BoxedValue::Object(_) => todo!(),
+        BoxedValue::Object(_) => todo!("(big feat) encode object ref (remember the GC!)"),
         BoxedValue::Null => 0 as _,
         BoxedValue::Undefined => 0 as _,
-        BoxedValue::SelfFunction => todo!(),
-        BoxedValue::NativeFunction(_) => todo!(),
-        BoxedValue::Closure(_) => todo!(),
+        BoxedValue::SelfFunction => todo!("(small feat) SelfFunction"),
+        BoxedValue::NativeFunction(_) => todo!("(big feat) NativeFunction"),
+        BoxedValue::Closure(_) => todo!("(big feat) encode closure"),
     };
 
     (rt_val, ValueType::of(value))
@@ -79,11 +79,11 @@ fn decode_value(rt_val: i64, typ: ValueType) -> interpreter::Value {
     match typ {
         ValueType::Bool => interpreter::Value::Bool(rt_val != 0),
         ValueType::Num => interpreter::Value::Number(unsafe { std::mem::transmute(rt_val) }),
-        ValueType::Str => todo!(),
-        ValueType::Obj => todo!(),
+        ValueType::Str => todo!("(big feat) decode string ref (remember the GC!)"),
+        ValueType::Obj => todo!("(big feat) decode object ref (remember the GC!)"),
         ValueType::Null => interpreter::Value::Null,
         ValueType::Undefined => interpreter::Value::Undefined,
-        ValueType::Function => todo!(),
+        ValueType::Function => todo!("(big feat) decode function ref"),
         ValueType::Boxed => unreachable!(),
     }
 }
@@ -199,7 +199,7 @@ const NUM_REGS: [Rx; 16] = [
 ];
 
 pub extern "C" fn ext_push_sink(value: u64) -> () {
-    println!("TODO: trace: push sink: {value} = {value:064b}");
+    println!("TODO(big feat): trace: push sink: {value} = {value:064b}"); // Figure out a better way of manipulating the `sink` vector
 }
 
 trait HardRegExt {
@@ -246,7 +246,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         );
     };
 
-    // TODO Another good idea from LuaJIT: group all the constants at the start of the trace
+    // TODO(big feat) Another good idea from LuaJIT: group all the constants at the start of the trace
     let num_consts = {
         let mut map = HashMap::new();
         for (vid, instr) in trace.iter_instrs() {
@@ -274,8 +274,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     let translate_instr = |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| {
         match instr {
-            Instr::Box(_) => todo!(),
-            Instr::GetArg { .. } => todo!(),
+            Instr::Box(_) => todo!("(big feat) Instr::Box"),
+            Instr::GetArg { .. } => todo!("(big feat) Instr::GetArg"),
             Instr::Const(value) => {
                 // It is assumed that the IR already "knows" the type of
                 // this value, so we can discard it here
@@ -293,7 +293,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     }
                 }
             }
-            Instr::Not(_) => todo!(),
+            Instr::Not(_) => todo!("(small feat) Instr::Box"),
             Instr::Arith { op, a, b } => {
                 assert_type(trace, *a, ValueType::Num);
                 assert_type(trace, *b, ValueType::Num);
@@ -301,17 +301,17 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 let a = get_hreg(*a).expect_numeric();
                 let b = get_hreg(*b).expect_numeric();
                 let tgt = get_hreg(vid).expect_numeric();
-                // TODO This would benefit from pin-pointing the target
+                // TODO(idea) This would benefit from pin-pointing the target
                 // register to the first operand register
                 if tgt != a {
                     dynasm!(asm; movsd Rx (tgt.code()), Rx (a.code()));
                 }
-                // TODO This is completely wrong. The instructions for double-precision floating point numbers is MOVSD, ADDSD, VADDSD & co.
+
                 match op {
                     ArithOp::Add => dynasm!(asm; addsd Rx (tgt.code()), Rx (b.code())),
                     ArithOp::Sub => dynasm!(asm; subsd Rx (tgt.code()), Rx (b.code())),
-                    ArithOp::Mul => todo!("mul"),
-                    ArithOp::Div => todo!("div"),
+                    ArithOp::Mul => todo!("TODO(small feat) mul"),
+                    ArithOp::Div => todo!("TODO(small feat) div"),
                 }
             }
             Instr::Cmp(_) => {
@@ -320,8 +320,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 // we'll choose whether to do a cmp + jz/ja/je/etc. (using a
                 // flag) or store the result in a dedicated boolean register.
             }
-            Instr::BoolOp { .. } => todo!(),
-            Instr::Choose { .. } => todo!(),
+            Instr::BoolOp { .. } => todo!("TODO(small feat) boolop"),
+            Instr::Choose { .. } => todo!("TODO(small feat) choose"),
             Instr::ExitUnless {
                 cond: cmp,
                 pre_snap_update,
@@ -331,12 +331,12 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 let b = get_hreg(cmp.b);
                 trace_assert_cmp(asm, cmp.ty, cmp.op, a, b);
             }
-            Instr::Num2Str(_) => todo!(),
-            Instr::ObjNew => todo!(),
-            Instr::ObjSet { .. } => todo!(),
-            Instr::ObjGet { .. } => todo!(),
-            Instr::TypeOf(_) => todo!(),
-            Instr::ClosureNew => todo!(),
+            Instr::Num2Str(_) => todo!("TODO(big feat) Num2Str"),
+            Instr::ObjNew => todo!("TODO(big feat) objects in JIT"),
+            Instr::ObjSet { .. } => todo!("TODO(big feat) objects in JIT"),
+            Instr::ObjGet { .. } => todo!("TODO(big feat) objects in JIT"),
+            Instr::TypeOf(_) => todo!("TODO(small feat) TypeOf"),
+            Instr::ClosureNew => todo!("TODO(big feat) closure creation in JIT (?)"),
             Instr::PushSink(vid) => {
                 dynasm!(asm
                 ; push rsi
@@ -378,7 +378,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 ; pop rsi
                 );
             }
-            Instr::Return(_) => todo!(),
+            Instr::Return(_) => todo!("TODO return"),
             Instr::Phi(old, new) => {
                 let old = get_hreg(*old);
                 let new = get_hreg(*new);
@@ -451,7 +451,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     }
 
     dynasm!(asm ; abort_trace:);
-    // TODO Any chance of reusing this bit of code with the `!trace.is_loop` case?
+
     for areg in used_gps.iter().rev() {
         if is_callee_saved(*areg) {
             dynasm!(asm; pop Rq (areg.code()));

@@ -61,7 +61,7 @@ struct FnBuilder {
     fnid: FnId,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
-    // TODO Maybe this needs to be more compact
+    // TODO(opt) Maybe this needs to be more compact
     captured_frames: HashSet<FnId>,
     last_index: u16,
 }

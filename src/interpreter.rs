@@ -29,9 +29,9 @@ pub enum Value {
     Object(Object),
     Null,
     Undefined,
-    // TODO Delete, Closure supersedes this
+    // TODO(cleanup) Delete, Closure supersedes this
     SelfFunction,
-    // TODO Delete, Closure supersedes this
+    // TODO(cleanup) Delete, Closure supersedes this
     NativeFunction(u32),
     Closure(Closure),
 }
@@ -55,7 +55,7 @@ impl Value {
             Value::String(_) => "string",
             Value::Bool(_) => "boolean",
             Value::Object(_) => "object",
-            // TODO This is actually an error in our type system.  null is really a value of the 'object' type
+            // TODO(cleanup) This is actually an error in our type system.  null is really a value of the 'object' type
             Value::Null => "object",
             Value::Undefined => "undefined",
             Value::SelfFunction => "function",
@@ -198,7 +198,7 @@ pub enum Instr {
         key: Operand,
     },
 
-    // Temporary; should be replaced by objects, just like all other "classes"
+    // TODO(big feat) Temporary; should be replaced by objects, just like all other "classes"
     ArrayNew,
     ArrayPush(Operand, Operand),
 
@@ -395,7 +395,7 @@ impl VM {
     }
 
     pub fn take_trace(&mut self) -> Option<jit::Trace> {
-        todo!("delete this method")
+        todo!("(cleanup) delete this method")
     }
 
     pub fn get_trace(&self, trace_id: &str) -> Option<&(jit::Trace, jit::NativeThunk)> {
@@ -540,14 +540,14 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // TODO Change this to return &Value instead
+    // TODO(cleanup) Change this to return &Value instead
     fn get_operand(
         &self,
         operand: &Operand,
         values_buf: &Vec<Value>,
         cur_fid: stack::FrameId,
     ) -> Value {
-        // TODO Refactor this mess
+        // TODO(cleanup) Refactor this mess
         resolve_operand(operand, values_buf, &self.frame_graph, cur_fid)
     }
 
@@ -568,7 +568,7 @@ impl<'a> Interpreter<'a> {
 
         let res = self._run_module_fn_inner(module, closure, frame, func, args);
 
-        // TODO Garbage collect stack frames
+        // TODO(big feat) Garbage collect stack frames
         self.stack_depth -= 1;
         res
     }
@@ -734,7 +734,7 @@ impl<'a> Interpreter<'a> {
                                 .get(&nfid)
                                 .ok_or(error!("no such native function: {nfid}"))?;
                             self.print_indent();
-                            todo!("interpreter: tell the JIT about this native call");
+                            todo!("(big feat) interpreter: tell the JIT about this native call");
                             eprintln!("      : native call");
                             let ret_val = nf(self, arg_values.as_slice())?;
                             values_buf[ndx] = ret_val;
@@ -866,7 +866,7 @@ impl<'a> Interpreter<'a> {
                             })
                             .collect();
 
-                        // TODO Use return value
+                        // TODO(small feat) Use return value
                         thunk.run(&mut snap);
                     }
                 },
@@ -930,7 +930,7 @@ fn resolve_operand(
         Operand::Value(value) => value.clone(),
         Operand::IID(IID(ndx)) => {
             let value = values_buf[*ndx as usize].clone();
-            //  TODO Move to a global logger. This is just for debugging!
+            //  TODO(cleanup) Move to a global logger. This is just for debugging!
             //  self.print_indent();
             eprintln!("      ↑ {:?} = {:?}", operand, value);
             value
@@ -938,7 +938,7 @@ fn resolve_operand(
         Operand::Var(var_id) => {
             let fid = frame_graph.get_lexical_scope(cur_fid, var_id.fnid).unwrap();
             let value = frame_graph.get_var(fid, var_id.var_ndx).unwrap().clone();
-            //  TODO Move to a global logger. This is just for debugging!
+            //  TODO(cleanup) Move to a global logger. This is just for debugging!
             //  self.print_indent();
             eprintln!("      ↑ {:?} = {:?}", var_id, value);
             value
@@ -955,7 +955,7 @@ fn set_builtins(bc_compiler: &mut bytecode_compiler::Compiler) {
         "String".into(),
         Value::NativeFunction(VM::NFID_STRING_NEW).into(),
     );
-    // TODO pls impl all Node.js API, ok? thxbye
+    // TODO(big feat) pls impl all Node.js API, ok? thxbye
     bc_compiler.bind_native("Object".into(), Value::Object(Object::new()).into());
     bc_compiler.bind_native("Array".into(), Value::Object(Object::new()).into());
 }
@@ -1291,7 +1291,7 @@ mod tests {
     #[ignore]
     #[test]
     fn test_for_in() {
-        // TODO This syntax is not yet implemented
+        // TODO(small feat) This syntax is not yet implemented
         let output = quick_run(
             "
             const obj = {

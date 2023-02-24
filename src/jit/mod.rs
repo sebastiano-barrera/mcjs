@@ -8,7 +8,7 @@ mod regalloc;
 mod tracking;
 
 pub use builder::{CloseMode, InterpreterStep, TraceBuilder};
-// TODO Move some of these from `builder` to this module?
+// TODO(cleanup) Move some of these from `builder` to this module?
 pub use codegen::NativeThunk;
 
 use self::builder::{Instr, SnapshotMap, ValueId};

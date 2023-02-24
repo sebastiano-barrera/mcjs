@@ -62,7 +62,7 @@ impl Cmp {
     }
 }
 
-// TODO Move this to the super module
+// TODO(cleanup) Move this to the super module
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValueId(pub(super) u32);
 
@@ -110,7 +110,7 @@ impl ValueType {
             ValueType::Num => "number",
             ValueType::Str => "string",
             ValueType::Obj => "object",
-            // TODO This is actually an error in our type system.  null is really a value of the 'object' type
+            // TODO(cleanup) This is actually an error in our type system.  null is really a value of the 'object' type
             ValueType::Null => "object",
             ValueType::Undefined => "undefined",
             ValueType::Function => "function",
@@ -191,7 +191,7 @@ impl SnapshotMap {
 
     fn find_or_insert(&mut self, operand: &interpreter::Operand) -> usize {
         self.find(operand).unwrap_or_else(|| {
-            // TODO on building, assert that no item has both write_on_ flags set to false
+            // TODO(small feat) on building, assert that no item has both write_on_ flags set to false
             self.items.push(SnapshotMapItem {
                 operand: operand.clone(),
                 write_on_entry: false,
@@ -283,7 +283,7 @@ impl TraceBuilder {
         tb
     }
 
-    // TODO Inline into all callers
+    // TODO(cleanup) Inline into all callers
     fn stack_depth(&self) -> usize {
         self.vars.stack_depth()
     }
@@ -317,7 +317,7 @@ impl TraceBuilder {
                             "[..tb {:?} is unresolved => considered trace parameter, adding guard]",
                             intrp_operand
                         );
-                        // TODO Test that this is really necessary. If so, describe it here
+                        // TODO(cleanup) Test that this is really necessary. If so, describe it here
                         assert_eq!(1, stack_depth);
 
                         let param = self.add_entry_snapshot_var(intrp_operand)?;
@@ -426,13 +426,13 @@ impl TraceBuilder {
                     ty: ValueType::Str,
                     op: CmpOp::EQ,
                     a: vid,
-                    // TODO this string allocation could be avoided
+                    // TODO(opt) this string allocation could be avoided
                     b: self.emit(Instr::Const("".into()))?,
                 };
                 Some(self.emit(cmp.into())?)
             }
 
-            // TODO Convert string to number
+            // TODO(big feat) Convert string to number
             (ValueType::Str, ValueType::Num) => None,
 
             (ValueType::Null, ValueType::Bool) => {
@@ -442,7 +442,7 @@ impl TraceBuilder {
                 Some(self.emit(Instr::Const(BoxedValue::Number(0.0)))?)
             }
 
-            // TODO this string allocation could be avoided
+            // TODO(opt) this string allocation could be avoided
             (ValueType::Null, ValueType::Str) => Some(self.emit(Instr::Const("null".into()))?),
 
             (ValueType::Undefined, ValueType::Bool) => {
@@ -537,14 +537,14 @@ impl TraceBuilder {
             }
             interpreter::Instr::Cmp { op, a, b } => {
                 let a_rt_type = {
-                    // TODO fix: This causes allocations with strings
+                    // TODO(opt) fix: This causes allocations with strings
                     let rt_value = (step.get_operand)(a);
                     let rt_ty = ValueType::of(&rt_value);
                     assert_ne!(rt_ty, ValueType::Boxed);
                     rt_ty
                 };
                 let b_rt_type = {
-                    // TODO fix: This causes allocations with strings
+                    // TODO(opt) fix: This causes allocations with strings
                     let rt_value = (step.get_operand)(b);
                     let rt_ty = ValueType::of(&rt_value);
                     assert_ne!(rt_ty, ValueType::Boxed);
@@ -710,10 +710,10 @@ impl TraceBuilder {
                 Some(self.emit(Instr::ObjGet { obj, key })?)
             }
             interpreter::Instr::ArrayNew => {
-                todo!("array new")
+                todo!("(big feat) array new")
             }
             interpreter::Instr::ArrayPush(_arr, _elem) => {
-                todo!("array push")
+                todo!("(big feat) array push")
             }
             interpreter::Instr::TypeOf(arg) => {
                 let arg = self.resolve_interpreter_operand(arg, &step.fnid_to_frameid)?;
@@ -728,7 +728,7 @@ impl TraceBuilder {
             interpreter::Instr::ClosureNew { .. } => Some(self.emit(Instr::ClosureNew)?),
 
             interpreter::Instr::UnaryMinus(_) => {
-                todo!("jit::builder: UnaryMinus")
+                todo!("(small feat) jit::builder: UnaryMinus")
             }
 
             interpreter::Instr::StartTrace { .. } => {
@@ -850,7 +850,7 @@ impl TraceBuilder {
                 }
             }
 
-            // TODO TODO Re-enable this feature
+            // TODO(small feat) Re-enable this feature
             // Instr::Arith {
             //     op: ArithOp::Add,
             //     a: Operand::Imm(BoxedValue::Number(a_const)),
@@ -1062,7 +1062,7 @@ impl<'a> InterpreterStep<'a> {
     }
 }
 
-// TODO Move to jit/mod.rs
+// TODO(cleanup) Move to jit/mod.rs
 #[derive(PartialEq, Debug)]
 pub(super) enum Instr {
     Const(BoxedValue),
@@ -1094,7 +1094,7 @@ pub(super) enum Instr {
         post_snap_update: SnapshotUpdate,
     },
     GetArg {
-        ndx: usize, // TODO Change to u16
+        ndx: usize, // TODO(small feat) Change to u16
         ty: ValueType,
         post_snap_update: SnapshotUpdate,
     },
@@ -1338,7 +1338,7 @@ mod tests {
         trace.dump();
 
         // TODO: Run the trace (continue writing this test when traces can be run)
-        assert!(false);
+        // TODO(cleanup) Run the trace (continue writing this test when traces can be run)
     }
 
     #[test]
