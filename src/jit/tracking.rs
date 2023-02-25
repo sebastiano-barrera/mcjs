@@ -18,7 +18,8 @@ use super::builder::{BoxedValue, ValueId, ValueType};
 /// constant folding).
 pub(super) struct VarsState {
     stack_model: Vec<FrameId>,
-    frame_models: HashMap<FrameId, FrameTracker>,
+
+    frame_models: HashMap<FrameId, Frame>,
 
     /// Associates RUNTIME variable identifiers (current frame id, VarIndex)
     /// from the interpreter to ValueIds in the SSA trace we're building.
@@ -31,6 +32,14 @@ pub(super) struct VarsState {
     first_write_of_varid: HashMap<DynamicVarId, ValueId>,
     overwritten_vars: RefCell<HashSet<DynamicVarId>>,
     read_before_overwrite: RefCell<HashSet<DynamicVarId>>,
+}
+
+/// A "model" of the interpreter's stack, represented in terms that the JIT
+/// cares about.
+struct Frame {
+    args: Vec<ValueId>,
+    vid_of_iid: HashMap<interpreter::IID, ValueId>,
+    n_vars: usize,
 }
 
 type DynamicVarId = (FrameId, VarIndex);
@@ -54,7 +63,11 @@ impl VarsState {
     // TODO(big feat) Garbage collection?
 
     pub(super) fn push_frame(&mut self, frame_id: FrameId, args: Vec<ValueId>, n_vars: usize) {
-        let frame_model = FrameTracker::new(args, n_vars);
+        let frame_model = Frame {
+            args,
+            n_vars,
+            vid_of_iid: HashMap::new(),
+        };
         self.frame_models.insert(frame_id, frame_model);
         self.stack_model.push(frame_id);
     }
@@ -69,18 +82,18 @@ impl VarsState {
             .last()
             .expect("JIT bug: no frame model on stack (trace ended?)")
     }
-    fn cur_frame(&self) -> &FrameTracker {
-        self.get(self.cur_frame_id()).unwrap()
+    fn cur_frame(&self) -> &Frame {
+        self.frame_models.get(&self.cur_frame_id()).unwrap()
     }
-    fn cur_frame_mut(&mut self) -> &mut FrameTracker {
-        self.get_mut(self.cur_frame_id()).unwrap()
+    fn cur_frame_mut(&mut self) -> &mut Frame {
+        self.frame_models.get_mut(&self.cur_frame_id()).unwrap()
     }
 
     pub(super) fn get_result(&self, iid: interpreter::IID) -> Option<&ValueId> {
-        self.cur_frame().get_result(iid)
+        self.cur_frame().vid_of_iid.get(&iid)
     }
     pub(super) fn set_result(&mut self, iid: interpreter::IID, value: ValueId) {
-        self.cur_frame_mut().set_result(iid, value)
+        self.cur_frame_mut().vid_of_iid.insert(iid, value);
     }
 
     pub(super) fn get_var(&self, frame_id: FrameId, var_ndx: VarIndex) -> Option<ValueId> {
@@ -93,8 +106,16 @@ impl VarsState {
         self.vid_of_varid.get(&(frame_id, var_ndx)).copied()
     }
     pub(super) fn set_var(&mut self, frame_id: FrameId, var_ndx: VarIndex, value: ValueId) {
-        // TODO Check that var_ndx is valid for the frame?
-        // The frame has a limited and known number of variables (FrameTracker::new takes `n_vars`)
+        // TODO(opt) skip this test if we're not in #[cfg(test)]?
+        if let Some(frame) = self.frame_models.get(&frame_id) {
+            assert!(usize::from(var_ndx.0) < frame.n_vars);
+        } else {
+            // The frame was not seen by the JIT before. If I'm not getting
+            // confused, this means that we're capturing this variable from one
+            // of the outer frames.   We still store it to "short-cut" reads to
+            // it later on in the trace.
+        }
+
         self.vid_of_varid
             .entry((frame_id, var_ndx))
             .or_insert(value);
@@ -109,14 +130,10 @@ impl VarsState {
     }
 
     pub(super) fn get_arg(&self, arg_ndx: usize) -> &ValueId {
-        self.cur_frame().get_arg(arg_ndx)
-    }
-
-    fn get(&self, frame_id: FrameId) -> Option<&FrameTracker> {
-        self.frame_models.get(&frame_id)
-    }
-    fn get_mut(&mut self, frame_id: FrameId) -> Option<&mut FrameTracker> {
-        self.frame_models.get_mut(&frame_id)
+        self.cur_frame()
+            .args
+            .get(arg_ndx)
+            .expect("bytecode_compiler bug: unbound arg var")
     }
 
     pub(super) fn get_reads_before_overwritten(&self) -> HashSet<(FrameId, VarIndex)> {
@@ -127,37 +144,5 @@ impl VarsState {
 
     pub(super) fn get_first_write(&self, frame_id: FrameId, var_ndx: VarIndex) -> Option<ValueId> {
         self.first_write_of_varid.get(&(frame_id, var_ndx)).copied()
-    }
-}
-
-/// A "model" of the interpreter's stack, represented in terms that the JIT
-/// cares about.
-struct FrameTracker {
-    args: Vec<ValueId>,
-
-    vid_of_iid: HashMap<interpreter::IID, ValueId>,
-    unboxes: HashMap<ValueId, (ValueType, ValueId)>,
-}
-
-impl FrameTracker {
-    fn new(args: Vec<ValueId>, n_vars: usize) -> Self {
-        FrameTracker {
-            args,
-            vid_of_iid: HashMap::new(),
-            unboxes: HashMap::new(),
-        }
-    }
-
-    fn get_arg(&self, arg_ndx: usize) -> &ValueId {
-        self.args
-            .get(arg_ndx)
-            .expect("bytecode_compiler bug: unbound arg var")
-    }
-
-    fn get_result(&self, iid: interpreter::IID) -> Option<&ValueId> {
-        self.vid_of_iid.get(&iid)
-    }
-    fn set_result(&mut self, iid: interpreter::IID, value: ValueId) {
-        self.vid_of_iid.insert(iid, value);
     }
 }
