@@ -644,8 +644,12 @@ impl TraceBuilder {
                     frame_id, var_id.var_ndx.0, value
                 );
 
+                let is_outside_trace = !self.vars.was_frame_seen(frame_id);
                 self.vars.set_var(frame_id, var_id.var_ndx, value);
-                self.set_exit_snapshot_var(var_id.clone(), value)?;
+
+                if is_outside_trace {
+                    self.set_exit_snapshot_var(var_id.clone(), value)?;
+                }
 
                 None
             }
@@ -1013,9 +1017,10 @@ impl TraceBuilder {
         Ok(())
     }
 
-    pub(crate) fn build(self) -> Option<Trace> {
+    pub(crate) fn build(mut self) -> Option<Trace> {
         if let TraceBuilderState::Finished = self.state {
             let is_loop = self.loop_head.is_some();
+            let snapshot_final_update = self.take_exit_snapshot().ok()?;
             let mut instrs = self.instrs;
 
             if is_loop {
@@ -1042,6 +1047,7 @@ impl TraceBuilder {
                 is_enabled,
                 hreg_alloc,
                 snapshot_map: self.snapshot_map,
+                snapshot_final_update,
             })
         } else {
             None

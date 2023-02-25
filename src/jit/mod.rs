@@ -11,7 +11,7 @@ pub use builder::{CloseMode, InterpreterStep, TraceBuilder};
 // TODO(cleanup) Move some of these from `builder` to this module?
 pub use codegen::NativeThunk;
 
-use self::builder::{Instr, SnapshotMap, ValueId};
+use self::builder::{Instr, SnapshotMap, SnapshotUpdate, ValueId};
 
 type BoxedValue = interpreter::Value;
 
@@ -19,6 +19,7 @@ type BoxedValue = interpreter::Value;
 pub struct Trace {
     hreg_alloc: regalloc::Allocation,
     snapshot_map: SnapshotMap,
+    snapshot_final_update: SnapshotUpdate,
     instrs: Vec<Instr>,
     is_loop: bool,
     // phis: std::collections::HashMap<ValueId, ValueId>,
@@ -59,6 +60,10 @@ impl Trace {
         for (ndx, instr) in self.instrs.iter().enumerate() {
             pr_inst(ValueId(ndx as u32), instr);
         }
+        eprintln!(
+            "              final snapshot update: {:?}",
+            self.snapshot_final_update
+        );
     }
 
     pub(crate) fn compile(&self) -> NativeThunk {

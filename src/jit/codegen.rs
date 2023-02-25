@@ -697,7 +697,7 @@ mod tests {
                 .expect("first run (jit compilation) failed");
         }
 
-        let (trace, _) = vm.get_trace("t").unwrap();
+        let (trace, _) = vm.get_trace("t").expect("no trace was produced!");
         trace.dump();
         assert!(vm.trace_ids().len() > 0);
         vm.take_sink(); // ... and discard it

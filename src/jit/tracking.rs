@@ -129,6 +129,10 @@ impl VarsState {
         }
     }
 
+    pub(super) fn was_frame_seen(&self, frame_id: FrameId) -> bool {
+        self.frame_models.contains_key(&frame_id)
+    }
+
     pub(super) fn get_arg(&self, arg_ndx: usize) -> &ValueId {
         self.cur_frame()
             .args
