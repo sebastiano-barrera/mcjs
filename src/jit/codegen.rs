@@ -199,7 +199,8 @@ const NUM_REGS: [Rx; 16] = [
 ];
 
 pub extern "C" fn ext_push_sink(value: u64) -> () {
-    println!("TODO(big feat): trace: push sink: {value} = {value:064b}"); // Figure out a better way of manipulating the `sink` vector
+    // Figure out a better way of manipulating the `sink` vector
+    println!("TODO(big feat): trace: push sink: {value:064b} = {value}");
 }
 
 trait HardRegExt {
@@ -266,13 +267,17 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     dynasm!(asm ; entry: );
 
     let (used_gps, used_nums) = order_used_aregs(trace);
-    for areg in used_gps.iter() {
-        if is_callee_saved(*areg) {
-            dynasm!(asm; push Rq (areg.code()));
-        }
-    }
+    let saved_gps: Box<[_]> = used_gps
+        .iter()
+        .filter(|areg| is_callee_saved(**areg))
+        .copied()
+        .collect();
 
-    let translate_instr = |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| {
+    // TODO(future rust): .next_multiple_of(16)
+    let mut stack_codegen = StackCodegen::new();
+    stack_codegen.start_chunk(&mut asm, &saved_gps, false);
+
+    let mut translate_instr = |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| {
         match instr {
             Instr::Box(_) => todo!("(big feat) Instr::Box"),
             Instr::GetArg { .. } => todo!("(big feat) Instr::GetArg"),
@@ -336,26 +341,32 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             Instr::ObjSet { .. } => todo!("TODO(big feat) objects in JIT"),
             Instr::ObjGet { .. } => todo!("TODO(big feat) objects in JIT"),
             Instr::TypeOf(_) => todo!("TODO(small feat) TypeOf"),
-            Instr::ClosureNew => todo!("TODO(big feat) closure creation in JIT (?)"),
+            Instr::ClosureNew => {
+                // Nothing to do.  This instruction only serves to assign
+                // the value ID to a new "virtual closure", which can only be
+                // inlined later on. (It can't esacpe the trace, by design.)
+                let tgt = get_hreg(vid).expect_general().code();
+                dynasm!(asm; xor Rq (tgt), Rq (tgt));
+            }
             Instr::PushSink(vid) => {
-                dynasm!(asm
-                ; push rsi
-                ; push rdi
-                ; push rax
-                );
-                for &areg in used_gps.iter() {
-                    if areg != Rq::RSI && areg != Rq::RAX && !is_callee_saved(areg) {
-                        dynasm!(asm; push Rq (areg.code()));
+                let saved_regs = {
+                    let mut saved_regs = vec![Rq::RSI, Rq::RDI, Rq::RAX];
+                    for &areg in used_gps.iter() {
+                        if areg != Rq::RSI
+                            && areg != Rq::RDI
+                            && areg != Rq::RAX
+                            && !is_callee_saved(areg)
+                        {
+                            saved_regs.push(areg);
+                        }
                     }
-                }
-                dynasm!(asm; sub rsp, (8 * used_nums.len()) as _);
-                for (ndx, nreg) in used_nums.iter().enumerate() {
-                    dynasm!(asm; movsd [rsp + 8 * (ndx as i32)], Rx (nreg.code()));
-                }
+                    saved_regs
+                };
+                stack_codegen.start_chunk(asm, &saved_regs, true);
 
                 match get_hreg(*vid) {
-                    HardReg::General(regndx) => dynasm!(asm; mov rsi, Rq (regndx as u8)),
-                    HardReg::Numeric(regndx) => dynasm!(asm; movq rsi, Rx (regndx as u8)),
+                    HardReg::General(regndx) => dynasm!(asm; mov rdi, Rq (regndx as u8)),
+                    HardReg::Numeric(regndx) => dynasm!(asm; movq rdi, Rx (regndx as u8)),
                 }
 
                 dynasm!(asm
@@ -363,20 +374,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 ; call rax
                 );
 
-                for (ndx, nreg) in used_nums.iter().enumerate() {
-                    dynasm!(asm; movsd Rx (nreg.code()), [rsp + (ndx as i32) * 8]);
-                }
-                dynasm!(asm; add rsp, (8 * used_nums.len()) as _);
-                for &areg in used_gps.iter().rev() {
-                    if areg != Rq::RSI && areg != Rq::RAX && !is_callee_saved(areg) {
-                        dynasm!(asm; pop Rq (areg.code()));
-                    }
-                }
-                dynasm!(asm
-                ; pop rax
-                ; pop rdi
-                ; pop rsi
-                );
+                stack_codegen.end_chunk(asm);
             }
             Instr::Return(_) => todo!("TODO return"),
             Instr::Phi(old, new) => {
@@ -452,11 +450,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     dynasm!(asm ; abort_trace:);
 
-    for areg in used_gps.iter().rev() {
-        if is_callee_saved(*areg) {
-            dynasm!(asm; pop Rq (areg.code()));
-        }
-    }
+    stack_codegen.end_chunk(&mut asm);
+
     dynasm!(asm; ret);
 
     let entry_offset = asm.labels().resolve_local("entry").unwrap();
@@ -517,6 +512,65 @@ fn order_used_aregs(trace: &Trace) -> (Vec<Rq>, Vec<Rx>) {
 
     let order_nums = used_nums.into_iter().collect();
     (order_gps, order_nums)
+}
+
+/// Helper for generating stack read/write.
+///
+/// Its main value is to make sure, in certain cases, that RSP is divisible
+/// by 16 as required by the C ABI. If this isn't done, C functions called
+/// directly or indirectly within this trace might, at some point, execute an
+/// instruction such as this:
+///
+///    movaps %xmm2, 0xa0(%rsp)
+///
+/// which throws a hardware exception if the memory address is not aligned
+/// to 16 bytes. (C compilers make sure that the offset (in this case 0xa0)
+/// is divisible by 16, too, so %rsp is the only variable here.)
+struct StackCodegen {
+    regs: Vec<Rq>,
+    chunks_size: Vec<(u8, u8)>,
+}
+impl StackCodegen {
+    fn new() -> Self {
+        StackCodegen {
+            regs: Vec::new(),
+            chunks_size: Vec::new(),
+        }
+    }
+
+    // TODO(opt): encode set of registers as a bitmask
+    fn start_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq], align16: bool) {
+        let chunk_sz = regs.len() as u8;
+        let padding = if align16 { 1 } else { 0 };
+
+        self.chunks_size.push((chunk_sz, padding));
+        self.regs.extend_from_slice(regs);
+
+        let delta_rsp = 8 * (chunk_sz + padding) as i32;
+        dynasm!(asm; sub rsp, delta_rsp);
+        for (i, reg) in regs.iter().enumerate() {
+            dynasm!(asm; mov [rsp + i as i32 * 8], Rq (reg.code()));
+        }
+    }
+
+    fn end_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler) {
+        let (chunk_sz, padding) = self.chunks_size.pop().unwrap();
+        let end = self.regs.len();
+        let start = end - chunk_sz as usize;
+        let regs = self.regs.drain(start..end);
+
+        for (i, reg) in regs.enumerate() {
+            dynasm!(asm; mov Rq (reg.code()), [rsp + i as i32 * 8]);
+        }
+        dynasm!(asm; add rsp, 8 * (chunk_sz + padding) as i32);
+    }
+}
+
+impl Drop for StackCodegen {
+    fn drop(&mut self) {
+        assert!(self.regs.is_empty());
+        assert!(self.chunks_size.is_empty());
+    }
 }
 
 fn trace_assert_type(asm: &mut dynasmrt::x64::Assembler, snap_len: usize, reg: Rq, ty: ValueType) {
@@ -607,6 +661,49 @@ mod tests {
     use super::*;
     use crate::jit::builder::ValueType;
 
+    struct Output {
+        sink: Vec<interpreter::Value>,
+        vm: interpreter::VM,
+    }
+    impl Output {
+        fn get_trace(&self, trace_id: &str) -> Option<&Trace> {
+            let (trace, _) = self.vm.get_trace(trace_id)?;
+            Some(trace)
+        }
+    }
+
+    fn quick_jit(code: &str) -> Output {
+        let mut vm = interpreter::VM::new();
+
+        let base_flags = Default::default();
+
+        {
+            let flags = interpreter::InterpreterFlags {
+                jit_mode: interpreter::JitMode::Compile,
+                ..base_flags
+            };
+            vm.run_script(code.to_string(), flags)
+                .expect("first run (jit compilation) failed");
+        }
+
+        assert!(vm.trace_ids().len() > 0);
+        vm.take_sink(); // ... and discard it
+
+        {
+            let flags = interpreter::InterpreterFlags {
+                jit_mode: interpreter::JitMode::UseTraces,
+                ..base_flags
+            };
+            vm.run_script(code.to_string(), flags)
+                .expect("second run (trace run) failed");
+        }
+
+        Output {
+            sink: vm.take_sink(),
+            vm,
+        }
+    }
+
     #[test]
     fn test_tag_encoding() {
         use strum::IntoEnumIterator;
@@ -617,5 +714,27 @@ mod tests {
             let readback_ty = decode_tag(encoded).unwrap();
             assert_eq!(ty, readback_ty);
         }
+    }
+
+    #[test]
+    fn test_create_closure_in_trace() {
+        let output = quick_jit(
+            "
+            function foo() {
+                __start_trace('t');
+                sink(function() { return 30; })
+                sink(function() { return 90; })
+                sink(function() { return 120; })
+                sink(function() { return 0; })
+            }
+
+            foo();
+            ",
+        );
+
+        let trace = output.get_trace("t").unwrap();
+        trace.dump();
+
+        assert!(false);
     }
 }
