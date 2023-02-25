@@ -932,7 +932,7 @@ fn resolve_operand(
             let value = values_buf[*ndx as usize].clone();
             //  TODO(cleanup) Move to a global logger. This is just for debugging!
             //  self.print_indent();
-            eprintln!("      ↑ {:?} = {:?}", operand, value);
+            eprintln!("      ↑  {:?} = {:?}", operand, value);
             value
         }
         Operand::Var(var_id) => {
@@ -940,7 +940,7 @@ fn resolve_operand(
             let value = frame_graph.get_var(fid, var_id.var_ndx).unwrap().clone();
             //  TODO(cleanup) Move to a global logger. This is just for debugging!
             //  self.print_indent();
-            eprintln!("      ↑ {:?} = {:?}", var_id, value);
+            eprintln!("      ↑  {:?} = {:?}", var_id, value);
             value
         }
     }
