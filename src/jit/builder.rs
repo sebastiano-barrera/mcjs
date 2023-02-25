@@ -312,7 +312,7 @@ impl TraceBuilder {
             // that last assigned to it (the JIT trace is SSA)
             interpreter::Operand::IID(iid) => {
                 let stack_depth = self.stack_depth();
-                match self.vars.cur_frame_mut().get_result(*iid).cloned() {
+                match self.vars.get_result(*iid).cloned() {
                     Some(vid_for_var) => {
                         print_indent(stack_depth);
                         eprintln!("[..tb {:?} is {:?}]", iid, vid_for_var);
@@ -328,7 +328,7 @@ impl TraceBuilder {
                         assert_eq!(1, stack_depth);
 
                         let param = self.add_entry_snapshot_var(intrp_operand)?;
-                        self.vars.cur_frame_mut().set_result(*iid, param.clone());
+                        self.vars.set_result(*iid, param.clone());
                         Ok(param)
                     }
                 }
@@ -338,15 +338,14 @@ impl TraceBuilder {
                 let frame_id = fnid_to_frameid(intrp_varid.fnid);
                 let var_ndx = intrp_varid.var_ndx;
 
-                let slot = self.vars.get(frame_id).get_var(var_ndx);
+                let slot = self.vars.get_var(frame_id, var_ndx);
                 if let Some(value) = slot {
                     return Ok(value.clone());
                 }
 
                 let vid = self.add_entry_snapshot_var(intrp_operand)?;
                 self.vars
-                    .get_mut(frame_id)
-                    .set_var(intrp_varid.var_ndx, vid.clone());
+                    .set_var(frame_id, intrp_varid.var_ndx, vid.clone());
                 Ok(vid)
             }
         }
@@ -619,7 +618,7 @@ impl TraceBuilder {
                             cmp.invert()
                         };
 
-                        let pre_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
+                        let pre_snap_update = self.take_exit_snapshot()?;
                         Some(self.emit(Instr::ExitUnless {
                             cond: cmp,
                             pre_snap_update,
@@ -645,7 +644,7 @@ impl TraceBuilder {
                     frame_id, var_id.var_ndx.0, value
                 );
 
-                self.vars.get_mut(frame_id).set_var(var_id.var_ndx, value);
+                self.vars.set_var(frame_id, var_id.var_ndx, value);
                 self.set_exit_snapshot_var(var_id.clone(), value)?;
 
                 None
@@ -669,14 +668,14 @@ impl TraceBuilder {
             }
             interpreter::Instr::GetArg(index) => {
                 let value = if self.stack_depth() == 1 {
-                    let post_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
+                    let post_snap_update = self.take_exit_snapshot()?;
                     self.emit(Instr::GetArg {
                         ndx: *index,
                         ty: ValueType::Boxed,
                         post_snap_update,
                     })?
                 } else {
-                    self.vars.cur_frame_mut().get_arg(*index).clone()
+                    self.vars.get_arg(*index).clone()
                 };
                 Some(value)
             }
@@ -831,7 +830,7 @@ impl TraceBuilder {
     fn map_iid(&mut self, iid: IID, jit_vid: ValueId) {
         print_indent(self.stack_depth());
         eprintln!("[..tb map {:?} -> {:?}]", iid, jit_vid);
-        self.vars.cur_frame_mut().set_result(iid, jit_vid);
+        self.vars.set_result(iid, jit_vid);
     }
 
     fn emit(&mut self, instr: Instr) -> Result<ValueId, Error> {
@@ -957,12 +956,36 @@ impl TraceBuilder {
         Ok(vid.into())
     }
 
+    fn take_exit_snapshot(&mut self) -> Result<Vec<Option<ValueId>>, Error> {
+        let post_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
+        for vid in &post_snap_update {
+            if let Some(vid) = vid {
+                let instr = self.get_instr(*vid);
+                if let Instr::ClosureNew = instr {
+                    // At this point, we know there is at least one case where a
+                    // closure that was *created* within the trace is being yielded
+                    // back to the interpreter (for example for storage or later call)
+                    //
+                    // This compiler, at least now, won't support this case.  It
+                    // would be very complicated to make the closure valid in the
+                    // interpreter's context. For example, you would have to determine
+                    // which stack frames have to be created, and create them (so that
+                    // the interpreter will be able to access captured variables).
+                    // This is a job better left to the interpreter.
+                    return Err(Error::UntraceableByDesign);
+                }
+            }
+        }
+        Ok(post_snap_update)
+    }
+
     fn add_entry_snapshot_var(&mut self, operand: &interpreter::Operand) -> Result<ValueId, Error> {
+        print_indent(self.stack_depth());
         eprintln!("[..tb add entry snap var {:?}]", operand);
 
         let ndx = self.snapshot_map.set_entry(operand);
 
-        let post_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
+        let post_snap_update = self.take_exit_snapshot()?;
         self.emit(Instr::GetSnapshotItem {
             ndx,
             ty: ValueType::Boxed,
@@ -975,22 +998,8 @@ impl TraceBuilder {
         intrp_varid: interpreter::StaticVarId,
         value_id: ValueId,
     ) -> Result<(), Error> {
+        print_indent(self.stack_depth());
         eprintln!("[..tb add exit snap var {value_id:?} -> {intrp_varid:?}]");
-
-        let instr = self.get_instr(value_id);
-        if let Instr::ClosureNew = instr {
-            // At this point, we know there is at least one case where a
-            // closure that was *created* within the trace is being yielded
-            // back to the interpreter (for example for storage or later call)
-            //
-            // This compiler, at least now, won't support this case.  It
-            // would be very complicated to make the closure valid in the
-            // interpreter's context. For example, you would have to determine
-            // which stack frames have to be created, and create them (so that
-            // the interpreter will be able to access captured variables).
-            // This is a job better left to the interpreter.
-            return Err(Error::UntraceableByDesign);
-        }
 
         let ndx = self
             .snapshot_map
@@ -1047,18 +1056,17 @@ impl TraceBuilder {
 
 fn compute_phis(vars_state: &tracking::VarsState) -> HashMap<ValueId, ValueId> {
     let mut phis = HashMap::new();
-    let rbw = vars_state.get_reads_before_writes();
-    for (frame_id, var_ndx) in rbw.iter() {
-        let frame = vars_state.get(*frame_id);
-        let first_vid = frame
-            .get_first_write(*var_ndx)
+    let rbw = vars_state.get_reads_before_overwritten();
+    for &(frame_id, var_ndx) in rbw.iter() {
+        let first_vid = vars_state
+            .get_first_write(frame_id, var_ndx)
             .expect("bug in VarsState: returned variable without a first write");
-        let last_vid = frame
-            .get_var(*var_ndx)
+        let last_vid = vars_state
+            .get_var(frame_id, var_ndx)
             .expect("bug in VarsState: returned variable without a current write");
-        assert_ne!(first_vid, *last_vid);
+        assert_ne!(first_vid, last_vid);
 
-        let prev = phis.insert(first_vid, *last_vid);
+        let prev = phis.insert(first_vid, last_vid);
         assert!(
             prev.is_none(),
             "JIT bug: tried to place multiple phis for the same variable"
@@ -1069,7 +1077,7 @@ fn compute_phis(vars_state: &tracking::VarsState) -> HashMap<ValueId, ValueId> {
 
 fn print_indent(stack_depth: usize) {
     for _ in 0..stack_depth {
-        eprint!("      · ");
+        eprint!(" · ");
     }
 }
 

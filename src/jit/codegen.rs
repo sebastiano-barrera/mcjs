@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicUsize;
 
 use dynasm::dynasm;
 use dynasmrt::x64::{Rq, Rx};
@@ -21,6 +23,9 @@ pub struct NativeThunk {
     entry_offset: dynasmrt::AssemblyOffset,
     sink: Vec<BoxedValue>,
     code_size: usize,
+
+    #[cfg(test)]
+    n_runs: AtomicUsize,
 }
 
 fn encode_values(
@@ -117,6 +122,10 @@ impl NativeThunk {
 
         decode_values(&snap_rt_vals[1..], &snap_types[1..], interp_snapshot);
         let ret = decode_value(snap_rt_vals[0], snap_types[0]);
+
+        #[cfg(test)]
+        self.n_runs
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 
         ret
     }
@@ -463,6 +472,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         sink: Vec::new(),
         snapshot_len: trace.snapshot_map.len() as u16,
         code_size,
+        #[cfg(test)]
+        n_runs: AtomicUsize::new(0),
     }
 }
 
@@ -686,6 +697,8 @@ mod tests {
                 .expect("first run (jit compilation) failed");
         }
 
+        let (trace, _) = vm.get_trace("t").unwrap();
+        trace.dump();
         assert!(vm.trace_ids().len() > 0);
         vm.take_sink(); // ... and discard it
 
@@ -697,6 +710,9 @@ mod tests {
             vm.run_script(code.to_string(), flags)
                 .expect("second run (trace run) failed");
         }
+
+        let (_, thunk) = vm.get_trace("t").unwrap();
+        assert_eq!(thunk.n_runs.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         Output {
             sink: vm.take_sink(),
@@ -722,19 +738,61 @@ mod tests {
             "
             function foo() {
                 __start_trace('t');
-                sink(function() { return 30; })
-                sink(function() { return 90; })
-                sink(function() { return 120; })
-                sink(function() { return 0; })
+                let a = function() { return sink(30); };
+                let b = function() { return sink(90); };
+                let c = function() { return sink(120); };
+                let d = function() { return sink(0); };
+
+
+                d();
+                c();
+                a();
             }
 
             foo();
             ",
         );
 
-        let trace = output.get_trace("t").unwrap();
-        trace.dump();
+        assert_eq!(
+            &[
+                BoxedValue::Number(0.0),
+                BoxedValue::Number(120.0),
+                BoxedValue::Number(30.0),
+            ],
+            &output.sink[..]
+        );
+    }
 
-        assert!(false);
+    #[test]
+    fn test_unsupported_escaping_closures() {
+        let code = "
+            function foo() {
+
+                let a = function() { return sink(999); };
+                let b = function() { return sink(90); };
+                let c = function() { return sink(120); };
+
+                function inner() {
+                    __start_trace('t');
+                    a = function() { return sink(30); };
+                }
+                inner();
+
+                let d = function() { return sink(0); };
+
+                d();
+                c();
+                a();
+            }
+
+            foo();
+        ";
+        let mut vm = interpreter::VM::new();
+        let flags = interpreter::InterpreterFlags {
+            jit_mode: interpreter::JitMode::Compile,
+            ..Default::default()
+        };
+        vm.run_script(code.to_string(), flags).unwrap();
+        assert!(vm.get_trace("t").is_none());
     }
 }
