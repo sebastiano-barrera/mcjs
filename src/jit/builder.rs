@@ -26,10 +26,17 @@ pub struct InconsistentUnbox {
 }
 
 #[derive(Debug, Clone)]
-pub enum Error {
+enum Error {
     Type(TypeError),
     Unsupported(Cow<'static, str>),
     InconsistentUnbox(InconsistentUnbox),
+
+    /// The compiler has encountered code that has been deemed inconvenient/
+    /// not worth it to compile (for the gained performance or implementation
+    /// complexity)
+    ///
+    /// This is an *internal* signal, not for external consumption.
+    UntraceableByDesign,
 }
 impl From<TypeError> for Error {
     fn from(type_err: TypeError) -> Self {
@@ -639,7 +646,7 @@ impl TraceBuilder {
                 );
 
                 self.vars.get_mut(frame_id).set_var(var_id.var_ndx, value);
-                self.set_exit_snapshot_var(var_id.clone(), value);
+                self.set_exit_snapshot_var(var_id.clone(), value)?;
 
                 None
             }
@@ -725,7 +732,13 @@ impl TraceBuilder {
                 let b = self.resolve_operand_as(b, &step.fnid_to_frameid, ValueType::Bool)?;
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
-            interpreter::Instr::ClosureNew { .. } => Some(self.emit(Instr::ClosureNew)?),
+            interpreter::Instr::ClosureNew { .. } => {
+                // This instruction really does nothing.  Its real value is in
+                // assigning the value ID to this "virtual closure" that is being
+                // created. It's a "virtual closure" because it can't escape the
+                // trace (it's UntraceableByDesign); it can only be inlined.
+                Some(self.emit(Instr::ClosureNew)?)
+            }
 
             interpreter::Instr::UnaryMinus(_) => {
                 todo!("(small feat) jit::builder: UnaryMinus")
@@ -957,8 +970,27 @@ impl TraceBuilder {
         })
     }
 
-    fn set_exit_snapshot_var(&mut self, intrp_varid: interpreter::StaticVarId, value_id: ValueId) {
+    fn set_exit_snapshot_var(
+        &mut self,
+        intrp_varid: interpreter::StaticVarId,
+        value_id: ValueId,
+    ) -> Result<(), Error> {
         eprintln!("[..tb add exit snap var {value_id:?} -> {intrp_varid:?}]");
+
+        let instr = self.get_instr(value_id);
+        if let Instr::ClosureNew = instr {
+            // At this point, we know there is at least one case where a
+            // closure that was *created* within the trace is being yielded
+            // back to the interpreter (for example for storage or later call)
+            //
+            // This compiler, at least now, won't support this case.  It
+            // would be very complicated to make the closure valid in the
+            // interpreter's context. For example, you would have to determine
+            // which stack frames have to be created, and create them (so that
+            // the interpreter will be able to access captured variables).
+            // This is a job better left to the interpreter.
+            return Err(Error::UntraceableByDesign);
+        }
 
         let ndx = self
             .snapshot_map
@@ -968,6 +1000,8 @@ impl TraceBuilder {
             self.exit_snapshot_changes.resize(ndx + 1, None);
         }
         self.exit_snapshot_changes[ndx] = Some(value_id);
+
+        Ok(())
     }
 
     pub(crate) fn build(self) -> Option<Trace> {
