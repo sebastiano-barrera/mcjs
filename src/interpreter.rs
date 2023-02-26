@@ -602,7 +602,6 @@ impl<'a> Interpreter<'a> {
             let instr = &instrs[ndx];
             let mut next_ndx = ndx + 1;
             let iid = IID(ndx as u32);
-            let next_iid = IID(next_ndx as u32);
 
             self.print_indent();
             eprintln!("i{:<4} {:?}", ndx, instr);
@@ -892,6 +891,7 @@ impl<'a> Interpreter<'a> {
             }
 
             if let Some(jitting) = &mut self.jitting {
+                let next_iid = IID(next_ndx as u32);
                 let frame_graph = &self.frame_graph;
                 jitting.builder.interpreter_step(&InterpreterStep {
                     values_buf: &values_buf,
