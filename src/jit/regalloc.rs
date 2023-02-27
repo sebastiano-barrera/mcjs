@@ -112,10 +112,11 @@ pub(super) fn allocate_registers(
                 });
                 let value_type = src_instr.result_type().unwrap_or_else(|| {
                     panic!(
-                        "JIT bug: value used but instruction has no value: {:?}",
+                        "JIT bug: value ID used but instruction has no value: {:?}",
                         instr
                     )
                 });
+                eprintln!("regalloc: v{} is {:?}", input_ndx, value_type);
                 if value_type == ValueType::Num {
                     let hreg_ndx = state_num.pick_free();
                     *alloc = Some(HardReg::Numeric(hreg_ndx));

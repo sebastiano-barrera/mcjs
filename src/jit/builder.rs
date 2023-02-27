@@ -225,7 +225,7 @@ impl SnapshotMap {
 
 impl std::fmt::Debug for SnapshotMap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<snapshot ")?;
+        write!(f, "{{snapshot ")?;
         for item in self.items.iter() {
             write!(
                 f,
@@ -235,7 +235,7 @@ impl std::fmt::Debug for SnapshotMap {
                 if item.write_on_exit { '>' } else { ' ' },
             )?;
         }
-        write!(f, ">")
+        write!(f, "}}")
     }
 }
 
@@ -572,8 +572,9 @@ impl TraceBuilder {
                     // rely on it (as an unbox assert).  This creates a more
                     // specialized trace that doesn't waste time and code
                     // checking a box type (which is likely to pass!)
-                    let a = self.ensure_type(a, ValueType::Num)?;
-                    let b = self.ensure_type(b, ValueType::Num)?;
+                    let a = self.ensure_type(a, a_rt_type)?;
+                    let b = self.ensure_type(b, b_rt_type)?;
+
                     let cmp = match (a_rt_type, b_rt_type) {
                         (ValueType::Num, ValueType::Num) => Cmp {
                             ty: ValueType::Num,
@@ -581,11 +582,15 @@ impl TraceBuilder {
                             a,
                             b,
                         },
-                        (at, bt) => {
-                            let msg = format!(
-                                "unsupported operands for comparison: {:?} and {:?}",
-                                at, bt
-                            );
+                        (ValueType::Str, ValueType::Str) => Cmp {
+                            ty: ValueType::Str,
+                            op: *op,
+                            a,
+                            b,
+                        },
+                        _ => {
+                            let msg =
+                                format!("unsupported operand type for comparison: {:?}", a_rt_type);
                             return Err(Error::Unsupported(msg.into()));
                         }
                     };
@@ -1304,7 +1309,10 @@ mod tests {
                 .expect("first run (jit compilation) failed");
         }
 
-        assert!(vm.trace_ids().len() > 0);
+        assert!(
+            vm.trace_ids().len() > 0,
+            "at least 1 trace was expected to be built"
+        );
         vm.take_sink(); // ... and discard it
 
         {
@@ -1362,7 +1370,6 @@ mod tests {
         assert!(PartialEq::eq(pushsink_operands[0], &"b".into()));
     }
 
-    #[ignore]
     #[test]
     fn test_tracing_one_func() {
         let output = quick_jit(
@@ -1382,8 +1389,9 @@ mod tests {
         );
 
         eprint!("trace = ");
-        let trace = output.get_trace("the-trace").unwrap();
+        let (trace, thunk) = output.vm.get_trace("the-trace").unwrap();
         trace.dump();
+        thunk.dump();
 
         // TODO: Run the trace (continue writing this test when traces can be run)
         // TODO(cleanup) Run the trace (continue writing this test when traces can be run)

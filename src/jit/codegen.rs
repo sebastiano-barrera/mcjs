@@ -19,17 +19,55 @@ use super::{BoxedValue, Trace};
 
 pub struct NativeThunk {
     buf: dynasmrt::ExecutableBuffer,
-    snapshot_len: u16,
     entry_offset: dynasmrt::AssemblyOffset,
-    sink: Vec<BoxedValue>,
-    code_size: usize,
 
+    snapshot_len: u16,
+    rt_data: RuntimeData,
+
+    code_size: usize,
     #[cfg(test)]
     n_runs: AtomicUsize,
 }
 
+/// Data available at runtime, accessible from the running trace.
+#[derive(Clone)]
+struct RuntimeData {
+    // TODO Any advantage in splitting const and mtu strs? They can be
+    // distinguished, based on the context of the call to encode_value[s].
+    strs: Vec<String>,
+
+    sink: Vec<BoxedValue>,
+}
+
+type StringId = u64;
+
+impl RuntimeData {
+    fn new() -> Self {
+        RuntimeData {
+            strs: Vec::new(),
+            sink: Vec::new(),
+        }
+    }
+
+    fn add_str(&mut self, value: String) -> StringId {
+        self.strs.push(value);
+        (self.strs.len() - 1) as u64
+    }
+    fn get_str(&self, id: StringId) -> Option<&String> {
+        self.strs.get(id as usize)
+    }
+
+    fn dump(&self) {
+        println!("strs[{}]", self.strs.len());
+        for (ndx, s) in self.strs.iter().enumerate() {
+            println!("  [{}] = [{}]{:?}", ndx, s.len(), s);
+        }
+    }
+}
+
 fn encode_values(
     interpreter_values: &[interpreter::Value],
+    rt_data: &mut RuntimeData,
     rt_vals: &mut [i64],
     types: &mut [ValueType],
 ) {
@@ -38,16 +76,21 @@ fn encode_values(
     assert_eq!(len, types.len());
 
     for i in 0..len {
-        let (val, typ) = encode_value(&interpreter_values[i]);
+        let (val, typ) = encode_value(rt_data, &interpreter_values[i]);
         rt_vals[i] = val;
         types[i] = typ;
     }
 }
 
-fn encode_value(value: &interpreter::Value) -> (i64, ValueType) {
+fn encode_value(rt_data: &mut RuntimeData, value: &interpreter::Value) -> (i64, ValueType) {
     let rt_val: i64 = match value {
         BoxedValue::Number(num) => unsafe { std::mem::transmute_copy(num) },
-        BoxedValue::String(_) => todo!("(big feat) encode string ref (remember the GC!)"),
+        BoxedValue::String(str) => {
+            // TODO Any safe way to avoid having to copy the string?
+            let s = str.clone().into_owned();
+            let sid = rt_data.add_str(s);
+            sid as i64
+        }
         BoxedValue::Bool(bv) => {
             if *bv {
                 1
@@ -67,6 +110,7 @@ fn encode_value(value: &interpreter::Value) -> (i64, ValueType) {
 }
 
 fn decode_values(
+    rt_data: &RuntimeData,
     snap_rt_vals: &[i64],
     snap_types: &[ValueType],
     snapshot_values: &mut [interpreter::Value],
@@ -76,15 +120,20 @@ fn decode_values(
     assert_eq!(len, snapshot_values.len());
 
     for (i, (val, typ)) in snap_rt_vals.iter().zip(snap_types.iter()).enumerate() {
-        snapshot_values[i] = decode_value(*val, *typ);
+        snapshot_values[i] = decode_value(rt_data, *val, *typ);
     }
 }
 
-fn decode_value(rt_val: i64, typ: ValueType) -> interpreter::Value {
+fn decode_value(rt_data: &RuntimeData, rt_val: i64, typ: ValueType) -> interpreter::Value {
     match typ {
         ValueType::Bool => interpreter::Value::Bool(rt_val != 0),
         ValueType::Num => interpreter::Value::Number(unsafe { std::mem::transmute(rt_val) }),
-        ValueType::Str => todo!("(big feat) decode string ref (remember the GC!)"),
+        ValueType::Str => {
+            let sid = rt_val as u64;
+            // TODO Any way to avoid this string copy?
+            let s = rt_data.get_str(sid).unwrap().clone();
+            interpreter::Value::String(s.into())
+        }
         ValueType::Obj => todo!("(big feat) decode object ref (remember the GC!)"),
         ValueType::Null => interpreter::Value::Null,
         ValueType::Undefined => interpreter::Value::Undefined,
@@ -103,6 +152,9 @@ impl NativeThunk {
             );
         }
 
+        // TODO Probably this copy could be saved, at least in part
+        let mut rt_data = self.rt_data.clone();
+
         let ptr = self.buf.ptr(self.entry_offset);
 
         // The first snapshot slot is reserved for the return value, and is not mapped/considered
@@ -111,17 +163,30 @@ impl NativeThunk {
         let mut snap_types = vec![ValueType::Undefined; snap_len + 1];
         encode_values(
             interp_snapshot,
+            &mut rt_data,
             &mut snap_rt_vals[1..],
             &mut snap_types[1..],
         );
 
-        let thunk: extern "C" fn(snapshot_ptr: *mut i64, snapshot_types_ptr: *mut ValueType) =
-            unsafe { std::mem::transmute(ptr) };
+        let thunk: extern "C" fn(
+            snapshot_ptr: *mut i64,
+            snapshot_types_ptr: *mut ValueType,
+            rt_data: *mut RuntimeData,
+        ) = unsafe { std::mem::transmute(ptr) };
 
-        thunk(snap_rt_vals.as_mut_ptr(), snap_types.as_mut_ptr());
+        thunk(
+            snap_rt_vals.as_mut_ptr(),
+            snap_types.as_mut_ptr(),
+            &mut rt_data,
+        );
 
-        decode_values(&snap_rt_vals[1..], &snap_types[1..], interp_snapshot);
-        let ret = decode_value(snap_rt_vals[0], snap_types[0]);
+        decode_values(
+            &rt_data,
+            &snap_rt_vals[1..],
+            &snap_types[1..],
+            interp_snapshot,
+        );
+        let ret = decode_value(&rt_data, snap_rt_vals[0], snap_types[0]);
 
         #[cfg(test)]
         self.n_runs
@@ -150,6 +215,8 @@ impl NativeThunk {
         }
 
         println!("-- Native ({} bytes)", self.code_size);
+        println!("  init runtime data");
+        self.rt_data.dump();
         // String implements FormatterOutput
         let mut line = String::new();
 
@@ -169,13 +236,13 @@ impl NativeThunk {
 /// The following registers are not part of the list, as they are reserved for other purposes:
 ///   - RDI (C func arg #1) points to the snapshot values (runtime encoded).
 ///   - RSI (C func arg #2) points to the array of value types.
+///   - RDX (C func arg #3) points to the RuntimeData.
 ///   - RSP is used as the stack pointer, in order to be compatible with the C calling convention.
 ///   - R15 is a scratch register
-const GP_REGS: [Rq; 14] = [
+const GP_REGS: [Rq; 13] = [
     Rq::RAX,
     Rq::RBX,
     Rq::RCX,
-    Rq::RDX,
     Rq::RSI,
     Rq::RDI,
     Rq::RBP,
@@ -212,6 +279,15 @@ pub extern "C" fn ext_push_sink(value: u64) -> () {
     println!("TODO(big feat): trace: push sink: {value:064b} = {value}");
 }
 
+// This function has the same prototype (as a C function) as the generated
+// code. Since registers RDI, RSI and RDX are reserved (not used by the
+// register allocation) and never touched in any other way, a naked `call`
+// instruction "works" without further register shuffling.
+pub extern "C" fn ext_str_cmp(value: u64) -> () {
+    // Figure out a better way of manipulating the `sink` vector
+    println!("TODO(big feat): trace: push sink: {value:064b} = {value}");
+}
+
 trait HardRegExt {
     fn expect_general(&self) -> Rq;
     fn expect_numeric(&self) -> Rx;
@@ -241,6 +317,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     let snap_len = trace.snapshot_map.len();
     let mut asm = dynasmrt::x64::Assembler::new().unwrap();
+    let mut rt_data = RuntimeData::new();
 
     let get_hreg = |vid| {
         trace
@@ -293,7 +370,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             Instr::Const(value) => {
                 // It is assumed that the IR already "knows" the type of
                 // this value, so we can discard it here
-                let (encoded_value, _) = encode_value(&value);
+                let (encoded_value, _) = encode_value(&mut rt_data, &value);
 
                 match get_hreg(vid) {
                     HardReg::General(regndx) => {
@@ -324,7 +401,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 match op {
                     ArithOp::Add => dynasm!(asm; addsd Rx (tgt.code()), Rx (b.code())),
                     ArithOp::Sub => dynasm!(asm; subsd Rx (tgt.code()), Rx (b.code())),
-                    ArithOp::Mul => todo!("TODO(small feat) mul"),
+                    ArithOp::Mul => dynasm!(asm; mulsd Rx (tgt.code()), Rx (b.code())),
                     ArithOp::Div => todo!("TODO(small feat) div"),
                 }
             }
@@ -358,19 +435,17 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 dynasm!(asm; xor Rq (tgt), Rq (tgt));
             }
             Instr::PushSink(vid) => {
-                let saved_regs = {
-                    let mut saved_regs = vec![Rq::RSI, Rq::RDI, Rq::RAX];
-                    for &areg in used_gps.iter() {
-                        if areg != Rq::RSI
-                            && areg != Rq::RDI
-                            && areg != Rq::RAX
-                            && !is_callee_saved(areg)
-                        {
-                            saved_regs.push(areg);
-                        }
+                let mut saved_regs = vec![Rq::RSI, Rq::RDI, Rq::RAX];
+                for &areg in used_gps.iter() {
+                    if areg != Rq::RSI
+                        && areg != Rq::RDI
+                        && areg != Rq::RAX
+                        && !is_callee_saved(areg)
+                    {
+                        saved_regs.push(areg);
                     }
-                    saved_regs
-                };
+                }
+
                 stack_codegen.start_chunk(asm, &saved_regs, true);
 
                 match get_hreg(*vid) {
@@ -378,10 +453,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     HardReg::Numeric(regndx) => dynasm!(asm; movq rdi, Rx (regndx as u8)),
                 }
 
-                dynasm!(asm
-                ; mov rax, QWORD ext_push_sink as _
-                ; call rax
-                );
+                dynasm!(asm; call func as i32);
 
                 stack_codegen.end_chunk(asm);
             }
@@ -469,9 +541,9 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     NativeThunk {
         buf,
         entry_offset,
-        sink: Vec::new(),
         snapshot_len: trace.snapshot_map.len() as u16,
         code_size,
+        rt_data,
         #[cfg(test)]
         n_runs: AtomicUsize::new(0),
     }
@@ -542,6 +614,11 @@ struct StackCodegen {
     chunks_size: Vec<(u8, u8)>,
 }
 impl StackCodegen {
+    // TODO(big feat) Any way to make sure that start_chunk is coupled with an
+    // end_chunk? Compile-time preferable, but runtime also useful. I had some
+    // asserts in an impl Drop, but it made the program "panic while panicking",
+    // which makes things harder.
+
     fn new() -> Self {
         StackCodegen {
             regs: Vec::new(),
@@ -577,13 +654,6 @@ impl StackCodegen {
     }
 }
 
-impl Drop for StackCodegen {
-    fn drop(&mut self) {
-        assert!(self.regs.is_empty());
-        assert!(self.chunks_size.is_empty());
-    }
-}
-
 fn trace_assert_type(asm: &mut dynasmrt::x64::Assembler, snap_len: usize, reg: Rq, ty: ValueType) {
     let expected_tag = ty as u8;
     // + 1 because the first slot is reserved for the return value
@@ -601,7 +671,7 @@ fn trace_assert_cmp(
     a: HardReg,
     b: HardReg,
 ) {
-    gen_cmp(ty, asm, a, b);
+    gen_cmp(asm, ty, a, b);
     match op {
         CmpOp::GE => dynasm!(asm; jl >abort_trace),
         CmpOp::GT => dynasm!(asm; jle >abort_trace),
@@ -612,21 +682,34 @@ fn trace_assert_cmp(
     };
 }
 
-fn gen_cmp(ty: ValueType, asm: &mut dynasmrt::x64::Assembler, a: HardReg, b: HardReg) {
-    if ValueType::Boxed == ty {
-        let a = a.expect_general();
-        let b = b.expect_general();
-        trace_assert_typetag(asm, a, b);
-    }
-
-    match (a, b) {
-        (HardReg::General(a), HardReg::General(b)) => dynasm!(asm; cmp Rq (a as u8), Rq (b as u8)),
-        (HardReg::Numeric(a), HardReg::Numeric(b)) => {
-            dynasm!(asm; ucomisd Rx (a as u8), Rx (b as u8))
+fn gen_cmp(asm: &mut dynasmrt::x64::Assembler, ty: ValueType, a: HardReg, b: HardReg) {
+    match ty {
+        ValueType::Boxed => {
+            let a = a.expect_general();
+            let b = b.expect_general();
+            trace_assert_typetag(asm, a, b);
         }
-        _ => panic!(
-            "JIT bug: comparisons must be between either general or numeric registers, no mix"
-        ),
+        ValueType::Bool => todo!(),
+        ValueType::Num => {
+            let a = a.expect_numeric();
+            let b = b.expect_numeric();
+            dynasm!(asm; ucomisd Rx (a as u8), Rx (b as u8));
+        }
+        ValueType::Str => {
+            let a = a.expect_general();
+            let b = b.expect_general();
+            dynasm!(asm
+                ; cmp Rq (a.code()), Rq (b.code())
+                ; je >strptreq
+                // TODO TODO TODO
+                ; call ext_str_cmp as _
+                ; strptreq:
+            );
+        }
+        ValueType::Obj => todo!(),
+        ValueType::Null => todo!(),
+        ValueType::Undefined => todo!(),
+        ValueType::Function => todo!(),
     }
 }
 
