@@ -453,7 +453,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     HardReg::Numeric(regndx) => dynasm!(asm; movq rdi, Rx (regndx as u8)),
                 }
 
-                dynasm!(asm; call func as i32);
+                let func = todo!();
+                dynasm!(asm; call ext_push_sink as i32);
 
                 stack_codegen.end_chunk(asm);
             }

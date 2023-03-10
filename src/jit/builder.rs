@@ -1035,7 +1035,8 @@ impl TraceBuilder {
                 }
             }
 
-            let hreg_alloc = regalloc::allocate_registers(instrs.as_slice(), 6, 8);
+            let hreg_alloc: regalloc::Allocation =
+                todo!("regalloc::allocate_registers(instrs.as_slice(), 6, 8)");
             let is_enabled: Vec<_> = instrs
                 .iter()
                 .enumerate()
