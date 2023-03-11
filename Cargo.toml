@@ -9,6 +9,7 @@ edition = "2021"
 dynasm = "1.2.3"
 dynasmrt = "1.2.3"
 lazy_static = "1.4.0"
+rand = "0.8.5"
 slotmap = "1.0.6"
 strum = "0.24.1"
 strum_macros = "0.24.3"
@@ -19,4 +20,5 @@ swc_ecma_parser = "0.124.4"
 
 [dev-dependencies]
 iced-x86 = "1.18.0"
+proptest = "1.1.0"
 
