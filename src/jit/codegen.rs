@@ -9,7 +9,7 @@ use dynasmrt::{DynasmApi, DynasmLabelApi};
 use strum::EnumCount;
 use strum_macros::{EnumCount, EnumIter, FromRepr};
 
-use crate::jit::regalloc::HardReg;
+use crate::jit::regalloc::{HardReg, RegClass};
 use crate::{
     interpreter::{self, ArithOp, CmpOp},
     jit::builder::{Cmp, Instr, ValueId, ValueType},
@@ -295,17 +295,13 @@ trait HardRegExt {
 
 impl HardRegExt for HardReg {
     fn expect_general(&self) -> Rq {
-        match self {
-            HardReg::General(ndx) => GP_REGS[*ndx as usize],
-            _ => panic!("expected a general reg"),
-        }
+        assert!(self.class == RegClass::General, "expected a general reg");
+        GP_REGS[self.index as usize]
     }
 
     fn expect_numeric(&self) -> Rx {
-        match self {
-            HardReg::Numeric(ndx) => NUM_REGS[*ndx as usize],
-            _ => panic!("expected a numeric reg"),
-        }
+        assert!(self.class == RegClass::Numeric, "expected a numeric reg");
+        NUM_REGS[self.index as usize]
     }
 }
 
@@ -373,11 +369,17 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 let (encoded_value, _) = encode_value(&mut rt_data, &value);
 
                 match get_hreg(vid) {
-                    HardReg::General(regndx) => {
+                    HardReg {
+                        class: RegClass::General,
+                        index: regndx,
+                    } => {
                         let reg = GP_REGS[regndx as usize];
                         dynasm!(asm; mov Rq (reg.code()), QWORD encoded_value);
                     }
-                    HardReg::Numeric(regndx) => {
+                    HardReg {
+                        class: RegClass::Numeric,
+                        index: regndx,
+                    } => {
                         let reg = NUM_REGS[regndx as usize];
                         let mem = *num_consts.get(&vid).unwrap();
                         dynasm!(asm; movsd Rx (reg.code()), [=>mem]);
@@ -449,8 +451,14 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 stack_codegen.start_chunk(asm, &saved_regs, true);
 
                 match get_hreg(*vid) {
-                    HardReg::General(regndx) => dynasm!(asm; mov rdi, Rq (regndx as u8)),
-                    HardReg::Numeric(regndx) => dynasm!(asm; movq rdi, Rx (regndx as u8)),
+                    HardReg {
+                        class: RegClass::General,
+                        index: regndx,
+                    } => dynasm!(asm; mov rdi, Rq (regndx as u8)),
+                    HardReg {
+                        class: RegClass::Numeric,
+                        index: regndx,
+                    } => dynasm!(asm; movq rdi, Rx (regndx as u8)),
                 }
 
                 let func = todo!();
@@ -463,12 +471,12 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 let old = get_hreg(*old);
                 let new = get_hreg(*new);
                 if old != new {
-                    match (old, new) {
-                        (HardReg::General(old), HardReg::General(new)) =>
-                            dynasm!(asm; mov Rq (old as u8), Rq (new as u8)),
+                    match (old.class, new.class) {
+                        (RegClass::General, RegClass::General) =>
+                            dynasm!(asm; mov Rq (old.index as u8), Rq (new.index as u8)),
 
-                        (HardReg::Numeric(old), HardReg::Numeric(new)) =>
-                            dynasm!(asm; movsd Rx (old as u8), Rx (new as u8)),
+                        (RegClass::Numeric, RegClass::Numeric) =>
+                            dynasm!(asm; movsd Rx (old.index as u8), Rx (new.index as u8)),
 
                         _ => panic!(
                             "JIT bug: comparisons must be between either general or numeric registers, no mix"
@@ -508,10 +516,16 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 );
 
                 match get_hreg(vid) {
-                    HardReg::General(tgt) => {
+                    HardReg {
+                        class: RegClass::General,
+                        index: tgt,
+                    } => {
                         dynasm!(asm; mov Rq (tgt as u8), QWORD [rdi + 8 * snap_ndx])
                     }
-                    HardReg::Numeric(tgt) => {
+                    HardReg {
+                        class: RegClass::Numeric,
+                        index: tgt,
+                    } => {
                         dynasm!(asm; movsd Rx (tgt as u8), QWORD [rdi + 8 * snap_ndx])
                     }
                 }
@@ -564,10 +578,16 @@ where
     for (ndx, vid_opt) in snap.iter().enumerate() {
         if let Some(vid) = vid_opt {
             match hreg_of(*vid) {
-                HardReg::General(regndx) => {
+                HardReg {
+                    class: RegClass::General,
+                    index: regndx,
+                } => {
                     dynasm!(asm; mov [rbp + 8 * (ndx as i32)], Rq (regndx as u8))
                 }
-                HardReg::Numeric(regndx) => {
+                HardReg {
+                    class: RegClass::Numeric,
+                    index: regndx,
+                } => {
                     dynasm!(asm; movsd [rbp + 8 * (ndx as i32)], Rx (regndx as u8))
                 }
             }
@@ -581,11 +601,17 @@ fn order_used_aregs(trace: &Trace) -> (Vec<Rq>, Vec<Rx>) {
     for vid in trace.iter_vids() {
         if let Some(hreg) = trace.hreg_alloc.hreg_of_instr(vid.clone().into()) {
             match hreg {
-                HardReg::General(ndx) => {
-                    used_gps.insert(GP_REGS.get(ndx as usize).copied().unwrap());
+                HardReg {
+                    class: RegClass::General,
+                    index,
+                } => {
+                    used_gps.insert(GP_REGS.get(index as usize).copied().unwrap());
                 }
-                HardReg::Numeric(ndx) => {
-                    used_nums.insert(NUM_REGS.get(ndx as usize).copied().unwrap());
+                HardReg {
+                    class: RegClass::Numeric,
+                    index,
+                } => {
+                    used_nums.insert(NUM_REGS.get(index as usize).copied().unwrap());
                 }
             }
         }
