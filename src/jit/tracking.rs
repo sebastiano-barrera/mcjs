@@ -106,6 +106,8 @@ impl VarsState {
         self.vid_of_varid.get(&(frame_id, var_ndx)).copied()
     }
     pub(super) fn set_var(&mut self, frame_id: FrameId, var_ndx: VarIndex, value: ValueId) {
+        use std::collections::hash_map::Entry;
+
         // TODO(opt) skip this test if we're not in #[cfg(test)]?
         if let Some(frame) = self.frame_models.get(&frame_id) {
             assert!(usize::from(var_ndx.0) < frame.n_vars);
@@ -120,12 +122,11 @@ impl VarsState {
             .entry((frame_id, var_ndx))
             .or_insert(value);
 
-        let key = (frame_id, var_ndx);
-        if self.first_write_of_varid.contains_key(&key) {
-            // Not the first write
-            self.overwritten_vars.get_mut().insert(key);
+        if let Entry::Vacant(e) = self.first_write_of_varid.entry((frame_id, var_ndx)) {
+            e.insert(value);
         } else {
-            self.first_write_of_varid.insert(key, value);
+            // Not the first write
+            self.overwritten_vars.get_mut().insert((frame_id, var_ndx));
         }
     }
 

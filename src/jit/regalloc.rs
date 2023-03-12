@@ -79,7 +79,7 @@ impl Allocation {
         }
     }
 
-    pub(crate) fn hreg_of_instr(&self, vid: ValueId) -> Option<HardReg> {
+    pub(crate) fn hreg_of_instr(&self, _vid: ValueId) -> Option<HardReg> {
         todo!("delete this method")
     }
 

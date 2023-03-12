@@ -213,7 +213,7 @@ pub enum Instr {
 impl Instr {
     fn read_vars<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = StaticVarId>> {
         Box::new(self.read_operands().filter_map(|oper| match oper {
-            Operand::Var(var_id) => Some(var_id.clone()),
+            Operand::Var(var_id) => Some(*var_id),
             _ => None,
         }))
     }
@@ -331,15 +331,9 @@ pub struct VM {
     traces: HashMap<String, (jit::Trace, jit::NativeThunk)>,
 }
 
+#[derive(Default)]
 pub struct VMOptions {
     pub debug_dump_module: bool,
-}
-impl Default for VMOptions {
-    fn default() -> Self {
-        VMOptions {
-            debug_dump_module: false,
-        }
-    }
 }
 
 pub struct NotADirectoryError(PathBuf);
@@ -374,6 +368,7 @@ impl VM {
     const NFID_REQUIRE: u32 = 1;
     const NFID_STRING_NEW: u32 = 2;
 
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         VM {
             include_paths: Vec::new(),
@@ -544,7 +539,7 @@ impl<'a> Interpreter<'a> {
     fn get_operand(
         &self,
         operand: &Operand,
-        values_buf: &Vec<Value>,
+        values_buf: &[Value],
         cur_fid: stack::FrameId,
     ) -> Value {
         // TODO(cleanup) Refactor this mess
@@ -559,7 +554,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value> {
         let func = module.fns.get(&closure.fnid).unwrap();
 
-        let lexical_parent = closure.lexical_parent.clone();
+        let lexical_parent = closure.lexical_parent;
         let n_local_vars = func.n_slots as usize;
         let frame = self
             .frame_graph
@@ -611,8 +606,8 @@ impl<'a> Interpreter<'a> {
                     values_buf[ndx] = value.clone();
                 }
                 Instr::Arith { op, a, b } => {
-                    let a = self.get_operand(a, &mut values_buf, cur_frame_id);
-                    let b = self.get_operand(b, &mut values_buf, cur_frame_id);
+                    let a = self.get_operand(a, &values_buf, cur_frame_id);
+                    let b = self.get_operand(b, &values_buf, cur_frame_id);
 
                     if let (Value::Number(a), Value::Number(b)) = (&a, &b) {
                         values_buf[ndx] = Value::Number(match op {
@@ -626,12 +621,12 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::PushSink(operand) => {
-                    let value = self.get_operand(operand, &mut values_buf, cur_frame_id);
+                    let value = self.get_operand(operand, &values_buf, cur_frame_id);
                     self.sink.push(value);
                 }
                 Instr::Cmp { op, a, b } => {
-                    let a = self.get_operand(a, &mut values_buf, cur_frame_id);
-                    let b = self.get_operand(b, &mut values_buf, cur_frame_id);
+                    let a = self.get_operand(a, &values_buf, cur_frame_id);
+                    let b = self.get_operand(b, &values_buf, cur_frame_id);
 
                     match (&a, &b) {
                         (Value::Number(a), Value::Number(b)) => {
@@ -667,7 +662,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::JmpIf { cond, dest } => {
-                    let cond_value = self.get_operand(cond, &mut values_buf, cur_frame_id);
+                    let cond_value = self.get_operand(cond, &values_buf, cur_frame_id);
                     match cond_value {
                         Value::Bool(true) => {
                             next_ndx = dest.0 as usize;
@@ -719,7 +714,7 @@ impl<'a> Interpreter<'a> {
                             eprintln!("      : call {closure:?}",);
 
                             if let Some(jitting) = &mut self.jitting {
-                                jitting.builder.set_args(&args, &|fnid| {
+                                jitting.builder.set_args(args, &|fnid| {
                                     self.frame_graph
                                         .get_lexical_scope(cur_frame_id, fnid)
                                         .unwrap()
@@ -789,7 +784,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::TypeOf(arg) => {
                     let value = self.get_operand(arg, &values_buf, cur_frame_id);
-                    values_buf[ndx] = value.js_typeof().into();
+                    values_buf[ndx] = value.js_typeof();
                 }
                 Instr::BoolOp { op, a, b } => {
                     let a: bool = self
@@ -807,7 +802,7 @@ impl<'a> Interpreter<'a> {
                 Instr::ClosureNew { fnid } => {
                     let closure = Closure {
                         fnid: *fnid,
-                        lexical_parent: Some(cur_frame_id.clone()),
+                        lexical_parent: Some(cur_frame_id),
                     };
                     self.print_indent();
                     eprintln!("      created closure: {:?}", closure);
@@ -854,11 +849,7 @@ impl<'a> Interpreter<'a> {
                             .iter()
                             .map(|snapitem| {
                                 if snapitem.write_on_entry {
-                                    self.get_operand(
-                                        &snapitem.operand,
-                                        &mut values_buf,
-                                        cur_frame_id,
-                                    )
+                                    self.get_operand(&snapitem.operand, &values_buf, cur_frame_id)
                                 } else {
                                     Value::Undefined
                                 }
@@ -896,7 +887,7 @@ impl<'a> Interpreter<'a> {
                 jitting.builder.interpreter_step(&InterpreterStep {
                     values_buf: &values_buf,
                     fnid: closure.fnid,
-                    func: &func,
+                    func,
                     iid,
                     next_iid,
                     fnid_to_frameid: &|fnid| {
@@ -922,7 +913,7 @@ impl<'a> Interpreter<'a> {
 
 fn resolve_operand(
     operand: &Operand,
-    values_buf: &Vec<Value>,
+    values_buf: &[Value],
     frame_graph: &stack::FrameGraph,
     cur_fid: stack::FrameId,
 ) -> Value {
@@ -937,7 +928,7 @@ fn resolve_operand(
         }
         Operand::Var(var_id) => {
             let fid = frame_graph.get_lexical_scope(cur_fid, var_id.fnid).unwrap();
-            let value = frame_graph.get_var(fid, var_id.var_ndx).unwrap().clone();
+            let value = frame_graph.get_var(fid, var_id.var_ndx).unwrap();
             //  TODO(cleanup) Move to a global logger. This is just for debugging!
             //  self.print_indent();
             eprintln!("      ↑  {:?} = {:?}", var_id, value);
@@ -1080,20 +1071,19 @@ fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
                 let dest_ndx = dest.0 as usize;
                 let mut interloop_vars = HashSet::new();
                 let mut reads = HashSet::new();
-                for ndx in dest_ndx..end_ndx {
-                    let inst = &instrs[ndx];
+                for inst in &instrs[dest_ndx..end_ndx] {
                     for read_var in inst.read_vars() {
                         reads.insert(read_var);
                     }
 
                     if let Instr::Set { var_id, .. } = inst {
                         if reads.remove(var_id) {
-                            interloop_vars.insert(var_id.clone());
+                            interloop_vars.insert(*var_id);
                         }
                     }
                 }
 
-                heads.insert(dest.clone(), LoopInfo { interloop_vars });
+                heads.insert(*dest, LoopInfo { interloop_vars });
             }
             _ => {}
         }

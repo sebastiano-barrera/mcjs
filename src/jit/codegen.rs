@@ -127,7 +127,7 @@ fn decode_values(
 fn decode_value(rt_data: &RuntimeData, rt_val: i64, typ: ValueType) -> interpreter::Value {
     match typ {
         ValueType::Bool => interpreter::Value::Bool(rt_val != 0),
-        ValueType::Num => interpreter::Value::Number(unsafe { std::mem::transmute(rt_val) }),
+        ValueType::Num => interpreter::Value::Number(f64::from_bits(rt_val as u64)),
         ValueType::Str => {
             let sid = rt_val as u64;
             // TODO Any way to avoid this string copy?
@@ -186,6 +186,7 @@ impl NativeThunk {
             &snap_types[1..],
             interp_snapshot,
         );
+
         let ret = decode_value(&rt_data, snap_rt_vals[0], snap_types[0]);
 
         #[cfg(test)]
@@ -274,7 +275,7 @@ const NUM_REGS: [Rx; 16] = [
     Rx::XMM15,
 ];
 
-pub extern "C" fn ext_push_sink(value: u64) -> () {
+pub extern "C" fn ext_push_sink(value: u64) {
     // Figure out a better way of manipulating the `sink` vector
     println!("TODO(big feat): trace: push sink: {value:064b} = {value}");
 }
@@ -283,7 +284,7 @@ pub extern "C" fn ext_push_sink(value: u64) -> () {
 // code. Since registers RDI, RSI and RDX are reserved (not used by the
 // register allocation) and never touched in any other way, a naked `call`
 // instruction "works" without further register shuffling.
-pub extern "C" fn ext_str_cmp(value: u64) -> () {
+pub extern "C" fn ext_str_cmp(value: u64) {
     // Figure out a better way of manipulating the `sink` vector
     println!("TODO(big feat): trace: push sink: {value:064b} = {value}");
 }
@@ -333,13 +334,11 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     let num_consts = {
         let mut map = HashMap::new();
         for (vid, instr) in trace.iter_instrs() {
-            if let Instr::Const(value) = instr {
-                if let BoxedValue::Number(num) = value {
-                    let lbl = asm.new_dynamic_label();
-                    let num_raw = num.to_bits() as i64;
-                    dynasm!(asm; =>lbl; .qword num_raw);
-                    map.insert(vid, lbl);
-                }
+            if let Instr::Const(BoxedValue::Number(num)) = instr {
+                let lbl = asm.new_dynamic_label();
+                let num_raw = num.to_bits() as i64;
+                dynasm!(asm; =>lbl; .qword num_raw);
+                map.insert(vid, lbl);
             }
         }
 
@@ -366,7 +365,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             Instr::Const(value) => {
                 // It is assumed that the IR already "knows" the type of
                 // this value, so we can discard it here
-                let (encoded_value, _) = encode_value(&mut rt_data, &value);
+                let (encoded_value, _) = encode_value(&mut rt_data, value);
 
                 match get_hreg(vid) {
                     HardReg {
@@ -419,7 +418,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 cond: cmp,
                 pre_snap_update,
             } => {
-                write_snapshot(asm, &pre_snap_update, get_hreg);
+                write_snapshot(asm, pre_snap_update, get_hreg);
                 let a = get_hreg(cmp.a);
                 let b = get_hreg(cmp.b);
                 trace_assert_cmp(asm, cmp.ty, cmp.op, a, b);
@@ -454,11 +453,11 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     HardReg {
                         class: RegClass::General,
                         index: regndx,
-                    } => dynasm!(asm; mov rdi, Rq (regndx as u8)),
+                    } => dynasm!(asm; mov rdi, Rq (regndx)),
                     HardReg {
                         class: RegClass::Numeric,
                         index: regndx,
-                    } => dynasm!(asm; movq rdi, Rx (regndx as u8)),
+                    } => dynasm!(asm; movq rdi, Rx (regndx)),
                 }
 
                 let func = todo!();
@@ -473,10 +472,10 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 if old != new {
                     match (old.class, new.class) {
                         (RegClass::General, RegClass::General) =>
-                            dynasm!(asm; mov Rq (old.index as u8), Rq (new.index as u8)),
+                            dynasm!(asm; mov Rq (old.index), Rq (new.index)),
 
                         (RegClass::Numeric, RegClass::Numeric) =>
-                            dynasm!(asm; movsd Rx (old.index as u8), Rx (new.index as u8)),
+                            dynasm!(asm; movsd Rx (old.index), Rx (new.index)),
 
                         _ => panic!(
                             "JIT bug: comparisons must be between either general or numeric registers, no mix"
@@ -520,16 +519,16 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                         class: RegClass::General,
                         index: tgt,
                     } => {
-                        dynasm!(asm; mov Rq (tgt as u8), QWORD [rdi + 8 * snap_ndx])
+                        dynasm!(asm; mov Rq (tgt), QWORD [rdi + 8 * snap_ndx])
                     }
                     HardReg {
                         class: RegClass::Numeric,
                         index: tgt,
                     } => {
-                        dynasm!(asm; movsd Rx (tgt as u8), QWORD [rdi + 8 * snap_ndx])
+                        dynasm!(asm; movsd Rx (tgt), QWORD [rdi + 8 * snap_ndx])
                     }
                 }
-                write_snapshot(asm, &post_snap_update, get_hreg);
+                write_snapshot(asm, post_snap_update, get_hreg);
             }
         }
     };
@@ -556,7 +555,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     NativeThunk {
         buf,
         entry_offset,
-        snapshot_len: trace.snapshot_map.len() as u16,
+        snapshot_len: trace.snapshot_map.len(),
         code_size,
         rt_data,
         #[cfg(test)]
@@ -565,10 +564,10 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 }
 
 fn is_callee_saved(areg: Rq) -> bool {
-    match areg {
-        Rq::RBX | Rq::RSP | Rq::RBP | Rq::R12 | Rq::R13 | Rq::R14 | Rq::R15 => true,
-        _ => false,
-    }
+    matches!(
+        areg,
+        Rq::RBX | Rq::RSP | Rq::RBP | Rq::R12 | Rq::R13 | Rq::R14 | Rq::R15
+    )
 }
 
 fn write_snapshot<H>(asm: &mut dynasmrt::x64::Assembler, snap: &[Option<ValueId>], hreg_of: H)
@@ -582,13 +581,13 @@ where
                     class: RegClass::General,
                     index: regndx,
                 } => {
-                    dynasm!(asm; mov [rbp + 8 * (ndx as i32)], Rq (regndx as u8))
+                    dynasm!(asm; mov [rbp + 8 * (ndx as i32)], Rq (regndx))
                 }
                 HardReg {
                     class: RegClass::Numeric,
                     index: regndx,
                 } => {
-                    dynasm!(asm; movsd [rbp + 8 * (ndx as i32)], Rx (regndx as u8))
+                    dynasm!(asm; movsd [rbp + 8 * (ndx as i32)], Rx (regndx))
                 }
             }
         }
@@ -599,7 +598,7 @@ fn order_used_aregs(trace: &Trace) -> (Vec<Rq>, Vec<Rx>) {
     let mut used_gps = HashSet::new();
     let mut used_nums = HashSet::new();
     for vid in trace.iter_vids() {
-        if let Some(hreg) = trace.hreg_alloc.hreg_of_instr(vid.clone().into()) {
+        if let Some(hreg) = trace.hreg_alloc.hreg_of_instr(vid) {
             match hreg {
                 HardReg {
                     class: RegClass::General,

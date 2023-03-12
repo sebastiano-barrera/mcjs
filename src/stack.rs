@@ -28,8 +28,8 @@ impl FrameGraph {
         }
     }
 
-    pub(crate) fn new_frame<'a>(
-        &'a mut self,
+    pub(crate) fn new_frame(
+        &mut self,
         fnid: FnId,
         n_local_vars: usize,
         lexical_parent: Option<FrameId>,
@@ -65,7 +65,7 @@ impl FrameGraph {
             if frame.fnid == fnid {
                 return Some(fid);
             }
-            fid = frame.lexical_parent?.clone();
+            fid = frame.lexical_parent?;
         }
     }
 }

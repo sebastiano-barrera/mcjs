@@ -44,7 +44,7 @@ impl Compiler {
         let res = compile_module(builder, &ast_module)
             .with_context(error!("while compiling module: {filename}"));
         if let Err(err) = &res {
-            eprintln!("\nbytecode compiler error: {}\n", err.message(&*source_map));
+            eprintln!("\nbytecode compiler error: {}\n", err.message(&source_map));
         }
 
         res
@@ -343,7 +343,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::While(while_stmt) => {
             let while_header_iid = builder.peek_iid();
             let condition = compile_expr(builder, &while_stmt.test)?;
-            let neg_condition = builder.emit(Instr::Not(condition.into()));
+            let neg_condition = builder.emit(Instr::Not(condition));
             let jmpif = builder.reserve();
             compile_stmt(builder, &while_stmt.body)?;
             builder.emit(Instr::Jmp(while_header_iid));
@@ -388,7 +388,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 let end: IID = builder.peek_iid();
 
                 *builder.get_mut(jmpif).unwrap() = Instr::JmpIf {
-                    cond: condition.into(),
+                    cond: condition,
                     dest: if_true_start,
                 };
                 *builder.get_mut(jmp_end).unwrap() = Instr::Jmp(end);
@@ -400,7 +400,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 //          < if true >
                 // END      < rest... >
 
-                let neg_condition = builder.emit(Instr::Not(condition.into()));
+                let neg_condition = builder.emit(Instr::Not(condition));
                 let jmpif = builder.reserve();
                 compile_stmt(builder, &if_stmt.cons)?;
                 let end: IID = builder.peek_iid();
@@ -468,7 +468,7 @@ fn compile_function(
         panic!("unsupported: TypeScript syntax (return type)");
     }
 
-    builder.start_function(name.clone(), func.params.as_slice());
+    builder.start_function(name, func.params.as_slice());
 
     let stmts = &func.body.as_ref().expect("function without body?!").stmts;
     for stmt in stmts {
@@ -529,7 +529,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                     let sym = callee.sym.as_ref();
                     if sym == "sink" {
                         for arg in args {
-                            let value = compile_expr(builder, &arg.expr)?.into();
+                            let value = compile_expr(builder, &arg.expr)?;
                             builder.emit(Instr::PushSink(value));
                         }
 
@@ -563,11 +563,11 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                         panic!("unsupported: spread function parameter: function(a, b, ...)");
                     }
                     let iid = compile_expr(builder, &arg.expr)?;
-                    args_iids.push(iid.into());
+                    args_iids.push(iid);
                 }
                 return Ok(builder
                     .emit(Instr::Call {
-                        callee: fn_iid.into(),
+                        callee: fn_iid,
                         args: args_iids,
                     })
                     .into());
@@ -580,8 +580,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
         }
 
         Expr::Bin(bin_expr) => {
-            let a = compile_expr(builder, &bin_expr.left)?.into();
-            let b = compile_expr(builder, &bin_expr.right)?.into();
+            let a = compile_expr(builder, &bin_expr.left)?;
+            let b = compile_expr(builder, &bin_expr.right)?;
 
             let arith = |op, a, b| Instr::Arith { a, b, op };
             let cmp = |op, a, b| Instr::Cmp { a, b, op };
@@ -627,7 +627,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
         }
 
         Expr::Ident(ident) => {
-            let value = if ident.sym == JsWord::from("undefined") {
+            let value = if &ident.sym == "undefined" {
                 Operand::Value(Value::Undefined)
             } else {
                 let var_id = get_var(builder, ident)?;
@@ -741,14 +741,14 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                     value: value.clone(),
                 });
             }
-            Ok(value.into())
+            Ok(value)
         }
 
         Expr::Unary(unary_expr) => {
             match unary_expr.op {
                 swc_ecma_ast::UnaryOp::Bang => {
                     let arg = compile_expr(builder, &unary_expr.arg)?;
-                    Ok(builder.emit(Instr::Not(arg.into())).into())
+                    Ok(builder.emit(Instr::Not(arg)).into())
                 }
                 swc_ecma_ast::UnaryOp::TypeOf => {
                     let arg = compile_expr(builder, &unary_expr.arg)?;
@@ -890,7 +890,7 @@ fn compile_assignment_rhs(
     asmt: &swc_ecma_ast::AssignExpr,
     target_operand: &Operand,
 ) -> Result<Operand> {
-    let right = compile_expr(builder, &asmt.right)?.into();
+    let right = compile_expr(builder, &asmt.right)?;
     let value = match asmt.op {
         AssignOp::Assign => right,
         AssignOp::AddAssign => builder

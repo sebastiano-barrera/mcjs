@@ -177,7 +177,7 @@ impl SnapshotMap {
     }
 
     pub(super) fn len(&self) -> u16 {
-        self.items.len() as u16
+        self.items.len().try_into().unwrap()
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &SnapshotMapItem> {
@@ -328,7 +328,7 @@ impl TraceBuilder {
                         assert_eq!(1, stack_depth);
 
                         let param = self.add_entry_snapshot_var(intrp_operand)?;
-                        self.vars.set_result(*iid, param.clone());
+                        self.vars.set_result(*iid, param);
                         Ok(param)
                     }
                 }
@@ -340,12 +340,11 @@ impl TraceBuilder {
 
                 let slot = self.vars.get_var(frame_id, var_ndx);
                 if let Some(value) = slot {
-                    return Ok(value.clone());
+                    return Ok(value);
                 }
 
                 let vid = self.add_entry_snapshot_var(intrp_operand)?;
-                self.vars
-                    .set_var(frame_id, intrp_varid.var_ndx, vid.clone());
+                self.vars.set_var(frame_id, intrp_varid.var_ndx, vid);
                 Ok(vid)
             }
         }
@@ -532,13 +531,12 @@ impl TraceBuilder {
             interpreter::Instr::Nop => None,
             interpreter::Instr::Const(value) => Some(self.emit(Instr::Const(value.clone()))?),
             interpreter::Instr::Not(oper) => {
-                let oper =
-                    self.resolve_operand_as(&oper, &step.fnid_to_frameid, ValueType::Bool)?;
+                let oper = self.resolve_operand_as(oper, step.fnid_to_frameid, ValueType::Bool)?;
                 Some(self.emit(Instr::Not(oper))?)
             }
             interpreter::Instr::Arith { op, a, b } => {
-                let a = self.resolve_operand_as(&a, &step.fnid_to_frameid, ValueType::Num)?;
-                let b = self.resolve_operand_as(&b, &step.fnid_to_frameid, ValueType::Num)?;
+                let a = self.resolve_operand_as(a, step.fnid_to_frameid, ValueType::Num)?;
+                let b = self.resolve_operand_as(b, step.fnid_to_frameid, ValueType::Num)?;
                 Some(self.emit(Instr::Arith { op: *op, a, b })?)
             }
             interpreter::Instr::Cmp { op, a, b } => {
@@ -557,8 +555,8 @@ impl TraceBuilder {
                     rt_ty
                 };
 
-                let a = self.resolve_interpreter_operand(&a, &step.fnid_to_frameid)?;
-                let b = self.resolve_interpreter_operand(&b, &step.fnid_to_frameid)?;
+                let a = self.resolve_interpreter_operand(a, step.fnid_to_frameid)?;
+                let b = self.resolve_interpreter_operand(b, step.fnid_to_frameid)?;
 
                 let instr = if let (Instr::Const(_), Instr::Const(_)) =
                     (self.get_instr(a), self.get_instr(b))
@@ -601,8 +599,7 @@ impl TraceBuilder {
                 Some(self.emit(instr)?)
             }
             interpreter::Instr::JmpIf { cond, .. } => {
-                let cond =
-                    self.resolve_operand_as(&cond, &step.fnid_to_frameid, ValueType::Bool)?;
+                let cond = self.resolve_operand_as(cond, step.fnid_to_frameid, ValueType::Bool)?;
 
                 match self.get_instr(cond) {
                     Instr::Const(_) => None,
@@ -640,7 +637,7 @@ impl TraceBuilder {
                 None
             }
             interpreter::Instr::Set { var_id, value } => {
-                let value = self.resolve_interpreter_operand(value, &step.fnid_to_frameid)?;
+                let value = self.resolve_interpreter_operand(value, step.fnid_to_frameid)?;
                 let frame_id = (step.fnid_to_frameid)(var_id.fnid);
 
                 print_indent(self.stack_depth());
@@ -653,13 +650,13 @@ impl TraceBuilder {
                 self.vars.set_var(frame_id, var_id.var_ndx, value);
 
                 if is_outside_trace {
-                    self.set_exit_snapshot_var(var_id.clone(), value)?;
+                    self.set_exit_snapshot_var(*var_id, value)?;
                 }
 
                 None
             }
             interpreter::Instr::PushSink(value) => {
-                let value = self.resolve_interpreter_operand(&value, &step.fnid_to_frameid)?;
+                let value = self.resolve_interpreter_operand(value, step.fnid_to_frameid)?;
                 self.emit(Instr::PushSink(value))?;
                 None
             }
@@ -667,9 +664,9 @@ impl TraceBuilder {
                 self.exit_function_expected = true;
 
                 let value = if self.stack_depth() == 1 {
-                    self.resolve_operand_as(&value, &step.fnid_to_frameid, ValueType::Boxed)?
+                    self.resolve_operand_as(value, step.fnid_to_frameid, ValueType::Boxed)?
                 } else {
-                    self.resolve_interpreter_operand(&value, &step.fnid_to_frameid)?
+                    self.resolve_interpreter_operand(value, step.fnid_to_frameid)?
                 };
 
                 self.return_value = Some(value);
@@ -684,7 +681,7 @@ impl TraceBuilder {
                         post_snap_update,
                     })?
                 } else {
-                    self.vars.get_arg(*index).clone()
+                    *self.vars.get_arg(*index)
                 };
                 Some(value)
             }
@@ -710,17 +707,17 @@ impl TraceBuilder {
 
             interpreter::Instr::ObjNew => Some(self.emit(Instr::ObjNew)?),
             interpreter::Instr::ObjSet { obj, key, value } => {
-                let obj = self.resolve_operand_as(obj, &step.fnid_to_frameid, ValueType::Obj)?;
-                let key = self.resolve_operand_as(key, &step.fnid_to_frameid, ValueType::Str)?;
+                let obj = self.resolve_operand_as(obj, step.fnid_to_frameid, ValueType::Obj)?;
+                let key = self.resolve_operand_as(key, step.fnid_to_frameid, ValueType::Str)?;
                 let value =
-                    self.resolve_operand_as(value, &step.fnid_to_frameid, ValueType::Boxed)?;
+                    self.resolve_operand_as(value, step.fnid_to_frameid, ValueType::Boxed)?;
 
                 self.emit(Instr::ObjSet { obj, key, value })?;
                 None
             }
             interpreter::Instr::ObjGet { obj, key } => {
-                let obj = self.resolve_operand_as(obj, &step.fnid_to_frameid, ValueType::Obj)?;
-                let key = self.resolve_operand_as(key, &step.fnid_to_frameid, ValueType::Str)?;
+                let obj = self.resolve_operand_as(obj, step.fnid_to_frameid, ValueType::Obj)?;
+                let key = self.resolve_operand_as(key, step.fnid_to_frameid, ValueType::Str)?;
 
                 Some(self.emit(Instr::ObjGet { obj, key })?)
             }
@@ -731,13 +728,13 @@ impl TraceBuilder {
                 todo!("(big feat) array push")
             }
             interpreter::Instr::TypeOf(arg) => {
-                let arg = self.resolve_interpreter_operand(arg, &step.fnid_to_frameid)?;
+                let arg = self.resolve_interpreter_operand(arg, step.fnid_to_frameid)?;
                 Some(self.emit(Instr::TypeOf(arg))?)
             }
 
             interpreter::Instr::BoolOp { op, a, b } => {
-                let a = self.resolve_operand_as(a, &step.fnid_to_frameid, ValueType::Bool)?;
-                let b = self.resolve_operand_as(b, &step.fnid_to_frameid, ValueType::Bool)?;
+                let a = self.resolve_operand_as(a, step.fnid_to_frameid, ValueType::Bool)?;
+                let b = self.resolve_operand_as(b, step.fnid_to_frameid, ValueType::Bool)?;
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
             interpreter::Instr::ClosureNew { .. } => {
@@ -807,8 +804,7 @@ impl TraceBuilder {
 
         let args_values = args
             .iter()
-            .map(|arg| self.resolve_interpreter_operand(arg, fnid_to_frameid))
-            .flatten()
+            .flat_map(|arg| self.resolve_interpreter_operand(arg, fnid_to_frameid))
             .collect();
         self.args_buf = Some(args_values);
     }
@@ -962,27 +958,25 @@ impl TraceBuilder {
         print_indent(self.stack_depth());
         eprintln!("[..tb emit: v{:<4} {:?}]", vid.0, instr);
         self.instrs.push(instr);
-        Ok(vid.into())
+        Ok(vid)
     }
 
     fn take_exit_snapshot(&mut self) -> Result<Vec<Option<ValueId>>, Error> {
         let post_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
-        for vid in &post_snap_update {
-            if let Some(vid) = vid {
-                let instr = self.get_instr(*vid);
-                if let Instr::ClosureNew = instr {
-                    // At this point, we know there is at least one case where a
-                    // closure that was *created* within the trace is being yielded
-                    // back to the interpreter (for example for storage or later call)
-                    //
-                    // This compiler, at least now, won't support this case.  It
-                    // would be very complicated to make the closure valid in the
-                    // interpreter's context. For example, you would have to determine
-                    // which stack frames have to be created, and create them (so that
-                    // the interpreter will be able to access captured variables).
-                    // This is a job better left to the interpreter.
-                    return Err(Error::UntraceableByDesign);
-                }
+        for vid in post_snap_update.iter().flatten() {
+            let instr = self.get_instr(*vid);
+            if let Instr::ClosureNew = instr {
+                // At this point, we know there is at least one case where a
+                // closure that was *created* within the trace is being yielded
+                // back to the interpreter (for example for storage or later call)
+                //
+                // This compiler, at least now, won't support this case.  It
+                // would be very complicated to make the closure valid in the
+                // interpreter's context. For example, you would have to determine
+                // which stack frames have to be created, and create them (so that
+                // the interpreter will be able to access captured variables).
+                // This is a job better left to the interpreter.
+                return Err(Error::UntraceableByDesign);
             }
         }
         Ok(post_snap_update)
@@ -1205,8 +1199,8 @@ impl Instr {
             Instr::ExitUnless { .. } => None,
             Instr::PushSink(_) => None,
             Instr::Return(_) => None,
-            Instr::GetArg { ty, .. } => Some(ty.clone()),
-            Instr::Choose { ty, .. } => Some(ty.clone()),
+            Instr::GetArg { ty, .. } => Some(*ty),
+            Instr::Choose { ty, .. } => Some(*ty),
             Instr::Num2Str(_) => Some(ValueType::Str),
             Instr::ObjNew => Some(ValueType::Obj),
             Instr::ObjSet { .. } => None,
@@ -1215,7 +1209,7 @@ impl Instr {
             Instr::ClosureNew => Some(ValueType::Function),
             Instr::Const(val) => Some(ValueType::of(val)),
             Instr::Phi(_, _) => None,
-            Instr::GetSnapshotItem { ty, .. } => Some(ty.clone()),
+            Instr::GetSnapshotItem { ty, .. } => Some(*ty),
             Instr::Box(_) => Some(ValueType::Boxed),
         }
     }

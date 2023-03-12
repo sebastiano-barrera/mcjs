@@ -39,7 +39,7 @@ impl Trace {
                 None => "--".into(),
             };
 
-            let hreg_opt = self.hreg_alloc.hreg_of_instr(vid.clone().into());
+            let hreg_opt = self.hreg_alloc.hreg_of_instr(vid);
             let hreg: Cow<'static, str> = if let Some(hreg) = hreg_opt {
                 format!("{:?}", hreg).into()
             } else {
@@ -74,12 +74,13 @@ impl Trace {
         self.instrs.get(vid.0 as usize)
     }
 
+    #[allow(clippy::needless_lifetimes)]
     fn iter_vids<'a>(&'a self) -> impl 'a + Iterator<Item = ValueId> {
         (0..self.instrs.len())
             .filter(|ndx| self.is_enabled[*ndx])
             .map(|ndx| ValueId(ndx as u32))
     }
-    fn iter_instrs<'a>(&'a self) -> impl 'a + Iterator<Item = (ValueId, &Instr)> {
+    fn iter_instrs(&self) -> impl Iterator<Item = (ValueId, &Instr)> {
         self.iter_vids()
             .map(|vid| (vid, self.instrs.get(vid.0 as usize).unwrap()))
     }

@@ -22,7 +22,7 @@ impl Mask {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.iter().all(|x| *x == false)
+        self.0.iter().all(|x| !(*x))
     }
 }
 
