@@ -1029,8 +1029,11 @@ impl TraceBuilder {
                 }
             }
 
+            // let constraints = HashMap::new();
+
             let hreg_alloc: regalloc::Allocation =
-                todo!("regalloc::allocate_registers(instrs.as_slice(), 6, 8)");
+                todo!("regalloc::allocate_registers(&instrs, &constraints, 6, 8)");
+
             let is_enabled: Vec<_> = instrs
                 .iter()
                 .enumerate()
@@ -1189,6 +1192,34 @@ impl From<Cmp> for Instr {
     }
 }
 
+const MAX_OPERANDS_PER_INSTR: usize = 4;
+pub(super) struct OperandsSet([Option<ValueId>; MAX_OPERANDS_PER_INSTR]);
+
+impl OperandsSet {
+    pub(super) fn none() -> Self {
+        Default::default()
+    }
+    pub(super) fn iter(&self) -> impl ExactSizeIterator<Item = &Option<ValueId>> {
+        self.0.iter()
+    }
+}
+
+impl Default for OperandsSet {
+    fn default() -> Self {
+        OperandsSet([None; MAX_OPERANDS_PER_INSTR])
+    }
+}
+impl From<&[ValueId]> for OperandsSet {
+    fn from(vids: &[ValueId]) -> Self {
+        assert!(vids.len() <= MAX_OPERANDS_PER_INSTR);
+        let mut arr = [None; MAX_OPERANDS_PER_INSTR];
+        for i in 0..vids.len() {
+            arr[i] = Some(vids[i]);
+        }
+        OperandsSet(arr)
+    }
+}
+
 impl Instr {
     pub(super) fn result_type(&self) -> Option<ValueType> {
         match self {
@@ -1214,38 +1245,38 @@ impl Instr {
         }
     }
 
-    pub(super) fn operands<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = &'a ValueId>> {
+    pub(super) fn operands(&self) -> OperandsSet {
         use std::iter::once;
         match self {
-            Instr::Not(arg) => Box::new(once(arg)),
-            Instr::Arith { a, b, .. } => Box::new([a, b].into_iter()),
-            Instr::Cmp(Cmp { a, b, .. }) => Box::new([a, b].into_iter()),
-            Instr::BoolOp { a, b, .. } => Box::new([a, b].into_iter()),
+            Instr::Not(arg) => [*arg].as_slice().into(),
+            Instr::Arith { a, b, .. } => [*a, *b].as_slice().into(),
+            Instr::Cmp(Cmp { a, b, .. }) => [*a, *b].as_slice().into(),
+            Instr::BoolOp { a, b, .. } => [*a, *b].as_slice().into(),
             Instr::Choose {
                 cond,
                 if_true,
                 if_false,
                 ..
-            } => Box::new([cond, if_true, if_false].into_iter()),
+            } => [*cond, *if_true, *if_false].as_slice().into(),
             Instr::ExitUnless {
                 cond: Cmp { a, b, .. },
                 ..
-            } => Box::new([a, b].into_iter()),
-            Instr::Num2Str(arg) => Box::new([arg].into_iter()),
-            Instr::PushSink(arg) => Box::new([arg].into_iter()),
-            Instr::Return(arg) => Box::new([arg].into_iter()),
+            } => [*a, *b].as_slice().into(),
+            Instr::Num2Str(arg) => [*arg].as_slice().into(),
+            Instr::PushSink(arg) => [*arg].as_slice().into(),
+            Instr::Return(arg) => [*arg].as_slice().into(),
 
-            Instr::GetArg { .. } => Box::new(std::iter::empty()),
+            Instr::GetArg { .. } => [].as_slice().into(),
 
-            Instr::ObjNew => Box::new(std::iter::empty()),
-            Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
-            Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
-            Instr::TypeOf(arg) => Box::new([arg].into_iter()),
-            Instr::ClosureNew => Box::new(std::iter::empty()),
-            Instr::Const(_) => Box::new(std::iter::empty()),
-            Instr::Phi(_tgt, new_value) => Box::new(std::iter::once(new_value)),
-            Instr::GetSnapshotItem { .. } => Box::new(std::iter::empty()),
-            Instr::Box(arg) => Box::new(std::iter::once(arg)),
+            Instr::ObjNew => [].as_slice().into(),
+            Instr::ObjSet { obj, key, value } => [*obj, *key, *value].as_slice().into(),
+            Instr::ObjGet { obj, key } => [*obj, *key].as_slice().into(),
+            Instr::TypeOf(arg) => [*arg].as_slice().into(),
+            Instr::ClosureNew => [].as_slice().into(),
+            Instr::Const(_) => [].as_slice().into(),
+            Instr::Phi(_tgt, new_value) => [*new_value].as_slice().into(),
+            Instr::GetSnapshotItem { .. } => [].as_slice().into(),
+            Instr::Box(arg) => [*arg].as_slice().into(),
         }
     }
 

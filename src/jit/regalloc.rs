@@ -2,7 +2,7 @@ use dynasmrt::x64::{Rq, Rx};
 
 use crate::jit::builder::{ValueId, ValueType};
 
-use super::builder::Instr;
+use super::builder::{Instr, OperandsSet};
 use std::collections::HashMap;
 
 type RegIndex = u8;
@@ -328,25 +328,31 @@ impl RegState {
     }
 }
 
-pub(super) fn allocate_registers<I: Instruction>(
-    code: &[I],
+pub(super) fn allocate_registers(
+    reg_classes: &[Option<RegClass>],
+    operands: &[OperandsSet],
     constraints: &HashMap<ConstraintPt, HardReg>,
     num_general: RegIndex,
     num_numeric: RegIndex,
 ) -> Allocation {
-    let get_constraint = |pos, vid| constraints.get(&ConstraintPt { pos, vid });
+    if reg_classes.len() != operands.len() {
+        panic!("bug: reg_class and operands must have same len()");
+    }
+    let n_instrs = reg_classes.len();
 
-    if code.is_empty() {
+    if n_instrs == 0 {
         return Allocation::new(Vec::new());
     }
 
-    let count_vids = u32::try_from(code.len()).unwrap();
+    let get_constraint = |pos, vid| constraints.get(&ConstraintPt { pos, vid });
+
+    let count_vids = u32::try_from(n_instrs).unwrap();
     let mut regs = RegState::new(num_general, num_numeric, count_vids);
 
     // Instructions are iterated backwards, last to first.  This way,
     // each vreg's last use is seen first, and its definition is seen
     // last (and clearly identified).
-    for (pos_ndx, instr) in code.iter().enumerate().rev() {
+    for (pos_ndx, operands) in operands.iter().enumerate().rev() {
         let pos = ValueId(pos_ndx as u32);
 
         #[cfg(test)]
@@ -354,11 +360,11 @@ pub(super) fn allocate_registers<I: Instruction>(
 
         regs.unlock_all();
 
-        for oper_ndx in 0..instr.n_operands() {
-            let operand = instr.get_operand(oper_ndx);
+        for &operand in operands.iter().flatten() {
             assert!((operand.0 as usize) < pos_ndx);
 
-            let operand_class = code[operand.0 as usize].result_class().unwrap();
+            let operand_class = reg_classes[operand.0 as usize]
+                .expect("bug: malformed code: result used, but no reg class for it");
 
             #[cfg(test)]
             eprintln!("  ~ {:?} [{:?}]", operand, operand_class);
@@ -398,76 +404,44 @@ pub(super) fn allocate_registers<I: Instruction>(
     Allocation::new(regs.asmts)
 }
 
-pub(super) trait Instruction {
-    fn n_operands(&self) -> usize;
-    fn get_operand(&self, ndx: usize) -> ValueId;
-    fn result_class(&self) -> Option<RegClass>;
-}
-
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::{interpreter::CmpOp, jit::builder::Cmp};
+    use crate::{
+        interpreter::CmpOp,
+        jit::builder::{Cmp, OperandsSet},
+    };
 
-    #[derive(Debug)]
-    struct TestInstr {
-        result_reg_class: Option<RegClass>,
-        // TODO Make this more compact?
-        operands: Vec<ValueId>,
+    #[derive(Default)]
+    struct InstSeq {
+        reg_class: Vec<Option<RegClass>>,
+        operands: Vec<OperandsSet>,
     }
-
-    impl Instruction for TestInstr {
-        fn result_class(&self) -> Option<RegClass> {
-            self.result_reg_class
-        }
-
-        fn n_operands(&self) -> usize {
-            self.operands.len()
-        }
-
-        fn get_operand(&self, ndx: usize) -> ValueId {
-            self.operands.get(ndx).copied().unwrap()
+    impl InstSeq {
+        fn inst(&mut self, cls: Option<RegClass>, operands: &[ValueId]) {
+            self.reg_class.push(cls);
+            self.operands.push(OperandsSet::from(operands));
         }
     }
 
-    struct InstSeqBuilder {
-        seq: Vec<TestInstr>,
-    }
-    impl InstSeqBuilder {
-        fn new() -> Self {
-            Self { seq: Vec::new() }
-        }
-        fn inst(mut self, cls: Option<RegClass>, operands: &[ValueId]) -> Self {
-            self.seq.push(TestInstr {
-                result_reg_class: cls,
-                operands: operands.to_owned(),
-            });
-            self
-        }
-        fn build(self) -> Vec<TestInstr> {
-            self.seq
-        }
-    }
-
-    fn check_allocation<I: Instruction>(instrs: &[I], alloc: &Allocation) {
+    fn check_allocation(instrs: &[OperandsSet], alloc: &Allocation) {
         // Simulate a user of the register allocation, and check that it "would
         // work" for it (e.g. for the code generation)
         let mut asmts = alloc.asmts.iter().rev().peekable();
 
         let mut vofh = HashMap::new();
 
-        for (pos_ndx, inst) in instrs.iter().enumerate() {
+        for (pos_ndx, operands) in instrs.iter().enumerate() {
             let pos = ValueId(pos_ndx.try_into().unwrap());
             while let Some(asmt) = asmts.next_if(|asmt| asmt.pos == pos) {
                 vofh.insert(asmt.loc, asmt.vid);
             }
 
-            for oper_ndx in 0..inst.n_operands() {
-                let operand = inst.get_operand(oper_ndx);
+            for operand in operands.iter().flatten() {
                 assert!(
-                    vofh.iter().any(|(_, v)| *v == operand),
+                    vofh.iter().any(|(_, v)| v == operand),
                     "no hreg assigned to {:?} at pos {}",
                     operand,
                     pos_ndx
@@ -512,15 +486,15 @@ mod tests {
 
     #[test]
     fn test_constraint() {
-        let instrs = InstSeqBuilder::new()
-            .inst(Some(RegClass::Numeric), &[])
-            .inst(Some(RegClass::General), &[])
-            .inst(Some(RegClass::General), &[])
-            .inst(Some(RegClass::Numeric), &[ValueId(0), ValueId(1)])
-            .inst(None, &[ValueId(3), ValueId(2)])
-            .inst(Some(RegClass::Numeric), &[])
-            .inst(Some(RegClass::General), &[ValueId(3)])
-            .build();
+        let mut instrs = InstSeq::default();
+        instrs.inst(Some(RegClass::Numeric), &[]);
+        instrs.inst(Some(RegClass::General), &[]);
+        instrs.inst(Some(RegClass::General), &[]);
+        instrs.inst(Some(RegClass::Numeric), &[ValueId(0), ValueId(1)]);
+        instrs.inst(None, &[ValueId(3), ValueId(2)]);
+        instrs.inst(Some(RegClass::Numeric), &[]);
+        instrs.inst(Some(RegClass::General), &[ValueId(3)]);
+
         let constraints = ConstrBuilder::new()
             .constraint(3, 0, hn(2))
             .constraint(3, 3, hn(1))
@@ -535,54 +509,69 @@ mod tests {
     }
 
     fn try_allocation(
-        instrs: &[TestInstr],
+        instrs: &InstSeq,
         constraints: &HashMap<ConstraintPt, HardReg>,
         num_general: u8,
         num_numeric: u8,
     ) -> Allocation {
-        let allocation = allocate_registers(&instrs, &constraints, num_general, num_numeric);
+        let allocation = allocate_registers(
+            &instrs.reg_class,
+            &instrs.operands,
+            &constraints,
+            num_general,
+            num_numeric,
+        );
         for asmt in &allocation.asmts {
             eprintln!(" - {:?}", asmt);
         }
-        check_allocation(&instrs, &allocation);
+        check_allocation(&instrs.operands, &allocation);
         allocation
     }
 
     #[test]
     fn test_zero_case() {
-        let allocation = allocate_registers::<TestInstr>(&[], &HashMap::new(), 0, 0);
+        let allocation = allocate_registers(&[], &[], &HashMap::new(), 0, 0);
         assert!(allocation.asmts.is_empty());
 
         let constrs = ConstrBuilder::new()
             .constraint(12, 34, hn(56))
             .constraint(1, 2, hn(3))
             .build();
-        let allocation = allocate_registers::<TestInstr>(&[], &constrs, 0, 0);
+        let allocation = allocate_registers(&[], &[], &constrs, 0, 0);
         assert!(allocation.asmts.is_empty());
     }
-
-    const ONE_INSTR: TestInstr = TestInstr {
-        result_reg_class: Some(RegClass::General),
-        operands: vec![],
-    };
 
     #[should_panic]
     #[test]
     fn test_one_instr_zero_hregs() {
-        allocate_registers(&[ONE_INSTR], &HashMap::new(), 0, 0);
+        allocate_registers(
+            &[Some(RegClass::General)],
+            &[OperandsSet::none()],
+            &HashMap::new(),
+            0,
+            0,
+        );
     }
 
     #[should_panic]
     #[test]
     fn test_one_instr_one_hreg() {
-        allocate_registers(&[ONE_INSTR], &HashMap::new(), 1, 1);
+        allocate_registers(
+            &[Some(RegClass::General)],
+            &[OperandsSet::none()],
+            &HashMap::new(),
+            1,
+            1,
+        );
     }
 
     #[test]
     fn test_one_instr() {
         for rcls in [RegClass::General, RegClass::Numeric] {
-            let instrs = InstSeqBuilder::new().inst(Some(rcls), &[]).build();
-            let allocation = allocate_registers::<TestInstr>(&instrs, &HashMap::new(), 2, 2);
+            let mut instrs = InstSeq::default();
+            instrs.inst(Some(rcls), &[]);
+            let allocation =
+                allocate_registers(&instrs.reg_class, &instrs.operands, &HashMap::new(), 2, 2);
             // The instruction is unused
             assert!(allocation.asmts.is_empty());
         }
@@ -592,35 +581,34 @@ mod tests {
     #[should_panic]
     fn test_two_instr_invalid_use() {
         for rcls in [RegClass::General, RegClass::Numeric] {
-            let instrs = InstSeqBuilder::new()
-                .inst(Some(rcls), &[])
-                .inst(Some(rcls), &[ValueId(1)])
-                .build();
-            allocate_registers::<TestInstr>(&instrs, &HashMap::new(), 2, 2);
+            let mut instrs = InstSeq::default();
+            instrs.inst(Some(rcls), &[]);
+            instrs.inst(Some(rcls), &[ValueId(1)]);
+            allocate_registers(&instrs.reg_class, &instrs.operands, &HashMap::new(), 2, 2);
         }
     }
 
     #[test]
     fn test_two_instr() {
         for rcls in [RegClass::General, RegClass::Numeric] {
-            let instrs = InstSeqBuilder::new()
-                .inst(Some(rcls), &[])
-                .inst(Some(rcls), &[ValueId(0)])
-                .build();
-            let allocation = allocate_registers::<TestInstr>(&instrs, &HashMap::new(), 2, 2);
+            let mut instrs = InstSeq::default();
+            instrs.inst(Some(rcls), &[]);
+            instrs.inst(Some(rcls), &[ValueId(0)]);
+            let allocation =
+                allocate_registers(&instrs.reg_class, &instrs.operands, &HashMap::new(), 2, 2);
             // The instruction is unused
             assert_eq!(1, allocation.asmts.len());
         }
 
         for (rcls, hreg) in [(RegClass::General, hg(2)), (RegClass::Numeric, hn(3))] {
-            let instrs = InstSeqBuilder::new()
-                .inst(Some(rcls), &[])
-                .inst(Some(rcls), &[ValueId(0)])
-                .build();
+            let mut instrs = InstSeq::default();
+            instrs.inst(Some(rcls), &[]);
+            instrs.inst(Some(rcls), &[ValueId(0)]);
 
             let constrs = ConstrBuilder::new().constraint(1, 0, hreg).build();
 
-            let allocation = allocate_registers::<TestInstr>(&instrs, &constrs, 5, 5);
+            let allocation =
+                allocate_registers(&instrs.reg_class, &instrs.operands, &constrs, 5, 5);
             // The instruction is unused
             assert_eq!(1, allocation.asmts.len());
             assert_eq!(
@@ -637,13 +625,12 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_constraint_with_wrong_reg_class() {
-        let instrs = InstSeqBuilder::new()
-            .inst(Some(RegClass::Numeric), &[])
-            .inst(Some(RegClass::General), &[ValueId(0)])
-            .inst(Some(RegClass::General), &[ValueId(1), ValueId(0)])
-            .inst(Some(RegClass::General), &[ValueId(1)])
-            .inst(Some(RegClass::Numeric), &[])
-            .build();
+        let mut instrs = InstSeq::default();
+        instrs.inst(Some(RegClass::Numeric), &[]);
+        instrs.inst(Some(RegClass::General), &[ValueId(0)]);
+        instrs.inst(Some(RegClass::General), &[ValueId(1), ValueId(0)]);
+        instrs.inst(Some(RegClass::General), &[ValueId(1)]);
+        instrs.inst(Some(RegClass::Numeric), &[]);
         let constraints = ConstrBuilder::new().constraint(3, 1, hn(1)).build();
 
         try_allocation(&instrs, &constraints, 2, 2);
@@ -651,13 +638,12 @@ mod tests {
 
     #[test]
     fn test_constraint_with_correct_reg_class() {
-        let instrs = InstSeqBuilder::new()
-            .inst(Some(RegClass::Numeric), &[])
-            .inst(Some(RegClass::General), &[ValueId(0)])
-            .inst(Some(RegClass::General), &[ValueId(1), ValueId(0)])
-            .inst(Some(RegClass::General), &[ValueId(0)])
-            .inst(Some(RegClass::Numeric), &[])
-            .build();
+        let mut instrs = InstSeq::default();
+        instrs.inst(Some(RegClass::Numeric), &[]);
+        instrs.inst(Some(RegClass::General), &[ValueId(0)]);
+        instrs.inst(Some(RegClass::General), &[ValueId(1), ValueId(0)]);
+        instrs.inst(Some(RegClass::General), &[ValueId(0)]);
+        instrs.inst(Some(RegClass::Numeric), &[]);
         let constraints = ConstrBuilder::new().constraint(3, 1, hg(1)).build();
 
         // just don't panic
@@ -666,20 +652,19 @@ mod tests {
 
     #[test]
     fn test_program1() {
-        let instrs = InstSeqBuilder::new()
-            .inst(Some(RegClass::Numeric), &[])
-            .inst(Some(RegClass::General), &[ValueId(0)])
-            .inst(Some(RegClass::General), &[ValueId(1), ValueId(0)])
-            .inst(Some(RegClass::General), &[ValueId(1)])
-            .inst(
-                Some(RegClass::Numeric),
-                &[ValueId(0), ValueId(2), ValueId(3)],
-            )
-            .inst(Some(RegClass::Numeric), &[ValueId(1), ValueId(2)])
-            .inst(Some(RegClass::Numeric), &[ValueId(1)])
-            .inst(Some(RegClass::General), &[ValueId(0)])
-            .inst(Some(RegClass::Numeric), &[ValueId(5)])
-            .build();
+        let mut instrs = InstSeq::default();
+        instrs.inst(Some(RegClass::Numeric), &[]);
+        instrs.inst(Some(RegClass::General), &[ValueId(0)]);
+        instrs.inst(Some(RegClass::General), &[ValueId(1), ValueId(0)]);
+        instrs.inst(Some(RegClass::General), &[ValueId(1)]);
+        instrs.inst(
+            Some(RegClass::Numeric),
+            &[ValueId(0), ValueId(2), ValueId(3)],
+        );
+        instrs.inst(Some(RegClass::Numeric), &[ValueId(1), ValueId(2)]);
+        instrs.inst(Some(RegClass::Numeric), &[ValueId(1)]);
+        instrs.inst(Some(RegClass::General), &[ValueId(0)]);
+        instrs.inst(Some(RegClass::Numeric), &[ValueId(5)]);
         try_allocation(&instrs, &HashMap::new(), 2, 2);
 
         let constraints = ConstrBuilder::new()
