@@ -173,7 +173,7 @@ pub(crate) struct SnapshotMapItem {
 }
 
 impl SnapshotMap {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self { items: Vec::new() }
     }
 

@@ -294,6 +294,22 @@ where
         .unwrap()
 }
 
+fn hreg_of_genreg(needle: Rq) -> HardReg {
+    let index = index_of_reg(&GP_REGS, &needle);
+    HardReg {
+        class: RegClass::General,
+        index,
+    }
+}
+
+fn hreg_of_numreg(needle: Rx) -> HardReg {
+    let index = index_of_reg(&NUM_REGS, &needle);
+    HardReg {
+        class: RegClass::Numeric,
+        index,
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_SINK: RefCell<Vec<BoxedValue>> = RefCell::new(Vec::new());
@@ -311,7 +327,6 @@ pub fn take_test_sink() -> Vec<BoxedValue> {
 
 extern "C" fn ext_push_sink_gen(value: i64, ty: ValueType) {
     // Figure out a better way of manipulating the `sink` vector
-    eprintln!("TODO(big feat): trace: push sink: [{ty:?}] {value:064b} = {value}");
     #[cfg(test)]
     TEST_SINK.with(|test_sink| {
         let mut test_sink = test_sink.borrow_mut();
@@ -324,7 +339,6 @@ extern "C" fn ext_push_sink_gen(value: i64, ty: ValueType) {
 
 extern "C" fn ext_push_sink_num(value: f64) {
     // Figure out a better way of manipulating the `sink` vector
-    eprintln!("TODO(big feat): trace: push sink numeric: {value}");
     #[cfg(test)]
     TEST_SINK.with(|test_sink| {
         let mut test_sink = test_sink.borrow_mut();
@@ -400,7 +414,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     // TODO(future rust): .next_multiple_of(16)
     let mut stack_codegen = StackCodegen::new();
-    stack_codegen.start_chunk(&mut asm, &saved_gps, false);
+    stack_codegen.start_chunk(&mut asm, &saved_gps);
 
     let mut translate_instr = |asm: &mut dynasmrt::x64::Assembler,
                                cur_locs: &HashMap<ValueId, regalloc::Loc>,
@@ -460,7 +474,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     ArithOp::Add => dynasm!(asm; addsd Rx (tgt.code()), Rx (b.code())),
                     ArithOp::Sub => dynasm!(asm; subsd Rx (tgt.code()), Rx (b.code())),
                     ArithOp::Mul => dynasm!(asm; mulsd Rx (tgt.code()), Rx (b.code())),
-                    ArithOp::Div => todo!("TODO(small feat) div"),
+                    ArithOp::Div => dynasm!(asm; divsd Rx (tgt.code()), Rx (b.code())),
                 }
             }
             Instr::Cmp(_) => {
@@ -494,12 +508,11 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             }
             Instr::PushSink(arg) => {
                 // TODO use a bitmask?
-                let mut saved_regs = vec![];
-                for &areg in used_gps.iter() {
-                    if !is_callee_saved(areg) {
-                        saved_regs.push(areg);
-                    }
-                }
+                let mut saved_genregs: Vec<_> = used_gps
+                    .iter()
+                    .filter(|areg| !is_callee_saved(**areg))
+                    .copied()
+                    .collect();
 
                 let ty: ValueType = trace
                     .get_instr(*arg)
@@ -508,7 +521,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     .expect("PushSink arg's source instr has no result");
                 let hreg = get_hreg(*arg);
 
-                stack_codegen.start_chunk(asm, &saved_regs, true);
+                stack_codegen.start_chunk(asm, &saved_genregs);
+                stack_codegen.start_chunk_num(asm, &used_nums);
                 stack_codegen.pre_call(asm);
                 match reg_class_of_type(ty) {
                     RegClass::General => {
@@ -532,7 +546,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                     }
                 }
                 stack_codegen.post_call(asm);
-                stack_codegen.end_chunk(asm, &saved_regs);
+                stack_codegen.end_chunk_num(asm, &used_nums);
+                stack_codegen.end_chunk(asm, &saved_genregs);
             }
             Instr::Return(_) => todo!("TODO return"),
             Instr::Phi(old, new) => {
@@ -611,7 +626,10 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     for (vid, instr) in trace.iter_instrs() {
         while let Some(asmt) = reg_asmts.next_if(|asmt| asmt.pos.0 <= vid.0) {
             eprintln!("  #{:2} reg: {:?} -> {:?}", asmt.pos.0, asmt.vid, asmt.loc);
-            cur_locs.insert(asmt.vid, asmt.loc);
+            let prev = cur_locs.insert(asmt.vid, asmt.loc);
+            if let Some(prev) = prev {
+                emit_mov(&mut asm, prev, asmt.loc);
+            }
         }
         eprintln!("{:4?} {:?}", vid, instr);
         translate_instr(&mut asm, &cur_locs, vid, instr);
@@ -637,6 +655,33 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         rt_data,
         #[cfg(test)]
         n_runs: AtomicUsize::new(0),
+    }
+}
+
+fn emit_mov(asm: &mut dynasmrt::x64::Assembler, prev: regalloc::Loc, dest: regalloc::Loc) {
+    use regalloc::Loc;
+    eprintln!("  (emitting move from {:?} to {:?})", prev, dest);
+    if let (Loc::HardReg(hfrom), Loc::HardReg(hto)) = (prev, dest) {
+        assert_eq!(
+            hfrom.class, hto.class,
+            "regalloc bug: can't move from a {:?} register to a {:?} one",
+            hfrom.class, hto.class
+        );
+
+        match hfrom.class {
+            RegClass::General => {
+                let from_ndx = GP_REGS[hfrom.index as usize].code();
+                let to_ndx = GP_REGS[hto.index as usize].code();
+                dynasm!(asm; mov Rq (to_ndx), Rq (from_ndx));
+            }
+            RegClass::Numeric => {
+                let from_ndx = NUM_REGS[hfrom.index as usize].code();
+                let to_ndx = NUM_REGS[hto.index as usize].code();
+                dynasm!(asm; movsd Rx (to_ndx), Rx (from_ndx));
+            }
+        }
+    } else {
+        todo!("emit mov from {:?} to {:?}", prev, dest);
     }
 }
 
@@ -737,7 +782,7 @@ impl StackCodegen {
     }
 
     // TODO(opt): encode set of registers as a bitmask
-    fn start_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq], _is_padded: bool) {
+    fn start_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq]) {
         let chunk_sz = regs.len() as u8;
         self.push_chunk(asm, chunk_sz);
         self.write_regs(asm, regs);
@@ -746,6 +791,19 @@ impl StackCodegen {
     }
     fn end_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq]) {
         self.read_regs(asm, regs);
+        self.pop_chunk(asm);
+
+        self.check_invariant();
+    }
+    fn start_chunk_num(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rx]) {
+        let chunk_sz = regs.len() as u8;
+        self.push_chunk(asm, chunk_sz);
+        self.write_regs_num(asm, regs);
+
+        self.check_invariant();
+    }
+    fn end_chunk_num(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rx]) {
+        self.read_regs_num(asm, regs);
         self.pop_chunk(asm);
 
         self.check_invariant();
@@ -785,9 +843,11 @@ impl StackCodegen {
     fn push_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, chunk_sz: u8) {
         debug_assert!(!self.in_call);
         self.chunks_size.push(chunk_sz);
-        self.cur_height += chunk_sz as u16;
-        let delta_rsp = 8 * chunk_sz as i32;
-        dynasm!(asm; sub rsp, delta_rsp);
+        if chunk_sz > 0 {
+            self.cur_height += chunk_sz as u16;
+            let delta_rsp = 8 * chunk_sz as i32;
+            dynasm!(asm; sub rsp, delta_rsp);
+        }
         self.check_invariant();
     }
 
@@ -807,11 +867,30 @@ impl StackCodegen {
         self.check_invariant();
     }
 
+    fn write_regs_num(&self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rx]) {
+        debug_assert!(!self.in_call);
+        for (i, reg) in regs.iter().enumerate() {
+            dynasm!(asm; movsd [rsp + i as i32 * 8], Rx (reg.code()));
+        }
+        self.check_invariant();
+    }
+
+    fn read_regs_num(&self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rx]) {
+        debug_assert!(!self.in_call);
+        for (i, reg) in regs.iter().enumerate() {
+            dynasm!(asm; movsd Rx (reg.code()), [rsp + i as i32 * 8]);
+        }
+        self.check_invariant();
+    }
+
     fn pop_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler) {
         debug_assert!(!self.in_call);
         let chunk_sz = self.chunks_size.pop().unwrap();
-        self.cur_height -= chunk_sz as u16;
-        dynasm!(asm; add rsp, 8 * chunk_sz as i32);
+        if chunk_sz > 0 {
+            self.cur_height -= chunk_sz as u16;
+            let delta_rsp = 8 * chunk_sz as i32;
+            dynasm!(asm; add rsp, delta_rsp);
+        }
         self.check_invariant();
     }
 }
@@ -915,7 +994,10 @@ fn min_max<T: PartialOrd>(a: T, b: T) -> (T, T) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jit::builder::ValueType;
+    use crate::jit::{
+        builder::{SnapshotMap, ValueType},
+        regalloc::{Allocation, RegAsmt},
+    };
 
     struct Output {
         sink: Vec<interpreter::Value>,
@@ -1038,5 +1120,156 @@ mod tests {
         };
         vm.run_script(code.to_string(), flags).unwrap();
         assert!(vm.get_trace("t").is_none());
+    }
+
+    fn simple_trace(instrs: Vec<Instr>, hreg_alloc: Allocation) -> Trace {
+        let is_enabled = instrs.iter().map(|_| true).collect();
+        Trace {
+            hreg_alloc,
+            snapshot_map: SnapshotMap::new(),
+            snapshot_final_update: Vec::new(),
+            instrs,
+            is_loop: false,
+            is_enabled,
+        }
+    }
+
+    #[test]
+    fn test_const_general() {
+        let trace = simple_trace(
+            [
+                Instr::Const(BoxedValue::Bool(true)),
+                Instr::PushSink(ValueId(0 as u32)),
+            ]
+            .into(),
+            Allocation::new(
+                [
+                    RegAsmt::hreg(1, 0, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(0, 0, super::hreg_of_genreg(Rq::RCX)),
+                ]
+                .into(),
+            ),
+        );
+
+        let thunk = super::to_native(&trace);
+        thunk.dump();
+        let ret = thunk.run(&mut []);
+
+        assert_eq!(ret, BoxedValue::Undefined);
+        assert_eq!(&super::take_test_sink(), &[BoxedValue::Bool(true)]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_pushsink_wrong_reg() {
+        let trace = simple_trace(
+            [
+                Instr::Const(BoxedValue::Number(1032.312)),
+                Instr::PushSink(ValueId(0 as u32)),
+            ]
+            .into(),
+            Allocation::new(
+                [
+                    RegAsmt::hreg(1, 0, super::hreg_of_numreg(Rx::XMM3)),
+                    RegAsmt::hreg(0, 0, super::hreg_of_numreg(Rx::XMM0)),
+                ]
+                .into(),
+            ),
+        );
+
+        super::to_native(&trace);
+    }
+
+    #[test]
+    fn test_const_numeric() {
+        let num_val = BoxedValue::Number(1032.312);
+        let trace = simple_trace(
+            [
+                Instr::Const(num_val.clone()),
+                Instr::PushSink(ValueId(0 as u32)),
+            ]
+            .into(),
+            Allocation::new(
+                [
+                    RegAsmt::hreg(1, 0, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(0, 0, super::hreg_of_numreg(Rx::XMM3)),
+                ]
+                .into(),
+            ),
+        );
+
+        let thunk = super::to_native(&trace);
+        thunk.dump();
+        let ret = thunk.run(&mut []);
+
+        assert_eq!(ret, BoxedValue::Undefined);
+        assert_eq!(&super::take_test_sink(), &[num_val]);
+    }
+
+    #[test]
+    fn test_arith() {
+        let a = 1032.312;
+        let b = 99.2321;
+        let trace = simple_trace(
+            [
+                Instr::Const(BoxedValue::Number(a)),
+                Instr::Const(BoxedValue::Number(b)),
+                Instr::Arith {
+                    op: ArithOp::Add,
+                    a: ValueId(0 as u32),
+                    b: ValueId(1 as u32),
+                },
+                Instr::Arith {
+                    op: ArithOp::Sub,
+                    a: ValueId(0 as u32),
+                    b: ValueId(1 as u32),
+                },
+                Instr::Arith {
+                    op: ArithOp::Mul,
+                    a: ValueId(0 as u32),
+                    b: ValueId(1 as u32),
+                },
+                Instr::Arith {
+                    op: ArithOp::Div,
+                    a: ValueId(0 as u32),
+                    b: ValueId(1 as u32),
+                },
+                Instr::PushSink(ValueId(2 as u32)),
+                Instr::PushSink(ValueId(3 as u32)),
+                Instr::PushSink(ValueId(4 as u32)),
+                Instr::PushSink(ValueId(5 as u32)),
+            ]
+            .into(),
+            Allocation::new(
+                [
+                    RegAsmt::hreg(9, 5, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(8, 4, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(7, 3, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(6, 2, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(5, 5, super::hreg_of_numreg(Rx::XMM5)),
+                    RegAsmt::hreg(4, 4, super::hreg_of_numreg(Rx::XMM4)),
+                    RegAsmt::hreg(3, 3, super::hreg_of_numreg(Rx::XMM3)),
+                    RegAsmt::hreg(2, 2, super::hreg_of_numreg(Rx::XMM2)),
+                    RegAsmt::hreg(1, 1, super::hreg_of_numreg(Rx::XMM1)),
+                    RegAsmt::hreg(0, 0, super::hreg_of_numreg(Rx::XMM0)),
+                ]
+                .into(),
+            ),
+        );
+
+        let thunk = super::to_native(&trace);
+        thunk.dump();
+        let ret = thunk.run(&mut []);
+
+        assert_eq!(ret, BoxedValue::Undefined);
+        assert_eq!(
+            &super::take_test_sink(),
+            &[
+                BoxedValue::Number(a + b),
+                BoxedValue::Number(a - b),
+                BoxedValue::Number(a * b),
+                BoxedValue::Number(a / b),
+            ]
+        );
     }
 }

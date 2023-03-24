@@ -41,6 +41,16 @@ pub(super) struct RegAsmt {
     pub(super) loc: Loc,
 }
 
+impl RegAsmt {
+    pub(super) fn hreg(pos: u32, vid: u32, hreg: HardReg) -> Self {
+        RegAsmt {
+            pos: ValueId(pos as u32),
+            vid: ValueId(vid as u32),
+            loc: Loc::HardReg(hreg),
+        }
+    }
+}
+
 pub struct Allocation {
     pub(super) asmts: Vec<RegAsmt>,
     n_general: RegIndex,
@@ -53,7 +63,15 @@ impl Allocation {
         self.n_general
     }
 
-    fn new(asmts: Vec<RegAsmt>) -> Allocation {
+    pub(super) fn new(asmts: Vec<RegAsmt>) -> Allocation {
+        if asmts.len() >= 2 {
+            for i in 0..asmts.len() - 1 {
+                let (a, b) = (&asmts[i], &asmts[i + 1]);
+                // The order of asmts MUST be inverse: from the last instruction "up"
+                debug_assert!(a.pos.0 >= b.pos.0);
+            }
+        }
+
         let mut n_general = 0;
         let mut n_numeric = 0;
         let mut n_stack_slots = 0u16;
@@ -692,5 +710,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_wrong_order_asserts() {
+        Allocation::new(
+            [
+                RegAsmt {
+                    pos: ValueId(0 as u32),
+                    vid: ValueId(0 as u32),
+                    loc: Loc::HardReg(HardReg {
+                        class: RegClass::General,
+                        index: 12,
+                    }),
+                },
+                RegAsmt {
+                    pos: ValueId(1 as u32),
+                    vid: ValueId(0 as u32),
+                    loc: Loc::HardReg(HardReg {
+                        class: RegClass::General,
+                        index: 34,
+                    }),
+                },
+            ]
+            .into(),
+        );
     }
 }
