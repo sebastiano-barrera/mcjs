@@ -1,6 +1,7 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 use dynasm::dynasm;
 use dynasmrt::x64::{Rq, Rx};
@@ -9,13 +10,14 @@ use dynasmrt::{DynasmApi, DynasmLabelApi};
 use strum::EnumCount;
 use strum_macros::{EnumCount, EnumIter, FromRepr};
 
+use crate::jit::builder::reg_class_of_type;
 use crate::jit::regalloc::{HardReg, RegClass};
 use crate::{
     interpreter::{self, ArithOp, CmpOp},
     jit::builder::{Cmp, Instr, ValueId, ValueType},
 };
 
-use super::{BoxedValue, Trace};
+use super::{regalloc, BoxedValue, Trace};
 
 pub struct NativeThunk {
     buf: dynasmrt::ExecutableBuffer,
@@ -128,12 +130,13 @@ fn decode_value(rt_data: &RuntimeData, rt_val: i64, typ: ValueType) -> interpret
     match typ {
         ValueType::Bool => interpreter::Value::Bool(rt_val != 0),
         ValueType::Num => interpreter::Value::Number(f64::from_bits(rt_val as u64)),
-        ValueType::Str => {
-            let sid = rt_val as u64;
-            // TODO Any way to avoid this string copy?
-            let s = rt_data.get_str(sid).unwrap().clone();
-            interpreter::Value::String(s.into())
-        }
+        ValueType::Str => todo!(),
+        // {
+        //     let sid = rt_val as u64;
+        //     // TODO Any way to avoid this string copy?
+        //     let s = rt_data.get_str(sid).unwrap().clone();
+        //     interpreter::Value::String(s.into())
+        // }
         ValueType::Obj => todo!("(big feat) decode object ref (remember the GC!)"),
         ValueType::Null => interpreter::Value::Null,
         ValueType::Undefined => interpreter::Value::Undefined,
@@ -197,6 +200,11 @@ impl NativeThunk {
     }
 
     #[cfg(test)]
+    pub(crate) fn n_runs(&self) -> usize {
+        self.n_runs.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(test)]
     pub(crate) fn dump(&self) {
         use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction};
 
@@ -240,7 +248,7 @@ impl NativeThunk {
 ///   - RDX (C func arg #3) points to the RuntimeData.
 ///   - RSP is used as the stack pointer, in order to be compatible with the C calling convention.
 ///   - R15 is a scratch register
-const GP_REGS: [Rq; 13] = [
+pub(crate) const GP_REGS: [Rq; 13] = [
     Rq::RAX,
     Rq::RBX,
     Rq::RCX,
@@ -256,7 +264,7 @@ const GP_REGS: [Rq; 13] = [
     Rq::R14,
 ];
 
-const NUM_REGS: [Rx; 16] = [
+pub(crate) const NUM_REGS: [Rx; 16] = [
     Rx::XMM0,
     Rx::XMM1,
     Rx::XMM2,
@@ -275,9 +283,53 @@ const NUM_REGS: [Rx; 16] = [
     Rx::XMM15,
 ];
 
-pub extern "C" fn ext_push_sink(value: u64) {
+pub(super) fn index_of_reg<R: dynasmrt::Register, O: TryFrom<usize>>(regs: &[R], needle: &R) -> O
+where
+    <O as TryFrom<usize>>::Error: std::fmt::Debug,
+{
+    regs.iter()
+        .position(|r| r == needle)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SINK: RefCell<Vec<BoxedValue>> = RefCell::new(Vec::new());
+}
+
+#[cfg(test)]
+pub fn take_test_sink() -> Vec<BoxedValue> {
+    TEST_SINK.with(|test_sink| {
+        let mut other = Vec::new();
+        let mut test_sink = test_sink.borrow_mut();
+        std::mem::swap(&mut other, &mut test_sink);
+        other
+    })
+}
+
+extern "C" fn ext_push_sink_gen(value: i64, ty: ValueType) {
     // Figure out a better way of manipulating the `sink` vector
-    println!("TODO(big feat): trace: push sink: {value:064b} = {value}");
+    eprintln!("TODO(big feat): trace: push sink: [{ty:?}] {value:064b} = {value}");
+    #[cfg(test)]
+    TEST_SINK.with(|test_sink| {
+        let mut test_sink = test_sink.borrow_mut();
+        // TODO This is a kludge.  Remove the rtdata parameter from decode_value?
+        let rtdata = unsafe { std::mem::transmute(std::ptr::null::<()>()) };
+        let value = decode_value(rtdata, value, ty);
+        test_sink.push(value);
+    });
+}
+
+extern "C" fn ext_push_sink_num(value: f64) {
+    // Figure out a better way of manipulating the `sink` vector
+    eprintln!("TODO(big feat): trace: push sink numeric: {value}");
+    #[cfg(test)]
+    TEST_SINK.with(|test_sink| {
+        let mut test_sink = test_sink.borrow_mut();
+        test_sink.push(BoxedValue::Number(value));
+    });
 }
 
 // This function has the same prototype (as a C function) as the generated
@@ -310,18 +362,10 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     if trace.hreg_alloc.n_general() as usize > GP_REGS.len() {
         panic!("too many hardregs used in reg allocation!");
     }
-    assert_eq!(trace.instrs.len(), trace.hreg_alloc.n_instrs());
 
     let snap_len = trace.snapshot_map.len();
     let mut asm = dynasmrt::x64::Assembler::new().unwrap();
     let mut rt_data = RuntimeData::new();
-
-    let get_hreg = |vid| {
-        trace
-            .hreg_alloc
-            .hreg_of_instr(vid)
-            .unwrap_or_else(|| panic!("no hreg for {vid:?}"))
-    };
 
     let assert_type = |trace: &Trace, vid: ValueId, expected_type: ValueType| {
         assert_eq!(
@@ -347,7 +391,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     dynasm!(asm ; entry: );
 
-    let (used_gps, used_nums) = order_used_aregs(trace);
+    let (used_gps, used_nums) = order_used_aregs(&trace.hreg_alloc);
     let saved_gps: Box<[_]> = used_gps
         .iter()
         .filter(|areg| is_callee_saved(**areg))
@@ -358,7 +402,20 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     let mut stack_codegen = StackCodegen::new();
     stack_codegen.start_chunk(&mut asm, &saved_gps, false);
 
-    let mut translate_instr = |asm: &mut dynasmrt::x64::Assembler, vid: ValueId, instr: &Instr| {
+    let mut translate_instr = |asm: &mut dynasmrt::x64::Assembler,
+                               cur_locs: &HashMap<ValueId, regalloc::Loc>,
+                               vid: ValueId,
+                               instr: &Instr| {
+        let get_hreg = |vid: ValueId| {
+            let loc = cur_locs
+                .get(&vid)
+                .unwrap_or_else(|| panic!("regalloc bug: no hreg or stack slot for {vid:?}"));
+            match loc {
+                regalloc::Loc::HardReg(hreg) => *hreg,
+                regalloc::Loc::StackSlot(_) => todo!("stack slots"),
+            }
+        };
+
         match instr {
             Instr::Box(_) => todo!("(big feat) Instr::Box"),
             Instr::GetArg { .. } => todo!("(big feat) Instr::GetArg"),
@@ -435,35 +492,47 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 let tgt = get_hreg(vid).expect_general().code();
                 dynasm!(asm; xor Rq (tgt), Rq (tgt));
             }
-            Instr::PushSink(vid) => {
-                let mut saved_regs = vec![Rq::RSI, Rq::RDI, Rq::RAX];
+            Instr::PushSink(arg) => {
+                // TODO use a bitmask?
+                let mut saved_regs = vec![];
                 for &areg in used_gps.iter() {
-                    if areg != Rq::RSI
-                        && areg != Rq::RDI
-                        && areg != Rq::RAX
-                        && !is_callee_saved(areg)
-                    {
+                    if !is_callee_saved(areg) {
                         saved_regs.push(areg);
                     }
                 }
 
+                let ty: ValueType = trace
+                    .get_instr(*arg)
+                    .unwrap()
+                    .result_type()
+                    .expect("PushSink arg's source instr has no result");
+                let hreg = get_hreg(*arg);
+
                 stack_codegen.start_chunk(asm, &saved_regs, true);
+                stack_codegen.pre_call(asm);
+                match reg_class_of_type(ty) {
+                    RegClass::General => {
+                        assert_eq!(hreg.class, RegClass::General);
+                        assert_eq!(GP_REGS[hreg.index as usize], Rq::RDI);
 
-                match get_hreg(*vid) {
-                    HardReg {
-                        class: RegClass::General,
-                        index: regndx,
-                    } => dynasm!(asm; mov rdi, Rq (regndx)),
-                    HardReg {
-                        class: RegClass::Numeric,
-                        index: regndx,
-                    } => dynasm!(asm; movq rdi, Rx (regndx)),
+                        let func_ptr = ext_push_sink_gen as *const ();
+                        dynasm!(asm
+                        ; mov rax, QWORD func_ptr as i64
+                        ; mov rsi, QWORD ty as _
+                        ; call rax);
+                    }
+                    RegClass::Numeric => {
+                        assert_eq!(hreg.class, RegClass::Numeric);
+                        assert_eq!(NUM_REGS[hreg.index as usize], Rx::XMM0);
+
+                        let func_ptr = ext_push_sink_num as *const ();
+                        dynasm!(asm
+                        ; mov rax, QWORD func_ptr as i64
+                        ; call rax);
+                    }
                 }
-
-                let func = todo!();
-                dynasm!(asm; call ext_push_sink as i32);
-
-                stack_codegen.end_chunk(asm);
+                stack_codegen.post_call(asm);
+                stack_codegen.end_chunk(asm, &saved_regs);
             }
             Instr::Return(_) => todo!("TODO return"),
             Instr::Phi(old, new) => {
@@ -533,11 +602,19 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         }
     };
 
+    let mut reg_asmts = trace.hreg_alloc.asmts.iter().rev().peekable();
+    let mut cur_locs: HashMap<ValueId, regalloc::Loc> = HashMap::new();
+
     if trace.is_loop {
         dynasm!(asm; loop_start:);
     }
     for (vid, instr) in trace.iter_instrs() {
-        translate_instr(&mut asm, vid, instr);
+        while let Some(asmt) = reg_asmts.next_if(|asmt| asmt.pos.0 <= vid.0) {
+            eprintln!("  #{:2} reg: {:?} -> {:?}", asmt.pos.0, asmt.vid, asmt.loc);
+            cur_locs.insert(asmt.vid, asmt.loc);
+        }
+        eprintln!("{:4?} {:?}", vid, instr);
+        translate_instr(&mut asm, &cur_locs, vid, instr);
     }
     if trace.is_loop {
         dynasm!(asm; jmp <loop_start);
@@ -545,7 +622,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     dynasm!(asm ; abort_trace:);
 
-    stack_codegen.end_chunk(&mut asm);
+    stack_codegen.end_chunk(&mut asm, &saved_gps);
 
     dynasm!(asm; ret);
 
@@ -594,23 +671,19 @@ where
     }
 }
 
-fn order_used_aregs(trace: &Trace) -> (Vec<Rq>, Vec<Rx>) {
+fn order_used_aregs(reg_alloc: &regalloc::Allocation) -> (Vec<Rq>, Vec<Rx>) {
+    use regalloc::Loc;
+
     let mut used_gps = HashSet::new();
     let mut used_nums = HashSet::new();
-    for vid in trace.iter_vids() {
-        if let Some(hreg) = trace.hreg_alloc.hreg_of_instr(vid) {
-            match hreg {
-                HardReg {
-                    class: RegClass::General,
-                    index,
-                } => {
-                    used_gps.insert(GP_REGS.get(index as usize).copied().unwrap());
+    for asmt in reg_alloc.asmts.iter() {
+        if let Loc::HardReg(hreg) = asmt.loc {
+            match hreg.class {
+                RegClass::General => {
+                    used_gps.insert(GP_REGS.get(hreg.index as usize).copied().unwrap());
                 }
-                HardReg {
-                    class: RegClass::Numeric,
-                    index,
-                } => {
-                    used_nums.insert(NUM_REGS.get(index as usize).copied().unwrap());
+                RegClass::Numeric => {
+                    used_nums.insert(NUM_REGS.get(hreg.index as usize).copied().unwrap());
                 }
             }
         }
@@ -636,9 +709,12 @@ fn order_used_aregs(trace: &Trace) -> (Vec<Rq>, Vec<Rx>) {
 /// to 16 bytes. (C compilers make sure that the offset (in this case 0xa0)
 /// is divisible by 16, too, so %rsp is the only variable here.)
 struct StackCodegen {
-    regs: Vec<Rq>,
-    chunks_size: Vec<(u8, u8)>,
+    chunks_size: Vec<u8>,
+    // Expressed in number of slots
+    cur_height: u16,
+    in_call: bool,
 }
+struct StackCodegenInCall(StackCodegen);
 impl StackCodegen {
     // TODO(big feat) Any way to make sure that start_chunk is coupled with an
     // end_chunk? Compile-time preferable, but runtime also useful. I had some
@@ -647,36 +723,96 @@ impl StackCodegen {
 
     fn new() -> Self {
         StackCodegen {
-            regs: Vec::new(),
             chunks_size: Vec::new(),
+            cur_height: 0,
+            in_call: false,
         }
+    }
+
+    fn check_invariant(&self) {
+        assert_eq!(
+            self.cur_height,
+            self.chunks_size.iter().map(|x| *x as u16).sum()
+        );
     }
 
     // TODO(opt): encode set of registers as a bitmask
-    fn start_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq], align16: bool) {
+    fn start_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq], _is_padded: bool) {
         let chunk_sz = regs.len() as u8;
-        let padding = if align16 { 1 } else { 0 };
+        self.push_chunk(asm, chunk_sz);
+        self.write_regs(asm, regs);
 
-        self.chunks_size.push((chunk_sz, padding));
-        self.regs.extend_from_slice(regs);
+        self.check_invariant();
+    }
+    fn end_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq]) {
+        self.read_regs(asm, regs);
+        self.pop_chunk(asm);
 
-        let delta_rsp = 8 * (chunk_sz + padding) as i32;
+        self.check_invariant();
+    }
+
+    fn pre_call(&mut self, asm: &mut dynasmrt::x64::Assembler) {
+        assert!(!self.in_call);
+        // cur_height is expressed in number 8-byte slots
+        match self.cur_height % 2 {
+            0 => dynasm!(asm; sub rsp, 8),
+            1 => { /* already OK for a C call */ }
+            other => {
+                panic!(
+                    "codegen bug: stack height is {}, but it should be either 16- or 8-aligned!",
+                    other * 8
+                );
+            }
+        }
+        self.in_call = true;
+    }
+    fn post_call(&mut self, asm: &mut dynasmrt::x64::Assembler) {
+        assert!(self.in_call);
+        // cur_height is expressed in number 8-byte slots
+        match self.cur_height % 2 {
+            0 => dynasm!(asm; add rsp, 8),
+            1 => { /* we were already OK for a C call */ }
+            other => {
+                panic!(
+                    "codegen bug: stack height is {}, but it should be either 16- or 8-aligned!",
+                    other * 8
+                );
+            }
+        }
+        self.in_call = false;
+    }
+
+    fn push_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler, chunk_sz: u8) {
+        debug_assert!(!self.in_call);
+        self.chunks_size.push(chunk_sz);
+        self.cur_height += chunk_sz as u16;
+        let delta_rsp = 8 * chunk_sz as i32;
         dynasm!(asm; sub rsp, delta_rsp);
+        self.check_invariant();
+    }
+
+    fn write_regs(&self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq]) {
+        debug_assert!(!self.in_call);
         for (i, reg) in regs.iter().enumerate() {
             dynasm!(asm; mov [rsp + i as i32 * 8], Rq (reg.code()));
         }
+        self.check_invariant();
     }
 
-    fn end_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler) {
-        let (chunk_sz, padding) = self.chunks_size.pop().unwrap();
-        let end = self.regs.len();
-        let start = end - chunk_sz as usize;
-        let regs = self.regs.drain(start..end);
-
-        for (i, reg) in regs.enumerate() {
+    fn read_regs(&self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq]) {
+        debug_assert!(!self.in_call);
+        for (i, reg) in regs.iter().enumerate() {
             dynasm!(asm; mov Rq (reg.code()), [rsp + i as i32 * 8]);
         }
-        dynasm!(asm; add rsp, 8 * (chunk_sz + padding) as i32);
+        self.check_invariant();
+    }
+
+    fn pop_chunk(&mut self, asm: &mut dynasmrt::x64::Assembler) {
+        debug_assert!(!self.in_call);
+        let chunk_sz = self.chunks_size.pop().unwrap();
+        self.cur_height -= chunk_sz as u16;
+        dynasm!(asm; add rsp, 8 * chunk_sz as i32);
+        self.check_invariant();
     }
 }
 
@@ -808,7 +944,6 @@ mod tests {
 
         let (trace, _) = vm.get_trace("t").expect("no trace was produced!");
         trace.dump();
-        assert!(vm.trace_ids().len() > 0);
         vm.take_sink(); // ... and discard it
 
         {

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
+use crate::jit::codegen::index_of_reg;
 use crate::{
     interpreter::{self, FnId, VarIndex, IID},
     stack::{self, FrameId},
@@ -1029,23 +1030,28 @@ impl TraceBuilder {
                 }
             }
 
-            // let constraints = HashMap::new();
-
+            let constraints = place_reg_constraints(&instrs);
+            let reg_classes = get_reg_classes(&instrs);
+            // TODO change Instr so that operands are explicitly stored in a separate Vec<OperandsSet> (so no need for extract_operands)
+            let operands = extract_operands(&instrs);
+            assert_eq!(instrs.len(), reg_classes.len());
+            assert_eq!(instrs.len(), operands.len());
             let hreg_alloc: regalloc::Allocation =
-                todo!("regalloc::allocate_registers(&instrs, &constraints, 6, 8)");
+                regalloc::allocate_registers(&reg_classes, &operands, &constraints, 6, 8);
 
-            let is_enabled: Vec<_> = instrs
-                .iter()
-                .enumerate()
-                .map(|(ndx, instr)| {
-                    let vid = ValueId(ndx as u32);
-                    hreg_alloc.hreg_of_instr(vid).is_some() || instr.has_side_effects()
-                })
-                .collect();
+            let is_enabled = {
+                let mut enb: Vec<_> = instrs
+                    .iter()
+                    .map(|instr| instr.has_side_effects())
+                    .collect();
+                for asmt in &hreg_alloc.asmts {
+                    enb[asmt.vid.0 as usize] = true;
+                }
+                enb
+            };
 
             Some(Trace {
                 instrs,
-                // phis,
                 is_loop,
                 is_enabled,
                 hreg_alloc,
@@ -1060,6 +1066,60 @@ impl TraceBuilder {
     fn get_instr(&self, vid: ValueId) -> &Instr {
         let ndx = vid.0 as usize;
         self.instrs.get(ndx).unwrap()
+    }
+}
+
+fn place_reg_constraints(instrs: &[Instr]) -> HashMap<regalloc::ConstraintPt, regalloc::HardReg> {
+    // TODO(arch) Ideally, this would be independent from the target
+    // architecture. Better to move this to jit::codegen?
+
+    use super::codegen;
+    use super::regalloc::{ConstraintPt, HardReg, RegClass};
+    use dynasmrt::x64::{Rq, Rx};
+
+    let mut constraints = HashMap::new();
+    for (ndx, instr) in instrs.iter().enumerate() {
+        let pos = ValueId(ndx as _);
+        if let Instr::PushSink(arg) = instr {
+            let src_instr = &instrs[arg.0 as usize];
+            let reg_class = src_instr
+                .result_type()
+                .map(reg_class_of_type)
+                .expect("bug: malformed code: PushSink arg's source instruction has no result?!");
+
+            let hreg = match reg_class {
+                RegClass::General => HardReg {
+                    class: RegClass::General,
+                    index: index_of_reg(&codegen::GP_REGS, &Rq::RDI),
+                },
+                RegClass::Numeric => HardReg {
+                    class: RegClass::Numeric,
+                    index: index_of_reg(&codegen::NUM_REGS, &Rx::XMM0),
+                },
+            };
+
+            constraints.insert(ConstraintPt { pos, vid: *arg }, hreg);
+        }
+    }
+    constraints
+}
+
+fn extract_operands(instrs: &[Instr]) -> Vec<OperandsSet> {
+    instrs.iter().map(|i| i.operands()).collect()
+}
+
+fn get_reg_classes(instrs: &[Instr]) -> Vec<Option<regalloc::RegClass>> {
+    instrs
+        .iter()
+        .map(|i| i.result_type().map(reg_class_of_type))
+        .collect()
+}
+
+// TODO(cleanup) move elsewhere?
+pub(super) fn reg_class_of_type(ty: ValueType) -> regalloc::RegClass {
+    match ty {
+        ValueType::Num => regalloc::RegClass::Numeric,
+        _ => regalloc::RegClass::General,
     }
 }
 
@@ -1310,6 +1370,26 @@ mod tests {
     use super::*;
     use crate::{interpreter::StaticVarId, jit};
 
+    #[test]
+    fn test_exit_unless_operands() {
+        // Instr::ExitUnless {
+        // cond: Cmp { a, b, .. },
+        // ..
+        // } => [*a, *b].as_slice().into(),
+        let instr = Instr::ExitUnless {
+            cond: Cmp {
+                ty: ValueType::Num,
+                op: CmpOp::LE,
+                a: ValueId(1),
+                b: ValueId(3),
+            },
+            pre_snap_update: Vec::new(),
+        };
+
+        let operands: Vec<_> = instr.operands().iter().flatten().copied().collect();
+        assert_eq!(&operands, &[ValueId(1), ValueId(3)]);
+    }
+
     struct Output {
         sink: Vec<interpreter::Value>,
         vm: interpreter::VM,
@@ -1321,9 +1401,7 @@ mod tests {
         }
     }
 
-    fn quick_jit(code: &str) -> Output {
-        let mut vm = interpreter::VM::new();
-
+    fn run_and_compile(vm: &mut crate::VM, code: &str) {
         let base_flags = Default::default();
 
         {
@@ -1339,12 +1417,18 @@ mod tests {
             vm.trace_ids().len() > 0,
             "at least 1 trace was expected to be built"
         );
+    }
+
+    fn quick_jit(code: &str) -> Output {
+        let mut vm = interpreter::VM::new();
+
+        run_and_compile(&mut vm, code);
         vm.take_sink(); // ... and discard it
 
         {
             let flags = interpreter::InterpreterFlags {
                 jit_mode: interpreter::JitMode::UseTraces,
-                ..base_flags
+                ..Default::default()
             };
             vm.run_script(code.to_string(), flags)
                 .expect("second run (trace run) failed");
@@ -1575,12 +1659,63 @@ mod tests {
             ",
         );
 
+        let (trace, thunk) = output.vm.get_trace("t").unwrap();
         eprint!("trace = ");
-        let trace = output.get_trace("t").unwrap();
         trace.dump();
+
+        assert_eq!(thunk.n_runs(), 1);
 
         assert_eq!(
             &output.sink,
+            &[
+                BoxedValue::Number(0.0),
+                BoxedValue::Number(1.0),
+                BoxedValue::Number(3.0),
+                BoxedValue::Number(6.0),
+                BoxedValue::Number(10.0),
+                BoxedValue::Number(15.0),
+                // last sink item: sum_range's return value
+                BoxedValue::Number(15.0),
+            ]
+        );
+    }
+
+    #[ignore]
+    #[test]
+    fn test_loop_unrolling_jit() {
+        let mut vm = interpreter::VM::new();
+
+        let code = &"
+            function sum_range(n) {
+                __start_trace('t');
+                let i = 0;
+                let ret = 0;
+                while (i <= n) {
+                    ret += i;
+                    sink(ret);
+                    i++;
+                }
+                return ret;
+            }
+
+            sink(sum_range(5));
+            ";
+        run_and_compile(&mut vm, code);
+
+        eprint!("trace = ");
+        let (trace, thunk) = vm.get_trace("t").unwrap();
+        trace.dump();
+
+        let mut snapshot = vec![BoxedValue::Number(5.0)];
+        assert_eq!(trace.snapshot_map.len() as usize, snapshot.len());
+
+        thunk.dump();
+        eprintln!("=== run");
+        thunk.run(&mut snapshot);
+
+        let sink = jit::codegen::take_test_sink();
+        assert_eq!(
+            &sink,
             &[
                 BoxedValue::Number(0.0),
                 BoxedValue::Number(1.0),

@@ -7,7 +7,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 pub use crate::common::Error;
@@ -82,11 +82,11 @@ impl Value {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Object(Rc<RefCell<HashMap<ObjectKey, Value>>>);
+pub struct Object(Arc<RefCell<HashMap<ObjectKey, Value>>>);
 
 impl Object {
     fn new() -> Self {
-        Object(Rc::new(RefCell::new(HashMap::new())))
+        Object(Arc::new(RefCell::new(HashMap::new())))
     }
 
     fn get<'a>(&'a self, key: &ObjectKey) -> Option<Ref<'a, Value>> {

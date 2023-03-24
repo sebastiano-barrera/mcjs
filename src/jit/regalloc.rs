@@ -35,17 +35,17 @@ impl std::fmt::Debug for HardReg {
 /// value ID `vid` is assigned to register `hreg` starting at position
 /// `pos` (inclusive).
 #[derive(Debug, PartialEq, Eq)]
-pub struct RegAsmt {
-    pos: ValueId,
-    vid: ValueId,
-    loc: Loc,
+pub(super) struct RegAsmt {
+    pub(super) pos: ValueId,
+    pub(super) vid: ValueId,
+    pub(super) loc: Loc,
 }
 
 pub struct Allocation {
-    asmts: Vec<RegAsmt>,
+    pub(super) asmts: Vec<RegAsmt>,
     n_general: RegIndex,
     n_numeric: RegIndex,
-    stack_size: u16,
+    n_stack_slots: u16,
 }
 
 impl Allocation {
@@ -56,7 +56,7 @@ impl Allocation {
     fn new(asmts: Vec<RegAsmt>) -> Allocation {
         let mut n_general = 0;
         let mut n_numeric = 0;
-        let mut stack_size = 0u16;
+        let mut n_stack_slots = 0u16;
         for asmt in asmts.iter() {
             match asmt.loc {
                 Loc::HardReg(HardReg {
@@ -67,7 +67,7 @@ impl Allocation {
                     class: RegClass::Numeric,
                     index: ndx,
                 }) => n_numeric = n_numeric.max(ndx + 1),
-                Loc::StackSlot(sslot) => stack_size = stack_size.max(sslot + 1),
+                Loc::StackSlot(sslot) => n_stack_slots = n_stack_slots.max(sslot + 1),
             }
         }
 
@@ -75,16 +75,8 @@ impl Allocation {
             asmts,
             n_general,
             n_numeric,
-            stack_size,
+            n_stack_slots,
         }
-    }
-
-    pub(crate) fn hreg_of_instr(&self, _vid: ValueId) -> Option<HardReg> {
-        todo!("delete this method")
-    }
-
-    pub(crate) fn n_instrs(&self) -> usize {
-        todo!("delete this method")
     }
 }
 
@@ -97,8 +89,8 @@ impl Allocation {
 /// the result register; otherwise, on an operand.
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub(super) struct ConstraintPt {
-    pos: ValueId,
-    vid: ValueId,
+    pub(super) pos: ValueId,
+    pub(super) vid: ValueId,
 }
 
 struct RegGroup {
@@ -392,6 +384,19 @@ pub(super) fn allocate_registers(
                     }
                 };
             }
+        }
+
+        // FIXME Does this go after advance_to?
+        if let Some(&fixed_hreg) = get_constraint(pos, pos) {
+            #[cfg(test)]
+            eprintln!("    - constrained to {:?} ", fixed_hreg);
+            let self_class = reg_classes[pos.0 as usize]
+                .expect("bug: malformed code: constraint on result, but no reg class");
+            assert_eq!(
+                self_class, fixed_hreg.class,
+                "invalid constraint: wrong register class!"
+            );
+            regs.force_allocate(fixed_hreg, pos);
         }
 
         regs.advance_to(pos);

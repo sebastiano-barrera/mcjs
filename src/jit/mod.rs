@@ -39,19 +39,11 @@ impl Trace {
                 None => "--".into(),
             };
 
-            let hreg_opt = self.hreg_alloc.hreg_of_instr(vid);
-            let hreg: Cow<'static, str> = if let Some(hreg) = hreg_opt {
-                format!("{:?}", hreg).into()
-            } else {
-                "---".into()
-            };
-
             let ndx = vid.0 as usize;
             eprintln!(
-                " {} {:4} {:5} {:6} {:?}",
+                " {} {:4} {:6} {:?}",
                 if self.is_enabled[ndx] { ' ' } else { 'X' },
                 vid.0,
-                hreg,
                 exp_type,
                 instr
             );
