@@ -172,6 +172,13 @@ pub(crate) struct SnapshotMapItem {
     pub(crate) operand: interpreter::Operand,
 }
 
+#[cfg(test)]
+impl From<Vec<SnapshotMapItem>> for SnapshotMap {
+    fn from(items: Vec<SnapshotMapItem>) -> Self {
+        SnapshotMap { items }
+    }
+}
+
 impl SnapshotMap {
     pub(super) fn new() -> Self {
         Self { items: Vec::new() }
@@ -1202,6 +1209,7 @@ pub(super) enum Instr {
     GetSnapshotItem {
         ndx: u16,
         ty: ValueType,
+        // TODO(performance) replace this with something that doesn't require a dedicated allocation?
         post_snap_update: SnapshotUpdate,
     },
     GetArg {

@@ -126,7 +126,7 @@ fn decode_values(
     }
 }
 
-fn decode_value(rt_data: &RuntimeData, rt_val: i64, typ: ValueType) -> interpreter::Value {
+fn decode_value(_rt_data: &RuntimeData, rt_val: i64, typ: ValueType) -> interpreter::Value {
     match typ {
         ValueType::Bool => interpreter::Value::Bool(rt_val != 0),
         ValueType::Num => interpreter::Value::Number(f64::from_bits(rt_val as u64)),
@@ -325,24 +325,24 @@ pub fn take_test_sink() -> Vec<BoxedValue> {
     })
 }
 
-extern "C" fn ext_push_sink_gen(value: i64, ty: ValueType) {
+extern "C" fn ext_push_sink_gen(_value: i64, _ty: ValueType) {
     // Figure out a better way of manipulating the `sink` vector
     #[cfg(test)]
     TEST_SINK.with(|test_sink| {
         let mut test_sink = test_sink.borrow_mut();
         // TODO This is a kludge.  Remove the rtdata parameter from decode_value?
         let rtdata = unsafe { std::mem::transmute(std::ptr::null::<()>()) };
-        let value = decode_value(rtdata, value, ty);
+        let value = decode_value(rtdata, _value, _ty);
         test_sink.push(value);
     });
 }
 
-extern "C" fn ext_push_sink_num(value: f64) {
+extern "C" fn ext_push_sink_num(_value: f64) {
     // Figure out a better way of manipulating the `sink` vector
     #[cfg(test)]
     TEST_SINK.with(|test_sink| {
         let mut test_sink = test_sink.borrow_mut();
-        test_sink.push(BoxedValue::Number(value));
+        test_sink.push(BoxedValue::Number(_value));
     });
 }
 
@@ -381,11 +381,10 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     let mut asm = dynasmrt::x64::Assembler::new().unwrap();
     let mut rt_data = RuntimeData::new();
 
-    let assert_type = |trace: &Trace, vid: ValueId, expected_type: ValueType| {
-        assert_eq!(
-            trace.get_instr(vid).unwrap().result_type().unwrap(),
-            expected_type
-        );
+    let get_ty = |vid: ValueId| trace.get_instr(vid).unwrap().result_type().unwrap();
+
+    let assert_type = |vid: ValueId, expected_type: ValueType| {
+        assert_eq!(get_ty(vid), expected_type);
     };
 
     // TODO(big feat) Another good idea from LuaJIT: group all the constants at the start of the trace
@@ -430,6 +429,17 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             }
         };
 
+        let write_snap_update =
+            |asm: &mut dynasmrt::x64::Assembler, update: &super::builder::SnapshotUpdate| {
+                for (ndx, slot_vid) in update.iter().enumerate() {
+                    if let Some(slot_vid) = slot_vid {
+                        let hreg = get_hreg(*slot_vid);
+                        let ty = get_ty(*slot_vid);
+                        write_snapshot_item(asm, ndx, ty, hreg);
+                    }
+                }
+            };
+
         match instr {
             Instr::Box(_) => todo!("(big feat) Instr::Box"),
             Instr::GetArg { .. } => todo!("(big feat) Instr::GetArg"),
@@ -458,8 +468,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             }
             Instr::Not(_) => todo!("(small feat) Instr::Box"),
             Instr::Arith { op, a, b } => {
-                assert_type(trace, *a, ValueType::Num);
-                assert_type(trace, *b, ValueType::Num);
+                assert_type(*a, ValueType::Num);
+                assert_type(*b, ValueType::Num);
 
                 let a = get_hreg(*a).expect_numeric();
                 let b = get_hreg(*b).expect_numeric();
@@ -489,7 +499,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 cond: cmp,
                 pre_snap_update,
             } => {
-                write_snapshot(asm, pre_snap_update, get_hreg);
+                write_snap_update(asm, &pre_snap_update);
                 let a = get_hreg(cmp.a);
                 let b = get_hreg(cmp.b);
                 trace_assert_cmp(asm, cmp.ty, cmp.op, a, b);
@@ -508,18 +518,14 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             }
             Instr::PushSink(arg) => {
                 // TODO use a bitmask?
-                let mut saved_genregs: Vec<_> = used_gps
+                let saved_genregs: Vec<_> = used_gps
                     .iter()
                     .filter(|areg| !is_callee_saved(**areg))
                     .copied()
                     .collect();
 
-                let ty: ValueType = trace
-                    .get_instr(*arg)
-                    .unwrap()
-                    .result_type()
-                    .expect("PushSink arg's source instr has no result");
                 let hreg = get_hreg(*arg);
+                let ty = get_ty(*arg);
 
                 stack_codegen.start_chunk(asm, &saved_genregs);
                 stack_codegen.start_chunk_num(asm, &used_nums);
@@ -612,7 +618,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                         dynasm!(asm; movsd Rx (tgt), QWORD [rdi + 8 * snap_ndx])
                     }
                 }
-                write_snapshot(asm, post_snap_update, get_hreg);
+
+                write_snap_update(asm, &post_snap_update);
             }
         }
     };
@@ -692,27 +699,18 @@ fn is_callee_saved(areg: Rq) -> bool {
     )
 }
 
-fn write_snapshot<H>(asm: &mut dynasmrt::x64::Assembler, snap: &[Option<ValueId>], hreg_of: H)
-where
-    H: Fn(ValueId) -> HardReg,
-{
-    for (ndx, vid_opt) in snap.iter().enumerate() {
-        if let Some(vid) = vid_opt {
-            match hreg_of(*vid) {
-                HardReg {
-                    class: RegClass::General,
-                    index: regndx,
-                } => {
-                    dynasm!(asm; mov [rbp + 8 * (ndx as i32)], Rq (regndx))
-                }
-                HardReg {
-                    class: RegClass::Numeric,
-                    index: regndx,
-                } => {
-                    dynasm!(asm; movsd [rbp + 8 * (ndx as i32)], Rx (regndx))
-                }
-            }
-        }
+fn write_snapshot_item(
+    asm: &mut dynasmrt::x64::Assembler,
+    ndx: usize,
+    ty: ValueType,
+    hreg: HardReg,
+) {
+    dynasm!(asm; mov BYTE [rsi + 1 + ndx as i32], ty as _);
+    match hreg.class {
+        // Mind the `1 + ndx`: the first slot is reserved for the return value
+        // (in case the trace spans a whole function)
+        RegClass::General => dynasm!(asm; mov [rdi + 8 * (1 + ndx as i32)], Rq (hreg.index)),
+        RegClass::Numeric => dynasm!(asm; movsd [rdi + 8 * (1 + ndx as i32)], Rx (hreg.index)),
     }
 }
 
@@ -995,7 +993,7 @@ fn min_max<T: PartialOrd>(a: T, b: T) -> (T, T) {
 mod tests {
     use super::*;
     use crate::jit::{
-        builder::{SnapshotMap, ValueType},
+        builder::{SnapshotMap, SnapshotMapItem, SnapshotUpdate, ValueType},
         regalloc::{Allocation, RegAsmt},
     };
 
@@ -1271,5 +1269,63 @@ mod tests {
                 BoxedValue::Number(a / b),
             ]
         );
+    }
+
+    #[test]
+    fn test_exit_unless() {
+        let trace = {
+            let instrs: Vec<_> = [
+                Instr::Const(BoxedValue::Number(122.3)),
+                Instr::Const(BoxedValue::Number(0.0)),
+                Instr::ExitUnless {
+                    cond: Cmp {
+                        ty: ValueType::Num,
+                        op: CmpOp::EQ,
+                        a: ValueId(0 as _),
+                        b: ValueId(1 as _),
+                    },
+                    pre_snap_update: [Some(ValueId(1 as _)), Some(ValueId(0 as _))].into(),
+                },
+            ]
+            .into();
+            let hreg_alloc = Allocation::new(
+                [
+                    RegAsmt::hreg(1, 1, super::hreg_of_numreg(Rx::XMM1)),
+                    RegAsmt::hreg(0, 0, super::hreg_of_numreg(Rx::XMM0)),
+                ]
+                .into(),
+            );
+            let is_enabled = instrs.iter().map(|_| true).collect();
+            // just dummies
+            Trace {
+                hreg_alloc,
+                snapshot_map: dummy_snapshot_map(2),
+                snapshot_final_update: Vec::new(),
+                instrs,
+                is_loop: false,
+                is_enabled,
+            }
+        };
+
+        let thunk = super::to_native(&trace);
+        thunk.dump();
+        let mut snap = vec![BoxedValue::Undefined, BoxedValue::Undefined];
+        let ret = thunk.run(&mut snap);
+
+        assert_eq!(ret, BoxedValue::Undefined);
+        assert_eq!(&snap, &[BoxedValue::Number(0.0), BoxedValue::Number(122.3)]);
+    }
+
+    fn dummy_snapshot_map(count: usize) -> SnapshotMap {
+        use interpreter::IID;
+        let items: Vec<_> = (0..count)
+            .map(|i| SnapshotMapItem {
+                write_on_entry: false,
+                write_on_exit: true,
+                operand: interpreter::Operand::IID(IID(i as u32)),
+            })
+            .collect();
+
+        SnapshotMap::from(items)
     }
 }
