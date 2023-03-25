@@ -595,12 +595,12 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 ty,
                 post_snap_update,
             } => {
-                let snap_ndx = *snap_ndx as i32;
-                assert!(snap_ndx < snap_len as i32);
-
+                assert!(*snap_ndx < snap_len);
                 // `+ 1` because the first slot is reserved for the return value
+                let slot_ndx = 1 + *snap_ndx as i32;
+
                 dynasm!(asm
-                 ; cmp BYTE [rsi + snap_ndx + 1], *ty as i8
+                 ; cmp BYTE [rsi + slot_ndx], *ty as i8
                  ; jne >abort_trace
                 );
 
@@ -609,13 +609,13 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                         class: RegClass::General,
                         index: tgt,
                     } => {
-                        dynasm!(asm; mov Rq (tgt), QWORD [rdi + 8 * snap_ndx])
+                        dynasm!(asm; mov Rq (tgt), QWORD [rdi + 8 * slot_ndx])
                     }
                     HardReg {
                         class: RegClass::Numeric,
                         index: tgt,
                     } => {
-                        dynasm!(asm; movsd Rx (tgt), QWORD [rdi + 8 * snap_ndx])
+                        dynasm!(asm; movsd Rx (tgt), QWORD [rdi + 8 * slot_ndx])
                     }
                 }
 
@@ -1137,7 +1137,7 @@ mod tests {
         let trace = simple_trace(
             [
                 Instr::Const(BoxedValue::Bool(true)),
-                Instr::PushSink(ValueId(0 as u32)),
+                Instr::PushSink(ValueId(0u32)),
             ]
             .into(),
             Allocation::new(
@@ -1163,7 +1163,7 @@ mod tests {
         let trace = simple_trace(
             [
                 Instr::Const(BoxedValue::Number(1032.312)),
-                Instr::PushSink(ValueId(0 as u32)),
+                Instr::PushSink(ValueId(0u32)),
             ]
             .into(),
             Allocation::new(
@@ -1184,7 +1184,7 @@ mod tests {
         let trace = simple_trace(
             [
                 Instr::Const(num_val.clone()),
-                Instr::PushSink(ValueId(0 as u32)),
+                Instr::PushSink(ValueId(0u32)),
             ]
             .into(),
             Allocation::new(
@@ -1214,28 +1214,28 @@ mod tests {
                 Instr::Const(BoxedValue::Number(b)),
                 Instr::Arith {
                     op: ArithOp::Add,
-                    a: ValueId(0 as u32),
-                    b: ValueId(1 as u32),
+                    a: ValueId(0u32),
+                    b: ValueId(1u32),
                 },
                 Instr::Arith {
                     op: ArithOp::Sub,
-                    a: ValueId(0 as u32),
-                    b: ValueId(1 as u32),
+                    a: ValueId(0u32),
+                    b: ValueId(1u32),
                 },
                 Instr::Arith {
                     op: ArithOp::Mul,
-                    a: ValueId(0 as u32),
-                    b: ValueId(1 as u32),
+                    a: ValueId(0u32),
+                    b: ValueId(1u32),
                 },
                 Instr::Arith {
                     op: ArithOp::Div,
-                    a: ValueId(0 as u32),
-                    b: ValueId(1 as u32),
+                    a: ValueId(0u32),
+                    b: ValueId(1u32),
                 },
-                Instr::PushSink(ValueId(2 as u32)),
-                Instr::PushSink(ValueId(3 as u32)),
-                Instr::PushSink(ValueId(4 as u32)),
-                Instr::PushSink(ValueId(5 as u32)),
+                Instr::PushSink(ValueId(2u32)),
+                Instr::PushSink(ValueId(3u32)),
+                Instr::PushSink(ValueId(4u32)),
+                Instr::PushSink(ValueId(5u32)),
             ]
             .into(),
             Allocation::new(
@@ -1272,24 +1272,96 @@ mod tests {
     }
 
     #[test]
-    fn test_exit_unless() {
+    fn test_exit_snapshot() {
         let trace = {
             let instrs: Vec<_> = [
                 Instr::Const(BoxedValue::Number(122.3)),
-                Instr::Const(BoxedValue::Number(0.0)),
+                Instr::Const(BoxedValue::Number(9.001)),
+                Instr::Const(BoxedValue::Number(75.30)),
                 Instr::ExitUnless {
                     cond: Cmp {
                         ty: ValueType::Num,
                         op: CmpOp::EQ,
-                        a: ValueId(0 as _),
-                        b: ValueId(1 as _),
+                        a: ValueId(0),
+                        b: ValueId(1),
                     },
-                    pre_snap_update: [Some(ValueId(1 as _)), Some(ValueId(0 as _))].into(),
+                    pre_snap_update: [Some(ValueId(2)), None, Some(ValueId(0))].into(),
                 },
             ]
             .into();
             let hreg_alloc = Allocation::new(
                 [
+                    RegAsmt::hreg(2, 2, super::hreg_of_numreg(Rx::XMM2)),
+                    RegAsmt::hreg(1, 1, super::hreg_of_numreg(Rx::XMM1)),
+                    RegAsmt::hreg(0, 0, super::hreg_of_numreg(Rx::XMM0)),
+                ]
+                .into(),
+            );
+            let is_enabled = instrs.iter().map(|_| true).collect();
+            // just dummies
+            Trace {
+                hreg_alloc,
+                snapshot_map: dummy_snapshot_map(3),
+                snapshot_final_update: Vec::new(),
+                instrs,
+                is_loop: false,
+                is_enabled,
+            }
+        };
+
+        let thunk = super::to_native(&trace);
+        thunk.dump();
+        let mut snap = vec![
+            BoxedValue::Number(2222.2),
+            BoxedValue::Bool(true),
+            BoxedValue::Number(11.111),
+        ];
+        let ret = thunk.run(&mut snap);
+
+        assert_eq!(ret, BoxedValue::Undefined);
+        assert_eq!(
+            &snap,
+            &[
+                BoxedValue::Number(75.30),
+                BoxedValue::Bool(true),
+                BoxedValue::Number(122.3)
+            ]
+        );
+    }
+
+    // NOTE: In this test module, the register assignments are done "manually",
+    // without using any register allocation algorithm.  It has to be correct
+    // or the trace will have a wrong result/behavior so be careful!
+
+    #[test]
+    fn test_snap_inout() {
+        let trace = {
+            let instrs: Vec<_> = [
+                Instr::GetSnapshotItem {
+                    ndx: 1,
+                    ty: ValueType::Num,
+                    post_snap_update: vec![],
+                },
+                Instr::Const(BoxedValue::Number(5.0)),
+                Instr::Arith {
+                    op: ArithOp::Mul,
+                    a: ValueId(0u32),
+                    b: ValueId(1u32),
+                },
+                Instr::ExitUnless {
+                    cond: Cmp {
+                        ty: ValueType::Num,
+                        op: CmpOp::NE,
+                        a: ValueId(0),
+                        b: ValueId(0),
+                    },
+                    pre_snap_update: [Some(ValueId(2)), None].into(),
+                },
+            ]
+            .into();
+            let hreg_alloc = Allocation::new(
+                [
+                    RegAsmt::hreg(2, 2, super::hreg_of_numreg(Rx::XMM2)),
                     RegAsmt::hreg(1, 1, super::hreg_of_numreg(Rx::XMM1)),
                     RegAsmt::hreg(0, 0, super::hreg_of_numreg(Rx::XMM0)),
                 ]
@@ -1309,13 +1381,24 @@ mod tests {
 
         let thunk = super::to_native(&trace);
         thunk.dump();
-        let mut snap = vec![BoxedValue::Undefined, BoxedValue::Undefined];
+        let mut snap = vec![BoxedValue::Bool(true), BoxedValue::Number(11.111)];
         let ret = thunk.run(&mut snap);
 
         assert_eq!(ret, BoxedValue::Undefined);
-        assert_eq!(&snap, &[BoxedValue::Number(0.0), BoxedValue::Number(122.3)]);
+        assert_eq!(snap.len(), 2);
+        let (n0, n1) = match &snap[..] {
+            &[BoxedValue::Number(n0), BoxedValue::Number(n1)] => (n0, n1),
+            _ => panic!(),
+        };
+        // Re-doing the multiplication explicitly is necessary, as the
+        // result will be approximate.  The multiplication performed by
+        // the trace and here in Rust will have "the same error".
+        assert_eq!(n0, 11.111 * 5.0);
+        assert!(n1 == 11.111);
     }
 
+    // There is NO use filling in a SnapshotMap properly in the codegen module
+    // TODO Can this be excluded/moved elsewhere
     fn dummy_snapshot_map(count: usize) -> SnapshotMap {
         use interpreter::IID;
         let items: Vec<_> = (0..count)
