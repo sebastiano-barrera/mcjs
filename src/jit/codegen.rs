@@ -345,13 +345,8 @@ extern "C" fn ext_push_sink_num(_value: f64) {
     });
 }
 
-// This function has the same prototype (as a C function) as the generated
-// code. Since registers RDI, RSI and RDX are reserved (not used by the
-// register allocation) and never touched in any other way, a naked `call`
-// instruction "works" without further register shuffling.
-pub extern "C" fn ext_str_cmp(value: u64) {
-    // Figure out a better way of manipulating the `sink` vector
-    println!("TODO(big feat): trace: push sink: {value:064b} = {value}");
+extern "C" fn ext_str_cmp(sid_a: u64, sid_b: u64) {
+    todo!("ext_str_cmp: {} <=> {}", sid_a, sid_b);
 }
 
 trait HardRegExt {
@@ -432,6 +427,12 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
         let write_snap_update =
             |asm: &mut dynasmrt::x64::Assembler, update: &super::builder::SnapshotUpdate| {
+                assert!(
+                    update.len() <= snap_len as usize,
+                    "snapshot update has wrong len ({}, must be at most {})",
+                    update.len(),
+                    snap_len
+                );
                 for (ndx, slot_vid) in update.iter().enumerate() {
                     if let Some(slot_vid) = slot_vid {
                         let hreg = get_hreg(*slot_vid);
@@ -557,7 +558,22 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 stack_codegen.end_chunk_num(asm, &used_nums);
                 stack_codegen.end_chunk(asm, &saved_genregs);
             }
-            Instr::Return(_) => todo!("TODO return"),
+            Instr::Return(vid) => {
+                let ty = get_ty(*vid);
+                let HardReg { class, index } = get_hreg(*vid);
+
+                dynasm!(asm; mov BYTE [rsi], ty as _);
+                match class {
+                    RegClass::General => {
+                        let rq = GP_REGS[index as usize];
+                        dynasm!(asm; mov [rdi], Rq (rq.code()))
+                    }
+                    RegClass::Numeric => {
+                        let rx = NUM_REGS[index as usize];
+                        dynasm!(asm; movsd [rdi], Rx (rx.code()))
+                    }
+                }
+            }
             Instr::Phi(old, new) => {
                 let old = get_hreg(*old);
                 let new = get_hreg(*new);
@@ -606,18 +622,16 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                  ; jne >abort_trace
                 );
 
-                match get_hreg(vid) {
-                    HardReg {
-                        class: RegClass::General,
-                        index: tgt,
-                    } => {
-                        dynasm!(asm; mov Rq (tgt), QWORD [rdi + 8 * slot_ndx])
+                let HardReg { class, index: tgt } = get_hreg(vid);
+                assert_eq!(class, reg_class_of_type(*ty));
+                match class {
+                    RegClass::General => {
+                        let tgt = GP_REGS[tgt as usize];
+                        dynasm!(asm; mov Rq (tgt.code()), QWORD [rdi + 8 * slot_ndx])
                     }
-                    HardReg {
-                        class: RegClass::Numeric,
-                        index: tgt,
-                    } => {
-                        dynasm!(asm; movsd Rx (tgt), QWORD [rdi + 8 * slot_ndx])
+                    RegClass::Numeric => {
+                        let tgt = NUM_REGS[tgt as usize];
+                        dynasm!(asm; movsd Rx (tgt.code()), QWORD [rdi + 8 * slot_ndx])
                     }
                 }
 
@@ -711,8 +725,14 @@ fn write_snapshot_item(
     match hreg.class {
         // Mind the `1 + ndx`: the first slot is reserved for the return value
         // (in case the trace spans a whole function)
-        RegClass::General => dynasm!(asm; mov [rdi + 8 * (1 + ndx as i32)], Rq (hreg.index)),
-        RegClass::Numeric => dynasm!(asm; movsd [rdi + 8 * (1 + ndx as i32)], Rx (hreg.index)),
+        RegClass::General => {
+            let rq = GP_REGS[hreg.index as usize];
+            dynasm!(asm; mov [rdi + 8 * (1 + ndx as i32)], Rq (rq.code()))
+        }
+        RegClass::Numeric => {
+            let rx = NUM_REGS[hreg.index as usize];
+            dynasm!(asm; movsd [rdi + 8 * (1 + ndx as i32)], Rx (rx.code()))
+        }
     }
 }
 
@@ -939,12 +959,12 @@ fn gen_cmp(asm: &mut dynasmrt::x64::Assembler, ty: ValueType, a: HardReg, b: Har
         ValueType::Str => {
             let a = a.expect_general();
             let b = b.expect_general();
+            todo!("I need a big refactoring in order to always generate correct code for arbitrary C funcs");
+            assert_eq!(a, Rq::RDI);
+            assert_eq!(b, Rq::RSI);
             dynasm!(asm
-                ; cmp Rq (a.code()), Rq (b.code())
-                ; je >strptreq
-                // TODO TODO TODO
-                ; call ext_str_cmp as _
-                ; strptreq:
+            ; call ext_str_cmp as _
+            ; cmp rax, 0
             );
         }
         ValueType::Obj => todo!(),
@@ -1335,6 +1355,39 @@ mod tests {
     // without using any register allocation algorithm.  It has to be correct
     // or the trace will have a wrong result/behavior so be careful!
 
+    fn check_getsnapshotitem_wrong_regclass(ty: ValueType, hreg: HardReg) {
+        let instr = Instr::GetSnapshotItem {
+            ndx: 0,
+            ty,
+            post_snap_update: vec![],
+        };
+        let instrs = vec![instr];
+        let hreg_asmts = vec![RegAsmt::hreg(0, 0, hreg)];
+        let is_enabled = vec![true];
+        let trace = Trace {
+            hreg_alloc: Allocation::new(hreg_asmts),
+            snapshot_map: dummy_snapshot_map(3),
+            snapshot_final_update: Vec::new(),
+            instrs,
+            is_loop: false,
+            is_enabled,
+        };
+
+        super::to_native(&trace);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_getsnapshotitem_wrong_regclass_1() {
+        check_getsnapshotitem_wrong_regclass(ValueType::Num, super::hreg_of_genreg(Rq::RBX));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_getsnapshotitem_wrong_regclass_2() {
+        check_getsnapshotitem_wrong_regclass(ValueType::Str, super::hreg_of_numreg(Rx::XMM2));
+    }
+
     #[test]
     fn test_snap_inout() {
         let trace = {
@@ -1372,7 +1425,7 @@ mod tests {
                     RegAsmt::hreg(4, 4, super::hreg_of_genreg(Rq::RBX)),
                     RegAsmt::hreg(3, 3, super::hreg_of_numreg(Rx::XMM3)),
                     RegAsmt::hreg(2, 2, super::hreg_of_numreg(Rx::XMM2)),
-                    RegAsmt::hreg(1, 1, super::hreg_of_numreg(Rx::XMM1)),
+                    RegAsmt::hreg(1, 1, super::hreg_of_genreg(Rq::RCX)),
                     RegAsmt::hreg(0, 0, super::hreg_of_numreg(Rx::XMM0)),
                 ]
                 .into(),
@@ -1446,5 +1499,77 @@ mod tests {
             .collect();
 
         SnapshotMap::from(items)
+    }
+
+    #[ignore]
+    #[test]
+    fn test_getsnapshotitem_wrong_ty() {
+        todo!()
+    }
+
+    #[ignore]
+    #[test]
+    fn test_getsnapshotitem_wrong_snap_len() {
+        todo!()
+    }
+
+    #[ignore]
+    #[test]
+    fn test_str_cmp() {
+        let trace = {
+            let instrs: Vec<_> = [
+                Instr::GetSnapshotItem {
+                    ndx: 0,
+                    ty: ValueType::Str,
+                    post_snap_update: [None, None].into(),
+                },
+                Instr::GetSnapshotItem {
+                    ndx: 1,
+                    ty: ValueType::Str,
+                    post_snap_update: [None, None].into(),
+                },
+                Instr::ExitUnless {
+                    cond: Cmp {
+                        ty: ValueType::Str,
+                        op: CmpOp::NE,
+                        a: ValueId(0),
+                        b: ValueId(1),
+                    },
+                    pre_snap_update: [None, None].into(),
+                },
+                Instr::Const(BoxedValue::Bool(true)),
+                Instr::Return(ValueId(3)),
+            ]
+            .into();
+            let hreg_alloc = Allocation::new(
+                [
+                    RegAsmt::hreg(3, 3, super::hreg_of_genreg(Rq::RAX)),
+                    RegAsmt::hreg(1, 1, super::hreg_of_genreg(Rq::RSI)),
+                    RegAsmt::hreg(0, 0, super::hreg_of_genreg(Rq::RDI)),
+                ]
+                .into(),
+            );
+            let is_enabled = instrs.iter().map(|_| true).collect();
+            // just dummies
+            Trace {
+                hreg_alloc,
+                snapshot_map: dummy_snapshot_map(2),
+                snapshot_final_update: Vec::new(),
+                instrs,
+                is_loop: false,
+                is_enabled,
+            }
+        };
+
+        let thunk = super::to_native(&trace);
+        thunk.dump();
+
+        let mut snap: [_; 2] = [
+            BoxedValue::String("asd".into()),
+            BoxedValue::String("rofl".into()),
+        ];
+        let ret = thunk.run(&mut snap[..]);
+
+        assert_eq!(ret, BoxedValue::Bool(true));
     }
 }
