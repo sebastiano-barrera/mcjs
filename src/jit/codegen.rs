@@ -126,17 +126,16 @@ fn decode_values(
     }
 }
 
-fn decode_value(_rt_data: &RuntimeData, rt_val: i64, typ: ValueType) -> interpreter::Value {
+fn decode_value(rt_data: &RuntimeData, rt_val: i64, typ: ValueType) -> interpreter::Value {
     match typ {
         ValueType::Bool => interpreter::Value::Bool(rt_val != 0),
         ValueType::Num => interpreter::Value::Number(f64::from_bits(rt_val as u64)),
-        ValueType::Str => todo!(),
-        // {
-        //     let sid = rt_val as u64;
-        //     // TODO Any way to avoid this string copy?
-        //     let s = rt_data.get_str(sid).unwrap().clone();
-        //     interpreter::Value::String(s.into())
-        // }
+        ValueType::Str => {
+            let sid = rt_val as u64;
+            // TODO Any way to avoid this string copy?
+            let s = rt_data.get_str(sid).unwrap().clone();
+            interpreter::Value::String(s.into())
+        }
         ValueType::Obj => todo!("(big feat) decode object ref (remember the GC!)"),
         ValueType::Null => interpreter::Value::Null,
         ValueType::Undefined => interpreter::Value::Undefined,
@@ -373,6 +372,8 @@ impl HardRegExt for HardReg {
 }
 
 pub(super) fn to_native(trace: &Trace) -> NativeThunk {
+    assert!(!trace.is_loop, "loops still unsupported");
+
     if trace.hreg_alloc.n_general() as usize > GP_REGS.len() {
         panic!("too many hardregs used in reg allocation!");
     }
@@ -448,19 +449,20 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 // this value, so we can discard it here
                 let (encoded_value, _) = encode_value(&mut rt_data, value);
 
-                match get_hreg(vid) {
-                    HardReg {
-                        class: RegClass::General,
-                        index: regndx,
-                    } => {
-                        let reg = GP_REGS[regndx as usize];
+                let HardReg { class, index } = get_hreg(vid);
+                assert_eq!(
+                    class,
+                    reg_class_of_type(ValueType::of(value)),
+                    "wrong register class: {class:?}"
+                );
+
+                match class {
+                    RegClass::General => {
+                        let reg = GP_REGS[index as usize];
                         dynasm!(asm; mov Rq (reg.code()), QWORD encoded_value);
                     }
-                    HardReg {
-                        class: RegClass::Numeric,
-                        index: regndx,
-                    } => {
-                        let reg = NUM_REGS[regndx as usize];
+                    RegClass::Numeric => {
+                        let reg = NUM_REGS[index as usize];
                         let mem = *num_consts.get(&vid).unwrap();
                         dynasm!(asm; movsd Rx (reg.code()), [=>mem]);
                     }
@@ -1342,12 +1344,18 @@ mod tests {
                     ty: ValueType::Num,
                     post_snap_update: vec![],
                 },
+                Instr::GetSnapshotItem {
+                    ndx: 2,
+                    ty: ValueType::Str,
+                    post_snap_update: vec![],
+                },
                 Instr::Const(BoxedValue::Number(5.0)),
                 Instr::Arith {
                     op: ArithOp::Mul,
-                    a: ValueId(0u32),
-                    b: ValueId(1u32),
+                    a: ValueId(0),
+                    b: ValueId(2),
                 },
+                Instr::Const(BoxedValue::String("lol123".into())),
                 Instr::ExitUnless {
                     cond: Cmp {
                         ty: ValueType::Num,
@@ -1355,12 +1363,14 @@ mod tests {
                         a: ValueId(0),
                         b: ValueId(0),
                     },
-                    pre_snap_update: [Some(ValueId(2)), None].into(),
+                    pre_snap_update: [Some(ValueId(3)), None, Some(ValueId(4))].into(),
                 },
             ]
             .into();
             let hreg_alloc = Allocation::new(
                 [
+                    RegAsmt::hreg(4, 4, super::hreg_of_genreg(Rq::RBX)),
+                    RegAsmt::hreg(3, 3, super::hreg_of_numreg(Rx::XMM3)),
                     RegAsmt::hreg(2, 2, super::hreg_of_numreg(Rx::XMM2)),
                     RegAsmt::hreg(1, 1, super::hreg_of_numreg(Rx::XMM1)),
                     RegAsmt::hreg(0, 0, super::hreg_of_numreg(Rx::XMM0)),
@@ -1371,7 +1381,7 @@ mod tests {
             // just dummies
             Trace {
                 hreg_alloc,
-                snapshot_map: dummy_snapshot_map(2),
+                snapshot_map: dummy_snapshot_map(3),
                 snapshot_final_update: Vec::new(),
                 instrs,
                 is_loop: false,
@@ -1381,20 +1391,46 @@ mod tests {
 
         let thunk = super::to_native(&trace);
         thunk.dump();
-        let mut snap = vec![BoxedValue::Bool(true), BoxedValue::Number(11.111)];
-        let ret = thunk.run(&mut snap);
+
+        let mut snap: [_; 3] = [
+            BoxedValue::Bool(true),
+            BoxedValue::Number(11.111),
+            BoxedValue::String("asdlol".into()),
+        ];
+        let ret = thunk.run(&mut snap[..]);
 
         assert_eq!(ret, BoxedValue::Undefined);
-        assert_eq!(snap.len(), 2);
-        let (n0, n1) = match &snap[..] {
-            &[BoxedValue::Number(n0), BoxedValue::Number(n1)] => (n0, n1),
-            _ => panic!(),
+        let (n0, n1, s) = match &snap[..] {
+            [BoxedValue::Number(n0), BoxedValue::Number(n1), BoxedValue::String(s)] => {
+                (*n0, *n1, s.clone())
+            }
+            _ => panic!("wrong post-trace snapshot content: {:?}", snap),
         };
+
         // Re-doing the multiplication explicitly is necessary, as the
         // result will be approximate.  The multiplication performed by
         // the trace and here in Rust will have "the same error".
         assert_eq!(n0, 11.111 * 5.0);
         assert!(n1 == 11.111);
+
+        assert_eq!(s.as_ref(), "lol123");
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_emit_mov_wrong_regclass() {
+        use crate::jit::regalloc::Loc;
+
+        let mut asm = dynasmrt::x64::Assembler::new().unwrap();
+        let a = super::HardReg {
+            class: RegClass::General,
+            index: 1,
+        };
+        let b = super::HardReg {
+            class: RegClass::Numeric,
+            index: 1,
+        };
+        super::emit_mov(&mut asm, Loc::HardReg(a), Loc::HardReg(b));
     }
 
     // There is NO use filling in a SnapshotMap properly in the codegen module

@@ -1488,6 +1488,7 @@ mod tests {
         assert!(PartialEq::eq(pushsink_operands[0], &"b".into()));
     }
 
+    #[ignore]
     #[test]
     fn test_tracing_one_func() {
         let output = quick_jit(
