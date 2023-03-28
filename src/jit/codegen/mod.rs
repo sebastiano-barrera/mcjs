@@ -128,7 +128,11 @@ fn decode_values(
 
 fn decode_value(rt_data: &RuntimeData, rt_val: i64, typ: ValueType) -> interpreter::Value {
     match typ {
-        ValueType::Bool => interpreter::Value::Bool(rt_val != 0),
+        ValueType::Bool => interpreter::Value::Bool(match rt_val {
+            0 => false,
+            1 => true,
+            _ => panic!("decode_value: invalid bool"),
+        }),
         ValueType::Num => interpreter::Value::Number(f64::from_bits(rt_val as u64)),
         ValueType::Str => {
             let sid = rt_val as u64;
@@ -241,16 +245,16 @@ impl NativeThunk {
 
 /// General purpose registers, available to be mapped to hregs.
 ///
-/// The following registers are not part of the list, as they are reserved for other purposes:
-///   - RDI (C func arg #1) points to the snapshot values (runtime encoded).
-///   - RSI (C func arg #2) points to the array of value types.
-///   - RDX (C func arg #3) points to the RuntimeData.
-///   - RSP is used as the stack pointer, in order to be compatible with the C calling convention.
+/// The following registers are not part of the list, as they are reserved for other
+/// purposes:
+///   - RSP is used as the stack pointer, in order to be compatible with the C calling
+///     convention.
 ///   - R15 is a scratch register
-pub(crate) const GP_REGS: [Rq; 13] = [
+pub(crate) const GP_REGS: [Rq; 14] = [
     Rq::RAX,
     Rq::RBX,
     Rq::RCX,
+    Rq::RDX,
     Rq::RSI,
     Rq::RDI,
     Rq::RBP,
@@ -328,10 +332,19 @@ extern "C" fn ext_push_sink_gen(_value: i64, _ty: ValueType) {
     // Figure out a better way of manipulating the `sink` vector
     #[cfg(test)]
     TEST_SINK.with(|test_sink| {
+        let addr = RefCell::as_ptr(test_sink) as usize;
         let mut test_sink = test_sink.borrow_mut();
         // TODO This is a kludge.  Remove the rtdata parameter from decode_value?
         let rtdata = unsafe { std::mem::transmute(std::ptr::null::<()>()) };
         let value = decode_value(rtdata, _value, _ty);
+        eprintln!(
+            "debug: push sink: value = {:?}/{} = {:?} (test_sink is at 0x{:08x}, thread is {:?})",
+            _ty,
+            _value,
+            value,
+            addr,
+            std::thread::current().id()
+        );
         test_sink.push(value);
     });
 }
@@ -340,7 +353,14 @@ extern "C" fn ext_push_sink_num(_value: f64) {
     // Figure out a better way of manipulating the `sink` vector
     #[cfg(test)]
     TEST_SINK.with(|test_sink| {
+        let addr = RefCell::as_ptr(test_sink) as usize;
         let mut test_sink = test_sink.borrow_mut();
+        eprintln!(
+            "debug: push sink numeric: value={} (test_sink is at 0x{:08x}, thread is {:?})",
+            _value,
+            addr as usize,
+            std::thread::current().id()
+        );
         test_sink.push(BoxedValue::Number(_value));
     });
 }
@@ -366,6 +386,103 @@ impl HardRegExt for HardReg {
     }
 }
 
+// TODO better name?
+struct LocMgr {
+    stack_codegen: StackCodegen,
+    cur_locs: HashMap<ValueId, regalloc::Loc>,
+    used_gps: Vec<Rq>,
+    used_nums: Vec<Rx>,
+}
+
+impl LocMgr {
+    fn new() -> Self {
+        LocMgr {
+            stack_codegen: StackCodegen::new(),
+            cur_locs: HashMap::new(),
+            used_gps: Vec::new(),
+            used_nums: Vec::new(),
+        }
+    }
+
+    fn stack_push(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq]) {
+        self.stack_codegen.start_chunk(asm, regs);
+    }
+    fn stack_pop(&mut self, asm: &mut dynasmrt::x64::Assembler, regs: &[Rq]) {
+        self.stack_codegen.end_chunk(asm, regs);
+    }
+
+    fn pre_call(&mut self, asm: &mut dynasmrt::x64::Assembler) {
+        let saved_genregs: Vec<_> = self
+            .used_gps
+            .iter()
+            .filter(|areg| !is_callee_saved(**areg))
+            .copied()
+            .collect();
+
+        self.stack_codegen.start_chunk(asm, &saved_genregs);
+        self.stack_codegen.start_chunk_num(asm, &self.used_nums);
+        self.stack_codegen.pre_call(asm);
+    }
+
+    fn post_call(&mut self, asm: &mut dynasmrt::x64::Assembler) {
+        // TODO avoid having this vec at all
+        let saved_genregs: Vec<_> = self
+            .used_gps
+            .iter()
+            .filter(|areg| !is_callee_saved(**areg))
+            .copied()
+            .collect();
+
+        self.stack_codegen.post_call(asm);
+        self.stack_codegen.end_chunk_num(asm, &self.used_nums);
+        self.stack_codegen.end_chunk(asm, &saved_genregs);
+    }
+
+    // TODO support locs, more general than HardRegs
+    fn get_hreg(&self, vid: ValueId) -> HardReg {
+        let loc = self
+            .cur_locs
+            .get(&vid)
+            .unwrap_or_else(|| panic!("regalloc bug: no hreg or stack slot for {vid:?}"));
+        match loc {
+            regalloc::Loc::HardReg(hreg) => *hreg,
+            regalloc::Loc::StackSlot(_) => todo!("stack slots"),
+        }
+    }
+
+    fn set_loc(
+        &mut self,
+        asmt: &regalloc::RegAsmt,
+        asm: &mut dynasmrt::Assembler<dynasmrt::x64::X64Relocation>,
+    ) {
+        // TODO this "algorithm" overestimates the set of used registers, as they remain marked as
+        // used, and are never cleared
+        match asmt.loc {
+            regalloc::Loc::HardReg(HardReg { class, index }) => match class {
+                // TODO Bad data structure
+                RegClass::General => {
+                    let rq = GP_REGS[index as usize];
+                    if !self.used_gps.contains(&rq) {
+                        self.used_gps.push(rq);
+                    }
+                }
+                RegClass::Numeric => {
+                    let rx = NUM_REGS[index as usize];
+                    if !self.used_nums.contains(&rx) {
+                        self.used_nums.push(rx);
+                    }
+                }
+            },
+            _ => {}
+        }
+
+        let prev = self.cur_locs.insert(asmt.vid, asmt.loc);
+        if let Some(prev) = prev {
+            emit_mov(asm, prev, asmt.loc);
+        }
+    }
+}
+
 pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     assert!(!trace.is_loop, "loops still unsupported");
 
@@ -374,16 +491,17 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     }
 
     let snap_len = trace.snapshot_map.len();
+
     let mut asm = dynasmrt::x64::Assembler::new().unwrap();
     let mut rt_data = RuntimeData::new();
 
     let get_ty = |vid: ValueId| trace.get_instr(vid).unwrap().result_type().unwrap();
-
     let assert_type = |vid: ValueId, expected_type: ValueType| {
         assert_eq!(get_ty(vid), expected_type);
     };
 
-    // TODO(big feat) Another good idea from LuaJIT: group all the constants at the start of the trace
+    // TODO(big feat) Another good idea from LuaJIT: group all the constants at the start of
+    // the trace
     let num_consts = {
         let mut map = HashMap::new();
         for (vid, instr) in trace.iter_instrs() {
@@ -407,24 +525,13 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
         .copied()
         .collect();
 
-    // TODO(future rust): .next_multiple_of(16)
-    let mut stack_codegen = StackCodegen::new();
-    stack_codegen.start_chunk(&mut asm, &saved_gps);
+    let mut locmgr = LocMgr::new();
+    locmgr.stack_push(&mut asm, &saved_gps);
 
     let mut translate_instr = |asm: &mut dynasmrt::x64::Assembler,
-                               cur_locs: &HashMap<ValueId, regalloc::Loc>,
+                               locmgr: &mut LocMgr,
                                vid: ValueId,
                                instr: &Instr| {
-        let get_hreg = |vid: ValueId| {
-            let loc = cur_locs
-                .get(&vid)
-                .unwrap_or_else(|| panic!("regalloc bug: no hreg or stack slot for {vid:?}"));
-            match loc {
-                regalloc::Loc::HardReg(hreg) => *hreg,
-                regalloc::Loc::StackSlot(_) => todo!("stack slots"),
-            }
-        };
-
         let write_snap_update =
             |asm: &mut dynasmrt::x64::Assembler, update: &super::builder::SnapshotUpdate| {
                 assert!(
@@ -435,7 +542,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 );
                 for (ndx, slot_vid) in update.iter().enumerate() {
                     if let Some(slot_vid) = slot_vid {
-                        let hreg = get_hreg(*slot_vid);
+                        let hreg = locmgr.get_hreg(*slot_vid);
                         let ty = get_ty(*slot_vid);
                         write_snapshot_item(asm, ndx, ty, hreg);
                     }
@@ -450,7 +557,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 // this value, so we can discard it here
                 let (encoded_value, _) = encode_value(&mut rt_data, value);
 
-                let HardReg { class, index } = get_hreg(vid);
+                let HardReg { class, index } = locmgr.get_hreg(vid);
                 assert_eq!(
                     class,
                     reg_class_of_type(ValueType::of(value)),
@@ -474,9 +581,9 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 assert_type(*a, ValueType::Num);
                 assert_type(*b, ValueType::Num);
 
-                let a = get_hreg(*a).expect_numeric();
-                let b = get_hreg(*b).expect_numeric();
-                let tgt = get_hreg(vid).expect_numeric();
+                let a = locmgr.get_hreg(*a).expect_numeric();
+                let b = locmgr.get_hreg(*b).expect_numeric();
+                let tgt = locmgr.get_hreg(vid).expect_numeric();
                 // TODO(idea) This would benefit from pin-pointing the target
                 // register to the first operand register
                 if tgt != a {
@@ -503,8 +610,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 pre_snap_update,
             } => {
                 write_snap_update(asm, &pre_snap_update);
-                let a = get_hreg(cmp.a);
-                let b = get_hreg(cmp.b);
+                let a = locmgr.get_hreg(cmp.a);
+                let b = locmgr.get_hreg(cmp.b);
                 trace_assert_cmp(asm, cmp.ty, cmp.op, a, b);
             }
             Instr::Num2Str(_) => todo!("TODO(big feat) Num2Str"),
@@ -516,23 +623,14 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 // Nothing to do.  This instruction only serves to assign
                 // the value ID to a new "virtual closure", which can only be
                 // inlined later on. (It can't esacpe the trace, by design.)
-                let tgt = get_hreg(vid).expect_general().code();
+                let tgt = locmgr.get_hreg(vid).expect_general().code();
                 dynasm!(asm; xor Rq (tgt), Rq (tgt));
             }
             Instr::PushSink(arg) => {
-                // TODO use a bitmask?
-                let saved_genregs: Vec<_> = used_gps
-                    .iter()
-                    .filter(|areg| !is_callee_saved(**areg))
-                    .copied()
-                    .collect();
-
-                let hreg = get_hreg(*arg);
+                let hreg = locmgr.get_hreg(*arg);
                 let ty = get_ty(*arg);
 
-                stack_codegen.start_chunk(asm, &saved_genregs);
-                stack_codegen.start_chunk_num(asm, &used_nums);
-                stack_codegen.pre_call(asm);
+                locmgr.pre_call(asm);
                 match reg_class_of_type(ty) {
                     RegClass::General => {
                         assert_eq!(hreg.class, RegClass::General);
@@ -554,13 +652,11 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                         ; call rax);
                     }
                 }
-                stack_codegen.post_call(asm);
-                stack_codegen.end_chunk_num(asm, &used_nums);
-                stack_codegen.end_chunk(asm, &saved_genregs);
+                locmgr.post_call(asm);
             }
             Instr::Return(vid) => {
                 let ty = get_ty(*vid);
-                let HardReg { class, index } = get_hreg(*vid);
+                let HardReg { class, index } = locmgr.get_hreg(*vid);
 
                 dynasm!(asm; mov BYTE [rsi], ty as _);
                 match class {
@@ -575,8 +671,8 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                 }
             }
             Instr::Phi(old, new) => {
-                let old = get_hreg(*old);
-                let new = get_hreg(*new);
+                let old = locmgr.get_hreg(*old);
+                let new = locmgr.get_hreg(*new);
                 if old != new {
                     match (old.class, new.class) {
                         (RegClass::General, RegClass::General) =>
@@ -597,7 +693,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             // -- Snapshots
             // Variables are passed to and retrieved from the trace via the
             // "snapshot", which is a the 'juxtaposition' of two arrays:
-            //   * values: [u64; N]        -- runtime-encoded values
+            //   * values: u64; N        -- runtime-encoded values
             //   * types: [ValueType; N]   -- repr as u8
             //
             // These arrays are allocated at runtime before starting the
@@ -622,7 +718,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
                  ; jne >abort_trace
                 );
 
-                let HardReg { class, index: tgt } = get_hreg(vid);
+                let HardReg { class, index: tgt } = locmgr.get_hreg(vid);
                 assert_eq!(class, reg_class_of_type(*ty));
                 match class {
                     RegClass::General => {
@@ -637,11 +733,35 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
                 write_snap_update(asm, &post_snap_update);
             }
+
+            #[cfg(test)]
+            Instr::ClobberCallerSaved => {
+                locmgr.pre_call(asm);
+
+                // A value that is pretty evident in a debugger
+                let mut val: i64 = 0x12345678abcdef01;
+                for reg in &GP_REGS {
+                    if !is_callee_saved(*reg) {
+                        dynasm!(asm; mov Rq (reg.code()), QWORD val);
+                        val = val.rotate_left(1);
+                    }
+                }
+
+                dynasm!(asm; sub rsp, 8);
+                for reg in &NUM_REGS {
+                    dynasm!(asm; mov DWORD [rsp], val as i32);
+                    dynasm!(asm; mov DWORD [rsp + 4], (val >> 32) as i32);
+                    dynasm!(asm; movsd Rx (reg.code()), QWORD [rsp]);
+                    val = val.rotate_left(1);
+                }
+                dynasm!(asm; add rsp, 8);
+
+                locmgr.post_call(asm);
+            }
         }
     };
 
     let mut reg_asmts = trace.hreg_alloc.asmts.iter().rev().peekable();
-    let mut cur_locs: HashMap<ValueId, regalloc::Loc> = HashMap::new();
 
     if trace.is_loop {
         dynasm!(asm; loop_start:);
@@ -649,13 +769,10 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
     for (vid, instr) in trace.iter_instrs() {
         while let Some(asmt) = reg_asmts.next_if(|asmt| asmt.pos.0 <= vid.0) {
             eprintln!("  #{:2} reg: {:?} -> {:?}", asmt.pos.0, asmt.vid, asmt.loc);
-            let prev = cur_locs.insert(asmt.vid, asmt.loc);
-            if let Some(prev) = prev {
-                emit_mov(&mut asm, prev, asmt.loc);
-            }
+            locmgr.set_loc(asmt, &mut asm);
         }
         eprintln!("{:4?} {:?}", vid, instr);
-        translate_instr(&mut asm, &cur_locs, vid, instr);
+        translate_instr(&mut asm, &mut locmgr, vid, instr);
     }
     if trace.is_loop {
         dynasm!(asm; jmp <loop_start);
@@ -663,7 +780,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
 
     dynasm!(asm ; abort_trace:);
 
-    stack_codegen.end_chunk(&mut asm, &saved_gps);
+    locmgr.stack_pop(&mut asm, &saved_gps);
 
     dynasm!(asm; ret);
 
@@ -709,6 +826,7 @@ fn emit_mov(asm: &mut dynasmrt::x64::Assembler, prev: regalloc::Loc, dest: regal
 }
 
 fn is_callee_saved(areg: Rq) -> bool {
+    // TODO(performance) use an array or a bitmask for this
     matches!(
         areg,
         Rq::RBX | Rq::RSP | Rq::RBP | Rq::R12 | Rq::R13 | Rq::R14 | Rq::R15
@@ -1003,14 +1121,6 @@ fn trace_assert_typetag(asm: &mut dynasmrt::x64::Assembler, a: Rq, b: Rq) {
     );
 }
 
-fn min_max<T: PartialOrd>(a: T, b: T) -> (T, T) {
-    if a < b {
-        (a, b)
-    } else {
-        (b, a)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1177,6 +1287,118 @@ mod tests {
 
         assert_eq!(ret, BoxedValue::Undefined);
         assert_eq!(&super::take_test_sink(), &[BoxedValue::Bool(true)]);
+    }
+
+    #[test]
+    fn test_caller_saved_reg() {
+        let trace = simple_trace(
+            [
+                Instr::Const(BoxedValue::Bool(true)),
+                Instr::Const(BoxedValue::Bool(true)),
+                Instr::Const(BoxedValue::Bool(false)),
+                Instr::Const(BoxedValue::Bool(true)),
+                Instr::Const(BoxedValue::Bool(true)),
+                Instr::Const(BoxedValue::Bool(false)),
+                Instr::Const(BoxedValue::Bool(false)),
+                Instr::Const(BoxedValue::Bool(false)),
+                Instr::Const(BoxedValue::Bool(true)),
+                Instr::Const(BoxedValue::Number(4.1234)),
+                Instr::Const(BoxedValue::Number(1.2344)),
+                Instr::Const(BoxedValue::Number(2.3441)),
+                Instr::Const(BoxedValue::Number(2.3441)),
+                Instr::Const(BoxedValue::Number(3.4123)),
+                Instr::Const(BoxedValue::Number(4.1234)),
+                Instr::Const(BoxedValue::Number(1.2345)),
+                Instr::Const(BoxedValue::Number(5.3214)),
+                Instr::ClobberCallerSaved,
+                Instr::PushSink(ValueId(0)),
+                Instr::PushSink(ValueId(1)),
+                Instr::PushSink(ValueId(2)),
+                Instr::PushSink(ValueId(3)),
+                Instr::PushSink(ValueId(4)),
+                Instr::PushSink(ValueId(5)),
+                Instr::PushSink(ValueId(6)),
+                Instr::PushSink(ValueId(7)),
+                Instr::PushSink(ValueId(8)),
+                Instr::PushSink(ValueId(9)),
+                Instr::PushSink(ValueId(10)),
+                Instr::PushSink(ValueId(11)),
+                Instr::PushSink(ValueId(12)),
+                Instr::PushSink(ValueId(13)),
+                Instr::PushSink(ValueId(14)),
+                Instr::PushSink(ValueId(15)),
+                Instr::PushSink(ValueId(16)),
+            ]
+            .into(),
+            Allocation::new(
+                [
+                    RegAsmt::hreg(35, 17, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(34, 16, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(33, 15, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(32, 14, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(31, 13, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(30, 12, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(29, 11, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(28, 10, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(27, 9, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(26, 8, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(25, 7, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(24, 6, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(23, 5, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(22, 4, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(21, 3, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(20, 2, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(19, 1, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(18, 0, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(16, 16, super::hreg_of_numreg(Rx::XMM7)),
+                    RegAsmt::hreg(15, 15, super::hreg_of_numreg(Rx::XMM6)),
+                    RegAsmt::hreg(14, 14, super::hreg_of_numreg(Rx::XMM5)),
+                    RegAsmt::hreg(13, 13, super::hreg_of_numreg(Rx::XMM4)),
+                    RegAsmt::hreg(12, 12, super::hreg_of_numreg(Rx::XMM3)),
+                    RegAsmt::hreg(11, 11, super::hreg_of_numreg(Rx::XMM2)),
+                    RegAsmt::hreg(10, 10, super::hreg_of_numreg(Rx::XMM1)),
+                    RegAsmt::hreg(9, 9, super::hreg_of_numreg(Rx::XMM0)),
+                    RegAsmt::hreg(8, 8, super::hreg_of_genreg(Rq::RAX)),
+                    RegAsmt::hreg(7, 7, super::hreg_of_genreg(Rq::RCX)),
+                    RegAsmt::hreg(6, 6, super::hreg_of_genreg(Rq::RDX)),
+                    RegAsmt::hreg(5, 5, super::hreg_of_genreg(Rq::RSI)),
+                    RegAsmt::hreg(4, 4, super::hreg_of_genreg(Rq::RDI)),
+                    RegAsmt::hreg(3, 3, super::hreg_of_genreg(Rq::R8)),
+                    RegAsmt::hreg(2, 2, super::hreg_of_genreg(Rq::R9)),
+                    RegAsmt::hreg(1, 1, super::hreg_of_genreg(Rq::R10)),
+                    RegAsmt::hreg(0, 0, super::hreg_of_genreg(Rq::R11)),
+                ]
+                .into(),
+            ),
+        );
+
+        let thunk = super::to_native(&trace);
+        thunk.dump();
+        let ret = thunk.run(&mut []);
+
+        assert_eq!(ret, BoxedValue::Undefined);
+        assert_eq!(
+            &super::take_test_sink(),
+            &[
+                BoxedValue::Bool(true),
+                BoxedValue::Bool(true),
+                BoxedValue::Bool(false),
+                BoxedValue::Bool(true),
+                BoxedValue::Bool(true),
+                BoxedValue::Bool(false),
+                BoxedValue::Bool(false),
+                BoxedValue::Bool(false),
+                BoxedValue::Bool(true),
+                BoxedValue::Number(4.1234),
+                BoxedValue::Number(1.2344),
+                BoxedValue::Number(2.3441),
+                BoxedValue::Number(2.3441),
+                BoxedValue::Number(3.4123),
+                BoxedValue::Number(4.1234),
+                BoxedValue::Number(1.2345),
+                BoxedValue::Number(5.3214),
+            ]
+        );
     }
 
     #[test]
@@ -1501,11 +1723,8 @@ mod tests {
         SnapshotMap::from(items)
     }
 
-    #[ignore]
     #[test]
-    fn test_getsnapshotitem_wrong_ty() {
-        todo!()
-    }
+    fn test_getsnapshotitem_wrong_ty() {}
 
     #[ignore]
     #[test]

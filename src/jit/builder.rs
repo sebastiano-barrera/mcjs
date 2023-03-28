@@ -1246,6 +1246,9 @@ pub(super) enum Instr {
     PushSink(ValueId),
     Return(ValueId),
     Phi(ValueId, ValueId),
+
+    // This is only a helper to test certain properties of the codegen
+    #[cfg(test)] ClobberCallerSaved,
 }
 
 pub(super) type SnapshotUpdate = Vec<Option<ValueId>>;
@@ -1310,6 +1313,7 @@ impl Instr {
             Instr::Phi(_, _) => None,
             Instr::GetSnapshotItem { ty, .. } => Some(*ty),
             Instr::Box(_) => Some(ValueType::Boxed),
+            #[cfg(test)] Instr::ClobberCallerSaved => None,
         }
     }
 
@@ -1345,6 +1349,8 @@ impl Instr {
             Instr::Phi(_tgt, new_value) => [*new_value].as_slice().into(),
             Instr::GetSnapshotItem { .. } => [].as_slice().into(),
             Instr::Box(arg) => [*arg].as_slice().into(),
+
+            #[cfg(test)] Instr::ClobberCallerSaved => [].as_slice().into(),
         }
     }
 
@@ -1369,6 +1375,7 @@ impl Instr {
             Instr::Phi(_, _) => true,
             Instr::GetSnapshotItem { .. } => false,
             Instr::Box(_) => false,
+            #[cfg(test)] Instr::ClobberCallerSaved => true,
         }
     }
 }

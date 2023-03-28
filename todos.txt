@@ -1,0 +1,140 @@
+commits.csv:14:2023-02-19 12:03:15 +0100,jit: add TODO for FP instructions
+src/jit/builder.rs:65:// TODO(cleanup) Move this to the super module
+src/jit/builder.rs:113:            // TODO(cleanup) This is actually an error in our type system.  null is really a value of the 'object' type
+src/jit/builder.rs:194:            // TODO(small feat) on building, assert that no item has both write_on_ flags set to false
+src/jit/builder.rs:286:    // TODO(cleanup) Inline into all callers
+src/jit/builder.rs:320:                        // TODO(cleanup) Test that this is really necessary. If so, describe it here
+src/jit/builder.rs:429:                    // TODO(opt) this string allocation could be avoided
+src/jit/builder.rs:435:            // TODO(big feat) Convert string to number
+src/jit/builder.rs:445:            // TODO(opt) this string allocation could be avoided
+src/jit/builder.rs:540:                    // TODO(opt) fix: This causes allocations with strings
+src/jit/builder.rs:547:                    // TODO(opt) fix: This causes allocations with strings
+src/jit/builder.rs:713:                todo!("(big feat) array new")
+src/jit/builder.rs:716:                todo!("(big feat) array push")
+src/jit/builder.rs:731:                todo!("(small feat) jit::builder: UnaryMinus")
+src/jit/builder.rs:853:            // TODO(small feat) Re-enable this feature
+src/jit/builder.rs:1065:// TODO(cleanup) Move to jit/mod.rs
+src/jit/builder.rs:1097:        ndx: usize, // TODO(small feat) Change to u16
+src/jit/builder.rs:1340:        // TODO: Run the trace (continue writing this test when traces can be run)
+src/jit/builder.rs:1341:        // TODO(cleanup) Run the trace (continue writing this test when traces can be run)
+src/interpreter.rs:32:    // TODO(cleanup) Delete, Closure supersedes this
+src/interpreter.rs:34:    // TODO(cleanup) Delete, Closure supersedes this
+src/interpreter.rs:58:            // TODO(cleanup) This is actually an error in our type system.  null is really a value of the 'object' type
+src/interpreter.rs:201:    // TODO(big feat) Temporary; should be replaced by objects, just like all other "classes"
+src/interpreter.rs:398:        todo!("(cleanup) delete this method")
+src/interpreter.rs:543:    // TODO(cleanup) Change this to return &Value instead
+src/interpreter.rs:550:        // TODO(cleanup) Refactor this mess
+src/interpreter.rs:571:        // TODO(big feat) Garbage collect stack frames
+src/interpreter.rs:737:                            todo!("(big feat) interpreter: tell the JIT about this native call");
+src/interpreter.rs:869:                        // TODO(small feat) Use return value
+src/interpreter.rs:933:            //  TODO(cleanup) Move to a global logger. This is just for debugging!
+src/interpreter.rs:941:            //  TODO(cleanup) Move to a global logger. This is just for debugging!
+src/interpreter.rs:958:    // TODO(big feat) pls impl all Node.js API, ok? thxbye
+src/interpreter.rs:1294:        // TODO(small feat) This syntax is not yet implemented
+src/jit/tracking.rs:36:    // TODO(big feat) Garbage collection?
+src/jit/tracking.rs:69:        // TODO(opt) Can we avoid a whole new data structure for this? Maybe it's OK
+src/jit/tracking.rs:95:    // TODO(opt) More compact data structures
+src/jit/mod.rs:11:// TODO(cleanup) Move some of these from `builder` to this module?
+src/bytecode_compiler.rs:16:        todo!("unsupported AST node: {:#?}", $value);
+src/bytecode_compiler.rs:64:    // TODO(opt) Maybe this needs to be more compact
+src/bytecode_compiler.rs:70:    // TODO Take advantage of identifier interning!
+src/bytecode_compiler.rs:282:    // Exports object.  TODO Actually make it accessible via `require`!
+src/bytecode_compiler.rs:292:            //     ModuleDecl::Import(_) => todo!(),
+src/bytecode_compiler.rs:293:            //     ModuleDecl::ExportDecl(_) => todo!(),
+src/bytecode_compiler.rs:294:            //     ModuleDecl::ExportNamed(_) => todo!(),
+src/bytecode_compiler.rs:295:            //     ModuleDecl::ExportDefaultDecl(_) => todo!(),
+src/bytecode_compiler.rs:296:            //     ModuleDecl::ExportDefaultExpr(_) => todo!(),
+src/bytecode_compiler.rs:297:            //     ModuleDecl::ExportAll(_) => todo!(),
+src/bytecode_compiler.rs:298:            //     ModuleDecl::TsImportEquals(_) => todo!(),
+src/bytecode_compiler.rs:299:            //     ModuleDecl::TsExportAssignment(_) => todo!(),
+src/bytecode_compiler.rs:300:            //     ModuleDecl::TsNamespaceExport(_) => todo!(),
+src/bytecode_compiler.rs:324:        // Stmt::Empty(_) => todo!(),
+src/bytecode_compiler.rs:325:        // Stmt::Debugger(_) => todo!(),
+src/bytecode_compiler.rs:326:        // Stmt::With(_) => todo!(),
+src/bytecode_compiler.rs:337:        // Stmt::Labeled(_) => todo!(),
+src/bytecode_compiler.rs:338:        // Stmt::Break(_) => todo!(),
+src/bytecode_compiler.rs:339:        // Stmt::Continue(_) => todo!(),
+src/bytecode_compiler.rs:340:        // Stmt::Switch(_) => todo!(),
+src/bytecode_compiler.rs:341:        // Stmt::Throw(_) => todo!(),
+src/bytecode_compiler.rs:342:        // Stmt::Try(_) => todo!(),
+src/bytecode_compiler.rs:360:        // Stmt::DoWhile(_) => todo!(),
+src/bytecode_compiler.rs:361:        // Stmt::For(_) => todo!(),
+src/bytecode_compiler.rs:362:        // Stmt::ForIn(_) => todo!(),
+src/bytecode_compiler.rs:363:        // Stmt::ForOf(_) => todo!(),
+src/bytecode_compiler.rs:396:                // TODO builder should fail if any reserved instruction is left untouched
+src/bytecode_compiler.rs:422:        // Decl::Class(_) => todo!(),
+src/bytecode_compiler.rs:481:    // TODO Unit test this property
+src/bytecode_compiler.rs:601:                // TODO TODO TODO This does not implement any of the 'wat' semantics of JavaScript
+src/bytecode_compiler.rs:620:                // Lit::BigInt(_) => todo!(),
+src/bytecode_compiler.rs:621:                // Lit::Regex(_) => todo!(),
+src/bytecode_compiler.rs:622:                // Lit::JSXText(_) => todo!(),
+src/bytecode_compiler.rs:704:        // Expr::This(_) => todo!(),
+src/bytecode_compiler.rs:731:            // TODO Refactor this with Decl::Fn
+src/bytecode_compiler.rs:762:                // swc_ecma_ast::UnaryOp::Plus => todo!(),
+src/bytecode_compiler.rs:763:                // swc_ecma_ast::UnaryOp::Tilde => todo!(),
+src/bytecode_compiler.rs:764:                // swc_ecma_ast::UnaryOp::Void => todo!(),
+src/bytecode_compiler.rs:765:                // swc_ecma_ast::UnaryOp::Delete => todo!(),
+src/bytecode_compiler.rs:780:                        // TODO Use integers here, when they get implemented
+src/bytecode_compiler.rs:790:                todo!("unsupported: UpdateExpr on anything other than an identifier")
+src/bytecode_compiler.rs:797:        // Expr::SuperProp(_) => todo!(),
+src/bytecode_compiler.rs:798:        // Expr::Cond(_) => todo!(),
+src/bytecode_compiler.rs:799:        // Expr::New(_) => todo!(),
+src/bytecode_compiler.rs:800:        // Expr::Seq(_) => todo!(),
+src/bytecode_compiler.rs:801:        // Expr::Tpl(_) => todo!(),
+src/bytecode_compiler.rs:802:        // Expr::TaggedTpl(_) => todo!(),
+src/bytecode_compiler.rs:803:        // Expr::Arrow(_) => todo!(),
+src/bytecode_compiler.rs:804:        // Expr::Class(_) => todo!(),
+src/bytecode_compiler.rs:805:        // Expr::Yield(_) => todo!(),
+src/bytecode_compiler.rs:806:        // Expr::MetaProp(_) => todo!(),
+src/bytecode_compiler.rs:807:        // Expr::Await(_) => todo!(),
+src/bytecode_compiler.rs:808:        // Expr::Paren(_) => todo!(),
+src/bytecode_compiler.rs:809:        // Expr::JSXMember(_) => todo!(),
+src/bytecode_compiler.rs:810:        // Expr::JSXNamespacedName(_) => todo!(),
+src/bytecode_compiler.rs:811:        // Expr::JSXEmpty(_) => todo!(),
+src/bytecode_compiler.rs:812:        // Expr::JSXElement(_) => todo!(),
+src/bytecode_compiler.rs:813:        // Expr::JSXFragment(_) => todo!(),
+src/bytecode_compiler.rs:814:        // Expr::TsTypeAssertion(_) => todo!(),
+src/bytecode_compiler.rs:815:        // Expr::TsConstAssertion(_) => todo!(),
+src/bytecode_compiler.rs:816:        // Expr::TsNonNull(_) => todo!(),
+src/bytecode_compiler.rs:817:        // Expr::TsAs(_) => todo!(),
+src/bytecode_compiler.rs:818:        // Expr::TsInstantiation(_) => todo!(),
+src/bytecode_compiler.rs:819:        // Expr::TsSatisfies(_) => todo!(),
+src/bytecode_compiler.rs:820:        // Expr::PrivateName(_) => todo!(),
+src/bytecode_compiler.rs:821:        // Expr::OptChain(_) => todo!(),
+src/bytecode_compiler.rs:822:        // Expr::Invalid(_) => todo!(),
+src/bytecode_compiler.rs:924:        // AssignOp::ModAssign => todo!(),
+src/bytecode_compiler.rs:925:        // AssignOp::LShiftAssign => todo!(),
+src/bytecode_compiler.rs:926:        // AssignOp::RShiftAssign => todo!(),
+src/bytecode_compiler.rs:927:        // AssignOp::ZeroFillRShiftAssign => todo!(),
+src/bytecode_compiler.rs:928:        // AssignOp::BitOrAssign => todo!(),
+src/bytecode_compiler.rs:929:        // AssignOp::BitXorAssign => todo!(),
+src/bytecode_compiler.rs:930:        // AssignOp::BitAndAssign => todo!(),
+src/bytecode_compiler.rs:931:        // AssignOp::ExpAssign => todo!(),
+src/bytecode_compiler.rs:932:        // AssignOp::AndAssign => todo!(),
+src/bytecode_compiler.rs:933:        // AssignOp::OrAssign => todo!(),
+src/bytecode_compiler.rs:934:        // AssignOp::NullishAssign => todo!(),
+src/jit/codegen.rs:45:        BoxedValue::String(_) => todo!("(big feat) encode string ref (remember the GC!)"),
+src/jit/codegen.rs:53:        BoxedValue::Object(_) => todo!("(big feat) encode object ref (remember the GC!)"),
+src/jit/codegen.rs:56:        BoxedValue::SelfFunction => todo!("(small feat) SelfFunction"),
+src/jit/codegen.rs:57:        BoxedValue::NativeFunction(_) => todo!("(big feat) NativeFunction"),
+src/jit/codegen.rs:58:        BoxedValue::Closure(_) => todo!("(big feat) encode closure"),
+src/jit/codegen.rs:82:        ValueType::Str => todo!("(big feat) decode string ref (remember the GC!)"),
+src/jit/codegen.rs:83:        ValueType::Obj => todo!("(big feat) decode object ref (remember the GC!)"),
+src/jit/codegen.rs:86:        ValueType::Function => todo!("(big feat) decode function ref"),
+src/jit/codegen.rs:202:    println!("TODO(big feat): trace: push sink: {value} = {value:064b}"); // Figure out a better way of manipulating the `sink` vector
+src/jit/codegen.rs:249:    // TODO(big feat) Another good idea from LuaJIT: group all the constants at the start of the trace
+src/jit/codegen.rs:277:            Instr::Box(_) => todo!("(big feat) Instr::Box"),
+src/jit/codegen.rs:278:            Instr::GetArg { .. } => todo!("(big feat) Instr::GetArg"),
+src/jit/codegen.rs:296:            Instr::Not(_) => todo!("(small feat) Instr::Box"),
+src/jit/codegen.rs:304:                // TODO(idea) This would benefit from pin-pointing the target
+src/jit/codegen.rs:313:                    ArithOp::Mul => todo!("TODO(small feat) mul"),
+src/jit/codegen.rs:314:                    ArithOp::Div => todo!("TODO(small feat) div"),
+src/jit/codegen.rs:323:            Instr::BoolOp { .. } => todo!("TODO(small feat) boolop"),
+src/jit/codegen.rs:324:            Instr::Choose { .. } => todo!("TODO(small feat) choose"),
+src/jit/codegen.rs:334:            Instr::Num2Str(_) => todo!("TODO(big feat) Num2Str"),
+src/jit/codegen.rs:335:            Instr::ObjNew => todo!("TODO(big feat) objects in JIT"),
+src/jit/codegen.rs:336:            Instr::ObjSet { .. } => todo!("TODO(big feat) objects in JIT"),
+src/jit/codegen.rs:337:            Instr::ObjGet { .. } => todo!("TODO(big feat) objects in JIT"),
+src/jit/codegen.rs:338:            Instr::TypeOf(_) => todo!("TODO(small feat) TypeOf"),
+src/jit/codegen.rs:339:            Instr::ClosureNew => todo!("TODO(big feat) closure creation in JIT (?)"),
+src/jit/codegen.rs:381:            Instr::Return(_) => todo!("TODO return"),
