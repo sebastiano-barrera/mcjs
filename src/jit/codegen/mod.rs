@@ -1726,10 +1726,35 @@ mod tests {
     #[test]
     fn test_getsnapshotitem_wrong_ty() {}
 
-    #[ignore]
+    #[should_panic]
     #[test]
     fn test_getsnapshotitem_wrong_snap_len() {
-        todo!()
+        let trace = {
+            let instrs: Vec<_> = [
+                Instr::GetSnapshotItem {
+                    ndx: 0,
+                    ty: ValueType::Str,
+                    post_snap_update: [None, None].into(),
+                },
+                Instr::Return(ValueId(0)),
+            ]
+            .into();
+            let hreg_alloc =
+                Allocation::new(vec![RegAsmt::hreg(0, 0, super::hreg_of_genreg(Rq::RDI))]);
+            let is_enabled = instrs.iter().map(|_| true).collect();
+            // just dummies
+            Trace {
+                hreg_alloc,
+                // 1 is smaller than the post_snap_update
+                snapshot_map: dummy_snapshot_map(1),
+                snapshot_final_update: Vec::new(),
+                instrs,
+                is_loop: false,
+                is_enabled,
+            }
+        };
+
+        super::to_native(&trace);
     }
 
     #[ignore]
