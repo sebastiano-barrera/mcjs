@@ -12,6 +12,7 @@ use std::{
 
 pub use crate::common::Error;
 use crate::{
+    bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, Instr, Operand, IID, GlobalIID, StaticVarId},
     bytecode_compiler,
     common::Result,
     error,
@@ -48,6 +49,20 @@ impl From<&'static str> for Value {
     }
 }
 
+impl From<bytecode::Value> for Value {
+    fn from(bc_value: bytecode::Value) -> Self {
+        match bc_value {
+            bytecode::Value::Number(nu) => Value::Number(nu),
+            bytecode::Value::String(st) => Value::String(st.into()),
+            bytecode::Value::Bool(bo) => Value::Bool(bo),
+            bytecode::Value::Null => Value::Null,
+            bytecode::Value::Undefined => Value::Undefined,
+            bytecode::Value::SelfFunction => todo!(),
+            bytecode::Value::NativeFunction(nf) => Value::NativeFunction(nf),
+        }
+    }
+}
+
 impl Value {
     fn js_typeof(&self) -> Value {
         let ty_s = match self {
@@ -55,7 +70,8 @@ impl Value {
             Value::String(_) => "string",
             Value::Bool(_) => "boolean",
             Value::Object(_) => "object",
-            // TODO(cleanup) This is actually an error in our type system.  null is really a value of the 'object' type
+            // TODO(cleanup) This is actually an error in our type system.  null is really a value
+            // of the 'object' type
             Value::Null => "object",
             Value::Undefined => "undefined",
             Value::SelfFunction => "function",
@@ -126,205 +142,9 @@ impl std::fmt::Debug for Closure {
     }
 }
 
-// Instruction ID. Can identify an instruction, or its result.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(clippy::upper_case_acronyms)]
-pub struct IID(pub u32);
-
-/// NOTE cross-module function calls are unsupported yet
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GlobalIID {
-    pub fnid: FnId,
-    pub iid: IID,
-}
-
-impl std::fmt::Debug for IID {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "i{}", self.0)
-    }
-}
-
-#[derive(Debug)]
-pub enum Instr {
-    Nop,
-    Const(Value),
-    Not(Operand),
-    UnaryMinus(Operand),
-    Arith {
-        op: ArithOp,
-        a: Operand,
-        b: Operand,
-    },
-    Cmp {
-        op: CmpOp,
-        a: Operand,
-        b: Operand,
-    },
-    BoolOp {
-        op: BoolOp,
-        a: Operand,
-        b: Operand,
-    },
-    JmpIf {
-        cond: Operand,
-        dest: IID,
-    },
-    Jmp(IID),
-    Set {
-        var_id: StaticVarId,
-        value: Operand,
-    },
-    PushSink(Operand),
-    Return(Operand),
-    GetArg(usize),
-    Call {
-        callee: Operand,
-        // smallvec?
-        args: Vec<Operand>,
-    },
-
-    ClosureNew {
-        fnid: FnId,
-    },
-
-    ObjNew,
-    ObjSet {
-        obj: Operand,
-        key: Operand,
-        value: Operand,
-    },
-    ObjGet {
-        obj: Operand,
-        key: Operand,
-    },
-
-    // TODO(big feat) Temporary; should be replaced by objects, just like all other "classes"
-    ArrayNew,
-    ArrayPush(Operand, Operand),
-
-    TypeOf(Operand),
-
-    StartTrace {
-        trace_id: String,
-        wait_loop: bool,
-    },
-}
-
-impl Instr {
-    fn read_vars<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = StaticVarId>> {
-        Box::new(self.read_operands().filter_map(|oper| match oper {
-            Operand::Var(var_id) => Some(*var_id),
-            _ => None,
-        }))
-    }
-
-    fn read_operands<'a>(&'a self) -> Box<dyn 'a + Iterator<Item = &Operand>> {
-        match self {
-            Instr::Nop => Box::new(std::iter::empty()),
-            Instr::Const(_) => Box::new(std::iter::empty()),
-            Instr::Not(oper) => Box::new([oper].into_iter()),
-            Instr::UnaryMinus(oper) => Box::new([oper].into_iter()),
-            Instr::Arith { op: _, a, b } => Box::new([a, b].into_iter()),
-            Instr::Cmp { op: _, a, b } => Box::new([a, b].into_iter()),
-            Instr::BoolOp { op: _, a, b } => Box::new([a, b].into_iter()),
-            Instr::JmpIf { cond, .. } => Box::new(std::iter::once(cond)),
-            Instr::Jmp(_) => Box::new(std::iter::empty()),
-            Instr::Set { var_id: _, value } => Box::new(std::iter::once(value)),
-            Instr::PushSink(arg) => Box::new(std::iter::once(arg)),
-            Instr::Return(arg) => Box::new(std::iter::once(arg)),
-            Instr::GetArg(_) => Box::new(std::iter::empty()),
-            Instr::Call { callee: _, args } => Box::new(args.iter()),
-            Instr::ObjNew => Box::new(std::iter::empty()),
-            Instr::ObjSet { obj, key, value } => Box::new([obj, key, value].into_iter()),
-            Instr::ObjGet { obj, key } => Box::new([obj, key].into_iter()),
-            Instr::ArrayNew => Box::new(std::iter::empty()),
-            Instr::ArrayPush(arr, value) => Box::new([arr, value].into_iter()),
-            Instr::TypeOf(arg) => Box::new([arg].into_iter()),
-            Instr::ClosureNew { .. } => Box::new(std::iter::empty()),
-            Instr::StartTrace { .. } => Box::new(std::iter::empty()),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct VarIndex(pub(crate) u16);
-/// Static identifier for a variable, used in the bytecode as operand.  
-///
-/// Designates a variable in the bytecode, not at runtime.  If the function
-/// containing the variable declaration is called multiple times (e.g. via
-/// recursion, or by producing multiple closures from the same function
-/// literal), this identifier is the same every time, but the *runtime*
-/// identifier will change.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StaticVarId {
-    pub(crate) fnid: FnId,
-    pub(crate) var_ndx: VarIndex,
-}
-
-impl std::fmt::Debug for StaticVarId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "var[{}:{}]", self.fnid.0, self.var_ndx.0)
-    }
-}
-
-#[allow(clippy::upper_case_acronyms)]
-#[derive(Clone, PartialEq)]
-pub enum Operand {
-    // Evaluates immediately to a constant value.
-    Value(Value),
-    // Evaluates to the value of the indicated variable.
-    Var(StaticVarId),
-    // Evaluates to the result of the indicated instruction.
-    IID(IID),
-}
-
-impl std::fmt::Debug for Operand {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Value(val) => val.fmt(f),
-            Self::IID(iid) => iid.fmt(f),
-            Self::Var(varid) => varid.fmt(f),
-        }
-    }
-}
-impl From<IID> for Operand {
-    fn from(iid: IID) -> Self {
-        Operand::IID(iid)
-    }
-}
-impl From<Value> for Operand {
-    fn from(value: Value) -> Self {
-        Operand::Value(value)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ArithOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CmpOp {
-    GE,
-    GT,
-    LT,
-    LE,
-    EQ,
-    NE,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BoolOp {
-    And,
-    Or,
-}
-
 pub struct VM {
     include_paths: Vec<PathBuf>,
-    modules: HashMap<String, Module>,
+    modules: HashMap<String, bytecode::Module>,
     opts: VMOptions,
     sink: Vec<Value>,
 
@@ -472,7 +292,7 @@ impl VM {
         self.run_module(&module, flags)
     }
 
-    fn run_module(&mut self, module: &Module, flags: InterpreterFlags) -> Result<()> {
+    fn run_module(&mut self, module: &bytecode::Module, flags: InterpreterFlags) -> Result<()> {
         let mut intrp = Interpreter::new(self, flags);
         intrp.run_module(module)?;
         let Interpreter { sink, jitting, .. } = intrp;
@@ -520,7 +340,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn run_module(&mut self, module: &Module) -> Result<()> {
+    fn run_module(&mut self, module: &bytecode::Module) -> Result<()> {
         let root_closure = Closure {
             fnid: FnId::ROOT_FN,
             lexical_parent: None,
@@ -548,14 +368,14 @@ impl<'a> Interpreter<'a> {
 
     fn run_module_fn(
         &mut self,
-        module: &Module,
+        module: &bytecode::Module,
         closure: &Closure,
         args: &[Value],
     ) -> Result<Value> {
-        let func = module.fns.get(&closure.fnid).unwrap();
+        let func = module.get_function(closure.fnid).unwrap();
 
         let lexical_parent = closure.lexical_parent;
-        let n_local_vars = func.n_slots as usize;
+        let n_local_vars = func.n_slots() as usize;
         let frame = self
             .frame_graph
             .new_frame(closure.fnid, n_local_vars, lexical_parent);
@@ -570,20 +390,20 @@ impl<'a> Interpreter<'a> {
 
     fn _run_module_fn_inner(
         &mut self,
-        module: &Module,
+        module: &bytecode::Module,
         closure: &Closure,
         cur_frame_id: stack::FrameId,
-        func: &Function,
+        func: &bytecode::Function,
         args: &[Value],
     ) -> Result<Value> {
-        let instrs = &func.instrs;
+        let instrs = func.instrs();
 
         let mut values_buf = vec![Value::Undefined; instrs.len()];
 
         if let Some(jitting) = &mut self.jitting {
             jitting
                 .builder
-                .enter_function(cur_frame_id, func.n_slots as usize);
+                .enter_function(cur_frame_id, func.n_slots() as usize);
         }
 
         let mut ndx = 0;
@@ -603,7 +423,7 @@ impl<'a> Interpreter<'a> {
 
             match instr {
                 Instr::Const(value) => {
-                    values_buf[ndx] = value.clone();
+                    values_buf[ndx] = value.clone().into();
                 }
                 Instr::Arith { op, a, b } => {
                     let a = self.get_operand(a, &values_buf, cur_frame_id);
@@ -826,7 +646,7 @@ impl<'a> Interpreter<'a> {
                             } else {
                                 let builder = jit::TraceBuilder::start(
                                     cur_frame_id,
-                                    func.n_slots as usize,
+                                    func.n_slots() as usize,
                                     jit::CloseMode::FunctionExit,
                                 );
                                 self.jitting = Some(Jitting {
@@ -868,7 +688,7 @@ impl<'a> Interpreter<'a> {
                     let global_iid = GlobalIID { fnid, iid };
                     let builder = jit::TraceBuilder::start(
                         cur_frame_id,
-                        func.n_slots as usize,
+                        func.n_slots() as usize,
                         jit::CloseMode::Loop(global_iid),
                     );
                     self.jitting = Some(Jitting {
@@ -918,7 +738,6 @@ fn resolve_operand(
     cur_fid: stack::FrameId,
 ) -> Value {
     match operand {
-        Operand::Value(value) => value.clone(),
         Operand::IID(IID(ndx)) => {
             let value = values_buf[*ndx as usize].clone();
             //  TODO(cleanup) Move to a global logger. This is just for debugging!
@@ -937,18 +756,19 @@ fn resolve_operand(
     }
 }
 
-fn set_builtins(bc_compiler: &mut bytecode_compiler::Compiler) {
-    bc_compiler.bind_native(
-        "require".into(),
-        Value::NativeFunction(VM::NFID_REQUIRE).into(),
-    );
-    bc_compiler.bind_native(
-        "String".into(),
-        Value::NativeFunction(VM::NFID_STRING_NEW).into(),
-    );
+fn set_builtins(_bc_compiler: &mut bytecode_compiler::Compiler) {
+    // TODO(small feat) re-do builtins API
+    // bc_compiler.bind_native(
+    //     "require".into(),
+    //     bytecode::Value::NativeFunction(VM::NFID_REQUIRE).into(),
+    // );
+    // bc_compiler.bind_native(
+    //     "String".into(),
+    //     bytecode::Value::NativeFunction(VM::NFID_STRING_NEW).into(),
+    // );
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
-    bc_compiler.bind_native("Object".into(), Value::Object(Object::new()).into());
-    bc_compiler.bind_native("Array".into(), Value::Object(Object::new()).into());
+    // bc_compiler.bind_native("Object".into(), bytecode::Value::Object(Object::new()).into());
+    // bc_compiler.bind_native("Array".into(), bytecode::Value::Object(Object::new()).into());
 }
 
 #[derive(Clone, Debug)]
@@ -975,121 +795,6 @@ impl Default for InterpreterFlags {
             jit_mode: JitMode::UseTraces,
         }
     }
-}
-
-#[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
-pub struct FnId(pub u32);
-impl FnId {
-    pub const ROOT_FN: FnId = FnId(0);
-}
-
-pub struct Module {
-    fns: HashMap<FnId, Function>,
-}
-
-impl Module {
-    pub fn new(fns: HashMap<FnId, Function>) -> Self {
-        Module { fns }
-    }
-
-    pub(crate) fn functions(&self) -> &HashMap<FnId, Function> {
-        &self.fns
-    }
-
-    pub(crate) fn dump(&self) {
-        eprintln!("=== module");
-        for (fnid, func) in self.fns.iter() {
-            eprintln!("fn #{} [{} vars]:", fnid.0, func.n_slots);
-            for (ndx, instr) in func.instrs.iter().enumerate() {
-                let lh = func.loop_heads.get(&IID(ndx as u32));
-                eprintln!(
-                    "  {:4}{:4}: {:?}",
-                    if lh.is_some() { ">>" } else { "" },
-                    ndx,
-                    instr,
-                );
-                if let Some(lh) = lh {
-                    eprint!("            (phis: ");
-                    for var in &lh.interloop_vars {
-                        eprint!("{:?}, ", var);
-                    }
-                    eprintln!(")");
-                }
-            }
-        }
-        eprintln!("---");
-    }
-}
-
-pub struct Function {
-    instrs: Box<[Instr]>,
-    loop_heads: HashMap<IID, LoopInfo>,
-    n_slots: u16,
-}
-pub struct LoopInfo {
-    // Variables that change in value during each cycle, in such a way that
-    // each cycle sees the value in  the previous cycle.  Phi instructions are
-    // added based on this set.
-    interloop_vars: HashSet<StaticVarId>,
-}
-impl Function {
-    pub(crate) fn new(instrs: Box<[Instr]>, n_slots: u16) -> Function {
-        let loop_heads = find_loop_heads(&instrs[..]);
-        Function {
-            instrs,
-            loop_heads,
-            n_slots,
-        }
-    }
-
-    pub(crate) fn instrs(&self) -> &[Instr] {
-        self.instrs.as_ref()
-    }
-
-    pub(crate) fn is_loop_head(&self, iid: IID) -> bool {
-        self.loop_heads.contains_key(&iid)
-    }
-
-    pub(crate) fn n_slots(&self) -> u16 {
-        self.n_slots
-    }
-}
-
-fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
-    // The set of interloop variables is the set of variables where, within a
-    // loop, at least one read happens before a write.
-    let mut heads = HashMap::new();
-
-    // It ain't linear, but it does the job (plus I don't think
-    // there should be so many nesting levels for loops within the
-    // same function...)
-    for (end_ndx, inst) in instrs.iter().enumerate() {
-        match inst {
-            Instr::Jmp(dest) | Instr::JmpIf { dest, .. } if dest.0 as usize <= end_ndx => {
-                // Loop goes from end_ndx to dest
-
-                let dest_ndx = dest.0 as usize;
-                let mut interloop_vars = HashSet::new();
-                let mut reads = HashSet::new();
-                for inst in &instrs[dest_ndx..end_ndx] {
-                    for read_var in inst.read_vars() {
-                        reads.insert(read_var);
-                    }
-
-                    if let Instr::Set { var_id, .. } = inst {
-                        if reads.remove(var_id) {
-                            interloop_vars.insert(*var_id);
-                        }
-                    }
-                }
-
-                heads.insert(*dest, LoopInfo { interloop_vars });
-            }
-            _ => {}
-        }
-    }
-
-    heads
 }
 
 #[cfg(test)]
@@ -1166,7 +871,7 @@ mod tests {
     fn test_fn_with_branch() {
         let output = quick_run(
             "
-            function foo(mode, a, b) { 
+            function foo(mode, a, b) {
                 if (mode === 'sum')
                     return a + b;
                 else if (mode === 'product')
@@ -1196,7 +901,7 @@ mod tests {
                 }
                 return ret;
             }
-            
+
             sink(sum_range(4));
             ",
         )
@@ -1246,6 +951,41 @@ mod tests {
             sink(!my_fun);
             ",
             false,
+        );
+    }
+
+    #[test]
+    fn test_capture() {
+        let output = quick_run(
+            "
+            let counter = 0;
+
+            function f() {
+                function g() {
+                    counter++;
+                }
+                g();
+                g();
+                sink(counter);
+            }
+
+            f();
+            f();
+            f();
+            counter -= 5;
+            sink(counter);
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(
+            &[
+                Value::Number(2.0),
+                Value::Number(4.0),
+                Value::Number(6.0),
+                Value::Number(1.0)
+            ],
+            &output.sink[..]
         );
     }
 

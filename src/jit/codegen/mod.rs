@@ -13,7 +13,8 @@ use strum_macros::{EnumCount, EnumIter, FromRepr};
 use crate::jit::builder::reg_class_of_type;
 use crate::jit::regalloc::{HardReg, RegClass};
 use crate::{
-    interpreter::{self, ArithOp, CmpOp},
+    interpreter,
+    bytecode::{IID, Operand, ArithOp, CmpOp},
     jit::builder::{Cmp, Instr, ValueId, ValueType},
 };
 
@@ -1711,12 +1712,11 @@ mod tests {
     // There is NO use filling in a SnapshotMap properly in the codegen module
     // TODO Can this be excluded/moved elsewhere
     fn dummy_snapshot_map(count: usize) -> SnapshotMap {
-        use interpreter::IID;
         let items: Vec<_> = (0..count)
             .map(|i| SnapshotMapItem {
                 write_on_entry: false,
                 write_on_exit: true,
-                operand: interpreter::Operand::IID(IID(i as u32)),
+                operand: Operand::IID(IID(i as u32)),
             })
             .collect();
 

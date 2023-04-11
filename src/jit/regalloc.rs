@@ -433,7 +433,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        interpreter::CmpOp,
+        bytecode::CmpOp,
         jit::builder::{Cmp, OperandsSet},
     };
 

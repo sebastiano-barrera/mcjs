@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::{
-    interpreter::{self, StaticVarId, VarIndex},
+    interpreter,
+    bytecode::{StaticVarId, VarIndex, self},
     stack::FrameId,
 };
 
@@ -38,7 +39,7 @@ pub(super) struct VarsState {
 /// cares about.
 struct Frame {
     args: Vec<ValueId>,
-    vid_of_iid: HashMap<interpreter::IID, ValueId>,
+    vid_of_iid: HashMap<bytecode::IID, ValueId>,
     n_vars: usize,
 }
 
@@ -89,10 +90,10 @@ impl VarsState {
         self.frame_models.get_mut(&self.cur_frame_id()).unwrap()
     }
 
-    pub(super) fn get_result(&self, iid: interpreter::IID) -> Option<&ValueId> {
+    pub(super) fn get_result(&self, iid: bytecode::IID) -> Option<&ValueId> {
         self.cur_frame().vid_of_iid.get(&iid)
     }
-    pub(super) fn set_result(&mut self, iid: interpreter::IID, value: ValueId) {
+    pub(super) fn set_result(&mut self, iid: bytecode::IID, value: ValueId) {
         self.cur_frame_mut().vid_of_iid.insert(iid, value);
     }
 

@@ -2,9 +2,11 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
+use crate::bytecode;
 use crate::jit::codegen::index_of_reg;
 use crate::{
-    interpreter::{self, FnId, VarIndex, IID},
+    bytecode::{ArithOp, BoolOp, CmpOp, FnId, VarIndex, IID},
+    interpreter,
     stack::{self, FrameId},
 };
 
@@ -118,7 +120,8 @@ impl ValueType {
             ValueType::Num => "number",
             ValueType::Str => "string",
             ValueType::Obj => "object",
-            // TODO(cleanup) This is actually an error in our type system.  null is really a value of the 'object' type
+            // TODO(cleanup) This is actually an error in our type system.  null is really a value
+            // of the 'object' type
             ValueType::Null => "object",
             ValueType::Undefined => "undefined",
             ValueType::Function => "function",
@@ -137,7 +140,7 @@ pub struct TraceBuilder {
     args_buf: Option<Vec<ValueId>>,
     return_value: Option<ValueId>,
 
-    loop_head: Option<interpreter::GlobalIID>,
+    loop_head: Option<bytecode::GlobalIID>,
     loop_entered: bool,
 
     instrs: Vec<Instr>,
@@ -169,7 +172,7 @@ pub(crate) struct SnapshotMap {
 pub(crate) struct SnapshotMapItem {
     pub(crate) write_on_entry: bool,
     pub(crate) write_on_exit: bool,
-    pub(crate) operand: interpreter::Operand,
+    pub(crate) operand: bytecode::Operand,
 }
 
 #[cfg(test)]
@@ -196,7 +199,7 @@ impl SnapshotMap {
         &self.items[ndx]
     }
 
-    pub(super) fn find(&mut self, operand: &interpreter::Operand) -> Option<usize> {
+    pub(super) fn find(&mut self, operand: &bytecode::Operand) -> Option<usize> {
         self.items
             .iter()
             .enumerate()
@@ -204,9 +207,10 @@ impl SnapshotMap {
             .map(|(ndx, _)| ndx)
     }
 
-    fn find_or_insert(&mut self, operand: &interpreter::Operand) -> usize {
+    fn find_or_insert(&mut self, operand: &bytecode::Operand) -> usize {
         self.find(operand).unwrap_or_else(|| {
-            // TODO(small feat) on building, assert that no item has both write_on_ flags set to false
+            // TODO(small feat) on building, assert that no item has both write_on_ flags set to
+            // false
             self.items.push(SnapshotMapItem {
                 operand: operand.clone(),
                 write_on_entry: false,
@@ -216,14 +220,14 @@ impl SnapshotMap {
         })
     }
 
-    fn set_entry(&mut self, operand: &interpreter::Operand) -> u16 {
+    fn set_entry(&mut self, operand: &bytecode::Operand) -> u16 {
         eprintln!("[..tb snapshot: set written-on-entry: {:?}]", operand);
         let ndx = self.find_or_insert(operand);
         self.items[ndx].write_on_entry = true;
         ndx as u16
     }
 
-    fn set_exit(&mut self, operand: &interpreter::Operand) -> u16 {
+    fn set_exit(&mut self, operand: &bytecode::Operand) -> u16 {
         eprintln!("[..tb snapshot: set written-on-exit: {:?}]", operand);
         let ndx = self.find_or_insert(operand);
         self.items[ndx].write_on_exit = true;
@@ -259,7 +263,7 @@ struct VarId {
 
 #[derive(Debug)]
 pub(super) struct TraceParam {
-    operand: interpreter::Operand,
+    operand: bytecode::Operand,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -270,7 +274,7 @@ enum TraceBuilderState {
 }
 
 pub enum CloseMode {
-    Loop(interpreter::GlobalIID),
+    Loop(bytecode::GlobalIID),
     FunctionExit,
 }
 
@@ -305,20 +309,17 @@ impl TraceBuilder {
 
     fn resolve_interpreter_operand<F>(
         &mut self,
-        intrp_operand: &interpreter::Operand,
+        intrp_operand: &bytecode::Operand,
         fnid_to_frameid: F,
     ) -> Result<ValueId, Error>
     where
         F: Fn(FnId) -> FrameId,
     {
         match intrp_operand {
-            // constants from the interpreter bytecode are simply preserved
-            interpreter::Operand::Value(value) => Ok(self.emit(Instr::Const(value.clone()))?),
-
             // variables from the interpreter (identified by the ID of the
             // instruction that produced them) are mapped to the JIT instruction
             // that last assigned to it (the JIT trace is SSA)
-            interpreter::Operand::IID(iid) => {
+            bytecode::Operand::IID(iid) => {
                 let stack_depth = self.stack_depth();
                 match self.vars.get_result(*iid).cloned() {
                     Some(vid_for_var) => {
@@ -342,7 +343,7 @@ impl TraceBuilder {
                 }
             }
 
-            interpreter::Operand::Var(intrp_varid) => {
+            bytecode::Operand::Var(intrp_varid) => {
                 let frame_id = fnid_to_frameid(intrp_varid.fnid);
                 let var_ndx = intrp_varid.var_ndx;
 
@@ -488,7 +489,7 @@ impl TraceBuilder {
 
     fn resolve_operand_as<F>(
         &mut self,
-        interp_oper: &interpreter::Operand,
+        interp_oper: &bytecode::Operand,
         fnid_to_frameid: F,
         desired_type: ValueType,
     ) -> Result<ValueId, Error>
@@ -536,18 +537,18 @@ impl TraceBuilder {
         eprintln!("[..tb step]");
 
         let result = match instr {
-            interpreter::Instr::Nop => None,
-            interpreter::Instr::Const(value) => Some(self.emit(Instr::Const(value.clone()))?),
-            interpreter::Instr::Not(oper) => {
+            bytecode::Instr::Nop => None,
+            bytecode::Instr::Const(value) => Some(self.emit(Instr::Const(value.clone().into()))?),
+            bytecode::Instr::Not(oper) => {
                 let oper = self.resolve_operand_as(oper, step.fnid_to_frameid, ValueType::Bool)?;
                 Some(self.emit(Instr::Not(oper))?)
             }
-            interpreter::Instr::Arith { op, a, b } => {
+            bytecode::Instr::Arith { op, a, b } => {
                 let a = self.resolve_operand_as(a, step.fnid_to_frameid, ValueType::Num)?;
                 let b = self.resolve_operand_as(b, step.fnid_to_frameid, ValueType::Num)?;
                 Some(self.emit(Instr::Arith { op: *op, a, b })?)
             }
-            interpreter::Instr::Cmp { op, a, b } => {
+            bytecode::Instr::Cmp { op, a, b } => {
                 let a_rt_type = {
                     // TODO(opt) fix: This causes allocations with strings
                     let rt_value = (step.get_operand)(a);
@@ -606,7 +607,7 @@ impl TraceBuilder {
 
                 Some(self.emit(instr)?)
             }
-            interpreter::Instr::JmpIf { cond, .. } => {
+            bytecode::Instr::JmpIf { cond, .. } => {
                 let cond = self.resolve_operand_as(cond, step.fnid_to_frameid, ValueType::Bool)?;
 
                 match self.get_instr(cond) {
@@ -640,11 +641,12 @@ impl TraceBuilder {
                     }
                 }
             }
-            interpreter::Instr::Jmp(_) => {
-                // unconditional jump.  Nothing to do, let's just follow the interpreter to the next instruction
+            bytecode::Instr::Jmp(_) => {
+                // unconditional jump.  Nothing to do, let's just follow the interpreter to the next
+                // instruction
                 None
             }
-            interpreter::Instr::Set { var_id, value } => {
+            bytecode::Instr::Set { var_id, value } => {
                 let value = self.resolve_interpreter_operand(value, step.fnid_to_frameid)?;
                 let frame_id = (step.fnid_to_frameid)(var_id.fnid);
 
@@ -663,12 +665,12 @@ impl TraceBuilder {
 
                 None
             }
-            interpreter::Instr::PushSink(value) => {
+            bytecode::Instr::PushSink(value) => {
                 let value = self.resolve_interpreter_operand(value, step.fnid_to_frameid)?;
                 self.emit(Instr::PushSink(value))?;
                 None
             }
-            interpreter::Instr::Return(value) => {
+            bytecode::Instr::Return(value) => {
                 self.exit_function_expected = true;
 
                 let value = if self.stack_depth() == 1 {
@@ -680,7 +682,7 @@ impl TraceBuilder {
                 self.return_value = Some(value);
                 None
             }
-            interpreter::Instr::GetArg(index) => {
+            bytecode::Instr::GetArg(index) => {
                 let value = if self.stack_depth() == 1 {
                     let post_snap_update = self.take_exit_snapshot()?;
                     self.emit(Instr::GetArg {
@@ -693,7 +695,7 @@ impl TraceBuilder {
                 };
                 Some(value)
             }
-            interpreter::Instr::Call { .. } => {
+            bytecode::Instr::Call { .. } => {
                 // We reach this point *after* the interpreter has completed the call, i.e.:
                 //   - intepreter gets instruction Call
                 //     - interpreter calls TraceBuilder::enter_function
@@ -713,8 +715,8 @@ impl TraceBuilder {
                 Some(ret_val)
             }
 
-            interpreter::Instr::ObjNew => Some(self.emit(Instr::ObjNew)?),
-            interpreter::Instr::ObjSet { obj, key, value } => {
+            bytecode::Instr::ObjNew => Some(self.emit(Instr::ObjNew)?),
+            bytecode::Instr::ObjSet { obj, key, value } => {
                 let obj = self.resolve_operand_as(obj, step.fnid_to_frameid, ValueType::Obj)?;
                 let key = self.resolve_operand_as(key, step.fnid_to_frameid, ValueType::Str)?;
                 let value =
@@ -723,29 +725,29 @@ impl TraceBuilder {
                 self.emit(Instr::ObjSet { obj, key, value })?;
                 None
             }
-            interpreter::Instr::ObjGet { obj, key } => {
+            bytecode::Instr::ObjGet { obj, key } => {
                 let obj = self.resolve_operand_as(obj, step.fnid_to_frameid, ValueType::Obj)?;
                 let key = self.resolve_operand_as(key, step.fnid_to_frameid, ValueType::Str)?;
 
                 Some(self.emit(Instr::ObjGet { obj, key })?)
             }
-            interpreter::Instr::ArrayNew => {
+            bytecode::Instr::ArrayNew => {
                 todo!("(big feat) array new")
             }
-            interpreter::Instr::ArrayPush(_arr, _elem) => {
+            bytecode::Instr::ArrayPush(_arr, _elem) => {
                 todo!("(big feat) array push")
             }
-            interpreter::Instr::TypeOf(arg) => {
+            bytecode::Instr::TypeOf(arg) => {
                 let arg = self.resolve_interpreter_operand(arg, step.fnid_to_frameid)?;
                 Some(self.emit(Instr::TypeOf(arg))?)
             }
 
-            interpreter::Instr::BoolOp { op, a, b } => {
+            bytecode::Instr::BoolOp { op, a, b } => {
                 let a = self.resolve_operand_as(a, step.fnid_to_frameid, ValueType::Bool)?;
                 let b = self.resolve_operand_as(b, step.fnid_to_frameid, ValueType::Bool)?;
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
-            interpreter::Instr::ClosureNew { .. } => {
+            bytecode::Instr::ClosureNew { .. } => {
                 // This instruction really does nothing.  Its real value is in
                 // assigning the value ID to this "virtual closure" that is being
                 // created. It's a "virtual closure" because it can't escape the
@@ -753,13 +755,14 @@ impl TraceBuilder {
                 Some(self.emit(Instr::ClosureNew)?)
             }
 
-            interpreter::Instr::UnaryMinus(_) => {
+            bytecode::Instr::UnaryMinus(_) => {
                 todo!("(small feat) jit::builder: UnaryMinus")
             }
 
-            interpreter::Instr::StartTrace { .. } => {
-                // Nothing to do.  The logic for starting and stopping the TraceBuilder is mostly in the Interpreter.
-                // The TraceBuilder is created in the 'Tracing' state.
+            bytecode::Instr::StartTrace { .. } => {
+                // Nothing to do.  The logic for starting and stopping the TraceBuilder is mostly in
+                // the Interpreter. The TraceBuilder is created in the 'Tracing'
+                // state.
                 None
             }
         };
@@ -797,7 +800,7 @@ impl TraceBuilder {
     /// failed, or it is still waiting for the right start instruction), then
     /// this function does nothing (if the arguments are needed later by the
     /// trace, they will be acquired  as trace parameters).
-    pub(crate) fn set_args<F>(&mut self, args: &[interpreter::Operand], fnid_to_frameid: &F)
+    pub(crate) fn set_args<F>(&mut self, args: &[bytecode::Operand], fnid_to_frameid: &F)
     where
         F: Fn(FnId) -> FrameId,
     {
@@ -990,7 +993,7 @@ impl TraceBuilder {
         Ok(post_snap_update)
     }
 
-    fn add_entry_snapshot_var(&mut self, operand: &interpreter::Operand) -> Result<ValueId, Error> {
+    fn add_entry_snapshot_var(&mut self, operand: &bytecode::Operand) -> Result<ValueId, Error> {
         print_indent(self.stack_depth());
         eprintln!("[..tb add entry snap var {:?}]", operand);
 
@@ -1006,7 +1009,7 @@ impl TraceBuilder {
 
     fn set_exit_snapshot_var(
         &mut self,
-        intrp_varid: interpreter::StaticVarId,
+        intrp_varid: bytecode::StaticVarId,
         value_id: ValueId,
     ) -> Result<(), Error> {
         print_indent(self.stack_depth());
@@ -1014,7 +1017,7 @@ impl TraceBuilder {
 
         let ndx = self
             .snapshot_map
-            .set_exit(&interpreter::Operand::Var(intrp_varid)) as usize;
+            .set_exit(&bytecode::Operand::Var(intrp_varid)) as usize;
 
         if self.exit_snapshot_changes.len() <= ndx {
             self.exit_snapshot_changes.resize(ndx + 1, None);
@@ -1039,7 +1042,8 @@ impl TraceBuilder {
 
             let constraints = place_reg_constraints(&instrs);
             let reg_classes = get_reg_classes(&instrs);
-            // TODO change Instr so that operands are explicitly stored in a separate Vec<OperandsSet> (so no need for extract_operands)
+            // TODO change Instr so that operands are explicitly stored in a separate
+            // Vec<OperandsSet> (so no need for extract_operands)
             let operands = extract_operands(&instrs);
             assert_eq!(instrs.len(), reg_classes.len());
             assert_eq!(instrs.len(), operands.len());
@@ -1159,21 +1163,21 @@ fn print_indent(stack_depth: usize) {
 
 pub struct InterpreterStep<'a> {
     pub(crate) values_buf: &'a Vec<interpreter::Value>,
-    pub(crate) fnid: interpreter::FnId,
-    pub(crate) func: &'a interpreter::Function,
-    pub(crate) iid: interpreter::IID,
-    pub(crate) next_iid: interpreter::IID,
+    pub(crate) fnid: bytecode::FnId,
+    pub(crate) func: &'a bytecode::Function,
+    pub(crate) iid: bytecode::IID,
+    pub(crate) next_iid: bytecode::IID,
     pub(crate) fnid_to_frameid: &'a dyn Fn(FnId) -> FrameId,
-    pub(crate) get_operand: &'a dyn Fn(&interpreter::Operand) -> BoxedValue,
+    pub(crate) get_operand: &'a dyn Fn(&bytecode::Operand) -> BoxedValue,
 }
 
 impl<'a> InterpreterStep<'a> {
-    fn cur_instr(&self) -> &interpreter::Instr {
+    fn cur_instr(&self) -> &bytecode::Instr {
         &self.func.instrs()[self.iid.0 as usize]
     }
 
-    fn global_iid(&self) -> interpreter::GlobalIID {
-        interpreter::GlobalIID {
+    fn global_iid(&self) -> bytecode::GlobalIID {
+        bytecode::GlobalIID {
             fnid: self.fnid,
             iid: self.iid,
         }
@@ -1209,7 +1213,8 @@ pub(super) enum Instr {
     GetSnapshotItem {
         ndx: u16,
         ty: ValueType,
-        // TODO(performance) replace this with something that doesn't require a dedicated allocation?
+        // TODO(performance) replace this with something that doesn't require a dedicated
+        // allocation?
         post_snap_update: SnapshotUpdate,
     },
     GetArg {
@@ -1248,14 +1253,11 @@ pub(super) enum Instr {
     Phi(ValueId, ValueId),
 
     // This is only a helper to test certain properties of the codegen
-    #[cfg(test)] ClobberCallerSaved,
+    #[cfg(test)]
+    ClobberCallerSaved,
 }
 
 pub(super) type SnapshotUpdate = Vec<Option<ValueId>>;
-
-type ArithOp = interpreter::ArithOp;
-type CmpOp = interpreter::CmpOp;
-type BoolOp = interpreter::BoolOp;
 
 impl From<Cmp> for Instr {
     fn from(cmp: Cmp) -> Self {
@@ -1313,7 +1315,8 @@ impl Instr {
             Instr::Phi(_, _) => None,
             Instr::GetSnapshotItem { ty, .. } => Some(*ty),
             Instr::Box(_) => Some(ValueType::Boxed),
-            #[cfg(test)] Instr::ClobberCallerSaved => None,
+            #[cfg(test)]
+            Instr::ClobberCallerSaved => None,
         }
     }
 
@@ -1350,7 +1353,8 @@ impl Instr {
             Instr::GetSnapshotItem { .. } => [].as_slice().into(),
             Instr::Box(arg) => [*arg].as_slice().into(),
 
-            #[cfg(test)] Instr::ClobberCallerSaved => [].as_slice().into(),
+            #[cfg(test)]
+            Instr::ClobberCallerSaved => [].as_slice().into(),
         }
     }
 
@@ -1375,7 +1379,8 @@ impl Instr {
             Instr::Phi(_, _) => true,
             Instr::GetSnapshotItem { .. } => false,
             Instr::Box(_) => false,
-            #[cfg(test)] Instr::ClobberCallerSaved => true,
+            #[cfg(test)]
+            Instr::ClobberCallerSaved => true,
         }
     }
 }
@@ -1383,7 +1388,7 @@ impl Instr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{interpreter::StaticVarId, jit};
+    use crate::{bytecode::StaticVarId, jit};
 
     #[test]
     fn test_exit_unless_operands() {
@@ -1500,7 +1505,7 @@ mod tests {
     fn test_tracing_one_func() {
         let output = quick_jit(
             "
-            function foo(mode, a, b) { 
+            function foo(mode, a, b) {
                 __start_trace('the-trace');
                 if (mode === 'sum')
                     return a + b;
@@ -1743,5 +1748,35 @@ mod tests {
                 BoxedValue::Number(15.0),
             ]
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_trace_exit_with_fn_inlining() {
+        let mut vm = interpreter::VM::new();
+
+        let code = &"
+            function f1(n) {
+                __start_trace('t');
+                function f2() {
+                    function f3() {
+                        function f4() {
+                            if (n == 1080) return 123;
+                            return 456;
+                        }
+                        return f4();
+                    }
+                    return f3();
+                }
+                return f2();
+            }
+
+            sink(f1(1080));
+            ";
+        run_and_compile(&mut vm, code);
+
+        let (trace, thunk) = vm.get_trace("t").unwrap();
+        trace.dump();
+        todo!()
     }
 }

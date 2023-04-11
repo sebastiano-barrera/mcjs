@@ -4,6 +4,7 @@
 #![allow(unused_imports)]
 
 mod bytecode_compiler;
+mod bytecode;
 mod common;
 mod interpreter;
 mod jit;

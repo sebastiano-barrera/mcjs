@@ -4,11 +4,12 @@ use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, SourceMap, Span};
 use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
-pub use crate::common::{Context, Error, Result};
-use crate::error;
-use crate::interpreter::{
+use crate::bytecode::{
     self, ArithOp, BoolOp, CmpOp, FnId, Instr, Operand, StaticVarId, Value, VarIndex, IID,
 };
+pub use crate::common::{Context, Error, Result};
+use crate::error;
+use crate::interpreter;
 use crate::util::Mask;
 
 macro_rules! unsupported_node {
@@ -36,7 +37,7 @@ impl Compiler {
         &mut self,
         filename: String,
         content: String,
-    ) -> Result<interpreter::Module> {
+    ) -> Result<bytecode::Module> {
         use crate::common::Context;
         let (source_map, ast_module) = parse_file(filename.clone(), content)
             .with_context(error!("while parsing file: {filename}"))?;
@@ -62,7 +63,7 @@ struct FnBuilder {
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
     // TODO(opt) Maybe this needs to be more compact
-    captured_frames: HashSet<FnId>,
+    // captured_frames: HashSet<FnId>,
     last_index: u16,
 }
 #[derive(Debug)]
@@ -76,14 +77,14 @@ impl FnBuilder {
             fnid: id,
             scopes: vec![Self::new_scope()],
             instrs: Vec::new(),
-            captured_frames: HashSet::new(),
+            // captured_frames: HashSet::new(),
             last_index: 0,
         }
     }
 
-    fn build(self) -> interpreter::Function {
+    fn build(self) -> bytecode::Function {
         let n_slots = self.last_index;
-        interpreter::Function::new(self.instrs.into_boxed_slice(), n_slots)
+        bytecode::Function::new(self.instrs.into_boxed_slice(), n_slots)
     }
 
     fn new_scope() -> Scope {
@@ -149,11 +150,11 @@ impl Builder {
         builder
     }
 
-    fn build(mut self) -> interpreter::Module {
+    fn build(mut self) -> bytecode::Module {
         let fnid = self.end_function();
         // The root function is the outermost scope, and therefore must capture
         // nothing.  Otherwise, we have a bug.
-        assert!(self.fns.get(&fnid).unwrap().captured_frames.is_empty());
+        // assert!(self.fns.get(&fnid).unwrap().captured_frames.is_empty());
         assert!(self.fn_stack.is_empty());
 
         let fns = self
@@ -161,7 +162,7 @@ impl Builder {
             .drain()
             .map(|(fn_id, fn_builder)| (fn_id, fn_builder.build()))
             .collect();
-        interpreter::Module::new(fns)
+        bytecode::Module::new(fns)
     }
 
     fn reserve(&mut self) -> IID {
@@ -213,7 +214,7 @@ impl Builder {
                 // stack frames. Mark that frame as "captured", so that the
                 // ClosureNew instruction will be generated, and provide a
                 // pointer to that stack frame in the interpreter.
-                fnb.captured_frames.insert(fnid);
+                // fnb.captured_frames.insert(fnid);
             }
         }
 
@@ -226,13 +227,13 @@ impl Builder {
 
         self.fn_stack.push(FnBuilder::new(fnid));
 
-        if let Some(name) = name {
-            let var_id = self.define_var(name);
-            self.emit(Instr::Set {
-                var_id,
-                value: Value::SelfFunction.into(),
-            });
-        }
+        // if let Some(name) = name {
+        //     let var_id = self.define_var(name);
+        //     self.emit(Instr::Set {
+        //         var_id,
+        //         value: Value::SelfFunction.into(),
+        //     });
+        // }
 
         for (param_ndx, param) in params.iter().enumerate() {
             if !param.decorators.is_empty() {
@@ -264,19 +265,19 @@ impl Builder {
         let other_fnb = self.fns.get(&other_fnid).unwrap();
         let fnb = self.fn_stack.last_mut().expect("no FnBuilder!");
         let cur_fnid = fnb.fnid;
-        fnb.captured_frames.extend(
-            other_fnb
-                .captured_frames
-                .iter()
-                .filter(|fnid| **fnid != cur_fnid),
-        );
+        // fnb.captured_frames.extend(
+        //     other_fnb
+        //         .captured_frames
+        //         .iter()
+        //         .filter(|fnid| **fnid != cur_fnid),
+        // );
     }
 }
 
 fn compile_module(
     mut builder: Builder,
     ast_module: &swc_ecma_ast::Module,
-) -> Result<interpreter::Module> {
+) -> Result<bytecode::Module> {
     use swc_ecma_ast::{ModuleDecl, ModuleItem, Stmt, VarDeclKind};
 
     // Exports object.  TODO Actually make it accessible via `require`!
@@ -501,7 +502,7 @@ fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> 
     for decl in &var_decl.decls {
         let operand = match &decl.init {
             Some(expr) => compile_expr(builder, expr)?,
-            None => Value::Undefined.into(),
+            None => builder.emit(Instr::Const(Value::Undefined)).into(),
         };
 
         if let Some(ident) = decl.name.as_ident() {
@@ -628,7 +629,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
 
         Expr::Ident(ident) => {
             let value = if &ident.sym == "undefined" {
-                Operand::Value(Value::Undefined)
+                builder.emit(Instr::Const(Value::Undefined)).into()
             } else {
                 let var_id = get_var(builder, ident)?;
                 Operand::Var(var_id)
@@ -667,8 +668,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                                         error!("unsupported node: {:?}", x).with_span(x.span)
                                     )
                                 }
-                            }
-                            .into();
+                            };
+                            let key = builder.emit(Instr::Const(key)).into();
 
                             builder.emit(Instr::ObjSet {
                                 obj: obj.clone(),
@@ -770,6 +771,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                 // NOTE: update_expr.prefix does not matter in this case, but
                 // it will matter when this code is extended to other types of args
                 let var_id = get_var(builder, ident)?;
+                // TODO Use integers here, when they get implemented
+                let one = builder.emit(Instr::Const(Value::Number(1.0))).into();
                 let value: Operand = builder
                     .emit(Instr::Arith {
                         op: match update_expr.op {
@@ -777,8 +780,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                             UpdateOp::MinusMinus => ArithOp::Sub,
                         },
                         a: Operand::Var(var_id),
-                        // TODO Use integers here, when they get implemented
-                        b: Value::Number(1.0).into(),
+                        b: one,
                     })
                     .into();
                 builder.emit(Instr::Set {
@@ -848,7 +850,8 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
                 });
                 Ok(new_value)
             }
-            // We should have already handled this case in the `if let ... = asm.left.as_ident()` case
+            // We should have already handled this case in the `if let ... = asm.left.as_ident()`
+            // case
             Expr::Ident(_) => unreachable!(),
             _ => Err(error!("assignment to an expression is unsupported").with_span(asmt.span)),
         }
@@ -864,8 +867,11 @@ fn compile_member_access(
     use swc_ecma_ast::MemberProp;
 
     let obj = compile_expr(builder, member_expr.obj.as_ref())?;
-    let key = match &member_expr.prop {
-        MemberProp::Ident(prop_ident) => Operand::Value(prop_ident.sym.to_string().into()),
+    let key: Operand = match &member_expr.prop {
+        MemberProp::Ident(prop_ident) => {
+            let prop_ident = prop_ident.sym.to_string().into();
+            builder.emit(Instr::Const(prop_ident)).into()
+        }
         _ => {
             return Err(
                 error!("accessing an object with non-identifer key is unsupported")
@@ -992,7 +998,7 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
 mod tests {
     use super::*;
 
-    fn quick_compile(code: &str) -> interpreter::Module {
+    fn quick_compile(code: &str) -> bytecode::Module {
         Compiler::new()
             .compile_file("<input>".to_string(), code.to_string())
             .unwrap()
@@ -1009,23 +1015,30 @@ mod tests {
             })",
         );
 
-        let root_fn = module.functions().get(&FnId::ROOT_FN).unwrap();
-        let instrs = &root_fn.instrs();
-        let obj_id = instrs
+        let root_fn = module.get_function(FnId::ROOT_FN).unwrap();
+        let instrs = root_fn.instrs();
+        let the_obj_id = instrs
             .iter()
             .find_map(|instr| match instr {
                 Instr::PushSink(Operand::IID(iid)) => Some(*iid),
                 _ => None,
             })
             .unwrap();
-        let keys: Vec<_> = instrs
+        let keys_iids: HashSet<_> = instrs
             .iter()
             .filter_map(|instr| match instr {
                 Instr::ObjSet {
-                    obj: Operand::IID(iid),
-                    key: Operand::Value(key),
+                    obj: Operand::IID(obj_iid),
+                    key: Operand::IID(key_iid),
                     ..
-                } if *iid == obj_id => Some(key.clone()),
+                } if *obj_iid == the_obj_id => Some(key_iid),
+                _ => None,
+            })
+            .collect();
+        let keys: Vec<bytecode::Value> = instrs.iter().enumerate()
+            .filter(|(ndx, _)| keys_iids.contains(&IID(*ndx as _)))
+            .filter_map(|(_, inst)| match inst {
+                Instr::Const(value) => Some(value.clone()),
                 _ => None,
             })
             .collect();
@@ -1033,10 +1046,10 @@ mod tests {
         assert_eq!(
             keys.as_slice(),
             &[
-                "aString".into(),
-                "aNumber".into(),
-                "anotherObject".into(),
-                "aFunction".into(),
+                bytecode::Value::String("aString".into()),
+                bytecode::Value::String("aNumber".into()),
+                bytecode::Value::String("anotherObject".into()),
+                bytecode::Value::String("aFunction".into()),
             ]
         );
     }

@@ -2,7 +2,7 @@ use slotmap::SlotMap;
 use std::{cell::Cell, marker::PhantomData, sync::atomic::AtomicUsize};
 
 pub(crate) use crate::interpreter::Value;
-use crate::interpreter::{FnId, VarIndex};
+use crate::bytecode::{FnId, VarIndex};
 
 slotmap::new_key_type! {
     pub(crate) struct FrameId;
