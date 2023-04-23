@@ -5,7 +5,8 @@ use swc_common::{sync::Lrc, SourceMap, Span};
 use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
 use crate::bytecode::{
-    self, ArithOp, BoolOp, CmpOp, FnId, Instr, Operand, StaticVarId, Value, VarIndex, IID,
+    self, ArithOp, BoolOp, CmpOp, FnId, Instr, LocalVarIndex, Operand, UpvalueIndex, Value, Var,
+    IID,
 };
 pub use crate::common::{Context, Error, Result};
 use crate::error;
@@ -33,11 +34,7 @@ impl Compiler {
         self.builtins.insert(ident, operand);
     }
 
-    pub fn compile_file(
-        &mut self,
-        filename: String,
-        content: String,
-    ) -> Result<bytecode::Module> {
+    pub fn compile_file(&mut self, filename: String, content: String) -> Result<bytecode::Module> {
         use crate::common::Context;
         let (source_map, ast_module) = parse_file(filename.clone(), content)
             .with_context(error!("while parsing file: {filename}"))?;
@@ -62,14 +59,16 @@ struct FnBuilder {
     fnid: FnId,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
-    // TODO(opt) Maybe this needs to be more compact
-    // captured_frames: HashSet<FnId>,
-    last_index: u16,
+    // upvalue_vars[i] == ident <==> variable named `ident` mapped to upvalue with index `i`
+    upvalue_vars: Vec<JsWord>,
+    trace_anchors: HashMap<IID, bytecode::TraceAnchor>,
+    last_local_ndx: LocalVarIndex,
+    last_upvalue_ndx: UpvalueIndex,
 }
 #[derive(Debug)]
 struct Scope {
     // TODO Take advantage of identifier interning!
-    vars: HashMap<String, VarIndex>,
+    vars: HashMap<String, Var>,
 }
 impl FnBuilder {
     fn new(id: FnId) -> Self {
@@ -77,14 +76,16 @@ impl FnBuilder {
             fnid: id,
             scopes: vec![Self::new_scope()],
             instrs: Vec::new(),
-            // captured_frames: HashSet::new(),
-            last_index: 0,
+            upvalue_vars: Vec::new(),
+            trace_anchors: HashMap::new(),
+            last_local_ndx: 0,
+            last_upvalue_ndx: 0,
         }
     }
 
     fn build(self) -> bytecode::Function {
-        let n_slots = self.last_index;
-        bytecode::Function::new(self.instrs.into_boxed_slice(), n_slots)
+        let n_slots = self.last_local_ndx;
+        bytecode::Function::new(self.instrs.into_boxed_slice(), n_slots, self.trace_anchors)
     }
 
     fn new_scope() -> Scope {
@@ -104,25 +105,34 @@ impl FnBuilder {
         IID(self.instrs.len() as u32)
     }
 
-    fn define(&mut self, name: JsWord) -> VarIndex {
+    fn define_local(&mut self, name: JsWord) -> Var {
+        let var = Var::Local(self.last_local_ndx);
+        self.last_local_ndx += 1;
+        self.define_var(name, var)
+    }
+
+    fn define_upvalue(&mut self, name: JsWord) -> Var {
+        let upv_ndx = self.last_upvalue_ndx;
+        self.last_upvalue_ndx += 1;
+        self.upvalue_vars.push(name.clone());
+        self.define_var(name, Var::Upvalue(upv_ndx))
+    }
+
+    fn define_var(&mut self, name: JsWord, var: Var) -> Var {
         let name = String::from_utf8(name.as_bytes().to_owned())
             .expect("only UTF-8 identifiers are supporeted!");
-
-        let var_index = VarIndex(self.last_index);
         let scope = self.inner_scope_mut();
-        if scope.vars.contains_key(&name) {
+        let prev = scope.vars.insert(name.clone(), var);
+        if prev.is_some() {
             panic!(
                 "definition of var `{}` shadows previous definition (compiler limitation)",
                 name
             );
         }
-        scope.vars.insert(name, var_index);
-
-        self.last_index += 1;
-        var_index
+        var
     }
 
-    fn get_var(&self, sym: &JsWord) -> Option<VarIndex> {
+    fn get_var(&self, sym: &JsWord) -> Option<Var> {
         let name = String::from_utf8_lossy(sym.as_bytes());
         self.inner_scope().vars.get(name.as_ref()).copied()
     }
@@ -140,9 +150,9 @@ impl Builder {
         };
 
         for (name, operand) in builtins.into_iter() {
-            let var_id = builder.define_var(name.clone());
+            let var = builder.define_var(name.clone());
             builder.emit(Instr::Set {
-                var_id,
+                var,
                 value: operand,
             });
         }
@@ -188,37 +198,17 @@ impl Builder {
         self.cur_fnb().instrs.get_mut(iid.0 as usize)
     }
 
-    fn define_var(&mut self, name: JsWord) -> StaticVarId {
-        let fnb = self.cur_fnb();
-        let var_ndx = fnb.define(name);
-        StaticVarId {
-            fnid: fnb.fnid,
-            var_ndx,
-        }
+    fn define_var(&mut self, name: JsWord) -> Var {
+        self.cur_fnb().define_local(name)
     }
 
-    fn get_var(&mut self, sym: &JsWord) -> Option<StaticVarId> {
-        // Lookup sym in each scope, inner to outer
-        let var_id = self.fn_stack.iter().rev().find_map(|fnb| {
-            fnb.get_var(sym).map(|var_ndx| StaticVarId {
-                fnid: fnb.fnid,
-                var_ndx,
-            })
-        });
-
+    fn get_var(&mut self, sym: &JsWord) -> Var {
         let fnb = &mut self.cur_fnb();
-        let cur_fnid = fnb.fnid;
-        if let Some(StaticVarId { fnid, .. }) = var_id {
-            if fnid != cur_fnid {
-                // This variable is captured from one of the enclosing
-                // stack frames. Mark that frame as "captured", so that the
-                // ClosureNew instruction will be generated, and provide a
-                // pointer to that stack frame in the interpreter.
-                // fnb.captured_frames.insert(fnid);
-            }
+        if let Some(var_id) = fnb.get_var(sym) {
+            var_id
+        } else {
+            fnb.define_upvalue(sym.clone())
         }
-
-        var_id
     }
 
     fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
@@ -245,7 +235,7 @@ impl Builder {
                     let iid = self.emit(Instr::GetArg(param_ndx));
                     let var_id = self.define_var(ident.sym.clone());
                     self.emit(Instr::Set {
-                        var_id,
+                        var: var_id,
                         value: iid.into(),
                     });
                 }
@@ -261,16 +251,11 @@ impl Builder {
         fnid
     }
 
-    fn add_captures(&mut self, other_fnid: FnId) {
-        let other_fnb = self.fns.get(&other_fnid).unwrap();
-        let fnb = self.fn_stack.last_mut().expect("no FnBuilder!");
-        let cur_fnid = fnb.fnid;
-        // fnb.captured_frames.extend(
-        //     other_fnb
-        //         .captured_frames
-        //         .iter()
-        //         .filter(|fnid| **fnid != cur_fnid),
-        // );
+    fn place_trace_anchor(&mut self, trace_id: String) {
+        let fnb = self.cur_fnb();
+        let iid = fnb.peek_iid();
+        fnb.trace_anchors
+            .insert(iid, bytecode::TraceAnchor { trace_id });
     }
 }
 
@@ -284,7 +269,10 @@ fn compile_module(
     {
         let obj = builder.emit(Instr::ObjNew).into();
         let var_id = builder.define_var("module".into());
-        builder.emit(Instr::Set { var_id, value: obj });
+        builder.emit(Instr::Set {
+            var: var_id,
+            value: obj,
+        });
     }
 
     for item in &ast_module.body {
@@ -430,7 +418,7 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
             let func = &fn_decl.function;
             let value = compile_function(builder, Some(name.clone()), func)?;
             let var_id = builder.define_var(name);
-            builder.emit(Instr::Set { var_id, value });
+            builder.emit(Instr::Set { var: var_id, value });
         }
 
         Decl::Var(var_decl) => {
@@ -477,17 +465,20 @@ fn compile_function(
             .with_context(error!("in function declaration").with_span(func.span))?;
     }
 
-    let inner_fnid = builder.end_function();
+    let inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
 
-    // TODO Unit test this property
-    // If a function literal captures one of the enclosing scopes,
-    // then the enclosing function also does. By induction, all
-    // further enclosing functions also do, up to the function literal
-    // corresponding to the captured scope.
-    builder.add_captures(inner_fnid);
+    let instr = Instr::ClosureNew {
+        fnid: inner_fnb.fnid,
+    };
+    let closure_iid = builder.emit(instr);
 
-    let instr = Instr::ClosureNew { fnid: inner_fnid };
-    Ok(builder.emit(instr).into())
+    for ident in inner_fnb.upvalue_vars.iter() {
+        let value = builder.get_var(ident);
+        builder.emit(Instr::ClosurePushUpvalue(Operand::Var(value)));
+    }
+
+    builder.fns.insert(inner_fnb.fnid, inner_fnb);
+    Ok(closure_iid.into())
 }
 
 fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> Result<()> {
@@ -509,7 +500,7 @@ fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> 
             let name: JsWord = ident.id.to_id().0;
             let var_id = builder.define_var(name);
             builder.emit(Instr::Set {
-                var_id,
+                var: var_id,
                 value: operand,
             });
         } else {
@@ -543,16 +534,11 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                             }
                         };
 
-                        let wait_loop = match sym {
-                            "__start_trace" => false,
-                            "__start_trace_loop" => true,
-                            _ => panic!("no such JIT builtin function: {sym}"),
-                        };
+                        if sym != "__start_trace" {
+                            panic!("no such JIT builtin function: {sym}")
+                        }
 
-                        builder.emit(Instr::StartTrace {
-                            trace_id,
-                            wait_loop,
-                        });
+                        builder.place_trace_anchor(trace_id);
                         return Ok(builder.emit(Instr::Const(Value::Undefined)).into());
                     }
                 }
@@ -738,7 +724,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
             if let Some(name) = name {
                 let var_id = builder.define_var(name);
                 builder.emit(Instr::Set {
-                    var_id,
+                    var: var_id,
                     value: value.clone(),
                 });
             }
@@ -784,7 +770,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<Oper
                     })
                     .into();
                 builder.emit(Instr::Set {
-                    var_id,
+                    var: var_id,
                     value: value.clone(),
                 });
                 Ok(value)
@@ -834,7 +820,7 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
         let operand = Operand::Var(var_id);
         let new_value = compile_assignment_rhs(builder, asmt, &operand)?;
         builder.emit(Instr::Set {
-            var_id,
+            var: var_id,
             value: new_value,
         });
         Ok(operand)
@@ -943,10 +929,8 @@ fn compile_assignment_rhs(
     Ok(value)
 }
 
-fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<StaticVarId> {
-    builder
-        .get_var(&ident.sym)
-        .ok_or_else(|| error!("unbound variable `{}`", ident.sym).with_span(ident.span))
+fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<Var> {
+    Ok(builder.get_var(&ident.sym))
 }
 
 fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_ecma_ast::Module)> {
@@ -1035,7 +1019,9 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let keys: Vec<bytecode::Value> = instrs.iter().enumerate()
+        let keys: Vec<bytecode::Value> = instrs
+            .iter()
+            .enumerate()
             .filter(|(ndx, _)| keys_iids.contains(&IID(*ndx as _)))
             .filter_map(|(_, inst)| match inst {
                 Instr::Const(value) => Some(value.clone()),
@@ -1052,5 +1038,26 @@ mod tests {
                 bytecode::Value::String("aFunction".into()),
             ]
         );
+    }
+
+    #[test]
+    fn test_upvalues() {
+        let module = quick_compile(
+            "
+            let counter = 10;
+            function foo() {
+                counter++; counter++; counter++;
+            }
+            counter--; counter--;
+            foo();
+            counter--; counter--; counter--;
+            foo();
+            counter--;
+            ",
+        );
+
+        module.dump();
+
+        todo!();
     }
 }

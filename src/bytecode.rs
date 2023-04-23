@@ -27,6 +27,16 @@ impl std::fmt::Debug for IID {
     }
 }
 
+/// TODO A fully missing feature
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub struct UpvalueId(usize);
+
+impl std::fmt::Debug for UpvalueId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "U{}", self.0)
+    }
+}
+
 #[derive(Debug)]
 pub enum Instr {
     Nop,
@@ -54,7 +64,7 @@ pub enum Instr {
     },
     Jmp(IID),
     Set {
-        var_id: StaticVarId,
+        var: Var,
         value: Operand,
     },
     PushSink(Operand),
@@ -69,6 +79,7 @@ pub enum Instr {
     ClosureNew {
         fnid: FnId,
     },
+    ClosurePushUpvalue(Operand),
 
     ObjNew,
     ObjSet {
@@ -86,11 +97,6 @@ pub enum Instr {
     ArrayPush(Operand, Operand),
 
     TypeOf(Operand),
-
-    StartTrace {
-        trace_id: String,
-        wait_loop: bool,
-    },
 }
 
 impl Instr {
@@ -119,7 +125,7 @@ impl From<String> for Value {
     }
 }
 
-type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, StaticVarId>;
+type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, Var>;
 
 impl Instr {
     pub fn read_vars<'a>(&'a self) -> Vars {
@@ -141,7 +147,7 @@ impl Instr {
             Instr::BoolOp { op: _, a, b } => Operands::from_iter([a, b].into_iter()),
             Instr::JmpIf { cond, .. } => Operands::from_iter([cond].into_iter()),
             Instr::Jmp(_) => Default::default(),
-            Instr::Set { var_id: _, value } => Operands::from_iter([value].into_iter()),
+            Instr::Set { var: _, value } => Operands::from_iter([value].into_iter()),
             Instr::PushSink(arg) => Operands::from_iter([arg].into_iter()),
             Instr::Return(arg) => Operands::from_iter([arg].into_iter()),
             Instr::GetArg(_) => Default::default(),
@@ -156,30 +162,26 @@ impl Instr {
             Instr::ArrayPush(arr, value) => Operands::from_iter([arr, value].into_iter()),
             Instr::TypeOf(arg) => Operands::from_iter([arg].into_iter()),
             Instr::ClosureNew { .. } => Default::default(),
-            Instr::StartTrace { .. } => Default::default(),
+            Instr::ClosurePushUpvalue(value) => Operands::from_iter([value].into_iter()),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct VarIndex(pub(crate) u16);
+pub type LocalVarIndex = u16;
+pub type UpvalueIndex = u16;
 
-/// Static identifier for a variable, used in the bytecode as operand.
-///
-/// Designates a variable in the bytecode, not at runtime.  If the function
-/// containing the variable declaration is called multiple times (e.g. via
-/// recursion, or by producing multiple closures from the same function
-/// literal), this identifier is the same every time, but the *runtime*
-/// identifier will change.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StaticVarId {
-    pub(crate) fnid: FnId,
-    pub(crate) var_ndx: VarIndex,
+pub enum Var {
+    Local(LocalVarIndex),
+    Upvalue(UpvalueIndex),
 }
 
-impl std::fmt::Debug for StaticVarId {
+impl std::fmt::Debug for Var {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "var[{}:{}]", self.fnid.0, self.var_ndx.0)
+        match self {
+            Var::Local(ndx) => write!(f, "local[{}]", ndx),
+            Var::Upvalue(ndx) => write!(f, "upv[{}]", ndx),
+        }
     }
 }
 
@@ -187,7 +189,7 @@ impl std::fmt::Debug for StaticVarId {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Operand {
     // Evaluates to the value of the indicated variable.
-    Var(StaticVarId),
+    Var(Var),
     // Evaluates to the result of the indicated instruction.
     IID(IID),
 }
@@ -246,7 +248,7 @@ impl Module {
     pub(crate) fn dump(&self) {
         eprintln!("=== module");
         for (fnid, func) in self.fns.iter() {
-            eprintln!("fn #{} [{} vars]:", fnid.0, func.n_slots);
+            eprintln!("fn #{} [{} vars]:", fnid.0, func.n_local_vars);
             for (ndx, instr) in func.instrs.iter().enumerate() {
                 let lh = func.loop_heads.get(&IID(ndx as u32));
                 eprintln!(
@@ -271,21 +273,30 @@ impl Module {
 pub struct Function {
     instrs: Box<[Instr]>,
     loop_heads: HashMap<IID, LoopInfo>,
-    n_slots: u16,
+    trace_anchors: HashMap<IID, TraceAnchor>,
+    n_local_vars: u16,
+}
+pub struct TraceAnchor {
+    pub trace_id: String,
 }
 pub struct LoopInfo {
     // Variables that change in value during each cycle, in such a way that
     // each cycle sees the value in  the previous cycle.  Phi instructions are
     // added based on this set.
-    interloop_vars: HashSet<StaticVarId>,
+    interloop_vars: HashSet<Var>,
 }
 impl Function {
-    pub(crate) fn new(instrs: Box<[Instr]>, n_slots: u16) -> Function {
+    pub(crate) fn new(
+        instrs: Box<[Instr]>,
+        n_local_vars: u16,
+        trace_anchors: HashMap<IID, TraceAnchor>,
+    ) -> Function {
         let loop_heads = find_loop_heads(&instrs[..]);
         Function {
             instrs,
             loop_heads,
-            n_slots,
+            trace_anchors,
+            n_local_vars,
         }
     }
 
@@ -297,8 +308,18 @@ impl Function {
         self.loop_heads.contains_key(&iid)
     }
 
-    pub(crate) fn n_slots(&self) -> u16 {
-        self.n_slots
+    pub(crate) fn get_trace_anchor(&self, iid: IID) -> Option<&TraceAnchor> {
+        self.trace_anchors.get(&iid)
+    }
+
+    pub(crate) fn trace_start_id(&self, iid: IID) -> Option<&str> {
+        self.trace_anchors
+            .get(&iid)
+            .map(|tanch| tanch.trace_id.as_str())
+    }
+
+    pub(crate) fn n_local_vars(&self) -> u16 {
+        self.n_local_vars
     }
 }
 
@@ -307,6 +328,7 @@ fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
     // loop, at least one read happens before a write.
     let mut heads = HashMap::new();
 
+    // TODO(small feat) This CAN be linear, can't it?
     // It ain't linear, but it does the job (plus I don't think
     // there should be so many nesting levels for loops within the
     // same function...)
@@ -317,13 +339,13 @@ fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
 
                 let dest_ndx = dest.0 as usize;
                 let mut interloop_vars = HashSet::new();
-                let mut reads: HashSet<StaticVarId> = HashSet::new();
+                let mut reads: HashSet<Var> = HashSet::new();
                 for inst in &instrs[dest_ndx..end_ndx] {
                     reads.extend(inst.read_vars().iter());
 
-                    if let Instr::Set { var_id, .. } = inst {
-                        if reads.remove(var_id) {
-                            interloop_vars.insert(*var_id);
+                    if let Instr::Set { var, .. } = inst {
+                        if reads.remove(var) {
+                            interloop_vars.insert(*var);
                         }
                     }
                 }

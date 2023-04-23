@@ -12,7 +12,7 @@ use std::{
 
 pub use crate::common::Error;
 use crate::{
-    bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, Instr, Operand, IID, GlobalIID, StaticVarId},
+    bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, GlobalIID, Instr, Operand, IID},
     bytecode_compiler,
     common::Result,
     error,
@@ -133,21 +133,36 @@ impl ObjectKey {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Closure {
     fnid: FnId,
-    lexical_parent: Option<stack::FrameId>,
+    /// TODO There oughta be a better data structure for this
+    upvalues: Vec<UpvalueId>,
 }
 
 impl std::fmt::Debug for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<closure {:?} <- {:?}>", self.fnid, self.lexical_parent)
+        write!(f, "<closure {:?} | ", self.fnid)?;
+        for upv in &self.upvalues {
+            write!(f, "{:?} ", upv)?;
+        }
+        write!(f, ">")
     }
 }
+
+/// TODO A fully missing feature
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub struct UpvalueId(usize);
+
+impl std::fmt::Debug for UpvalueId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "U{}", self.0)
+    }
+}
+
 
 pub struct VM {
     include_paths: Vec<PathBuf>,
     modules: HashMap<String, bytecode::Module>,
     opts: VMOptions,
     sink: Vec<Value>,
-
     traces: HashMap<String, (jit::Trace, jit::NativeThunk)>,
 }
 
@@ -293,8 +308,8 @@ impl VM {
     }
 
     fn run_module(&mut self, module: &bytecode::Module, flags: InterpreterFlags) -> Result<()> {
-        let mut intrp = Interpreter::new(self, flags);
-        intrp.run_module(module)?;
+        let mut intrp = Interpreter::new(self, flags, module);
+        intrp.run()?;
         let Interpreter { sink, jitting, .. } = intrp;
 
         if let Some(jitting) = jitting {
@@ -314,8 +329,15 @@ struct Interpreter<'a> {
     vm: &'a mut VM,
     flags: InterpreterFlags,
     jitting: Option<Jitting>,
-    frame_graph: stack::FrameGraph,
-    stack_depth: u32,
+
+    // TODO (big feat) This interpreter does not support having multiple modules running. can you
+    // believe it?!
+    // module_id: bytecode::IID,
+    module: &'a bytecode::Module,
+    fnid: bytecode::FnId,
+    iid: bytecode::IID,
+    stack: stack::Stack,
+
     sink: Vec<Value>,
 }
 
@@ -327,184 +349,176 @@ struct Jitting {
 }
 
 impl<'a> Interpreter<'a> {
-    fn new(parent_vm: &'a mut VM, flags: InterpreterFlags) -> Self {
+    fn new(parent_vm: &'a mut VM, flags: InterpreterFlags, module: &'a bytecode::Module) -> Self {
         eprintln!("Interpreter: flags: {:?}", flags);
+
+        let mut stack = stack::Stack::new();
+        let main_func = module.get_function(FnId::ROOT_FN).unwrap();
+        let n_locals = main_func.n_local_vars();
+        eprintln!("-- main. {} locals", n_locals);
+        stack.push(stack::CallMeta {
+            fnid: FnId::ROOT_FN,
+            n_instrs: main_func.instrs().len().try_into().unwrap(),
+            n_upvalues: 0,
+            n_locals,
+            n_args: 0,
+            // This is never used!
+            parent_iid: bytecode::IID(0),
+        });
 
         Interpreter {
             vm: parent_vm,
             flags,
             jitting: None,
-            frame_graph: stack::FrameGraph::new(),
-            stack_depth: 0,
+            module,
+            fnid: FnId::ROOT_FN,
+            iid: bytecode::IID(0),
+            stack,
             sink: Vec::new(),
         }
     }
 
-    fn run_module(&mut self, module: &bytecode::Module) -> Result<()> {
-        let root_closure = Closure {
-            fnid: FnId::ROOT_FN,
-            lexical_parent: None,
-        };
-        self.run_module_fn(module, &root_closure, &[])?;
-        Ok(())
-    }
-
-    fn print_indent(&self) {
-        for _ in 0..(self.stack_depth - 1) {
-            eprint!("      | ");
-        }
-    }
-
-    // TODO(cleanup) Change this to return &Value instead
-    fn get_operand(
-        &self,
-        operand: &Operand,
-        values_buf: &[Value],
-        cur_fid: stack::FrameId,
-    ) -> Value {
-        // TODO(cleanup) Refactor this mess
-        resolve_operand(operand, values_buf, &self.frame_graph, cur_fid)
-    }
-
-    fn run_module_fn(
-        &mut self,
-        module: &bytecode::Module,
-        closure: &Closure,
-        args: &[Value],
-    ) -> Result<Value> {
-        let func = module.get_function(closure.fnid).unwrap();
-
-        let lexical_parent = closure.lexical_parent;
-        let n_local_vars = func.n_slots() as usize;
-        let frame = self
-            .frame_graph
-            .new_frame(closure.fnid, n_local_vars, lexical_parent);
-        self.stack_depth += 1;
-
-        let res = self._run_module_fn_inner(module, closure, frame, func, args);
-
-        // TODO(big feat) Garbage collect stack frames
-        self.stack_depth -= 1;
-        res
-    }
-
-    fn _run_module_fn_inner(
-        &mut self,
-        module: &bytecode::Module,
-        closure: &Closure,
-        cur_frame_id: stack::FrameId,
-        func: &bytecode::Function,
-        args: &[Value],
-    ) -> Result<Value> {
-        let instrs = func.instrs();
-
-        let mut values_buf = vec![Value::Undefined; instrs.len()];
-
-        if let Some(jitting) = &mut self.jitting {
-            jitting
-                .builder
-                .enter_function(cur_frame_id, func.n_slots() as usize);
-        }
-
-        let mut ndx = 0;
-        let mut return_value = None;
-        let mut jit_waiting_loop = None;
-
-        while return_value.is_none() {
-            if ndx >= instrs.len() {
-                break;
-            }
-            let instr = &instrs[ndx];
-            let mut next_ndx = ndx + 1;
-            let iid = IID(ndx as u32);
+    fn run(&mut self) -> Result<()> {
+        loop {
+            // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
+            let func = self.module.get_function(self.fnid).unwrap();
+            let instr = &func.instrs()[self.iid.0 as usize];
 
             self.print_indent();
-            eprintln!("i{:<4} {:?}", ndx, instr);
+            eprintln!("i{:<4} {:?}", self.iid.0, instr);
+
+            let mut next_ndx = self.iid.0 + 1;
+
+            if let Some(tanch) = func.get_trace_anchor(self.iid) {
+                match self.flags.jit_mode {
+                    JitMode::Compile => {
+                        if self.jitting.is_none() {
+                            let builder = jit::TraceBuilder::start(
+                                func.n_local_vars() as usize,
+                                jit::CloseMode::FunctionExit,
+                            );
+                            self.jitting = Some(Jitting {
+                                builder,
+                                fnid: self.fnid,
+                                iid: self.iid,
+                                trace_id: tanch.trace_id.clone(),
+                            });
+                        }
+                    }
+                    JitMode::UseTraces => {
+                        let (trace, thunk) =
+                            self.vm.get_trace(&tanch.trace_id).unwrap_or_else(|| {
+                                panic!("no such trace with ID `{}`", tanch.trace_id)
+                            });
+
+                        let mut snap: Vec<_> = trace
+                            .snapshot_map()
+                            .iter()
+                            .map(|snapitem| {
+                                if snapitem.write_on_entry {
+                                    self.get_operand(&snapitem.operand)
+                                } else {
+                                    Value::Undefined
+                                }
+                            })
+                            .collect();
+
+                        // TODO(small feat) Update the interpreter's state from the trace
+                        thunk.run(&mut snap);
+                    }
+                }
+            }
 
             match instr {
                 Instr::Const(value) => {
-                    values_buf[ndx] = value.clone().into();
+                    self.stack.set_result(self.iid, value.clone().into());
                 }
                 Instr::Arith { op, a, b } => {
-                    let a = self.get_operand(a, &values_buf, cur_frame_id);
-                    let b = self.get_operand(b, &values_buf, cur_frame_id);
+                    let a = self.get_operand(&a);
+                    let b = self.get_operand(&b);
 
                     if let (Value::Number(a), Value::Number(b)) = (&a, &b) {
-                        values_buf[ndx] = Value::Number(match op {
-                            ArithOp::Add => a + b,
-                            ArithOp::Sub => a - b,
-                            ArithOp::Mul => a * b,
-                            ArithOp::Div => a / b,
-                        });
+                        self.stack.set_result(
+                            self.iid,
+                            Value::Number(match op {
+                                ArithOp::Add => a + b,
+                                ArithOp::Sub => a - b,
+                                ArithOp::Mul => a * b,
+                                ArithOp::Div => a / b,
+                            }),
+                        );
                     } else {
                         panic!("invalid operands for arith op: {:?}; {:?}", a, b);
                     }
                 }
                 Instr::PushSink(operand) => {
-                    let value = self.get_operand(operand, &values_buf, cur_frame_id);
+                    let value = self.get_operand(&operand);
                     self.sink.push(value);
                 }
                 Instr::Cmp { op, a, b } => {
-                    let a = self.get_operand(a, &values_buf, cur_frame_id);
-                    let b = self.get_operand(b, &values_buf, cur_frame_id);
+                    let a = self.get_operand(&a);
+                    let b = self.get_operand(&b);
 
                     match (&a, &b) {
                         (Value::Number(a), Value::Number(b)) => {
-                            values_buf[ndx] = Value::Bool(match op {
-                                CmpOp::GE => a >= b,
-                                CmpOp::GT => a > b,
-                                CmpOp::LT => a < b,
-                                CmpOp::LE => a <= b,
-                                CmpOp::EQ => a == b,
-                                CmpOp::NE => a != b,
-                            });
+                            self.stack.set_result(
+                                self.iid,
+                                Value::Bool(match op {
+                                    CmpOp::GE => a >= b,
+                                    CmpOp::GT => a > b,
+                                    CmpOp::LT => a < b,
+                                    CmpOp::LE => a <= b,
+                                    CmpOp::EQ => a == b,
+                                    CmpOp::NE => a != b,
+                                }),
+                            );
                         }
                         (Value::String(a), Value::String(b)) => {
                             let ordering = a.cmp(b);
-                            values_buf[ndx] = Value::Bool(matches!(
-                                (op, ordering),
-                                (CmpOp::GE, Ordering::Greater)
-                                    | (CmpOp::GE, Ordering::Equal)
-                                    | (CmpOp::GT, Ordering::Greater)
-                                    | (CmpOp::LT, Ordering::Less)
-                                    | (CmpOp::LE, Ordering::Less)
-                                    | (CmpOp::LE, Ordering::Equal)
-                                    | (CmpOp::EQ, Ordering::Equal)
-                                    | (CmpOp::NE, Ordering::Greater)
-                                    | (CmpOp::NE, Ordering::Less)
-                            ));
+                            self.stack.set_result(
+                                self.iid,
+                                Value::Bool(matches!(
+                                    (op, ordering),
+                                    (CmpOp::GE, Ordering::Greater)
+                                        | (CmpOp::GE, Ordering::Equal)
+                                        | (CmpOp::GT, Ordering::Greater)
+                                        | (CmpOp::LT, Ordering::Less)
+                                        | (CmpOp::LE, Ordering::Less)
+                                        | (CmpOp::LE, Ordering::Equal)
+                                        | (CmpOp::EQ, Ordering::Equal)
+                                        | (CmpOp::NE, Ordering::Greater)
+                                        | (CmpOp::NE, Ordering::Less)
+                                )),
+                            );
                         }
 
                         _ => {
-                            values_buf[ndx] = Value::Bool(false);
-                            // panic!("invalid operands for cmp op: {:?}; {:?}", a, b);
+                            self.stack.set_result(self.iid, Value::Bool(false));
+                            // panic!("invalid operands for cmp op: {:?}; {:?}", a,
+                            // b);
                         }
                     }
                 }
                 Instr::JmpIf { cond, dest } => {
-                    let cond_value = self.get_operand(cond, &values_buf, cur_frame_id);
+                    let cond_value = self.get_operand(&cond);
                     match cond_value {
                         Value::Bool(true) => {
-                            next_ndx = dest.0 as usize;
+                            next_ndx = dest.0;
                         }
                         Value::Bool(false) => {} // Just go to the next instruction
                         other => panic!("invalid if condition (not boolean): {:?}", other),
                     }
                 }
-                Instr::Set { var_id, value } => {
-                    let value = self.get_operand(value, &values_buf, cur_frame_id);
-
-                    let target_frame_id = self
-                        .frame_graph
-                        .get_lexical_scope(cur_frame_id, var_id.fnid)
-                        .expect("invalid var_id (no lexical scope)");
-                    self.frame_graph
-                        .set_var(target_frame_id, var_id.var_ndx, value);
+                Instr::Set { var, value } => {
+                    let value = self.get_operand(&value);
+                    match var {
+                        bytecode::Var::Local(var_ndx) => self.stack.set_local(*var_ndx, value),
+                        bytecode::Var::Upvalue(upv_ndx) => self.stack.set_upvalue(*upv_ndx, value),
+                    }
                 }
                 Instr::Nop => {}
                 Instr::Not(value) => {
-                    let value = self.get_operand(value, &values_buf, cur_frame_id);
-                    values_buf[ndx] = match value {
+                    let value = match self.get_operand(&value) {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         Value::Number(num) => Value::Bool(num == 0.0),
                         Value::String(str) => Value::Bool(str.is_empty()),
@@ -515,86 +529,94 @@ impl<'a> Interpreter<'a> {
                         Value::NativeFunction(_) => Value::Bool(false),
                         Value::Closure(_) => Value::Bool(false),
                     };
+                    self.stack.set_result(self.iid, value);
                 }
-                Instr::Jmp(dest) => {
-                    next_ndx = dest.0 as usize;
+                Instr::Jmp(IID(dest_ndx)) => {
+                    next_ndx = *dest_ndx;
                 }
                 Instr::Return(value) => {
-                    return_value = Some(self.get_operand(value, &values_buf, cur_frame_id));
+                    let return_value = self.get_operand(&value);
+                    next_ndx = self.stack.parent_iid().unwrap().0 + 1;
+                    self.stack.pop();
+                    todo!("pass return value to caller");
                 }
                 Instr::Call { callee, args } => {
-                    let callee = self.get_operand(callee, &values_buf, cur_frame_id);
-                    let arg_values: Vec<Value> = args
-                        .iter()
-                        .map(|oper| self.get_operand(oper, &values_buf, cur_frame_id))
-                        .collect();
-                    match callee {
-                        Value::Closure(closure) => {
-                            self.print_indent();
-                            eprintln!("      : call {closure:?}",);
+                    let closure = match self.get_operand(&callee) {
+                        Value::Closure(closure) => closure,
+                        Value::NativeFunction(nfid) => todo!("call NativeFunction"),
+                        _ => panic!("invalid callee (not a function): {:?}", callee),
+                    };
 
-                            if let Some(jitting) = &mut self.jitting {
-                                jitting.builder.set_args(args, &|fnid| {
-                                    self.frame_graph
-                                        .get_lexical_scope(cur_frame_id, fnid)
-                                        .unwrap()
-                                });
-                            }
-                            let ret_val = self.run_module_fn(module, &closure, &arg_values[..])?;
-                            values_buf[ndx] = ret_val;
-                        }
-                        Value::NativeFunction(nfid) => {
-                            let nf = NATIVE_FUNCS
-                                .get(&nfid)
-                                .ok_or(error!("no such native function: {nfid}"))?;
-                            self.print_indent();
-                            todo!("(big feat) interpreter: tell the JIT about this native call");
-                            eprintln!("      : native call");
-                            let ret_val = nf(self, arg_values.as_slice())?;
-                            values_buf[ndx] = ret_val;
-                        }
-                        _ => {
-                            panic!("invalid callee (not a function): {:?}", callee);
-                        }
+                    let callee_func = self.module.get_function(closure.fnid).unwrap();
+                    self.print_indent();
+                    let n_locals = callee_func.n_local_vars();
+                    let n_upvalues = closure.upvalues.len().try_into().unwrap();
+                    eprintln!(
+                        "      : call {:?}. {} locals. {} upvalues.",
+                        closure, n_locals, n_upvalues,
+                    );
+
+                    self.stack.push(stack::CallMeta {
+                        fnid: closure.fnid,
+                        n_instrs: callee_func.instrs().len().try_into().unwrap(),
+                        n_upvalues,
+                        n_locals,
+                        n_args: args.len().try_into().unwrap(),
+                        parent_iid: bytecode::IID(next_ndx),
+                    });
+
+                    for (i, oper) in args.iter().enumerate() {
+                        let arg = self.get_operand(&oper);
+                        self.stack.set_arg(i, arg);
                     }
+                    if let Some(jitting) = &mut self.jitting {
+                        todo!("jitting.builder.set_args");
+                        // jitting.builder.set_args(args, &|fnid| {
+                        //     self.frame_graph.get_lexical_scope(frame,
+                        // fnid).unwrap() });
+                    }
+
+                    self.fnid = closure.fnid;
+                    next_ndx = 0;
                 }
 
                 Instr::GetArg(arg_ndx) => {
-                    values_buf[ndx] = args[*arg_ndx].clone();
+                    // TODO extra copy?
+                    let value = self.stack.get_arg(*arg_ndx).clone();
+                    self.stack.set_result(self.iid, value);
                 }
 
                 Instr::ObjNew => {
-                    values_buf[ndx] = Value::Object(Object::new());
+                    self.stack
+                        .set_result(self.iid, Value::Object(Object::new()));
                 }
                 Instr::ObjSet { obj, key, value } => {
-                    let obj = self.get_operand(obj, &values_buf, cur_frame_id);
+                    let obj = self.get_operand(&obj);
                     let mut obj = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
-                    let key = self.get_operand(key, &values_buf, cur_frame_id);
+                    let key = self.get_operand(&key);
                     let key = ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = self.get_operand(value, &values_buf, cur_frame_id);
+                    let value = self.get_operand(&value);
                     obj.set(key, value);
                 }
                 Instr::ObjGet { obj, key } => {
-                    let obj = self.get_operand(obj, &values_buf, cur_frame_id);
+                    let obj = self.get_operand(&obj);
                     let obj = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
-                    let key = self.get_operand(key, &values_buf, cur_frame_id);
+                    let key = self.get_operand(&key);
                     let key = ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = obj.get(&key);
-                    values_buf[ndx] = value
-                        .unwrap_or_else(|| {
-                            panic!("ObjGet: no property for key `{:?}` in object", key)
-                        })
-                        .clone();
+                    let value = obj.get(&key).unwrap_or_else(|| {
+                        panic!("ObjGet: no property for key `{:?}` in object", key)
+                    });
+                    self.stack.set_result(self.iid, value.clone());
                 }
                 Instr::ArrayNew => {
                     eprintln!("ArrayNew does nothing for now");
@@ -603,140 +625,88 @@ impl<'a> Interpreter<'a> {
                     eprintln!("ArrayPush does nothing for now");
                 }
                 Instr::TypeOf(arg) => {
-                    let value = self.get_operand(arg, &values_buf, cur_frame_id);
-                    values_buf[ndx] = value.js_typeof();
+                    let value = self.get_operand(&arg);
+                    self.stack.set_result(self.iid, value.js_typeof());
                 }
                 Instr::BoolOp { op, a, b } => {
-                    let a: bool = self
-                        .get_operand(a, &values_buf, cur_frame_id)
-                        .expect_bool()?;
-                    let b: bool = self
-                        .get_operand(b, &values_buf, cur_frame_id)
-                        .expect_bool()?;
+                    let a: bool = self.get_operand(&a).expect_bool()?;
+                    let b: bool = self.get_operand(&b).expect_bool()?;
                     let res = match op {
                         BoolOp::And => a && b,
                         BoolOp::Or => a || b,
                     };
-                    values_buf[ndx] = Value::Bool(res);
+                    self.stack.set_result(self.iid, Value::Bool(res));
                 }
                 Instr::ClosureNew { fnid } => {
+                    let mut upvalues: Vec<_> = func
+                        .instrs()
+                        .iter()
+                        .skip(next_ndx as _)
+                        .map_while(|instr| match instr {
+                            Instr::ClosurePushUpvalue(value) => Some(value),
+                            _ => None,
+                        })
+                        .collect();
+                    next_ndx += u32::try_from(upvalues.len()).unwrap();
+
                     let closure = Closure {
                         fnid: *fnid,
-                        lexical_parent: Some(cur_frame_id),
+                        upvalues,
                     };
+
                     self.print_indent();
                     eprintln!("      created closure: {:?}", closure);
-                    values_buf[ndx] = Value::Closure(closure);
+                    self.stack.set_result(self.iid, Value::Closure(closure));
                 }
+                // This is always handled in the code for ClosureNew
+                Instr::ClosurePushUpvalue(_) => unreachable!(),
+
                 Instr::UnaryMinus(arg) => {
-                    let arg: f64 = self
-                        .get_operand(arg, &values_buf, cur_frame_id)
-                        .expect_num()?;
-                    values_buf[ndx] = Value::Number(-arg);
-                }
-
-                Instr::StartTrace {
-                    trace_id,
-                    wait_loop,
-                } => match self.flags.jit_mode {
-                    JitMode::Compile => {
-                        if self.jitting.is_none() {
-                            if *wait_loop {
-                                jit_waiting_loop = Some(trace_id);
-                            } else {
-                                let builder = jit::TraceBuilder::start(
-                                    cur_frame_id,
-                                    func.n_slots() as usize,
-                                    jit::CloseMode::FunctionExit,
-                                );
-                                self.jitting = Some(Jitting {
-                                    builder,
-                                    fnid: closure.fnid,
-                                    iid,
-                                    trace_id: trace_id.clone(),
-                                });
-                            }
-                        }
-                    }
-                    JitMode::UseTraces => {
-                        let (trace, thunk) = self
-                            .vm
-                            .get_trace(trace_id)
-                            .unwrap_or_else(|| panic!("no such trace with ID `{trace_id}`"));
-
-                        let mut snap: Vec<_> = trace
-                            .snapshot_map()
-                            .iter()
-                            .map(|snapitem| {
-                                if snapitem.write_on_entry {
-                                    self.get_operand(&snapitem.operand, &values_buf, cur_frame_id)
-                                } else {
-                                    Value::Undefined
-                                }
-                            })
-                            .collect();
-
-                        // TODO(small feat) Use return value
-                        thunk.run(&mut snap);
-                    }
-                },
-            }
-
-            if let Some(trace_id) = jit_waiting_loop {
-                if func.is_loop_head(iid) {
-                    let fnid = closure.fnid;
-                    let global_iid = GlobalIID { fnid, iid };
-                    let builder = jit::TraceBuilder::start(
-                        cur_frame_id,
-                        func.n_slots() as usize,
-                        jit::CloseMode::Loop(global_iid),
-                    );
-                    self.jitting = Some(Jitting {
-                        builder,
-                        fnid,
-                        iid,
-                        trace_id: trace_id.clone(),
-                    });
-                    jit_waiting_loop = None;
+                    let arg: f64 = self.get_operand(&arg).expect_num()?;
+                    self.stack.set_result(self.iid, Value::Number(-arg));
                 }
             }
 
-            if let Some(jitting) = &mut self.jitting {
-                let next_iid = IID(next_ndx as u32);
-                let frame_graph = &self.frame_graph;
-                jitting.builder.interpreter_step(&InterpreterStep {
-                    values_buf: &values_buf,
-                    fnid: closure.fnid,
-                    func,
-                    iid,
-                    next_iid,
-                    fnid_to_frameid: &|fnid| {
-                        self.frame_graph
-                            .get_lexical_scope(cur_frame_id, fnid)
-                            .unwrap()
-                    },
-                    get_operand: &|operand| {
-                        resolve_operand(operand, &values_buf, frame_graph, cur_frame_id)
-                    },
-                });
+            if next_ndx as usize == func.instrs().len() {
+                break;
             }
-
-            ndx = next_ndx;
+            self.iid.0 = next_ndx;
         }
+        Ok(())
+    }
 
-        if let Some(jitting) = self.jitting.as_mut() {
-            jitting.builder.exit_function();
+    fn print_indent(&self) {
+        for _ in 0..(self.stack.len() - 1) {
+            eprint!("      | ");
         }
-        Ok(return_value.unwrap_or(Value::Undefined))
+    }
+
+    // TODO(cleanup) Change this to return &Value instead
+    fn get_operand(&self, operand: &Operand) -> Value {
+        // TODO(cleanup) Refactor this mess
+        match operand {
+            Operand::IID(iid) => {
+                let value = self.stack.get_result(*iid).clone();
+                //  TODO(cleanup) Move to a global logger. This is just for debugging!
+                //  self.print_indent();
+                eprintln!("      ↑  {:?} = {:?}", operand, value);
+                value
+            }
+            Operand::Var(var) => {
+                let value = match var {
+                    bytecode::Var::Local(var_ndx) => self.stack.get_local(*var_ndx).clone(),
+                    bytecode::Var::Upvalue(upvalue_id) => {
+                        self.stack.get_upvalue(*upvalue_id).clone()
+                    }
+                };
+                eprintln!("      ↑  {:?} = {:?}", var, value);
+                value
+            }
+        }
     }
 }
 
-fn resolve_operand(
-    operand: &Operand,
-    values_buf: &[Value],
-    frame_graph: &stack::FrameGraph,
-    cur_fid: stack::FrameId,
-) -> Value {
+fn resolve_operand(operand: &Operand, values_buf: &[Value], intrp_stack: &stack::Stack) -> Value {
     match operand {
         Operand::IID(IID(ndx)) => {
             let value = values_buf[*ndx as usize].clone();
@@ -745,12 +715,12 @@ fn resolve_operand(
             eprintln!("      ↑  {:?} = {:?}", operand, value);
             value
         }
-        Operand::Var(var_id) => {
-            let fid = frame_graph.get_lexical_scope(cur_fid, var_id.fnid).unwrap();
-            let value = frame_graph.get_var(fid, var_id.var_ndx).unwrap();
-            //  TODO(cleanup) Move to a global logger. This is just for debugging!
-            //  self.print_indent();
-            eprintln!("      ↑  {:?} = {:?}", var_id, value);
+        Operand::Var(var) => {
+            let value = match var {
+                bytecode::Var::Local(var_ndx) => intrp_stack.get_local(*var_ndx).clone(),
+                bytecode::Var::Upvalue(upvalue_id) => intrp_stack.get_upvalue(*upvalue_id).clone(),
+            };
+            eprintln!("      ↑  {:?} = {:?}", var, value);
             value
         }
     }
@@ -767,8 +737,9 @@ fn set_builtins(_bc_compiler: &mut bytecode_compiler::Compiler) {
     //     bytecode::Value::NativeFunction(VM::NFID_STRING_NEW).into(),
     // );
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
-    // bc_compiler.bind_native("Object".into(), bytecode::Value::Object(Object::new()).into());
-    // bc_compiler.bind_native("Array".into(), bytecode::Value::Object(Object::new()).into());
+    // bc_compiler.bind_native("Object".into(),
+    // bytecode::Value::Object(Object::new()).into()); bc_compiler.bind_native("Array"
+    // .into(), bytecode::Value::Object(Object::new()).into());
 }
 
 #[derive(Clone, Debug)]

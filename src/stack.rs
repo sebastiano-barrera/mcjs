@@ -1,71 +1,119 @@
 use slotmap::SlotMap;
 use std::{cell::Cell, marker::PhantomData, sync::atomic::AtomicUsize};
 
-pub(crate) use crate::interpreter::Value;
-use crate::bytecode::{FnId, VarIndex};
+use crate::bytecode;
+use crate::interpreter::{Value, self};
 
-slotmap::new_key_type! {
-    pub(crate) struct FrameId;
+/// The interpreter's stack.
+///
+/// Mostly stores local variables.
+pub(crate) struct Stack {
+    meta: Vec<CallMeta>,
+
+    args: Vec<Value>,
+    results: Vec<Value>,
+    locals: Vec<Value>,
+    upvalue_ids: Vec<interpreter::UpvalueId>,
 }
 
-/// A graph of activation frames (with a terrible name; I'm avoiding the word
-/// "stack" as it pretty quickly becomes a graph, as soon as a closure is
-/// created).
-pub(crate) struct FrameGraph {
-    frames: SlotMap<FrameId, Frame>,
+pub(crate) struct CallBuilder<'a> {
+    stack: &'a mut Stack,
 }
 
-pub(crate) struct Frame {
-    fnid: FnId,
-    lexical_parent: Option<FrameId>,
-    variables: Box<[Value]>,
+pub(crate) struct CallMeta {
+    pub fnid: bytecode::FnId,
+    pub n_instrs: u16,
+    pub n_upvalues: u16,
+    pub n_locals: u16,
+    pub n_args: u16,
+    pub parent_iid: bytecode::IID,
 }
 
-impl FrameGraph {
+impl Stack {
+    /// TODO(small feat) Better value?
+    const INIT_CAPACITY: usize = 4096;
+
     pub(crate) fn new() -> Self {
-        FrameGraph {
-            frames: SlotMap::with_key(),
+        Stack {
+            meta: Vec::with_capacity(Self::INIT_CAPACITY),
+            args: Vec::with_capacity(Self::INIT_CAPACITY),
+            results: Vec::with_capacity(Self::INIT_CAPACITY),
+            locals: Vec::with_capacity(Self::INIT_CAPACITY),
+            upvalue_ids: Vec::with_capacity(Self::INIT_CAPACITY),
         }
     }
 
-    pub(crate) fn new_frame(
-        &mut self,
-        fnid: FnId,
-        n_local_vars: usize,
-        lexical_parent: Option<FrameId>,
-    ) -> FrameId {
-        let variables = vec![Value::Undefined; n_local_vars].into_boxed_slice();
-        self.frames.insert(Frame {
-            fnid,
-            lexical_parent,
-            variables,
-        })
+    pub(crate) fn len(&self) -> usize {
+        self.meta.len()
     }
 
-    pub(crate) fn get(&self, fid: FrameId) -> Option<&Frame> {
-        self.frames.get(fid)
-    }
-
-    pub(crate) fn get_mut(&mut self, fid: FrameId) -> Option<&mut Frame> {
-        self.frames.get_mut(fid)
-    }
-
-    pub(crate) fn get_var(&self, fid: FrameId, var_ndx: VarIndex) -> Option<Value> {
-        self.get(fid)?.variables.get(var_ndx.0 as usize).cloned()
-    }
-
-    pub(crate) fn set_var(&mut self, fid: FrameId, var_ndx: VarIndex, value: Value) {
-        let frame = self.get_mut(fid).unwrap();
-        *frame.variables.get_mut(var_ndx.0 as usize).unwrap() = value;
-    }
-
-    pub(crate) fn get_lexical_scope(&self, mut fid: FrameId, fnid: FnId) -> Option<FrameId> {
-        loop {
-            let frame = self.get(fid).unwrap();
-            if frame.fnid == fnid {
-                return Some(fid);
-            }
-            fid = frame.lexical_parent?;
+    pub(crate) fn push(&mut self, call_meta: CallMeta) {
+        for _ in 0..call_meta.n_args {
+            self.args.push(Value::Undefined);
         }
+
+        for _ in 0..call_meta.n_upvalues {
+            // TODO This OK?
+            self.upvalue_ids.push(0u16);
+        }
+
+        for _ in 0..call_meta.n_locals {
+            self.locals.push(Value::Undefined);
+        }
+
+        for _ in 0..call_meta.n_instrs {
+            self.results.push(Value::Undefined);
+        }
+
+        self.meta.push(call_meta);
+    }
+
+    pub(crate) fn pop(&mut self) {
+        use crate::util::shorten_by;
+        let call_meta = self.meta.pop().unwrap();
+
+        shorten_by(&mut self.args, call_meta.n_args as usize);
+        shorten_by(&mut self.upvalue_ids, call_meta.n_upvalues as usize);
+        shorten_by(&mut self.locals, call_meta.n_locals as usize);
+        shorten_by(&mut self.results, call_meta.n_instrs as usize);
+    }
+
+    pub(crate) fn parent_iid(&self) -> Option<bytecode::IID> {
+        self.meta.last().map(|meta| meta.parent_iid)
+    }
+
+    pub(crate) fn get_result(&self, iid: bytecode::IID) -> &Value {
+        &self.results[self.results.len() - iid.0 as usize - 1]
+    }
+
+    pub(crate) fn set_result(&mut self, iid: bytecode::IID, value: Value) {
+        let ndx = self.results.len() - iid.0 as usize - 1;
+        self.results[ndx] = value;
+    }
+
+    pub(crate) fn get_local(&self, var_ndx: u16) -> &Value {
+        &self.locals[self.locals.len() - var_ndx as usize - 1]
+    }
+
+    pub(crate) fn set_local(&mut self, var_ndx: u16, value: Value) {
+        let ndx = self.locals.len() - var_ndx as usize - 1;
+        self.locals[ndx] = value;
+    }
+
+    pub(crate) fn get_upvalue(&self, upvalue_id: u16) -> Value {
+        todo!("get_upvalue")
+    }
+
+    pub(crate) fn set_upvalue(&self, upvalue_id: u16, value: Value) {
+        todo!("set_upvalue")
+    }
+
+    pub(crate) fn get_arg(&self, arg_ndx: usize) -> &Value {
+        &self.args[self.args.len() - arg_ndx as usize - 1]
+    }
+
+    pub(crate) fn set_arg(&mut self, arg_ndx: usize, value: Value) {
+        let ndx = self.args.len() - arg_ndx as usize - 1;
+        self.args[ndx] = value;
     }
 }

@@ -65,3 +65,8 @@ where
         LimVec(arr)
     }
 }
+
+pub fn shorten_by<T>(xs: &mut Vec<T>, n: usize) {
+    xs.truncate(xs.len() - n);
+}
+
