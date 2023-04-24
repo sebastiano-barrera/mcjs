@@ -12,7 +12,7 @@ use std::{
 
 pub use crate::common::Error;
 use crate::{
-    bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, GlobalIID, Instr, Operand, IID},
+    bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, GlobalIID, Instr, IID},
     bytecode_compiler,
     common::Result,
     error,
@@ -509,7 +509,7 @@ impl<'a> Interpreter<'a> {
                         other => panic!("invalid if condition (not boolean): {:?}", other),
                     }
                 }
-                Instr::Set { var, value } => {
+                Instr::SetVar { var, value } => {
                     let value = self.get_operand(&value);
                     match var {
                         bytecode::Var::Local(var_ndx) => self.stack.set_local(*var_ndx, value),

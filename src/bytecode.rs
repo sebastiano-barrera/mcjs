@@ -37,73 +37,78 @@ impl std::fmt::Debug for UpvalueId {
     }
 }
 
+pub type ConstIndex = u16;
+
 #[derive(Debug)]
 pub enum Instr {
     Nop,
     Const(Value),
-    Not(Operand),
-    UnaryMinus(Operand),
+
+    ReadVar(Var),
+    SetVar {
+        var: Var,
+        value: IID,
+    },
+
+    Not(IID),
+    UnaryMinus(IID),
     Arith {
         op: ArithOp,
-        a: Operand,
-        b: Operand,
+        a: IID,
+        b: IID,
     },
     Cmp {
         op: CmpOp,
-        a: Operand,
-        b: Operand,
+        a: IID,
+        b: IID,
     },
     BoolOp {
         op: BoolOp,
-        a: Operand,
-        b: Operand,
+        a: IID,
+        b: IID,
     },
     JmpIf {
-        cond: Operand,
+        cond: IID,
         dest: IID,
     },
     Jmp(IID),
-    Set {
-        var: Var,
-        value: Operand,
-    },
-    PushSink(Operand),
-    Return(Operand),
+    PushSink(IID),
+    Return(IID),
     GetArg(usize),
     Call {
-        callee: Operand,
+        callee: IID,
         // smallvec?
-        args: Vec<Operand>,
+        args: Vec<IID>,
     },
 
     ClosureNew {
         fnid: FnId,
     },
-    ClosurePushUpvalue(Operand),
+    ClosurePushUpvalue(IID),
 
     ObjNew,
     ObjSet {
-        obj: Operand,
-        key: Operand,
-        value: Operand,
+        obj: IID,
+        key: IID,
+        value: IID,
     },
     ObjGet {
-        obj: Operand,
-        key: Operand,
+        obj: IID,
+        key: IID,
     },
 
     // TODO(big feat) Temporary; should be replaced by objects, just like all other "classes"
     ArrayNew,
-    ArrayPush(Operand, Operand),
+    ArrayPush(IID, IID),
 
-    TypeOf(Operand),
+    TypeOf(IID),
 }
 
 impl Instr {
     const MAX_OPERANDS: usize = 4;
 }
 
-type Operands = crate::util::LimVec<{ Instr::MAX_OPERANDS }, Operand>;
+type Operands = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
 
 /// A value literal that is allowed to appear in the bytecode.
 #[derive(Debug, PartialEq, Clone)]
@@ -128,14 +133,6 @@ impl From<String> for Value {
 type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, Var>;
 
 impl Instr {
-    pub fn read_vars<'a>(&'a self) -> Vars {
-        let operands = self.read_operands();
-        Vars::from_iter(operands.iter().filter_map(|oper| match oper {
-            Operand::Var(var_id) => Some(*var_id),
-            _ => None,
-        }))
-    }
-
     fn read_operands<'a>(&'a self) -> Operands {
         match *self {
             Instr::Nop => Default::default(),
@@ -147,7 +144,7 @@ impl Instr {
             Instr::BoolOp { op: _, a, b } => Operands::from_iter([a, b].into_iter()),
             Instr::JmpIf { cond, .. } => Operands::from_iter([cond].into_iter()),
             Instr::Jmp(_) => Default::default(),
-            Instr::Set { var: _, value } => Operands::from_iter([value].into_iter()),
+            Instr::SetVar { var: _, value } => Operands::from_iter([value].into_iter()),
             Instr::PushSink(arg) => Operands::from_iter([arg].into_iter()),
             Instr::Return(arg) => Operands::from_iter([arg].into_iter()),
             Instr::GetArg(_) => Default::default(),
@@ -163,6 +160,7 @@ impl Instr {
             Instr::TypeOf(arg) => Operands::from_iter([arg].into_iter()),
             Instr::ClosureNew { .. } => Default::default(),
             Instr::ClosurePushUpvalue(value) => Operands::from_iter([value].into_iter()),
+            Instr::ReadVar(_) => Default::default(),
         }
     }
 }
@@ -182,29 +180,6 @@ impl std::fmt::Debug for Var {
             Var::Local(ndx) => write!(f, "local[{}]", ndx),
             Var::Upvalue(ndx) => write!(f, "upv[{}]", ndx),
         }
-    }
-}
-
-#[allow(clippy::upper_case_acronyms)]
-#[derive(Clone, Copy, PartialEq)]
-pub enum Operand {
-    // Evaluates to the value of the indicated variable.
-    Var(Var),
-    // Evaluates to the result of the indicated instruction.
-    IID(IID),
-}
-
-impl std::fmt::Debug for Operand {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IID(iid) => iid.fmt(f),
-            Self::Var(varid) => varid.fmt(f),
-        }
-    }
-}
-impl From<IID> for Operand {
-    fn from(iid: IID) -> Self {
-        Operand::IID(iid)
     }
 }
 
@@ -341,12 +316,14 @@ fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
                 let mut interloop_vars = HashSet::new();
                 let mut reads: HashSet<Var> = HashSet::new();
                 for inst in &instrs[dest_ndx..end_ndx] {
-                    reads.extend(inst.read_vars().iter());
-
-                    if let Instr::Set { var, .. } = inst {
-                        if reads.remove(var) {
+                    match inst {
+                        Instr::ReadVar(var) => {
+                            reads.insert(*var);
+                        }
+                        Instr::SetVar { var, .. } if reads.remove(var) => {
                             interloop_vars.insert(*var);
                         }
+                        _ => {},
                     }
                 }
 

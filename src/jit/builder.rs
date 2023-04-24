@@ -171,7 +171,7 @@ pub(crate) struct SnapshotMap {
 pub(crate) struct SnapshotMapItem {
     pub(crate) write_on_entry: bool,
     pub(crate) write_on_exit: bool,
-    pub(crate) operand: bytecode::Operand,
+    pub(crate) operand: IID,
 }
 
 #[cfg(test)]
@@ -198,20 +198,20 @@ impl SnapshotMap {
         &self.items[ndx]
     }
 
-    pub(super) fn find(&mut self, operand: &bytecode::Operand) -> Option<usize> {
+    pub(super) fn find(&mut self, iid: bytecode::IID) -> Option<usize> {
         self.items
             .iter()
             .enumerate()
-            .find(|(_, item)| &item.operand == operand)
+            .find(|(_, item)| item.operand == iid)
             .map(|(ndx, _)| ndx)
     }
 
-    fn find_or_insert(&mut self, operand: &bytecode::Operand) -> usize {
-        self.find(operand).unwrap_or_else(|| {
+    fn find_or_insert(&mut self, iid: bytecode::IID) -> usize {
+        self.find(iid).unwrap_or_else(|| {
             // TODO(small feat) on building, assert that no item has both write_on_ flags set to
             // false
             self.items.push(SnapshotMapItem {
-                operand: operand.clone(),
+                operand: iid,
                 write_on_entry: false,
                 write_on_exit: false,
             });
@@ -219,16 +219,16 @@ impl SnapshotMap {
         })
     }
 
-    fn set_entry(&mut self, operand: &bytecode::Operand) -> u16 {
-        eprintln!("[..tb snapshot: set written-on-entry: {:?}]", operand);
-        let ndx = self.find_or_insert(operand);
+    fn set_entry(&mut self, iid: bytecode::IID) -> u16 {
+        eprintln!("[..tb snapshot: set written-on-entry: {:?}]", iid);
+        let ndx = self.find_or_insert(iid);
         self.items[ndx].write_on_entry = true;
         ndx as u16
     }
 
-    fn set_exit(&mut self, operand: &bytecode::Operand) -> u16 {
-        eprintln!("[..tb snapshot: set written-on-exit: {:?}]", operand);
-        let ndx = self.find_or_insert(operand);
+    fn set_exit(&mut self, iid: bytecode::IID) -> u16 {
+        eprintln!("[..tb snapshot: set written-on-exit: {:?}]", iid);
+        let ndx = self.find_or_insert(iid);
         self.items[ndx].write_on_exit = true;
         ndx as u16
     }
@@ -258,11 +258,6 @@ struct VarId {
     // function/loop.
     stack_depth: i32,
     var_ndx: u16,
-}
-
-#[derive(Debug)]
-pub(super) struct TraceParam {
-    operand: bytecode::Operand,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -306,46 +301,30 @@ impl TraceBuilder {
         self.vars.stack_depth()
     }
 
-    fn resolve_interpreter_operand(
-        &mut self,
-        intrp_operand: &bytecode::Operand,
-    ) -> Result<ValueId, Error> {
-        match intrp_operand {
-            // variables from the interpreter (identified by the ID of the
-            // instruction that produced them) are mapped to the JIT instruction
-            // that last assigned to it (the JIT trace is SSA)
-            bytecode::Operand::IID(iid) => {
-                let stack_depth = self.stack_depth();
-                match self.vars.get_result(*iid).cloned() {
-                    Some(vid_for_var) => {
-                        print_indent(stack_depth);
-                        eprintln!("[..tb {:?} is {:?}]", iid, vid_for_var);
-                        Ok(vid_for_var)
-                    }
-                    None => {
-                        print_indent(stack_depth);
-                        eprintln!(
-                            "[..tb {:?} is unresolved => considered trace parameter, adding guard]",
-                            intrp_operand
-                        );
-                        // TODO(cleanup) Test that this is really necessary. If so, describe it here
-                        assert_eq!(1, stack_depth);
-
-                        let param = self.add_entry_snapshot_var(intrp_operand)?;
-                        self.vars.set_result(*iid, param);
-                        Ok(param)
-                    }
-                }
+    fn resolve_interpreter_operand(&mut self, intrp_iid: bytecode::IID) -> Result<ValueId, Error> {
+        // variables from the interpreter (identified by the ID of the
+        // instruction that produced them) are mapped to the JIT instruction
+        // that last assigned to it (the JIT trace is SSA)
+        let stack_depth = self.stack_depth();
+        match self.vars.get_result(intrp_iid).cloned() {
+            Some(vid_for_var) => {
+                print_indent(stack_depth);
+                eprintln!("[..tb {:?} is {:?}]", intrp_iid, vid_for_var);
+                Ok(vid_for_var)
             }
+            None => {
+                print_indent(stack_depth);
+                eprintln!(
+                    "[..tb {:?} is unresolved => considered trace parameter, adding guard]",
+                    intrp_iid
+                );
+                // TODO(cleanup) Test that this is really necessary. If so, describe it here
+                assert_eq!(1, stack_depth);
 
-            bytecode::Operand::Var(var) => match self.vars.get_var(var) {
-                Some(vid) => Ok(vid),
-                None => {
-                    let vid = self.add_entry_snapshot_var(intrp_operand)?;
-                    self.vars.set_var(var, vid);
-                    Ok(vid)
-                }
-            },
+                let param = self.add_entry_snapshot_var(intrp_iid)?;
+                self.vars.set_result(intrp_iid, param);
+                Ok(param)
+            }
         }
     }
 
@@ -479,11 +458,11 @@ impl TraceBuilder {
 
     fn resolve_operand_as(
         &mut self,
-        interp_oper: &bytecode::Operand,
+        interp_iid: bytecode::IID,
         desired_type: ValueType,
     ) -> Result<ValueId, Error> {
-        let oper = self.resolve_interpreter_operand(interp_oper)?;
-        self.ensure_type(oper, desired_type)
+        let operand = self.resolve_interpreter_operand(interp_iid)?;
+        self.ensure_type(operand, desired_type)
     }
 
     pub(crate) fn interpreter_step(&mut self, step: &InterpreterStep) {
@@ -526,12 +505,12 @@ impl TraceBuilder {
             bytecode::Instr::Nop => None,
             bytecode::Instr::Const(value) => Some(self.emit(Instr::Const(value.clone().into()))?),
             bytecode::Instr::Not(oper) => {
-                let oper = self.resolve_operand_as(oper, ValueType::Bool)?;
+                let oper = self.resolve_operand_as(*oper, ValueType::Bool)?;
                 Some(self.emit(Instr::Not(oper))?)
             }
             bytecode::Instr::Arith { op, a, b } => {
-                let a = self.resolve_operand_as(a, ValueType::Num)?;
-                let b = self.resolve_operand_as(b, ValueType::Num)?;
+                let a = self.resolve_operand_as(*a, ValueType::Num)?;
+                let b = self.resolve_operand_as(*b, ValueType::Num)?;
                 Some(self.emit(Instr::Arith { op: *op, a, b })?)
             }
             bytecode::Instr::Cmp { op, a, b } => {
@@ -550,8 +529,8 @@ impl TraceBuilder {
                     rt_ty
                 };
 
-                let a = self.resolve_interpreter_operand(a)?;
-                let b = self.resolve_interpreter_operand(b)?;
+                let a = self.resolve_interpreter_operand(*a)?;
+                let b = self.resolve_interpreter_operand(*b)?;
 
                 let instr = if let (Instr::Const(_), Instr::Const(_)) =
                     (self.get_instr(a), self.get_instr(b))
@@ -594,7 +573,7 @@ impl TraceBuilder {
                 Some(self.emit(instr)?)
             }
             bytecode::Instr::JmpIf { cond, .. } => {
-                let cond = self.resolve_operand_as(cond, ValueType::Bool)?;
+                let cond = self.resolve_operand_as(*cond, ValueType::Bool)?;
 
                 match self.get_instr(cond) {
                     Instr::Const(_) => None,
@@ -632,8 +611,20 @@ impl TraceBuilder {
                 // instruction
                 None
             }
-            bytecode::Instr::Set { var, value } => {
-                let value = self.resolve_interpreter_operand(value)?;
+            bytecode::Instr::ReadVar(var) => match self.vars.get_var(var) {
+                Some(vid) => Ok(vid),
+                None => {
+                    // This is the first time we see this variable mentioned, which means it was
+                    // last set before the trace's start.  That means that the trace will have to
+                    // take it as a parameter, and the interpreter will have to pass it in order to
+                    // invoke the trace.
+                    let vid = self.add_entry_snapshot_var(intrp_operand)?;
+                    self.vars.set_var(var, vid);
+                    Ok(vid)
+                }
+            },
+            bytecode::Instr::SetVar { var, value } => {
+                let value = self.resolve_interpreter_operand(*value)?;
 
                 print_indent(self.stack_depth());
                 eprintln!("[..tb map var: {:?} = {:?}]", var, value);
@@ -648,7 +639,7 @@ impl TraceBuilder {
                 None
             }
             bytecode::Instr::PushSink(value) => {
-                let value = self.resolve_interpreter_operand(value)?;
+                let value = self.resolve_interpreter_operand(*value)?;
                 self.emit(Instr::PushSink(value))?;
                 None
             }
@@ -656,9 +647,9 @@ impl TraceBuilder {
                 self.exit_function_expected = true;
 
                 let value = if self.stack_depth() == 1 {
-                    self.resolve_operand_as(value, ValueType::Boxed)?
+                    self.resolve_operand_as(*value, ValueType::Boxed)?
                 } else {
-                    self.resolve_interpreter_operand(value)?
+                    self.resolve_interpreter_operand(*value)?
                 };
 
                 self.return_value = Some(value);
@@ -699,16 +690,16 @@ impl TraceBuilder {
 
             bytecode::Instr::ObjNew => Some(self.emit(Instr::ObjNew)?),
             bytecode::Instr::ObjSet { obj, key, value } => {
-                let obj = self.resolve_operand_as(obj, ValueType::Obj)?;
-                let key = self.resolve_operand_as(key, ValueType::Str)?;
-                let value = self.resolve_operand_as(value, ValueType::Boxed)?;
+                let obj = self.resolve_operand_as(*obj, ValueType::Obj)?;
+                let key = self.resolve_operand_as(*key, ValueType::Str)?;
+                let value = self.resolve_operand_as(*value, ValueType::Boxed)?;
 
                 self.emit(Instr::ObjSet { obj, key, value })?;
                 None
             }
             bytecode::Instr::ObjGet { obj, key } => {
-                let obj = self.resolve_operand_as(obj, ValueType::Obj)?;
-                let key = self.resolve_operand_as(key, ValueType::Str)?;
+                let obj = self.resolve_operand_as(*obj, ValueType::Obj)?;
+                let key = self.resolve_operand_as(*key, ValueType::Str)?;
 
                 Some(self.emit(Instr::ObjGet { obj, key })?)
             }
@@ -719,13 +710,13 @@ impl TraceBuilder {
                 todo!("(big feat) array push")
             }
             bytecode::Instr::TypeOf(arg) => {
-                let arg = self.resolve_interpreter_operand(arg)?;
+                let arg = self.resolve_interpreter_operand(*arg)?;
                 Some(self.emit(Instr::TypeOf(arg))?)
             }
 
             bytecode::Instr::BoolOp { op, a, b } => {
-                let a = self.resolve_operand_as(a, ValueType::Bool)?;
-                let b = self.resolve_operand_as(b, ValueType::Bool)?;
+                let a = self.resolve_operand_as(*a, ValueType::Bool)?;
+                let b = self.resolve_operand_as(*b, ValueType::Bool)?;
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
             bytecode::Instr::ClosureNew { .. } => {
@@ -789,7 +780,7 @@ impl TraceBuilder {
 
         let args_values = args
             .iter()
-            .flat_map(|arg| self.resolve_interpreter_operand(arg))
+            .flat_map(|arg| self.resolve_interpreter_operand(*arg))
             .collect();
         self.args_buf = Some(args_values);
     }
@@ -967,11 +958,11 @@ impl TraceBuilder {
         Ok(post_snap_update)
     }
 
-    fn add_entry_snapshot_var(&mut self, operand: &bytecode::Operand) -> Result<ValueId, Error> {
+    fn add_entry_snapshot_var(&mut self, iid: bytecode::IID) -> Result<ValueId, Error> {
         print_indent(self.stack_depth());
-        eprintln!("[..tb add entry snap var {:?}]", operand);
+        eprintln!("[..tb add entry snap var {:?}]", iid);
 
-        let ndx = self.snapshot_map.set_entry(operand);
+        let ndx = self.snapshot_map.set_entry(iid);
 
         let post_snap_update = self.take_exit_snapshot()?;
         self.emit(Instr::GetSnapshotItem {
@@ -989,8 +980,7 @@ impl TraceBuilder {
         print_indent(self.stack_depth());
         eprintln!("[..tb add exit snap var {value_id:?} -> {intrp_varid:?}]");
 
-        let operand = bytecode::Operand::Var(intrp_varid);
-        let ndx = self.snapshot_map.set_exit(&operand) as usize;
+        let ndx = self.snapshot_map.set_exit(intrp_varid) as usize;
 
         if self.exit_snapshot_changes.len() <= ndx {
             self.exit_snapshot_changes.resize(ndx + 1, None);
