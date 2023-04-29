@@ -4,9 +4,15 @@ use std::{
 };
 
 // Instruction ID. Can identify an instruction, or its result.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub struct IID(pub u32);
+
+impl std::fmt::Display for IID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "i{}", self.0)
+    }
+}
 
 #[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
 pub struct FnId(pub u32);
@@ -27,28 +33,19 @@ impl std::fmt::Debug for IID {
     }
 }
 
-/// TODO A fully missing feature
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub struct UpvalueId(usize);
-
-impl std::fmt::Debug for UpvalueId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "U{}", self.0)
-    }
-}
-
 pub type ConstIndex = u16;
+pub type CaptureIndex = u16;
 
 #[derive(Debug)]
 pub enum Instr {
     Nop,
     Const(Value),
 
-    ReadVar(Var),
     SetVar {
-        var: Var,
+        var: IID,
         value: IID,
     },
+    GetCapture(CaptureIndex),
 
     Not(IID),
     UnaryMinus(IID),
@@ -84,7 +81,7 @@ pub enum Instr {
     ClosureNew {
         fnid: FnId,
     },
-    ClosurePushUpvalue(IID),
+    ClosureAddCapture(IID),
 
     ObjNew,
     ObjSet {
@@ -130,7 +127,7 @@ impl From<String> for Value {
     }
 }
 
-type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, Var>;
+type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
 
 impl Instr {
     fn read_operands<'a>(&'a self) -> Operands {
@@ -145,6 +142,7 @@ impl Instr {
             Instr::JmpIf { cond, .. } => Operands::from_iter([cond].into_iter()),
             Instr::Jmp(_) => Default::default(),
             Instr::SetVar { var: _, value } => Operands::from_iter([value].into_iter()),
+            Instr::GetCapture(_) => Default::default(),
             Instr::PushSink(arg) => Operands::from_iter([arg].into_iter()),
             Instr::Return(arg) => Operands::from_iter([arg].into_iter()),
             Instr::GetArg(_) => Default::default(),
@@ -159,26 +157,7 @@ impl Instr {
             Instr::ArrayPush(arr, value) => Operands::from_iter([arr, value].into_iter()),
             Instr::TypeOf(arg) => Operands::from_iter([arg].into_iter()),
             Instr::ClosureNew { .. } => Default::default(),
-            Instr::ClosurePushUpvalue(value) => Operands::from_iter([value].into_iter()),
-            Instr::ReadVar(_) => Default::default(),
-        }
-    }
-}
-
-pub type LocalVarIndex = u16;
-pub type UpvalueIndex = u16;
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Var {
-    Local(LocalVarIndex),
-    Upvalue(UpvalueIndex),
-}
-
-impl std::fmt::Debug for Var {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Var::Local(ndx) => write!(f, "local[{}]", ndx),
-            Var::Upvalue(ndx) => write!(f, "upv[{}]", ndx),
+            Instr::ClosureAddCapture(value) => Operands::from_iter([value].into_iter()),
         }
     }
 }
@@ -223,7 +202,7 @@ impl Module {
     pub(crate) fn dump(&self) {
         eprintln!("=== module");
         for (fnid, func) in self.fns.iter() {
-            eprintln!("fn #{} [{} vars]:", fnid.0, func.n_local_vars);
+            eprintln!("fn #{}:", fnid.0);
             for (ndx, instr) in func.instrs.iter().enumerate() {
                 let lh = func.loop_heads.get(&IID(ndx as u32));
                 eprintln!(
@@ -247,9 +226,9 @@ impl Module {
 
 pub struct Function {
     instrs: Box<[Instr]>,
+    // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
     trace_anchors: HashMap<IID, TraceAnchor>,
-    n_local_vars: u16,
 }
 pub struct TraceAnchor {
     pub trace_id: String,
@@ -258,12 +237,11 @@ pub struct LoopInfo {
     // Variables that change in value during each cycle, in such a way that
     // each cycle sees the value in  the previous cycle.  Phi instructions are
     // added based on this set.
-    interloop_vars: HashSet<Var>,
+    interloop_vars: HashSet<IID>,
 }
 impl Function {
     pub(crate) fn new(
         instrs: Box<[Instr]>,
-        n_local_vars: u16,
         trace_anchors: HashMap<IID, TraceAnchor>,
     ) -> Function {
         let loop_heads = find_loop_heads(&instrs[..]);
@@ -271,7 +249,6 @@ impl Function {
             instrs,
             loop_heads,
             trace_anchors,
-            n_local_vars,
         }
     }
 
@@ -292,10 +269,6 @@ impl Function {
             .get(&iid)
             .map(|tanch| tanch.trace_id.as_str())
     }
-
-    pub(crate) fn n_local_vars(&self) -> u16 {
-        self.n_local_vars
-    }
 }
 
 fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
@@ -311,19 +284,17 @@ fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
         match inst {
             Instr::Jmp(dest) | Instr::JmpIf { dest, .. } if dest.0 as usize <= end_ndx => {
                 // Loop goes from end_ndx to dest
-
                 let dest_ndx = dest.0 as usize;
                 let mut interloop_vars = HashSet::new();
-                let mut reads: HashSet<Var> = HashSet::new();
-                for inst in &instrs[dest_ndx..end_ndx] {
-                    match inst {
-                        Instr::ReadVar(var) => {
-                            reads.insert(*var);
-                        }
-                        Instr::SetVar { var, .. } if reads.remove(var) => {
+                for ndx in dest_ndx..end_ndx {
+                    let inst = &instrs[ndx];
+                    if let Instr::SetVar { var, .. } = inst {
+                        let var_ndx = var.0 as usize;
+                        assert!(var_ndx < ndx);
+
+                        if var_ndx >= dest_ndx {
                             interloop_vars.insert(*var);
                         }
-                        _ => {},
                     }
                 }
 

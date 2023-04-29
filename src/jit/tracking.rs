@@ -3,10 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use crate::{
-    bytecode::{self, LocalVarIndex},
-    interpreter,
-};
+use crate::{bytecode, interpreter};
 
 use super::builder::{BoxedValue, ValueId, ValueType};
 
@@ -21,36 +18,41 @@ pub(super) struct VarsState {
     stack_model: Vec<Frame>,
 
     // These are only used for determining the PHI instuctions to be added when building a looping
-    // trace.  As such, the only variables that they track are the ones from the call context where
-    // the trace originates (i.e. not from any calls made after the trace starts).
-    // TODO(opt) More compact data structures?
-    first_write_of_varid: HashMap<LocalVarIndex, ValueId>,
-    overwritten_vars: RefCell<HashSet<LocalVarIndex>>,
-    read_before_overwrite: RefCell<HashSet<LocalVarIndex>>,
+    // trace.  As such, the only variables that they track are the ones from the "outermost stack
+    // frame", i.e. from the call context where the trace originates (not from any calls made after
+    // the trace starts).
+    read_before_any_write: Box<[bool]>,
+    overwritten: Box<[bool]>,
+    first_write: Box<[Option<ValueId>]>,
 }
 
 /// A "model" of the interpreter's stack, represented in terms that the JIT
 /// cares about.
 struct Frame {
-    args: Vec<ValueId>,
-    vid_of_iid: HashMap<bytecode::IID, ValueId>,
-    n_vars: usize,
-    /// Associates RUNTIME variable identifiers (LocalVarIndex, local to this stack frame)
+    args: Box<[ValueId]>,
+    /// Associates variable identifiers (= IID of the instruction that initializes it)
     /// from the interpreter to ValueIds in the SSA trace we're building.
     ///
-    /// Only stores values for variables whose assignment has been "seen" by the JIT. This
-    /// allows variables to be introduced as trace parameters when the JIT starts
-    /// later than the start of the function's body.
-    vid_of_varid: HashMap<LocalVarIndex, ValueId>,
+    /// Only stores values for variables/instruction results whose assignment has been
+    /// "seen" by the JIT. This allows variables to be introduced as trace parameters
+    /// when the JIT starts later than the start of the function's body.
+    vid_of_iid: Box<[Option<ValueId>]>,
+}
+
+impl Frame {
+    fn new(args: Box<[ValueId]>, n_values: usize) -> Self {
+        let vid_of_iid = vec![None; n_values].into_boxed_slice();
+        Frame { args, vid_of_iid }
+    }
 }
 
 impl VarsState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(n_values_outermost_frame: usize) -> Self {
         VarsState {
             stack_model: Vec::new(),
-            first_write_of_varid: HashMap::new(),
-            overwritten_vars: RefCell::new(HashSet::new()),
-            read_before_overwrite: RefCell::new(HashSet::new()),
+            overwritten: vec![false; n_values_outermost_frame].into_boxed_slice(),
+            read_before_any_write: vec![false; n_values_outermost_frame].into_boxed_slice(),
+            first_write: vec![None; n_values_outermost_frame].into_boxed_slice(),
         }
     }
 
@@ -60,13 +62,8 @@ impl VarsState {
 
     // TODO(big feat) Garbage collection?
 
-    pub(super) fn push_frame(&mut self, args: Vec<ValueId>, n_vars: usize) {
-        self.stack_model.push(Frame {
-            args,
-            n_vars,
-            vid_of_iid: HashMap::new(),
-            vid_of_varid: HashMap::new(),
-        });
+    pub(super) fn push_frame(&mut self, args: Box<[ValueId]>, n_values: usize) {
+        self.stack_model.push(Frame::new(args, n_values));
     }
 
     pub(super) fn pop_frame(&mut self) {
@@ -80,52 +77,46 @@ impl VarsState {
         self.stack_model.last_mut().unwrap()
     }
 
-    pub(super) fn get_result(&self, iid: bytecode::IID) -> Option<&ValueId> {
-        self.cur_frame().vid_of_iid.get(&iid)
-    }
-    pub(super) fn set_result(&mut self, iid: bytecode::IID, value: ValueId) {
-        self.cur_frame_mut().vid_of_iid.insert(iid, value);
-    }
-
-    pub(super) fn get_var(&self, var: &bytecode::Var) -> Option<ValueId> {
+    pub(super) fn get_var(&mut self, var_iid: bytecode::IID) -> Option<ValueId> {
         assert!(self.stack_model.len() > 0);
-        match var {
-            bytecode::Var::Local(var_ndx) => {
-                if self.stack_model.len() == 1 {
-                    let ws = self.overwritten_vars.borrow();
-                    if !ws.contains(var_ndx) {
-                        let mut rbws = self.read_before_overwrite.borrow_mut();
-                        rbws.insert(*var_ndx);
-                    }
-                }
 
-                self.cur_frame().vid_of_varid.get(&var_ndx).copied()
+        let var_iid = var_iid.0 as usize;
+
+        if self.stack_model.len() == 1 {
+            if !self.overwritten[var_iid] {
+                self.read_before_any_write[var_iid] = true;
             }
-            bytecode::Var::Upvalue(_) => todo!("get_var(upvalue)"),
+        }
+
+        self.cur_frame().vid_of_iid[var_iid]
+    }
+
+    //pub(super) fn get_upvalue(&self) {}
+    //pub(super) fn set_upvalue(&mut self) {}
+
+    pub(super) fn init_var(&mut self, iid: bytecode::IID, value: ValueId) {
+        assert!(self.stack_model.len() > 0);
+
+        let iid = iid.0 as usize;
+        let frame = self.cur_frame_mut();
+        assert!(frame.vid_of_iid[iid].is_none());
+        frame.vid_of_iid[iid] = Some(value);
+
+        if self.stack_model.len() == 1 && self.first_write[iid].is_none() {
+            self.first_write[iid] = Some(value);
         }
     }
-    pub(super) fn set_var(&mut self, var: &bytecode::Var, value: ValueId) {
-        use std::collections::hash_map::Entry;
 
+    pub(super) fn set_var(&mut self, iid: bytecode::IID, value: ValueId) {
         assert!(self.stack_model.len() > 0);
 
-        match var {
-            bytecode::Var::Local(var_ndx) => {
-                let frame = self.cur_frame_mut();
-                // TODO(opt) skip this test if we're not in #[cfg(test)]?
-                assert!(usize::from(*var_ndx) < frame.n_vars);
-                frame.vid_of_varid.entry(*var_ndx).or_insert(value);
+        let iid = iid.0 as usize;
+        let frame = self.cur_frame_mut();
+        assert!(frame.vid_of_iid[iid].is_some());
+        frame.vid_of_iid[iid] = Some(value);
 
-                if self.stack_model.len() == 1 {
-                    if let Entry::Vacant(e) = self.first_write_of_varid.entry(*var_ndx) {
-                        e.insert(value);
-                    } else {
-                        // Not the first write
-                        self.overwritten_vars.get_mut().insert(*var_ndx);
-                    }
-                }
-            }
-            bytecode::Var::Upvalue(_) => todo!("set_var(upvalue)"),
+        if self.stack_model.len() == 1 {
+            self.overwritten[iid] = true;
         }
     }
 
@@ -136,20 +127,23 @@ impl VarsState {
             .expect("bytecode_compiler bug: unbound arg var")
     }
 
-    pub(super) fn get_reads_before_overwritten(&self) -> HashSet<LocalVarIndex> {
-        let rbw = self.read_before_overwrite.borrow();
-        let ws = self.overwritten_vars.borrow();
-        rbw.intersection(&ws).copied().collect()
+    pub(super) fn get_reads_before_overwritten(&self) -> Box<[bytecode::IID]> {
+        let n_values = self.stack_model[0].vid_of_iid.len();
+        assert_eq!(self.overwritten.len(), n_values);
+        assert_eq!(self.overwritten.len(), self.read_before_any_write.len());
+
+        (0..n_values)
+            .filter(|&i| self.read_before_any_write[i] && self.overwritten[i])
+            .map(|i| bytecode::IID(u32::try_from(i).unwrap()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 
-    pub(super) fn get_first_write(&self, var_ndx: LocalVarIndex) -> Option<ValueId> {
-        self.first_write_of_varid.get(&var_ndx).copied()
+    pub(super) fn get_first_write(&self, iid: bytecode::IID) -> Option<ValueId> {
+        self.first_write[iid.0 as usize]
     }
 
-    pub(crate) fn was_var_seen(&self, var: &bytecode::Var) -> bool {
-        match var {
-            bytecode::Var::Local(var_ndx) => self.cur_frame().vid_of_varid.contains_key(&var_ndx),
-            bytecode::Var::Upvalue(_) => todo!("was_var_seen(upvalue)"),
-        }
+    pub(super) fn was_var_seen(&self, iid: bytecode::IID) -> bool {
+        self.stack_model[0].vid_of_iid[iid.0 as usize].is_some()
     }
 }

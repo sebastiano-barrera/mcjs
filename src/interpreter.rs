@@ -147,17 +147,9 @@ impl std::fmt::Debug for Closure {
     }
 }
 
-/// TODO A fully missing feature
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub struct UpvalueId(usize);
+slotmap::new_key_type! { pub struct UpvalueId; }
 
-impl std::fmt::Debug for UpvalueId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "U{}", self.0)
-    }
-}
-
-
+// TODO Rename to a better name ("Driver"?)
 pub struct VM {
     include_paths: Vec<PathBuf>,
     modules: HashMap<String, bytecode::Module>,
@@ -334,9 +326,8 @@ struct Interpreter<'a> {
     // believe it?!
     // module_id: bytecode::IID,
     module: &'a bytecode::Module,
-    fnid: bytecode::FnId,
+    data: stack::InterpreterData,
     iid: bytecode::IID,
-    stack: stack::Stack,
 
     sink: Vec<Value>,
 }
@@ -352,18 +343,16 @@ impl<'a> Interpreter<'a> {
     fn new(parent_vm: &'a mut VM, flags: InterpreterFlags, module: &'a bytecode::Module) -> Self {
         eprintln!("Interpreter: flags: {:?}", flags);
 
-        let mut stack = stack::Stack::new();
+        let mut stack = stack::InterpreterData::new();
         let main_func = module.get_function(FnId::ROOT_FN).unwrap();
-        let n_locals = main_func.n_local_vars();
-        eprintln!("-- main. {} locals", n_locals);
+        eprintln!("-- main");
         stack.push(stack::CallMeta {
             fnid: FnId::ROOT_FN,
             n_instrs: main_func.instrs().len().try_into().unwrap(),
-            n_upvalues: 0,
-            n_locals,
+            n_captured_upvalues: 0,
             n_args: 0,
             // This is never used!
-            parent_iid: bytecode::IID(0),
+            call_iid: bytecode::IID(0),
         });
 
         Interpreter {
@@ -371,21 +360,39 @@ impl<'a> Interpreter<'a> {
             flags,
             jitting: None,
             module,
-            fnid: FnId::ROOT_FN,
             iid: bytecode::IID(0),
-            stack,
+            data: stack,
             sink: Vec::new(),
         }
     }
 
     fn run(&mut self) -> Result<()> {
         loop {
+            if self.data.len() == 0 {
+                return Ok(());
+            }
+
+            let fnid = self.data.cur_meta().fnid;
             // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
-            let func = self.module.get_function(self.fnid).unwrap();
+            let func = self.module.get_function(fnid).unwrap();
+
+            assert!(
+                self.iid.0 as usize <= func.instrs().len(),
+                "can't proceed to instruction at index {} (func has {})",
+                self.iid.0,
+                func.instrs().len()
+            );
+            if self.iid.0 as usize == func.instrs().len() {
+                let parent_iid_ndx = self.data.call_iid().unwrap().0;
+                self.iid.0 = parent_iid_ndx + 1;
+                self.data.pop();
+                continue;
+            }
+
             let instr = &func.instrs()[self.iid.0 as usize];
 
             self.print_indent();
-            eprintln!("i{:<4} {:?}", self.iid.0, instr);
+            eprintln!("{:4}: {:?}", self.iid.0, instr);
 
             let mut next_ndx = self.iid.0 + 1;
 
@@ -394,12 +401,12 @@ impl<'a> Interpreter<'a> {
                     JitMode::Compile => {
                         if self.jitting.is_none() {
                             let builder = jit::TraceBuilder::start(
-                                func.n_local_vars() as usize,
+                                func.instrs().len(),
                                 jit::CloseMode::FunctionExit,
                             );
                             self.jitting = Some(Jitting {
                                 builder,
-                                fnid: self.fnid,
+                                fnid,
                                 iid: self.iid,
                                 trace_id: tanch.trace_id.clone(),
                             });
@@ -416,7 +423,7 @@ impl<'a> Interpreter<'a> {
                             .iter()
                             .map(|snapitem| {
                                 if snapitem.write_on_entry {
-                                    self.get_operand(&snapitem.operand)
+                                    self.get_operand(snapitem.operand)
                                 } else {
                                     Value::Undefined
                                 }
@@ -431,14 +438,14 @@ impl<'a> Interpreter<'a> {
 
             match instr {
                 Instr::Const(value) => {
-                    self.stack.set_result(self.iid, value.clone().into());
+                    self.data.set_result(self.iid, value.clone().into());
                 }
                 Instr::Arith { op, a, b } => {
-                    let a = self.get_operand(&a);
-                    let b = self.get_operand(&b);
+                    let a = self.get_operand(*a);
+                    let b = self.get_operand(*b);
 
                     if let (Value::Number(a), Value::Number(b)) = (&a, &b) {
-                        self.stack.set_result(
+                        self.data.set_result(
                             self.iid,
                             Value::Number(match op {
                                 ArithOp::Add => a + b,
@@ -452,16 +459,16 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Instr::PushSink(operand) => {
-                    let value = self.get_operand(&operand);
+                    let value = self.get_operand(*operand);
                     self.sink.push(value);
                 }
                 Instr::Cmp { op, a, b } => {
-                    let a = self.get_operand(&a);
-                    let b = self.get_operand(&b);
+                    let a = self.get_operand(*a);
+                    let b = self.get_operand(*b);
 
                     match (&a, &b) {
                         (Value::Number(a), Value::Number(b)) => {
-                            self.stack.set_result(
+                            self.data.set_result(
                                 self.iid,
                                 Value::Bool(match op {
                                     CmpOp::GE => a >= b,
@@ -475,7 +482,7 @@ impl<'a> Interpreter<'a> {
                         }
                         (Value::String(a), Value::String(b)) => {
                             let ordering = a.cmp(b);
-                            self.stack.set_result(
+                            self.data.set_result(
                                 self.iid,
                                 Value::Bool(matches!(
                                     (op, ordering),
@@ -493,14 +500,14 @@ impl<'a> Interpreter<'a> {
                         }
 
                         _ => {
-                            self.stack.set_result(self.iid, Value::Bool(false));
+                            self.data.set_result(self.iid, Value::Bool(false));
                             // panic!("invalid operands for cmp op: {:?}; {:?}", a,
                             // b);
                         }
                     }
                 }
                 Instr::JmpIf { cond, dest } => {
-                    let cond_value = self.get_operand(&cond);
+                    let cond_value = self.get_operand(*cond);
                     match cond_value {
                         Value::Bool(true) => {
                             next_ndx = dest.0;
@@ -509,16 +516,17 @@ impl<'a> Interpreter<'a> {
                         other => panic!("invalid if condition (not boolean): {:?}", other),
                     }
                 }
+
                 Instr::SetVar { var, value } => {
-                    let value = self.get_operand(&value);
-                    match var {
-                        bytecode::Var::Local(var_ndx) => self.stack.set_local(*var_ndx, value),
-                        bytecode::Var::Upvalue(upv_ndx) => self.stack.set_upvalue(*upv_ndx, value),
-                    }
+                    self.data.set_result(*var, self.get_operand(*value));
                 }
+                Instr::GetCapture(cap_ndx) => {
+                    self.data.capture_to_var(*cap_ndx, self.iid);
+                }
+
                 Instr::Nop => {}
                 Instr::Not(value) => {
-                    let value = match self.get_operand(&value) {
+                    let value = match self.get_operand(*value) {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         Value::Number(num) => Value::Bool(num == 0.0),
                         Value::String(str) => Value::Bool(str.is_empty()),
@@ -529,46 +537,49 @@ impl<'a> Interpreter<'a> {
                         Value::NativeFunction(_) => Value::Bool(false),
                         Value::Closure(_) => Value::Bool(false),
                     };
-                    self.stack.set_result(self.iid, value);
+                    self.data.set_result(self.iid, value);
                 }
                 Instr::Jmp(IID(dest_ndx)) => {
                     next_ndx = *dest_ndx;
                 }
                 Instr::Return(value) => {
-                    let return_value = self.get_operand(&value);
-                    next_ndx = self.stack.parent_iid().unwrap().0 + 1;
-                    self.stack.pop();
-                    todo!("pass return value to caller");
+                    let return_value = self.get_operand(*value);
+                    let call_iid = self.data.call_iid().unwrap();
+                    self.data.pop();
+                    self.data.set_result(call_iid, return_value);
+                    next_ndx = call_iid.0 + 1;
                 }
                 Instr::Call { callee, args } => {
-                    let closure = match self.get_operand(&callee) {
+                    let closure = match self.get_operand(*callee) {
                         Value::Closure(closure) => closure,
                         Value::NativeFunction(nfid) => todo!("call NativeFunction"),
                         _ => panic!("invalid callee (not a function): {:?}", callee),
                     };
 
-                    let callee_func = self.module.get_function(closure.fnid).unwrap();
-                    self.print_indent();
-                    let n_locals = callee_func.n_local_vars();
-                    let n_upvalues = closure.upvalues.len().try_into().unwrap();
-                    eprintln!(
-                        "      : call {:?}. {} locals. {} upvalues.",
-                        closure, n_locals, n_upvalues,
-                    );
+                    // The arguments have to be "read" before adding the stack frame; they will no
+                    // longer be accessible afterwards
+                    let args: Vec<_> = args.iter().map(|arg| self.get_operand(*arg)).collect();
 
-                    self.stack.push(stack::CallMeta {
+                    let callee_func = self.module.get_function(closure.fnid).unwrap();
+                    let n_captures = closure.upvalues.len().try_into().unwrap();
+                    self.data.push(stack::CallMeta {
                         fnid: closure.fnid,
                         n_instrs: callee_func.instrs().len().try_into().unwrap(),
-                        n_upvalues,
-                        n_locals,
+                        n_captured_upvalues: n_captures,
                         n_args: args.len().try_into().unwrap(),
-                        parent_iid: bytecode::IID(next_ndx),
+                        call_iid: self.iid,
                     });
 
-                    for (i, oper) in args.iter().enumerate() {
-                        let arg = self.get_operand(&oper);
-                        self.stack.set_arg(i, arg);
+                    self.print_indent();
+                    eprintln!("-- fn #{} [{} captures]", closure.fnid.0, n_captures);
+
+                    for (capndx, capture) in closure.upvalues.iter().enumerate() {
+                        self.data.set_capture(capndx, *capture);
                     }
+                    for (i, arg) in args.into_iter().enumerate() {
+                        self.data.set_arg(i, arg);
+                    }
+
                     if let Some(jitting) = &mut self.jitting {
                         todo!("jitting.builder.set_args");
                         // jitting.builder.set_args(args, &|fnid| {
@@ -576,47 +587,49 @@ impl<'a> Interpreter<'a> {
                         // fnid).unwrap() });
                     }
 
-                    self.fnid = closure.fnid;
-                    next_ndx = 0;
+                    self.iid = IID(0u32);
+                    // Important: we don't execute the tail part of the instruction's execution.
+                    // This makes it easier to keep a consistent value in `func` and other
+                    // variables, and avoid subtle bugs
+                    continue;
                 }
 
                 Instr::GetArg(arg_ndx) => {
                     // TODO extra copy?
-                    let value = self.stack.get_arg(*arg_ndx).clone();
-                    self.stack.set_result(self.iid, value);
+                    let value = self.data.get_arg(*arg_ndx).clone();
+                    self.data.set_result(self.iid, value);
                 }
 
                 Instr::ObjNew => {
-                    self.stack
-                        .set_result(self.iid, Value::Object(Object::new()));
+                    self.data.set_result(self.iid, Value::Object(Object::new()));
                 }
                 Instr::ObjSet { obj, key, value } => {
-                    let obj = self.get_operand(&obj);
+                    let obj = self.get_operand(*obj);
                     let mut obj = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
-                    let key = self.get_operand(&key);
+                    let key = self.get_operand(*key);
                     let key = ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = self.get_operand(&value);
+                    let value = self.get_operand(*value);
                     obj.set(key, value);
                 }
                 Instr::ObjGet { obj, key } => {
-                    let obj = self.get_operand(&obj);
+                    let obj = self.get_operand(*obj);
                     let obj = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
-                    let key = self.get_operand(&key);
+                    let key = self.get_operand(*key);
                     let key = ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = obj.get(&key).unwrap_or_else(|| {
                         panic!("ObjGet: no property for key `{:?}` in object", key)
                     });
-                    self.stack.set_result(self.iid, value.clone());
+                    self.data.set_result(self.iid, value.clone());
                 }
                 Instr::ArrayNew => {
                     eprintln!("ArrayNew does nothing for now");
@@ -625,104 +638,66 @@ impl<'a> Interpreter<'a> {
                     eprintln!("ArrayPush does nothing for now");
                 }
                 Instr::TypeOf(arg) => {
-                    let value = self.get_operand(&arg);
-                    self.stack.set_result(self.iid, value.js_typeof());
+                    let value = self.get_operand(*arg);
+                    self.data.set_result(self.iid, value.js_typeof());
                 }
                 Instr::BoolOp { op, a, b } => {
-                    let a: bool = self.get_operand(&a).expect_bool()?;
-                    let b: bool = self.get_operand(&b).expect_bool()?;
+                    let a: bool = self.get_operand(*a).expect_bool()?;
+                    let b: bool = self.get_operand(*b).expect_bool()?;
                     let res = match op {
                         BoolOp::And => a && b,
                         BoolOp::Or => a || b,
                     };
-                    self.stack.set_result(self.iid, Value::Bool(res));
+                    self.data.set_result(self.iid, Value::Bool(res));
                 }
                 Instr::ClosureNew { fnid } => {
-                    let mut upvalues: Vec<_> = func
-                        .instrs()
-                        .iter()
-                        .skip(next_ndx as _)
-                        .map_while(|instr| match instr {
-                            Instr::ClosurePushUpvalue(value) => Some(value),
-                            _ => None,
-                        })
-                        .collect();
-                    next_ndx += u32::try_from(upvalues.len()).unwrap();
+                    let mut upvalues = Vec::new();
+                    while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
+                        let upv_id = self.data.ensure_in_upvalue(cap);
+                        #[cfg(test)]
+                        {
+                            self.print_indent();
+                            eprintln!("        upvalue: {:?} -> {:?}", cap, upv_id);
+                        }
+
+                        upvalues.push(upv_id);
+
+                        next_ndx += 1;
+                    }
 
                     let closure = Closure {
                         fnid: *fnid,
                         upvalues,
                     };
 
-                    self.print_indent();
-                    eprintln!("      created closure: {:?}", closure);
-                    self.stack.set_result(self.iid, Value::Closure(closure));
+                    self.data.set_result(self.iid, Value::Closure(closure));
                 }
                 // This is always handled in the code for ClosureNew
-                Instr::ClosurePushUpvalue(_) => unreachable!(),
+                Instr::ClosureAddCapture(_) => unreachable!(),
 
                 Instr::UnaryMinus(arg) => {
-                    let arg: f64 = self.get_operand(&arg).expect_num()?;
-                    self.stack.set_result(self.iid, Value::Number(-arg));
+                    let arg: f64 = self.get_operand(*arg).expect_num()?;
+                    self.data.set_result(self.iid, Value::Number(-arg));
                 }
             }
 
-            if next_ndx as usize == func.instrs().len() {
-                break;
-            }
             self.iid.0 = next_ndx;
         }
-        Ok(())
     }
 
     fn print_indent(&self) {
-        for _ in 0..(self.stack.len() - 1) {
-            eprint!("      | ");
+        for _ in 0..(self.data.len() - 1) {
+            eprint!("    ");
         }
     }
 
     // TODO(cleanup) Change this to return &Value instead
-    fn get_operand(&self, operand: &Operand) -> Value {
-        // TODO(cleanup) Refactor this mess
-        match operand {
-            Operand::IID(iid) => {
-                let value = self.stack.get_result(*iid).clone();
-                //  TODO(cleanup) Move to a global logger. This is just for debugging!
-                //  self.print_indent();
-                eprintln!("      ↑  {:?} = {:?}", operand, value);
-                value
-            }
-            Operand::Var(var) => {
-                let value = match var {
-                    bytecode::Var::Local(var_ndx) => self.stack.get_local(*var_ndx).clone(),
-                    bytecode::Var::Upvalue(upvalue_id) => {
-                        self.stack.get_upvalue(*upvalue_id).clone()
-                    }
-                };
-                eprintln!("      ↑  {:?} = {:?}", var, value);
-                value
-            }
-        }
-    }
-}
-
-fn resolve_operand(operand: &Operand, values_buf: &[Value], intrp_stack: &stack::Stack) -> Value {
-    match operand {
-        Operand::IID(IID(ndx)) => {
-            let value = values_buf[*ndx as usize].clone();
-            //  TODO(cleanup) Move to a global logger. This is just for debugging!
-            //  self.print_indent();
-            eprintln!("      ↑  {:?} = {:?}", operand, value);
-            value
-        }
-        Operand::Var(var) => {
-            let value = match var {
-                bytecode::Var::Local(var_ndx) => intrp_stack.get_local(*var_ndx).clone(),
-                bytecode::Var::Upvalue(upvalue_id) => intrp_stack.get_upvalue(*upvalue_id).clone(),
-            };
-            eprintln!("      ↑  {:?} = {:?}", var, value);
-            value
-        }
+    fn get_operand(&self, iid: bytecode::IID) -> Value {
+        let value = self.data.get_result(iid).clone();
+        //  TODO(cleanup) Move to a global logger. This is just for debugging!
+        // self.print_indent();
+        // eprintln!("        {:?} = {:?}", iid, value);
+        value
     }
 }
 

@@ -4,9 +4,7 @@ use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, SourceMap, Span};
 use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
-use crate::bytecode::{
-    self, ArithOp, BoolOp, CmpOp, FnId, Instr, LocalVarIndex, UpvalueIndex, Value, Var, IID,
-};
+use crate::bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, Instr, Value, IID};
 pub use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::interpreter;
@@ -58,16 +56,14 @@ struct FnBuilder {
     fnid: FnId,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
-    // upvalue_vars[i] == ident <==> variable named `ident` mapped to upvalue with index `i`
-    upvalue_vars: Vec<JsWord>,
     trace_anchors: HashMap<IID, bytecode::TraceAnchor>,
-    last_local_ndx: LocalVarIndex,
-    last_upvalue_ndx: UpvalueIndex,
+    last_local_ndx: u32,
+    captures: Vec<JsWord>,
 }
 #[derive(Debug)]
 struct Scope {
     // TODO Take advantage of identifier interning!
-    vars: HashMap<String, Var>,
+    vars: HashMap<String, IID>,
 }
 impl FnBuilder {
     fn new(id: FnId) -> Self {
@@ -75,16 +71,14 @@ impl FnBuilder {
             fnid: id,
             scopes: vec![Self::new_scope()],
             instrs: Vec::new(),
-            upvalue_vars: Vec::new(),
             trace_anchors: HashMap::new(),
+            captures: Vec::new(),
             last_local_ndx: 0,
-            last_upvalue_ndx: 0,
         }
     }
 
     fn build(self) -> bytecode::Function {
-        let n_slots = self.last_local_ndx;
-        bytecode::Function::new(self.instrs.into_boxed_slice(), n_slots, self.trace_anchors)
+        bytecode::Function::new(self.instrs.into_boxed_slice(), self.trace_anchors)
     }
 
     fn new_scope() -> Scope {
@@ -104,20 +98,34 @@ impl FnBuilder {
         IID(self.instrs.len() as u32)
     }
 
-    fn define_local(&mut self, name: JsWord) -> Var {
-        let var = Var::Local(self.last_local_ndx);
-        self.last_local_ndx += 1;
-        self.define_var(name, var)
+    fn emit(&mut self, instr: Instr) -> IID {
+        let iid = self.peek_iid();
+        self.instrs.push(instr);
+        iid
     }
 
-    fn define_upvalue(&mut self, name: JsWord) -> Var {
-        let upv_ndx = self.last_upvalue_ndx;
-        self.last_upvalue_ndx += 1;
-        self.upvalue_vars.push(name.clone());
-        self.define_var(name, Var::Upvalue(upv_ndx))
+    fn define_local(&mut self, name: JsWord, var_iid: IID) {
+        self.define_var(name, var_iid);
     }
 
-    fn define_var(&mut self, name: JsWord, var: Var) -> Var {
+    // Assign a new upvalue index to the given variable, and emits the necessary "GetCapture"
+    // instruction.
+    // Subsequent calls to get_var will return  the IID for the GetCapture instruction.
+    fn set_var_captured(&mut self, name: JsWord) -> IID {
+        assert!(!self.captures.contains(&name));
+        let cap_ndx = self.captures.len().try_into().expect("too many captures!");
+        let iid = self.emit(Instr::GetCapture(cap_ndx));
+        self.captures.push(name.clone());
+        self.define_var(name, iid);
+        iid
+    }
+
+    fn get_var(&self, sym: &JsWord) -> Option<IID> {
+        let name = String::from_utf8_lossy(sym.as_bytes());
+        self.inner_scope().vars.get(name.as_ref()).copied()
+    }
+
+    fn define_var(&mut self, name: JsWord, var: IID) {
         let name = String::from_utf8(name.as_bytes().to_owned())
             .expect("only UTF-8 identifiers are supporeted!");
         let scope = self.inner_scope_mut();
@@ -128,12 +136,6 @@ impl FnBuilder {
                 name
             );
         }
-        var
-    }
-
-    fn get_var(&self, sym: &JsWord) -> Option<Var> {
-        let name = String::from_utf8_lossy(sym.as_bytes());
-        self.inner_scope().vars.get(name.as_ref()).copied()
     }
 }
 
@@ -149,21 +151,19 @@ impl Builder {
         };
 
         for (name, operand) in builtins.into_iter() {
-            let var = builder.define_var(name.clone());
-            builder.emit(Instr::SetVar {
-                var,
-                value: operand,
-            });
+            builder.define_var(name.clone(), operand);
         }
 
         builder
     }
 
     fn build(mut self) -> bytecode::Module {
-        let fnid = self.end_function();
+        // End the root function
+        let root_fnid = self.end_function();
+
         // The root function is the outermost scope, and therefore must capture
         // nothing.  Otherwise, we have a bug.
-        // assert!(self.fns.get(&fnid).unwrap().captured_frames.is_empty());
+        assert!(self.fns.get(&root_fnid).unwrap().captures.is_empty());
         assert!(self.fn_stack.is_empty());
 
         let fns = self
@@ -183,10 +183,7 @@ impl Builder {
     }
 
     fn emit(&mut self, instr: Instr) -> IID {
-        let fnb = self.cur_fnb();
-        let iid = fnb.peek_iid();
-        fnb.instrs.push(instr);
-        iid
+        self.cur_fnb().emit(instr)
     }
 
     fn peek_iid(&mut self) -> IID {
@@ -197,16 +194,16 @@ impl Builder {
         self.cur_fnb().instrs.get_mut(iid.0 as usize)
     }
 
-    fn define_var(&mut self, name: JsWord) -> Var {
-        self.cur_fnb().define_local(name)
+    fn define_var(&mut self, name: JsWord, value_iid: IID) {
+        self.cur_fnb().define_local(name, value_iid)
     }
 
-    fn get_var(&mut self, sym: &JsWord) -> Var {
+    fn get_var(&mut self, sym: &JsWord) -> IID {
         let fnb = &mut self.cur_fnb();
         if let Some(var_id) = fnb.get_var(sym) {
             var_id
         } else {
-            fnb.define_upvalue(sym.clone())
+            fnb.set_var_captured(sym.clone())
         }
     }
 
@@ -216,14 +213,6 @@ impl Builder {
 
         self.fn_stack.push(FnBuilder::new(fnid));
 
-        // if let Some(name) = name {
-        //     let var_id = self.define_var(name);
-        //     self.emit(Instr::Set {
-        //         var_id,
-        //         value: Value::SelfFunction.into(),
-        //     });
-        // }
-
         for (param_ndx, param) in params.iter().enumerate() {
             if !param.decorators.is_empty() {
                 panic!("unsupported: decorators on function parameters");
@@ -232,11 +221,7 @@ impl Builder {
             match &param.pat {
                 Pat::Ident(ident) => {
                     let iid = self.emit(Instr::GetArg(param_ndx));
-                    let var_id = self.define_var(ident.sym.clone());
-                    self.emit(Instr::SetVar {
-                        var: var_id,
-                        value: iid.into(),
-                    });
+                    self.define_var(ident.sym.clone(), iid);
                 }
                 other => unsupported_node!(other),
             }
@@ -266,12 +251,8 @@ fn compile_module(
 
     // Exports object.  TODO Actually make it accessible via `require`!
     {
-        let obj = builder.emit(Instr::ObjNew).into();
-        let var_id = builder.define_var("module".into());
-        builder.emit(Instr::SetVar {
-            var: var_id,
-            value: obj,
-        });
+        let obj = builder.emit(Instr::ObjNew);
+        builder.define_var("module".into(), obj);
     }
 
     for item in &ast_module.body {
@@ -416,8 +397,7 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
             let (name, _) = fn_decl.ident.to_id();
             let func = &fn_decl.function;
             let value = compile_function(builder, Some(name.clone()), func)?;
-            let var_id = builder.define_var(name);
-            builder.emit(Instr::SetVar { var: var_id, value });
+            builder.define_var(name, value);
         }
 
         Decl::Var(var_decl) => {
@@ -462,15 +442,20 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
 
     let inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
 
-    let instr = Instr::ClosureNew {
-        fnid: inner_fnb.fnid,
-    };
-    let closure_iid = builder.emit(instr);
+    // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
+    // the ClosureNew and any associated ClosureAddCapture are adjacent
+    // TODO(performance) avoid this allocation?
+    let cap_vars: Vec<_> = inner_fnb
+        .captures
+        .iter()
+        .map(|var_name| builder.get_var(var_name))
+        .collect();
 
-    for ident in inner_fnb.upvalue_vars.iter() {
-        let var = builder.get_var(ident);
-        let value = builder.emit(Instr::ReadVar(var));
-        builder.emit(Instr::ClosurePushUpvalue(value));
+    let closure_iid = builder.emit(Instr::ClosureNew {
+        fnid: inner_fnb.fnid,
+    });
+    for var in cap_vars {
+        builder.emit(Instr::ClosureAddCapture(var));
     }
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
@@ -494,11 +479,7 @@ fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> 
 
         if let Some(ident) = decl.name.as_ident() {
             let name: JsWord = ident.id.to_id().0;
-            let var_id = builder.define_var(name);
-            builder.emit(Instr::SetVar {
-                var: var_id,
-                value: operand,
-            });
+            builder.define_var(name, operand);
         } else {
             unsupported_node!(decl)
         }
@@ -611,10 +592,9 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
 
         Expr::Ident(ident) => {
             let value = if &ident.sym == "undefined" {
-                builder.emit(Instr::Const(Value::Undefined)).into()
+                builder.emit(Instr::Const(Value::Undefined))
             } else {
-                let var = get_var(builder, ident)?;
-                builder.emit(Instr::ReadVar(var))
+                get_var(builder, ident)?
             };
             Ok(value)
         }
@@ -718,11 +698,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
             let value = compile_function(builder, name.clone(), func)?;
 
             if let Some(name) = name {
-                let var_id = builder.define_var(name);
-                builder.emit(Instr::SetVar {
-                    var: var_id,
-                    value: value.clone(),
-                });
+                builder.define_var(name, value);
             }
             Ok(value)
         }
@@ -755,12 +731,11 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                 let var = get_var(builder, ident)?;
                 // TODO Use integers here, when they get implemented
                 let one = builder.emit(Instr::Const(Value::Number(1.0)));
-                let a = builder.emit(Instr::ReadVar(var));
                 let op = match update_expr.op {
                     UpdateOp::PlusPlus => ArithOp::Add,
                     UpdateOp::MinusMinus => ArithOp::Sub,
                 };
-                let value: IID = builder.emit(Instr::Arith { op, a, b: one });
+                let value: IID = builder.emit(Instr::Arith { op, a: var, b: one });
                 builder.emit(Instr::SetVar {
                     var,
                     value: value.clone(),
@@ -809,13 +784,12 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
 
     if let Some(ident) = asmt.left.as_ident() {
         let var = get_var(builder, ident)?;
-        let operand = builder.emit(Instr::ReadVar(var));
-        let new_value = compile_assignment_rhs(builder, asmt, operand)?;
+        let new_value = compile_assignment_rhs(builder, asmt, var)?;
         builder.emit(Instr::SetVar {
             var,
             value: new_value,
         });
-        Ok(operand)
+        Ok(var)
     } else if let Some(target_expr) = asmt.left.as_expr() {
         match target_expr {
             Expr::Member(member_expr) => {
@@ -921,7 +895,7 @@ fn compile_assignment_rhs(
     Ok(value)
 }
 
-fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<Var> {
+fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<IID> {
     Ok(builder.get_var(&ident.sym))
 }
 
@@ -1028,24 +1002,93 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_upvalues() {
-        let module = quick_compile(
-            "
-            let counter = 10;
-            function foo() {
-                counter++; counter++; counter++;
-            }
-            counter--; counter--;
-            foo();
-            counter--; counter--; counter--;
-            foo();
-            counter--;
-            ",
-        );
+    const CODE_UPVALUES: &'static str = "
+        let counter = 10;
+        function foo() {
+            counter++; counter++; counter++;
+        }
+        counter--; counter--;
+        foo();
+        counter--; counter--; counter--;
+        foo();
+        counter--;
+    ";
 
+    #[test]
+    fn test_upvalues_caller() {
+        let module = quick_compile(CODE_UPVALUES);
         module.dump();
 
-        todo!();
+        let root_fn = module.get_function(FnId(0)).unwrap();
+        let captures: Vec<_> = root_fn
+            .instrs()
+            .iter()
+            .filter_map(|inst| match inst {
+                Instr::ClosureAddCapture(cap_iid) => Some(cap_iid),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(captures.len(), 1);
+        let cap = captures[0];
+        let cap_const = match &root_fn.instrs()[cap.0 as usize] {
+            Instr::Const(Value::Number(val)) => val,
+            _ => panic!(),
+        };
+        assert_eq!(*cap_const, 10.0);
+    }
+
+    #[test]
+    fn test_upvalues_callee() {
+        let module = quick_compile(CODE_UPVALUES);
+        module.dump();
+
+        let callee = module.get_function(FnId(1)).unwrap();
+        assert!(std::matches!(callee.instrs()[0], Instr::GetCapture(0)));
+    }
+
+    #[test]
+    fn test_upvalues_compact_addcapinstr() {
+        let module = quick_compile(
+            "
+            let counter = 0;
+
+            function f() {
+                function g() {
+                    counter++;
+                }
+                g();
+                g();
+                sink(counter);
+            }
+
+            f();
+            f();
+            f();
+            counter -= 5;
+            sink(counter);
+            ",
+        );
+        module.dump();
+
+        let mut fnid = FnId(0);
+        while let Some(func) = module.get_function(fnid) {
+            let instrs = func.instrs();
+            for (prev_instr, instr) in instrs.iter().zip(&instrs[1..]) {
+                if let Instr::ClosureAddCapture(_) = instr {
+                    assert!(
+                        match prev_instr {
+                            Instr::ClosureAddCapture(_) => true,
+                            Instr::ClosureNew { .. } => true,
+                            _ => false,
+                        },
+                        "ClosureAddCapture preceded by {:?} instead of a ClosureNew or another ClosureAddCapture", 
+                        prev_instr
+                    );
+                }
+            }
+
+            fnid.0 += 1;
+        }
     }
 }

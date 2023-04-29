@@ -5,7 +5,7 @@ use std::fmt::Debug;
 use crate::bytecode;
 use crate::jit::codegen::index_of_reg;
 use crate::{
-    bytecode::{ArithOp, BoolOp, CmpOp, FnId, LocalVarIndex, IID},
+    bytecode::{ArithOp, BoolOp, CmpOp, FnId, IID},
     interpreter, stack,
 };
 
@@ -273,11 +273,11 @@ pub enum CloseMode {
 }
 
 impl TraceBuilder {
-    pub(crate) fn start(n_local_vars: usize, close_mode: CloseMode) -> Self {
+    pub(crate) fn start(n_values_outermost_frame: usize, close_mode: CloseMode) -> Self {
         let mut tb = TraceBuilder {
             return_value: None,
             args_buf: None,
-            vars: tracking::VarsState::new(),
+            vars: tracking::VarsState::new(n_values_outermost_frame),
             instrs: Vec::new(),
             snapshot_map: SnapshotMap::new(),
             exit_snapshot_changes: Vec::new(),
@@ -290,8 +290,8 @@ impl TraceBuilder {
             exit_function_expected: false,
         };
 
-        let args = Vec::new();
-        tb.vars.push_frame(args, n_local_vars);
+        let args = Vec::new().into_boxed_slice();
+        tb.vars.push_frame(args, n_values_outermost_frame);
 
         tb
     }
@@ -306,11 +306,11 @@ impl TraceBuilder {
         // instruction that produced them) are mapped to the JIT instruction
         // that last assigned to it (the JIT trace is SSA)
         let stack_depth = self.stack_depth();
-        match self.vars.get_result(intrp_iid).cloned() {
-            Some(vid_for_var) => {
+        match self.vars.get_var(intrp_iid) {
+            Some(vid) => {
                 print_indent(stack_depth);
-                eprintln!("[..tb {:?} is {:?}]", intrp_iid, vid_for_var);
-                Ok(vid_for_var)
+                eprintln!("[..tb {:?} is {:?}]", intrp_iid, vid);
+                Ok(vid)
             }
             None => {
                 print_indent(stack_depth);
@@ -322,7 +322,7 @@ impl TraceBuilder {
                 assert_eq!(1, stack_depth);
 
                 let param = self.add_entry_snapshot_var(intrp_iid)?;
-                self.vars.set_result(intrp_iid, param);
+                self.vars.init_var(intrp_iid, param);
                 Ok(param)
             }
         }
@@ -502,6 +502,8 @@ impl TraceBuilder {
         eprintln!("[..tb step]");
 
         let result = match instr {
+            bytecode::Instr::GetCapture(_) => todo!("GetCapture"),
+            
             bytecode::Instr::Nop => None,
             bytecode::Instr::Const(value) => Some(self.emit(Instr::Const(value.clone().into()))?),
             bytecode::Instr::Not(oper) => {
@@ -611,26 +613,14 @@ impl TraceBuilder {
                 // instruction
                 None
             }
-            bytecode::Instr::ReadVar(var) => match self.vars.get_var(var) {
-                Some(vid) => Ok(vid),
-                None => {
-                    // This is the first time we see this variable mentioned, which means it was
-                    // last set before the trace's start.  That means that the trace will have to
-                    // take it as a parameter, and the interpreter will have to pass it in order to
-                    // invoke the trace.
-                    let vid = self.add_entry_snapshot_var(intrp_operand)?;
-                    self.vars.set_var(var, vid);
-                    Ok(vid)
-                }
-            },
             bytecode::Instr::SetVar { var, value } => {
                 let value = self.resolve_interpreter_operand(*value)?;
 
                 print_indent(self.stack_depth());
                 eprintln!("[..tb map var: {:?} = {:?}]", var, value);
 
-                let is_outside_trace = !self.vars.was_var_seen(var);
-                self.vars.set_var(var, value);
+                let is_outside_trace = !self.vars.was_var_seen(*var);
+                self.vars.set_var(*var, value);
 
                 if is_outside_trace {
                     self.set_exit_snapshot_var(*var, value)?;
@@ -728,7 +718,7 @@ impl TraceBuilder {
                 Some(self.emit(Instr::ClosureNew)?)
             }
             // This is handled as part of the ClosureNew
-            bytecode::Instr::ClosurePushUpvalue(_) => unreachable!(),
+            bytecode::Instr::ClosureAddCapture(_) => unreachable!(),
 
             bytecode::Instr::UnaryMinus(_) => {
                 todo!("(small feat) jit::builder: UnaryMinus")
@@ -751,7 +741,8 @@ impl TraceBuilder {
         let args = self
             .args_buf
             .take()
-            .expect("enter_function called without calling set_args first");
+            .expect("enter_function called without calling set_args first")
+            .into_boxed_slice();
         self.vars.push_frame(args, n_vars);
 
         print_indent(self.stack_depth());
@@ -768,7 +759,7 @@ impl TraceBuilder {
     /// failed, or it is still waiting for the right start instruction), then
     /// this function does nothing (if the arguments are needed later by the
     /// trace, they will be acquired  as trace parameters).
-    pub(crate) fn set_args(&mut self, args: &[bytecode::Operand]) {
+    pub(crate) fn set_args(&mut self, args: &[bytecode::IID]) {
         if self.state != TraceBuilderState::Tracing {
             return;
         }
@@ -811,7 +802,7 @@ impl TraceBuilder {
     fn map_iid(&mut self, iid: IID, jit_vid: ValueId) {
         print_indent(self.stack_depth());
         eprintln!("[..tb map {:?} -> {:?}]", iid, jit_vid);
-        self.vars.set_result(iid, jit_vid);
+        self.vars.set_var(iid, jit_vid);
     }
 
     fn emit(&mut self, instr: Instr) -> Result<ValueId, Error> {
@@ -974,13 +965,13 @@ impl TraceBuilder {
 
     fn set_exit_snapshot_var(
         &mut self,
-        intrp_varid: bytecode::Var,
+        intrp_iid: bytecode::IID,
         value_id: ValueId,
     ) -> Result<(), Error> {
         print_indent(self.stack_depth());
-        eprintln!("[..tb add exit snap var {value_id:?} -> {intrp_varid:?}]");
+        eprintln!("[..tb add exit snap var {value_id:?} -> {intrp_iid:?}]");
 
-        let ndx = self.snapshot_map.set_exit(intrp_varid) as usize;
+        let ndx = self.snapshot_map.set_exit(intrp_iid) as usize;
 
         if self.exit_snapshot_changes.len() <= ndx {
             self.exit_snapshot_changes.resize(ndx + 1, None);
@@ -997,7 +988,7 @@ impl TraceBuilder {
             let mut instrs = self.instrs;
 
             if is_loop {
-                let phis = compute_phis(&self.vars);
+                let phis = compute_phis(&mut self.vars);
                 for (old, new) in phis.iter() {
                     instrs.push(Instr::Phi(*old, *new));
                 }
@@ -1097,15 +1088,15 @@ pub(super) fn reg_class_of_type(ty: ValueType) -> regalloc::RegClass {
     }
 }
 
-fn compute_phis(vars_state: &tracking::VarsState) -> HashMap<ValueId, ValueId> {
+fn compute_phis(vars_state: &mut tracking::VarsState) -> HashMap<ValueId, ValueId> {
     let mut phis = HashMap::new();
     let rbw = vars_state.get_reads_before_overwritten();
-    for &var_ndx in rbw.iter() {
+    for &var in rbw.iter() {
         let first_vid = vars_state
-            .get_first_write(var_ndx)
+            .get_first_write(var)
             .expect("bug in VarsState: returned variable without a first write");
         let last_vid = vars_state
-            .get_var(&bytecode::Var::Local(var_ndx))
+            .get_var(var)
             .expect("bug in VarsState: returned variable without a current write");
         assert_ne!(first_vid, last_vid);
 
@@ -1130,7 +1121,7 @@ pub struct InterpreterStep<'a> {
     pub(crate) func: &'a bytecode::Function,
     pub(crate) iid: bytecode::IID,
     pub(crate) next_iid: bytecode::IID,
-    pub(crate) get_operand: &'a dyn Fn(&bytecode::Operand) -> BoxedValue,
+    pub(crate) get_operand: &'a dyn Fn(&bytecode::IID) -> BoxedValue,
 }
 
 impl<'a> InterpreterStep<'a> {
@@ -1350,7 +1341,7 @@ impl Instr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bytecode::LocalVarIndex, jit};
+    use crate::jit;
 
     #[test]
     fn test_exit_unless_operands() {

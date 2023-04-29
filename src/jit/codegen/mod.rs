@@ -14,7 +14,7 @@ use crate::jit::builder::reg_class_of_type;
 use crate::jit::regalloc::{HardReg, RegClass};
 use crate::{
     interpreter,
-    bytecode::{IID, Operand, ArithOp, CmpOp},
+    bytecode::{IID, ArithOp, CmpOp},
     jit::builder::{Cmp, Instr, ValueId, ValueType},
 };
 
@@ -1716,7 +1716,7 @@ mod tests {
             .map(|i| SnapshotMapItem {
                 write_on_entry: false,
                 write_on_exit: true,
-                operand: Operand::IID(IID(i as u32)),
+                operand: IID(i as u32),
             })
             .collect();
 
