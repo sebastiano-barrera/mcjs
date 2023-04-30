@@ -13,8 +13,8 @@ use strum_macros::{EnumCount, EnumIter, FromRepr};
 use crate::jit::builder::reg_class_of_type;
 use crate::jit::regalloc::{HardReg, RegClass};
 use crate::{
+    bytecode::{ArithOp, CmpOp, IID},
     interpreter,
-    bytecode::{IID, ArithOp, CmpOp},
     jit::builder::{Cmp, Instr, ValueId, ValueType},
 };
 
@@ -620,7 +620,7 @@ pub(super) fn to_native(trace: &Trace) -> NativeThunk {
             Instr::ObjSet { .. } => todo!("TODO(big feat) objects in JIT"),
             Instr::ObjGet { .. } => todo!("TODO(big feat) objects in JIT"),
             Instr::TypeOf(_) => todo!("TODO(small feat) TypeOf"),
-            Instr::ClosureNew => {
+            Instr::ClosureId { .. } => {
                 // Nothing to do.  This instruction only serves to assign
                 // the value ID to a new "virtual closure", which can only be
                 // inlined later on. (It can't esacpe the trace, by design.)

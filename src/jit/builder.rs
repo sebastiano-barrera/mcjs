@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::ops::Range;
 
 use crate::bytecode;
 use crate::jit::codegen::index_of_reg;
@@ -32,7 +33,7 @@ enum Error {
     Type(TypeError),
     Unsupported(Cow<'static, str>),
     InconsistentUnbox(InconsistentUnbox),
-
+    CaptureInExternalClosure,
     /// The compiler has encountered code that has been deemed inconvenient/
     /// not worth it to compile (for the gained performance or implementation
     /// complexity)
@@ -142,12 +143,19 @@ pub struct TraceBuilder {
     //
     // Note that each IID is only well-defined specifically in the context of each function; they
     // are not directly "comparable".
-    callstack_iids: Vec<IID>,
+    //
+    // The Vec is empty until the first call to `enter_function`.
+    callstack: Vec<FrameModel>,
 
     loop_head: Option<bytecode::GlobalIID>,
     loop_entered: bool,
 
     instrs: Vec<Instr>,
+
+    // This map contains a bunch of capture slot -> ValueId mappings.
+    // Each closure is mapped to a non-overlapping subrange of this Vec, stored in the
+    // corresponding ClosureId instruction.
+    captures_map: Vec<ValueId>,
 
     snapshot_map: SnapshotMap,
 
@@ -157,6 +165,24 @@ pub struct TraceBuilder {
     exit_snapshot_changes: Vec<Option<ValueId>>,
 
     state: TraceBuilderState,
+}
+
+// Stores some auxiliary info that we want to track per-call.
+//
+// Each FrameModel originates from a single call to a closure.
+struct FrameModel {
+    // IID of the instruction that originated this call, in the caller's frame
+    call_iid: IID,
+
+    // Range in `captures_map` where one can find the captures for this closure.
+    //
+    // For a GetCapture(i) instruction, the corresponding ValueId is in
+    // captures_map[cap_map_range][i].
+    //
+    // It is only present if the closure's creation (bytecode::Instr::ClosureNew) was seen by the
+    // JIT compiler (otherwise the JIT won't have enough information to map captures' IID to trace
+    // ValueIds).  If None, then GetCapture(i) can't be mapped, and the trace fails.
+    cap_map_range: Option<Range<usize>>,
 }
 
 // Tells which interpreter value to write into or read from each slot of the
@@ -279,17 +305,20 @@ pub enum CloseMode {
 impl TraceBuilder {
     pub(crate) fn start(n_values_outermost_frame: usize, close_mode: CloseMode) -> Self {
         let mut tb = TraceBuilder {
-            args_buf: None,
-            callstack_iids: Vec::new(),
             vars: tracking::VarsState::new(n_values_outermost_frame),
-            instrs: Vec::new(),
-            snapshot_map: SnapshotMap::new(),
-            exit_snapshot_changes: Vec::new(),
+            args_buf: None,
+            callstack: Vec::new(),
+            captures_map: Vec::new(),
+
             loop_head: match close_mode {
                 CloseMode::Loop(giid) => Some(giid),
                 CloseMode::FunctionExit => None,
             },
             loop_entered: false,
+
+            instrs: Vec::new(),
+            snapshot_map: SnapshotMap::new(),
+            exit_snapshot_changes: Vec::new(),
             state: TraceBuilderState::Tracing,
         };
 
@@ -323,7 +352,9 @@ impl TraceBuilder {
                     "[..tb {:?} is unresolved => considered trace parameter, adding guard]",
                     intrp_iid
                 );
-                // TODO(cleanup) Test that this is really necessary. If so, describe it here
+
+                // If we're inside a called function, then we've run that function from the
+                // beginning, and therefore we MUST have seen the initialization of all variables
                 assert_eq!(1, stack_depth);
 
                 let param = self.add_entry_snapshot_var(intrp_iid)?;
@@ -503,11 +534,15 @@ impl TraceBuilder {
 
         let instr = step.cur_instr();
 
-        print_indent(self.stack_depth());
-        eprintln!("[..tb step]");
-
         let result = match instr {
-            bytecode::Instr::GetCapture(_) => todo!("GetCapture"),
+            bytecode::Instr::GetCapture(cap_ndx) => {
+                let cap_map_range = self.callstack.last()
+                    .ok_or(Error::Unsupported("GetCapture in the topmost JIT-observed frame".into()))?
+                    .cap_map_range.clone()
+                    .ok_or(Error::CaptureInExternalClosure)?;
+                let cap = self.captures_map[cap_map_range][*cap_ndx as usize];
+                Some(cap)
+            },
 
             bytecode::Instr::Nop => None,
             bytecode::Instr::Const(value) => Some(self.emit(Instr::Const(value.clone().into()))?),
@@ -687,12 +722,17 @@ impl TraceBuilder {
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
             bytecode::Instr::ClosureNew { .. } => {
-                todo!("jit::builder: get the upvalues");
-                // This instruction really does nothing.  Its real value is in
-                // assigning the value ID to this "virtual closure" that is being
-                // created. It's a "virtual closure" because it can't escape the
-                // trace (it's UntraceableByDesign); it can only be inlined.
-                Some(self.emit(Instr::ClosureNew)?)
+                let cap_range_start = self.captures_map.len();
+
+                let mut ndx = step.iid.0 as usize + 1;
+                while let Some(bytecode::Instr::ClosureAddCapture(cap)) = step.func.instrs().get(ndx) {
+                    let mapped_cap = self.resolve_interpreter_operand(*cap)?;
+                    self.captures_map.push(mapped_cap);
+                    ndx += 1;
+                }
+
+                let cap_map_range = cap_range_start .. self.captures_map.len();
+                Some(self.emit(Instr::ClosureId{cap_map_range})?)
             }
             // This is handled as part of the ClosureNew
             bytecode::Instr::ClosureAddCapture(_) => unreachable!(),
@@ -710,12 +750,43 @@ impl TraceBuilder {
         Ok(())
     }
 
-    pub(crate) fn enter_function(&mut self, call_iid: IID, n_vars: usize) {
+    pub(crate) fn enter_function(&mut self, call_iid: IID, callee_iid: IID, n_vars: usize) {
         if self.state != TraceBuilderState::Tracing {
             return;
         }
 
-        self.callstack_iids.push(call_iid);
+        let closure_vid = match self.resolve_interpreter_operand(callee_iid) {
+            Ok(vid) => vid,
+            Err(err) => return self.fail_trace(err),
+        };
+        let closure_instr = &self.instrs[closure_vid.0 as usize];
+        let cap_map_range = match closure_instr {
+            Instr::ClosureId { cap_map_range } => Some(cap_map_range.clone()),
+            Instr::GetSnapshotItem {..} => {
+                // The closure's creation was not seen by the JIT (it's taken as a trace parameter,
+                // hence the GetSnapshotItem instruction). 
+                //
+                // For this reason, we can't really map any of the closure's captures to any JIT
+                // trace value or parameter, so we will be unable to continue the trace upon
+                // encountering a bytecode::Instr::GetCapture..  If the closure does NOT have any
+                // captures, though, then there is no problem.  
+                //
+                // Right now we have no way to tell these two cases apart, though. We'll
+                // continue by recording this call with "unknown captures", and fail the trace upon
+                // the first bytecode::Instr::GetCapture.
+                None
+            },
+            other => panic!(
+                "JIT or interpreter bug: call IID {:?} not mapped to ClosureId instruction ({:?} {:?})",
+                callee_iid, closure_vid, other,
+            ),
+        };
+
+        // TODO generalize callstack_iids to include more info, and push the cap_map_range there
+        self.callstack.push(FrameModel {
+            call_iid,
+            cap_map_range,
+        });
         let args = self
             .args_buf
             .take()
@@ -792,14 +863,14 @@ impl TraceBuilder {
             eprintln!("[..tb trace ended]");
             self.state = TraceBuilderState::Finished;
         } else {
-            let call_iid = self.callstack_iids.pop().unwrap();
+            let call_iid = self.callstack.pop().unwrap().call_iid;
             self.map_iid(call_iid, ret_val);
         }
     }
 
     fn map_iid(&mut self, iid: IID, jit_vid: ValueId) {
         print_indent(self.stack_depth());
-        eprintln!("[..tb map {:?} -> {:?}]", iid, jit_vid);
+        eprintln!("[..tb {:?} -> {:?}]", iid, jit_vid);
         self.vars.set_var(iid, jit_vid);
     }
 
@@ -930,7 +1001,7 @@ impl TraceBuilder {
         let post_snap_update = std::mem::take(&mut self.exit_snapshot_changes);
         for vid in post_snap_update.iter().flatten() {
             let instr = self.get_instr(*vid);
-            if let Instr::ClosureNew = instr {
+            if let Instr::ClosureId { .. } = instr {
                 // At this point, we know there is at least one case where a
                 // closure that was *created* within the trace is being yielded
                 // back to the interpreter (for example for storage or later call)
@@ -1109,7 +1180,7 @@ fn compute_phis(vars_state: &mut tracking::VarsState) -> HashMap<ValueId, ValueI
 
 fn print_indent(stack_depth: usize) {
     for _ in 0..stack_depth {
-        eprint!(" · ");
+        eprint!("      ");
     }
 }
 
@@ -1197,7 +1268,16 @@ pub(super) enum Instr {
     Num2Str(ValueId),
     Box(ValueId),
 
-    ClosureNew,
+    // The JIT ClosureId instruction really does nothing.
+    //
+    // The only point here is to allocate one ValueId to this specific interpreter-side
+    // closure so that we can build a mapping between interpreter-side upvalues and
+    // JIT-side ValueIds, to be used at the time of the closure being called.  We don't
+    // even store the closure's FnId, as the interpreter is the one doing all the
+    // "control flow" work, and the JIT will implicitly inline it.
+    ClosureId {
+        cap_map_range: Range<usize>,
+    },
 
     PushSink(ValueId),
     Return(ValueId),
@@ -1261,7 +1341,7 @@ impl Instr {
             Instr::ObjSet { .. } => None,
             Instr::ObjGet { .. } => Some(ValueType::Boxed),
             Instr::TypeOf(_) => Some(ValueType::Str),
-            Instr::ClosureNew => Some(ValueType::Function),
+            Instr::ClosureId { .. } => Some(ValueType::Function),
             Instr::Const(val) => Some(ValueType::of(val)),
             Instr::Phi(_, _) => None,
             Instr::GetSnapshotItem { ty, .. } => Some(*ty),
@@ -1298,7 +1378,7 @@ impl Instr {
             Instr::ObjSet { obj, key, value } => [*obj, *key, *value].as_slice().into(),
             Instr::ObjGet { obj, key } => [*obj, *key].as_slice().into(),
             Instr::TypeOf(arg) => [*arg].as_slice().into(),
-            Instr::ClosureNew => [].as_slice().into(),
+            Instr::ClosureId { .. } => [].as_slice().into(),
             Instr::Const(_) => [].as_slice().into(),
             Instr::Phi(_tgt, new_value) => [*new_value].as_slice().into(),
             Instr::GetSnapshotItem { .. } => [].as_slice().into(),
@@ -1324,7 +1404,7 @@ impl Instr {
             Instr::ObjSet { .. } => false,
             Instr::ObjGet { .. } => false,
             Instr::TypeOf(_) => false,
-            Instr::ClosureNew => false,
+            Instr::ClosureId { .. } => false,
             Instr::PushSink(_) => true,
             Instr::Return(_) => false,
             Instr::Phi(_, _) => true,

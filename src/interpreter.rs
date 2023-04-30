@@ -306,6 +306,12 @@ impl VM {
 
         if let Some(jitting) = jitting {
             if let Some(trace) = jitting.builder.build() {
+                #[cfg(test)]
+                {
+                    eprintln!(" ---- compiled trace");
+                    trace.dump();
+                }
+
                 let native_thunk = trace.compile();
                 let prev = self.traces.insert(jitting.trace_id, (trace, native_thunk));
                 assert!(prev.is_none());
@@ -561,10 +567,15 @@ impl<'a> Interpreter<'a> {
                     // The arguments have to be "read" before adding the stack frame; they will no
                     // longer be accessible afterwards
                     let arg_vals: Vec<_> = args.iter().map(|arg| self.get_operand(*arg)).collect();
-
                     let callee_func = self.module.get_function(closure.fnid).unwrap();
                     let n_captures = closure.upvalues.len().try_into().unwrap();
                     let n_instrs = callee_func.instrs().len().try_into().unwrap();
+
+                    if let Some(jitting) = &mut self.jitting {
+                        jitting.builder.set_args(args);
+                        jitting.builder.enter_function(self.iid, *callee, n_instrs as usize);
+                    }
+
                     self.data.push(stack::CallMeta {
                         fnid: closure.fnid,
                         n_instrs,
@@ -581,11 +592,6 @@ impl<'a> Interpreter<'a> {
                     }
                     for (i, arg) in arg_vals.into_iter().enumerate() {
                         self.data.set_arg(i, arg);
-                    }
-
-                    if let Some(jitting) = &mut self.jitting {
-                        jitting.builder.set_args(args);
-                        jitting.builder.enter_function(self.iid, n_instrs as usize);
                     }
 
                     self.iid = IID(0u32);
@@ -961,8 +967,6 @@ mod tests {
             ],
             &output.sink[..]
         );
-
-        panic!();
     }
 
     #[test]
