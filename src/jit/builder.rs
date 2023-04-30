@@ -135,9 +135,14 @@ pub struct TraceBuilder {
     vars: tracking::VarsState,
 
     // "Parking spot" used to tranfer the arguments from caller to callee
-    // frame, and the return value in the other direction
+    // frame
     args_buf: Option<Vec<ValueId>>,
-    return_value: Option<ValueId>,
+    // At each enter-function, the IID of the call is pushed onto this stack.  Upon exit_function,
+    // that IID is popped and associated to the actual return value observed from the interpreter.
+    //
+    // Note that each IID is only well-defined specifically in the context of each function; they
+    // are not directly "comparable".
+    callstack_iids: Vec<IID>,
 
     loop_head: Option<bytecode::GlobalIID>,
     loop_entered: bool,
@@ -152,7 +157,6 @@ pub struct TraceBuilder {
     exit_snapshot_changes: Vec<Option<ValueId>>,
 
     state: TraceBuilderState,
-    exit_function_expected: bool,
 }
 
 // Tells which interpreter value to write into or read from each slot of the
@@ -275,8 +279,8 @@ pub enum CloseMode {
 impl TraceBuilder {
     pub(crate) fn start(n_values_outermost_frame: usize, close_mode: CloseMode) -> Self {
         let mut tb = TraceBuilder {
-            return_value: None,
             args_buf: None,
+            callstack_iids: Vec::new(),
             vars: tracking::VarsState::new(n_values_outermost_frame),
             instrs: Vec::new(),
             snapshot_map: SnapshotMap::new(),
@@ -287,11 +291,12 @@ impl TraceBuilder {
             },
             loop_entered: false,
             state: TraceBuilderState::Tracing,
-            exit_function_expected: false,
         };
 
         let args = Vec::new().into_boxed_slice();
         tb.vars.push_frame(args, n_values_outermost_frame);
+
+        eprintln!("[..tb start tracing]");
 
         tb
     }
@@ -322,7 +327,7 @@ impl TraceBuilder {
                 assert_eq!(1, stack_depth);
 
                 let param = self.add_entry_snapshot_var(intrp_iid)?;
-                self.vars.init_var(intrp_iid, param);
+                self.vars.set_var(intrp_iid, param);
                 Ok(param)
             }
         }
@@ -475,9 +480,7 @@ impl TraceBuilder {
                 }
 
                 if let Err(error) = self.trace_step(step) {
-                    print_indent(self.stack_depth());
-                    eprintln!("[..tb trace failed: {:?}]", error);
-                    self.state = TraceBuilderState::Failed;
+                    self.fail_trace(error);
                 }
 
                 if !self.loop_entered && Some(step.global_iid()) == self.loop_head {
@@ -489,12 +492,14 @@ impl TraceBuilder {
         }
     }
 
+    fn fail_trace(&mut self, error: Error) {
+        print_indent(self.stack_depth());
+        eprintln!("[..tb trace failed: {:?}]", error);
+        self.state = TraceBuilderState::Failed;
+    }
+
     fn trace_step(&mut self, step: &InterpreterStep) -> Result<(), Error> {
         assert!(self.state == TraceBuilderState::Tracing);
-
-        if self.exit_function_expected {
-            panic!("JIT bug: should have called exit_function() !");
-        }
 
         let instr = step.cur_instr();
 
@@ -503,7 +508,7 @@ impl TraceBuilder {
 
         let result = match instr {
             bytecode::Instr::GetCapture(_) => todo!("GetCapture"),
-            
+
             bytecode::Instr::Nop => None,
             bytecode::Instr::Const(value) => Some(self.emit(Instr::Const(value.clone().into()))?),
             bytecode::Instr::Not(oper) => {
@@ -518,14 +523,14 @@ impl TraceBuilder {
             bytecode::Instr::Cmp { op, a, b } => {
                 let a_rt_type = {
                     // TODO(opt) fix: This causes allocations with strings
-                    let rt_value = (step.get_operand)(a);
+                    let rt_value = (step.get_operand)(*a);
                     let rt_ty = ValueType::of(&rt_value);
                     assert_ne!(rt_ty, ValueType::Boxed);
                     rt_ty
                 };
                 let b_rt_type = {
                     // TODO(opt) fix: This causes allocations with strings
-                    let rt_value = (step.get_operand)(b);
+                    let rt_value = (step.get_operand)(*b);
                     let rt_ty = ValueType::of(&rt_value);
                     assert_ne!(rt_ty, ValueType::Boxed);
                     rt_ty
@@ -537,7 +542,7 @@ impl TraceBuilder {
                 let instr = if let (Instr::Const(_), Instr::Const(_)) =
                     (self.get_instr(a), self.get_instr(b))
                 {
-                    let interpreter_result = &step.values_buf[step.iid.0 as usize];
+                    let interpreter_result = (step.get_operand)(step.iid);
                     Instr::Const(interpreter_result.clone())
                 } else {
                     // We always unbox before Cmp.
@@ -633,18 +638,6 @@ impl TraceBuilder {
                 self.emit(Instr::PushSink(value))?;
                 None
             }
-            bytecode::Instr::Return(value) => {
-                self.exit_function_expected = true;
-
-                let value = if self.stack_depth() == 1 {
-                    self.resolve_operand_as(*value, ValueType::Boxed)?
-                } else {
-                    self.resolve_interpreter_operand(*value)?
-                };
-
-                self.return_value = Some(value);
-                None
-            }
             bytecode::Instr::GetArg(index) => {
                 let value = if self.stack_depth() == 1 {
                     let post_snap_update = self.take_exit_snapshot()?;
@@ -658,25 +651,9 @@ impl TraceBuilder {
                 };
                 Some(value)
             }
-            bytecode::Instr::Call { .. } => {
-                // We reach this point *after* the interpreter has completed the call, i.e.:
-                //   - intepreter gets instruction Call
-                //     - interpreter calls TraceBuilder::enter_function
-                //     - interpreter runs callee
-                //       - interpreter calls TraceBuilder::exit_function
-                //     - interpreter collects return value
-                //   - interpreter calls TraceBuilder::trace_step(call instruction)
-                //
-                // All that's left to do for us is to pick the return value
-                // from the JIT (not the interpreter), so that we can continue
-                // constant folding etc.
 
-                let ret_val = self
-                    .return_value
-                    .take()
-                    .unwrap_or(self.emit(Instr::Const(BoxedValue::Undefined))?);
-                Some(ret_val)
-            }
+            bytecode::Instr::Call { .. } => panic!("interpreter bug: call enter_function instead of passing the Call instruction through interpreter_step"),
+            bytecode::Instr::Return(_) => panic!("interpreter bug: call exit_function instead of passing the Return instruction through interpreter_step"),
 
             bytecode::Instr::ObjNew => Some(self.emit(Instr::ObjNew)?),
             bytecode::Instr::ObjSet { obj, key, value } => {
@@ -733,11 +710,12 @@ impl TraceBuilder {
         Ok(())
     }
 
-    pub(crate) fn enter_function(&mut self, n_vars: usize) {
+    pub(crate) fn enter_function(&mut self, call_iid: IID, n_vars: usize) {
         if self.state != TraceBuilderState::Tracing {
             return;
         }
 
+        self.callstack_iids.push(call_iid);
         let args = self
             .args_buf
             .take()
@@ -776,27 +754,47 @@ impl TraceBuilder {
         self.args_buf = Some(args_values);
     }
 
-    pub(crate) fn exit_function(&mut self) -> bool {
-        if self.state == TraceBuilderState::Tracing {
-            // self.exit_function_expected might be false, if the source bytecode
-            // does not have an explicit Return instruction. In this case, we do
-            // an implicit Return(undefined)
-
-            print_indent(self.stack_depth());
-            eprintln!("[..tb exit function]");
-
-            self.vars.pop_frame();
-
-            if self.vars.stack_depth() == 0 {
-                print_indent(self.stack_depth());
-                eprintln!("[..tb trace ended]");
-                self.state = TraceBuilderState::Finished;
-            }
-
-            self.exit_function_expected = false;
+    pub(crate) fn exit_function(&mut self, ret_val_iid: Option<IID>) {
+        if self.state != TraceBuilderState::Tracing {
+            return;
         }
 
-        self.state == TraceBuilderState::Finished
+        // NOTE: return_value is the interpreter-side IID of the return value in the returning
+        // function, and therefore only makes sense while we're in the callee's context.
+        //
+        // The IID we pop from callstack_iids is the interpreter-side IID of the *call*
+        // instruction that we're returning *to*, and therefore only makes sense in the
+        // caller's context.
+
+        let ret_val = {
+            let resolution = match (ret_val_iid, self.stack_depth()) {
+                (_, 0) => panic!("JIT bug: stack is empty!"),
+                // We must exit the trace with a Boxed value
+                (Some(iid), 1) => self.resolve_operand_as(iid, ValueType::Boxed),
+                (Some(iid), _) => self.resolve_interpreter_operand(iid),
+                (None, _) => self.emit(Instr::Const(BoxedValue::Undefined)),
+            };
+            match resolution {
+                Ok(val) => val,
+                Err(err) => {
+                    self.fail_trace(err);
+                    return;
+                }
+            }
+        };
+
+        print_indent(self.stack_depth());
+        eprintln!("[..tb exit function]");
+        self.vars.pop_frame();
+
+        if self.vars.stack_depth() == 0 {
+            print_indent(self.stack_depth());
+            eprintln!("[..tb trace ended]");
+            self.state = TraceBuilderState::Finished;
+        } else {
+            let call_iid = self.callstack_iids.pop().unwrap();
+            self.map_iid(call_iid, ret_val);
+        }
     }
 
     fn map_iid(&mut self, iid: IID, jit_vid: ValueId) {
@@ -1115,13 +1113,13 @@ fn print_indent(stack_depth: usize) {
     }
 }
 
+// TODO(performance) monomorphize get_operand?
 pub struct InterpreterStep<'a> {
-    pub(crate) values_buf: &'a Vec<interpreter::Value>,
     pub(crate) fnid: bytecode::FnId,
     pub(crate) func: &'a bytecode::Function,
     pub(crate) iid: bytecode::IID,
     pub(crate) next_iid: bytecode::IID,
-    pub(crate) get_operand: &'a dyn Fn(&bytecode::IID) -> BoxedValue,
+    pub(crate) get_operand: &'a dyn Fn(bytecode::IID) -> BoxedValue,
 }
 
 impl<'a> InterpreterStep<'a> {
@@ -1562,7 +1560,6 @@ mod tests {
         assert_eq!(sink_operands, [&"asd".into(), &"lol".into(),]);
     }
 
-    #[ignore]
     #[test]
     fn test_closures() {
         let output = quick_jit(

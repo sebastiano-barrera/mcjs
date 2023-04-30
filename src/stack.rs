@@ -27,7 +27,7 @@ pub(crate) struct CallMeta {
     pub n_instrs: u32,
     pub n_captured_upvalues: u16,
     pub n_args: u16,
-    pub call_iid: bytecode::IID,
+    pub call_iid: Option<bytecode::IID>,
 }
 
 impl InterpreterData {
@@ -93,7 +93,7 @@ impl InterpreterData {
     }
 
     pub(crate) fn call_iid(&self) -> Option<bytecode::IID> {
-        self.meta.last().map(|meta| meta.call_iid)
+        self.meta.last().and_then(|meta| meta.call_iid)
     }
 
     pub(crate) fn get_result(&self, iid: bytecode::IID) -> &Value {

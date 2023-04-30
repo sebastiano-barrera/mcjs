@@ -94,29 +94,19 @@ impl VarsState {
     //pub(super) fn get_upvalue(&self) {}
     //pub(super) fn set_upvalue(&mut self) {}
 
-    pub(super) fn init_var(&mut self, iid: bytecode::IID, value: ValueId) {
-        assert!(self.stack_model.len() > 0);
-
-        let iid = iid.0 as usize;
-        let frame = self.cur_frame_mut();
-        assert!(frame.vid_of_iid[iid].is_none());
-        frame.vid_of_iid[iid] = Some(value);
-
-        if self.stack_model.len() == 1 && self.first_write[iid].is_none() {
-            self.first_write[iid] = Some(value);
-        }
-    }
-
     pub(super) fn set_var(&mut self, iid: bytecode::IID, value: ValueId) {
         assert!(self.stack_model.len() > 0);
 
         let iid = iid.0 as usize;
         let frame = self.cur_frame_mut();
-        assert!(frame.vid_of_iid[iid].is_some());
         frame.vid_of_iid[iid] = Some(value);
 
         if self.stack_model.len() == 1 {
-            self.overwritten[iid] = true;
+            if self.first_write[iid].is_none() {
+                self.first_write[iid] = Some(value);
+            } else {
+                self.overwritten[iid] = true;
+            }
         }
     }
 

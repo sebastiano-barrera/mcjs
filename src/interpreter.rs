@@ -351,8 +351,7 @@ impl<'a> Interpreter<'a> {
             n_instrs: main_func.instrs().len().try_into().unwrap(),
             n_captured_upvalues: 0,
             n_args: 0,
-            // This is never used!
-            call_iid: bytecode::IID(0),
+            call_iid: None,
         });
 
         Interpreter {
@@ -383,10 +382,12 @@ impl<'a> Interpreter<'a> {
                 func.instrs().len()
             );
             if self.iid.0 as usize == func.instrs().len() {
-                let parent_iid_ndx = self.data.call_iid().unwrap().0;
-                self.iid.0 = parent_iid_ndx + 1;
-                self.data.pop();
-                continue;
+                if let Some(call_iid) = self.exit_function(None) {
+                    self.iid.0 = call_iid.0 + 1;
+                    continue;
+                } else {
+                    return Ok(());
+                }
             }
 
             let instr = &func.instrs()[self.iid.0 as usize];
@@ -543,11 +544,12 @@ impl<'a> Interpreter<'a> {
                     next_ndx = *dest_ndx;
                 }
                 Instr::Return(value) => {
-                    let return_value = self.get_operand(*value);
-                    let call_iid = self.data.call_iid().unwrap();
-                    self.data.pop();
-                    self.data.set_result(call_iid, return_value);
-                    next_ndx = call_iid.0 + 1;
+                    if let Some(call_iid) = self.exit_function(Some(*value)) {
+                        self.iid.0 = call_iid.0 + 1;
+                        continue;
+                    } else {
+                        return Ok(());
+                    }
                 }
                 Instr::Call { callee, args } => {
                     let closure = match self.get_operand(*callee) {
@@ -558,16 +560,17 @@ impl<'a> Interpreter<'a> {
 
                     // The arguments have to be "read" before adding the stack frame; they will no
                     // longer be accessible afterwards
-                    let args: Vec<_> = args.iter().map(|arg| self.get_operand(*arg)).collect();
+                    let arg_vals: Vec<_> = args.iter().map(|arg| self.get_operand(*arg)).collect();
 
                     let callee_func = self.module.get_function(closure.fnid).unwrap();
                     let n_captures = closure.upvalues.len().try_into().unwrap();
+                    let n_instrs = callee_func.instrs().len().try_into().unwrap();
                     self.data.push(stack::CallMeta {
                         fnid: closure.fnid,
-                        n_instrs: callee_func.instrs().len().try_into().unwrap(),
+                        n_instrs,
                         n_captured_upvalues: n_captures,
-                        n_args: args.len().try_into().unwrap(),
-                        call_iid: self.iid,
+                        n_args: arg_vals.len().try_into().unwrap(),
+                        call_iid: Some(self.iid),
                     });
 
                     self.print_indent();
@@ -576,15 +579,13 @@ impl<'a> Interpreter<'a> {
                     for (capndx, capture) in closure.upvalues.iter().enumerate() {
                         self.data.set_capture(capndx, *capture);
                     }
-                    for (i, arg) in args.into_iter().enumerate() {
+                    for (i, arg) in arg_vals.into_iter().enumerate() {
                         self.data.set_arg(i, arg);
                     }
 
                     if let Some(jitting) = &mut self.jitting {
-                        todo!("jitting.builder.set_args");
-                        // jitting.builder.set_args(args, &|fnid| {
-                        //     self.frame_graph.get_lexical_scope(frame,
-                        // fnid).unwrap() });
+                        jitting.builder.set_args(args);
+                        jitting.builder.enter_function(self.iid, n_instrs as usize);
                     }
 
                     self.iid = IID(0u32);
@@ -681,8 +682,35 @@ impl<'a> Interpreter<'a> {
                 }
             }
 
+            if let Some(jitting) = &mut self.jitting {
+                jitting.builder.interpreter_step(&InterpreterStep {
+                    fnid,
+                    func,
+                    iid: self.iid,
+                    next_iid: IID(next_ndx),
+                    get_operand: &|iid| self.data.get_result(iid).clone(),
+                });
+            }
+
             self.iid.0 = next_ndx;
         }
+    }
+
+    fn exit_function(&mut self, return_value_iid: Option<IID>) -> Option<IID> {
+        let return_value = return_value_iid
+            .map(|iid| self.get_operand(iid))
+            .unwrap_or(Value::Undefined);
+        let call_iid: Option<_> = self.data.call_iid();
+        self.data.pop();
+
+        if let Some(call_iid) = call_iid {
+            self.data.set_result(call_iid, return_value);
+        }
+        if let Some(jitting) = &mut self.jitting {
+            jitting.builder.exit_function(return_value_iid);
+        }
+
+        call_iid
     }
 
     fn print_indent(&self) {
@@ -691,7 +719,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // TODO(cleanup) Change this to return &Value instead
+    // TODO(cleanup) inline this function. It now adds nothing
     fn get_operand(&self, iid: bytecode::IID) -> Value {
         let value = self.data.get_result(iid).clone();
         //  TODO(cleanup) Move to a global logger. This is just for debugging!
@@ -933,6 +961,8 @@ mod tests {
             ],
             &output.sink[..]
         );
+
+        panic!();
     }
 
     #[test]
