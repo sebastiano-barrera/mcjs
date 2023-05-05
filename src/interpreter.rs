@@ -377,7 +377,7 @@ impl<'a> Interpreter<'a> {
                 return Ok(());
             }
 
-            let fnid = self.data.cur_meta().fnid;
+            let fnid = self.data.fnid();
             // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
             let func = self.module.get_function(fnid).unwrap();
 
@@ -561,7 +561,7 @@ impl<'a> Interpreter<'a> {
                     let closure = match self.get_operand(*callee) {
                         Value::Closure(closure) => closure,
                         Value::NativeFunction(nfid) => todo!("call NativeFunction"),
-                        _ => panic!("invalid callee (not a function): {:?}", callee),
+                        other => panic!("invalid callee (not a function): {:?}", other),
                     };
 
                     // The arguments have to be "read" before adding the stack frame; they will no
@@ -573,7 +573,9 @@ impl<'a> Interpreter<'a> {
 
                     if let Some(jitting) = &mut self.jitting {
                         jitting.builder.set_args(args);
-                        jitting.builder.enter_function(self.iid, *callee, n_instrs as usize);
+                        jitting
+                            .builder
+                            .enter_function(self.iid, *callee, n_instrs as usize);
                     }
 
                     self.data.push(stack::CallMeta {

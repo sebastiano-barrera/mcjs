@@ -1,25 +1,22 @@
 use std::{cell::Cell, marker::PhantomData, sync::atomic::AtomicUsize};
 
-use crate::bytecode;
 use crate::interpreter::{self, UpvalueId, Value};
+use crate::stack_access::FrameMetrics;
+use crate::{bytecode, stack_access};
+
+type Heap = slotmap::SlotMap<UpvalueId, Value>;
 
 /// The interpreter's stack.
 ///
 /// Mostly stores local variables.
 pub(crate) struct InterpreterData {
-    upv_alloc: slotmap::SlotMap<UpvalueId, Value>,
-
-    meta: Vec<CallMeta>,
-
-    args: Stack<Value>,
-    results: Stack<Value>,
-    local_upvalues: Stack<Option<UpvalueId>>,
-    captured_upvalues: Stack<UpvalueId>,
+    upv_alloc: Heap,
+    stack_buffer: [u8; STACK_SIZE],
+    metrics: FrameMetrics,
+    n_frames: usize,
 }
 
-pub(crate) struct CallBuilder<'a> {
-    stack: &'a mut InterpreterData,
-}
+const STACK_SIZE: usize = 16 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct CallMeta {
@@ -37,116 +34,121 @@ impl InterpreterData {
     pub(crate) fn new() -> Self {
         InterpreterData {
             upv_alloc: slotmap::SlotMap::with_key(),
-            meta: Vec::with_capacity(Self::INIT_CAPACITY),
-            args: Stack::with_capacity(Self::INIT_CAPACITY),
-            results: Stack::with_capacity(Self::INIT_CAPACITY),
-            local_upvalues: Stack::with_capacity(Self::INIT_CAPACITY),
-            captured_upvalues: Stack::with_capacity(Self::INIT_CAPACITY),
+
+            stack_buffer: [0u8; STACK_SIZE],
+            metrics: FrameMetrics { top: STACK_SIZE },
+
+            n_frames: 0,
         }
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.meta.len()
+        self.n_frames
     }
 
     pub(crate) fn push(&mut self, call_meta: CallMeta) {
-        self.args
-            .push_and_lock(call_meta.n_args as _, Value::Undefined);
-        self.captured_upvalues
-            .push_and_lock(call_meta.n_captured_upvalues as _, UpvalueId::default());
-        self.results
-            .push_and_lock(call_meta.n_instrs as _, Value::Undefined);
-        self.local_upvalues
-            .push_and_lock(call_meta.n_instrs as _, None);
+        let frame_hdr = stack_access::FrameHeader {
+            n_instrs: call_meta.n_instrs,
+            n_args: call_meta.n_args,
+            n_captures: call_meta.n_captured_upvalues,
+            call_iid: call_meta.call_iid,
+            fn_id: call_meta.fnid,
+        };
 
-        self.meta.push(call_meta);
+        let frame_sz = frame_hdr.expected_frame_size();
+        self.metrics.top -= frame_sz;
+        *self.metrics.header().get_mut(&mut self.stack_buffer) = frame_hdr;
+        self.n_frames += 1;
+
+        #[cfg(test)]
+        eprintln!(
+            "pushed frame, {} bytes. top = {}; hdr = {:?}",
+            frame_sz,
+            self.metrics.top,
+            self.metrics.header().get(&self.stack_buffer)
+        );
     }
 
     pub(crate) fn pop(&mut self) {
         use crate::util::shorten_by;
-        let call_meta = self.meta.pop().unwrap();
+        let cur_frame_sz = self.metrics.frame_size(&self.stack_buffer);
+        self.metrics.top += cur_frame_sz;
+        self.n_frames -= 1;
 
-        self.args.pop_n(call_meta.n_args as usize);
-        self.captured_upvalues
-            .pop_n(call_meta.n_captured_upvalues as usize);
-        self.local_upvalues.pop_n(call_meta.n_instrs as usize);
-        self.results.pop_n(call_meta.n_instrs as usize);
-
-        if let Some(new_cur_meta) = self.meta.last() {
-            self.args.set_n_readable(Some(new_cur_meta.n_args as usize));
-            self.captured_upvalues
-                .set_n_readable(Some(new_cur_meta.n_captured_upvalues as usize));
-            self.local_upvalues
-                .set_n_readable(Some(new_cur_meta.n_instrs as usize));
-            self.results
-                .set_n_readable(Some(new_cur_meta.n_instrs as usize));
+        #[cfg(test)]
+        if self.n_frames == 0 {
+            eprintln!(
+                "popped frame, {} bytes. top = {}, no more stack!",
+                cur_frame_sz, self.metrics.top
+            );
         } else {
-            self.args.set_n_readable(Some(0));
-            self.captured_upvalues.set_n_readable(Some(0));
-            self.local_upvalues.set_n_readable(Some(0));
-            self.results.set_n_readable(Some(0));
+            let hdr = self.metrics.header().get(&self.stack_buffer);
+            eprintln!(
+                "popped frame, {} bytes. top = {}, hdr = {:?}",
+                cur_frame_sz, self.metrics.top, hdr
+            );
         }
     }
 
-    pub(crate) fn cur_meta(&self) -> &CallMeta {
-        self.meta.last().as_ref().unwrap()
+    pub(crate) fn fnid(&self) -> bytecode::FnId {
+        let frame_hdr = self.metrics.header().get(&self.stack_buffer);
+        frame_hdr.fn_id
     }
 
     pub(crate) fn call_iid(&self) -> Option<bytecode::IID> {
-        self.meta.last().and_then(|meta| meta.call_iid)
+        let frame_hdr = self.metrics.header().get(&self.stack_buffer);
+        frame_hdr.call_iid
     }
 
     pub(crate) fn get_result(&self, iid: bytecode::IID) -> &Value {
         let ndx = iid.0 as usize;
-        if let Some(upv_id) = self.local_upvalues.get(ndx) {
-            self.upv_alloc
-                .get(*upv_id)
-                .expect("gc bug: value deleted but still referenced by stack")
-        } else {
-            self.results.get(ndx)
-        }
+        let slot = self
+            .metrics
+            .result_slot(ndx, &self.stack_buffer)
+            .get(&self.stack_buffer);
+        slot_value(slot, &self.upv_alloc)
     }
     pub(crate) fn set_result(&mut self, iid: bytecode::IID, value: Value) {
         let ndx = iid.0 as usize;
-        if let Some(upv_id) = self.local_upvalues.get(ndx) {
-            let slot = self
-                .upv_alloc
-                .get_mut(*upv_id)
-                .expect("gc bug: value deleted but still referenced by stack");
-            *slot = value;
-        } else {
-            *self.results.get_mut(ndx) = value;
-        }
+        let slot = self
+            .metrics
+            .result_slot(ndx, &self.stack_buffer)
+            .get_mut(&mut self.stack_buffer);
+        set_slot_value(slot, &mut self.upv_alloc, value);
     }
 
     pub(crate) fn get_arg(&self, arg_ndx: usize) -> &Value {
-        self.args.get(arg_ndx)
+        let slot = self
+            .metrics
+            .arg_slot(arg_ndx, &self.stack_buffer)
+            .get(&self.stack_buffer);
+        slot_value(slot, &self.upv_alloc)
     }
     pub(crate) fn set_arg(&mut self, arg_ndx: usize, value: Value) {
-        *self.args.get_mut(arg_ndx) = value;
+        let slot = self
+            .metrics
+            .arg_slot(arg_ndx, &self.stack_buffer)
+            .get_mut(&mut self.stack_buffer);
+        set_slot_value(slot, &mut self.upv_alloc, value);
     }
 
     pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::IID) -> UpvalueId {
-        self.move_to_upvalue(var);
-        self.get_upvalue(var)
-            .expect("bug: var is not associated to an upvalue")
-    }
-    fn get_upvalue(&self, var: bytecode::IID) -> Option<UpvalueId> {
-        *self.local_upvalues.get(var.0 as usize)
-    }
-    fn move_to_upvalue(&mut self, var: bytecode::IID) {
-        assert!(var.0 < self.cur_meta().n_instrs);
-
         let varndx = var.0 as usize;
-        if self.local_upvalues.get(varndx).is_some() {
-            return;
+        let slot = self
+            .metrics
+            .result_slot(varndx, &self.stack_buffer)
+            .get_mut(&mut self.stack_buffer);
+        match slot {
+            stack_access::Slot::Inline(value) => {
+                // This is just to give this shuffle well-defined behavior.  Hopefully it gets
+                // optimized out.
+                let value = std::mem::replace(value, Value::Undefined);
+                let upv_id = self.upv_alloc.insert(value);
+                *slot = stack_access::Slot::Upvalue(upv_id);
+                upv_id
+            }
+            stack_access::Slot::Upvalue(upv_id) => *upv_id,
         }
-
-        let mut cur_value = Value::Undefined;
-        std::mem::swap(self.results.get_mut(varndx), &mut cur_value);
-
-        let upv_id = self.upv_alloc.insert(cur_value);
-        *self.local_upvalues.get_mut(varndx) = Some(upv_id);
     }
 
     pub(crate) fn capture_to_var(
@@ -154,75 +156,49 @@ impl InterpreterData {
         capture_ndx: bytecode::CaptureIndex,
         var: bytecode::IID,
     ) {
-        let upvalue_id = self.captured_upvalues.get(capture_ndx as usize);
-        let prev = self
-            .local_upvalues
-            .get_mut(var.0 as usize)
-            .replace(*upvalue_id);
-        assert!(prev.is_none());
+        let upvalue_id = *self
+            .metrics
+            .capture_slot(capture_ndx.into(), &self.stack_buffer)
+            .get(&self.stack_buffer);
+
+        let slot = self
+            .metrics
+            .result_slot(var.0 as usize, &self.stack_buffer)
+            .get_mut(&mut self.stack_buffer);
+        *slot = stack_access::Slot::Upvalue(upvalue_id);
     }
 
-    pub(crate) fn set_capture(&mut self, capndx: usize, capture: UpvalueId) {
-        *self.captured_upvalues.get_mut(capndx) = capture;
+    pub(crate) fn set_capture(&mut self, capture_ndx: usize, capture: UpvalueId) {
+        let capture_slot = self
+            .metrics
+            .capture_slot(capture_ndx, &self.stack_buffer)
+            .get_mut(&mut self.stack_buffer);
+        *capture_slot = capture;
     }
 }
 
-struct Stack<T> {
-    items: Vec<T>,
-    n_readable_slots: Option<usize>,
+fn slot_value<'a>(slot: &'a stack_access::Slot, upv_alloc: &'a Heap) -> &'a Value {
+    match slot {
+        stack_access::Slot::Inline(value) => value,
+        stack_access::Slot::Upvalue(upv_id) => upv_alloc
+            .get(*upv_id)
+            .expect("gc bug: value deleted but still referenced by stack"),
+    }
 }
 
-impl<T: Clone> Stack<T> {
-    fn with_capacity(cap: usize) -> Self {
-        let items = Vec::with_capacity(cap);
-        Stack {
-            items,
-            n_readable_slots: None,
+fn set_slot_value(slot: &mut stack_access::Slot, upv_alloc: &mut Heap, value: Value) {
+    let value_slot = match slot {
+        stack_access::Slot::Inline(slot_value) => {
+            eprintln!(".. set inline result = {:?}", value);
+            slot_value
         }
-    }
-
-    fn push_and_lock(&mut self, count: usize, value: T) {
-        self.push_n(count, value);
-        self.set_n_readable(Some(count));
-    }
-    fn push_n(&mut self, count: usize, value: T) {
-        self.items.resize(self.items.len() + count, value);
-    }
-    fn push(&mut self, value: T) {
-        self.items.push(value);
-    }
-
-    fn pop_n(&mut self, count: usize) {
-        self.items.truncate(self.items.len() - count);
-    }
-
-    fn get(&self, ndx: usize) -> &T {
-        if let Some(n_readable) = self.n_readable_slots {
-            assert!(
-                ndx < n_readable,
-                "requested index {}, but only {} slots are readable",
-                ndx,
-                n_readable
-            );
+        stack_access::Slot::Upvalue(upv_id) => {
+            eprintln!(".. set upvalue {:?} = {:?}", upv_id, value);
+            upv_alloc
+                .get_mut(*upv_id)
+                .expect("gc bug: value deleted but still referenced by stack")
         }
+    };
 
-        let ndx = self.items.len() - 1 - ndx;
-        &self.items[ndx]
-    }
-    fn get_mut(&mut self, ndx: usize) -> &mut T {
-        if let Some(n_readable) = self.n_readable_slots {
-            assert!(ndx < n_readable);
-        }
-
-        let ndx = self.items.len() - 1 - ndx;
-        &mut self.items[ndx]
-    }
-
-    fn set_n_readable(&mut self, count: Option<usize>) {
-        self.n_readable_slots = count;
-    }
-
-    fn len(&self) -> usize {
-        self.items.len()
-    }
+    *value_slot = value;
 }

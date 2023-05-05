@@ -11,6 +11,8 @@ mod jit;
 mod stack;
 mod util;
 
+mod stack_access;
+
 pub use interpreter::{InterpreterFlags, JitMode, TracerFlags, VM};
 
 #[cfg(test)]
