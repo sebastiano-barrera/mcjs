@@ -153,8 +153,9 @@ pub struct TraceBuilder {
     instrs: Vec<Instr>,
 
     // This map contains a bunch of capture slot -> ValueId mappings.
-    // Each closure is mapped to a non-overlapping subrange of this Vec, stored in the
-    // corresponding ClosureId instruction.
+    // Each closure corresponds to a non-overlapping subrange of this Vec. Its captures will be
+    // stored in this subrange, and the subrange's coordinates are stored in the corresponding
+    // ClosureId instruction.
     captures_map: Vec<ValueId>,
 
     snapshot_map: SnapshotMap,
@@ -536,10 +537,7 @@ impl TraceBuilder {
 
         let result = match instr {
             bytecode::Instr::GetCapture(cap_ndx) => {
-                let cap_map_range = self.callstack.last()
-                    .ok_or(Error::Unsupported("GetCapture in the topmost JIT-observed frame".into()))?
-                    .cap_map_range.clone()
-                    .ok_or(Error::CaptureInExternalClosure)?;
+                let cap_map_range = self.get_captures_map_range()?;
                 let cap = self.captures_map[cap_map_range][*cap_ndx as usize];
                 Some(cap)
             },
@@ -656,6 +654,15 @@ impl TraceBuilder {
             bytecode::Instr::SetVar { var, value } => {
                 let value = self.resolve_interpreter_operand(*value)?;
 
+                let var_instr = &step.func.instrs()[var.0 as usize];
+                if let bytecode::Instr::GetCapture(cap_ndx) = var_instr {
+                    print_indent(self.stack_depth());
+                    eprintln!("[..tb map capture #{} = {:?}]", cap_ndx, value);
+
+                    let cap_map_range = self.get_captures_map_range()?;
+                    self.captures_map[cap_map_range][*cap_ndx as usize] = value;
+                }
+
                 print_indent(self.stack_depth());
                 eprintln!("[..tb map var: {:?} = {:?}]", var, value);
 
@@ -748,6 +755,19 @@ impl TraceBuilder {
         }
 
         Ok(())
+    }
+
+    fn get_captures_map_range(&mut self) -> Result<Range<usize>, Error> {
+        let range = self
+            .callstack
+            .last()
+            .ok_or(Error::Unsupported(
+                "GetCapture in the topmost JIT-observed frame".into(),
+            ))?
+            .cap_map_range
+            .clone()
+            .ok_or(Error::CaptureInExternalClosure)?;
+        Ok(range)
     }
 
     pub(crate) fn enter_function(&mut self, call_iid: IID, callee_iid: IID, n_vars: usize) {
@@ -1442,7 +1462,8 @@ mod tests {
     }
 
     struct Output {
-        sink: Vec<interpreter::Value>,
+        interpreter_sink: Vec<interpreter::Value>,
+        jit_sink: Vec<interpreter::Value>,
         vm: interpreter::VM,
     }
     impl Output {
@@ -1474,19 +1495,19 @@ mod tests {
         let mut vm = interpreter::VM::new();
 
         run_and_compile(&mut vm, code);
-        vm.take_sink(); // ... and discard it
+        let interpreter_sink = vm.take_sink();
 
-        {
-            let flags = interpreter::InterpreterFlags {
-                jit_mode: interpreter::JitMode::UseTraces,
-                ..Default::default()
-            };
-            vm.run_script(code.to_string(), flags)
-                .expect("second run (trace run) failed");
-        }
+        let flags = interpreter::InterpreterFlags {
+            jit_mode: interpreter::JitMode::UseTraces,
+            ..Default::default()
+        };
+        vm.run_script(code.to_string(), flags)
+            .expect("second run (trace run) failed");
+        let jit_sink = vm.take_sink();
 
         Output {
-            sink: vm.take_sink(),
+            interpreter_sink,
+            jit_sink,
             vm,
         }
     }
@@ -1595,7 +1616,7 @@ mod tests {
         native_thunk.dump();
 
         assert_eq!(
-            &output.sink,
+            &output.jit_sink,
             &[
                 BoxedValue::Number(0.0),
                 BoxedValue::Number(1.0),
@@ -1641,9 +1662,12 @@ mod tests {
     }
 
     #[test]
-    fn test_closures() {
+    fn test_inline_closures() {
+        // A closure with a capture, fully "seen" and inlined by the JIT
         let output = quick_jit(
             "
+            __start_trace('t');
+
             function iota(factor) {
                 let i = 0;
                 return function() {
@@ -1652,7 +1676,6 @@ mod tests {
                 };
             }
 
-            __start_trace('t');
             const next1 = iota(11);
             const next2 = iota(7);
 
@@ -1694,6 +1717,8 @@ mod tests {
     fn test_loop_unrolling() {
         let output = quick_jit(
             "
+            __start_trace('t');
+
             function sum_range(n) {
                 let i = 0;
                 let ret = 0;
@@ -1705,7 +1730,6 @@ mod tests {
                 return ret;
             }
 
-            __start_trace('t');
             sink(sum_range(5));
             ",
         );
@@ -1717,7 +1741,7 @@ mod tests {
         assert_eq!(thunk.n_runs(), 1);
 
         assert_eq!(
-            &output.sink,
+            &output.jit_sink,
             &[
                 BoxedValue::Number(0.0),
                 BoxedValue::Number(1.0),

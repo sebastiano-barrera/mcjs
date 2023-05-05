@@ -59,14 +59,6 @@ impl InterpreterData {
         self.metrics.top -= frame_sz;
         *self.metrics.header().get_mut(&mut self.stack_buffer) = frame_hdr;
         self.n_frames += 1;
-
-        #[cfg(test)]
-        eprintln!(
-            "pushed frame, {} bytes. top = {}; hdr = {:?}",
-            frame_sz,
-            self.metrics.top,
-            self.metrics.header().get(&self.stack_buffer)
-        );
     }
 
     pub(crate) fn pop(&mut self) {
@@ -74,20 +66,6 @@ impl InterpreterData {
         let cur_frame_sz = self.metrics.frame_size(&self.stack_buffer);
         self.metrics.top += cur_frame_sz;
         self.n_frames -= 1;
-
-        #[cfg(test)]
-        if self.n_frames == 0 {
-            eprintln!(
-                "popped frame, {} bytes. top = {}, no more stack!",
-                cur_frame_sz, self.metrics.top
-            );
-        } else {
-            let hdr = self.metrics.header().get(&self.stack_buffer);
-            eprintln!(
-                "popped frame, {} bytes. top = {}, hdr = {:?}",
-                cur_frame_sz, self.metrics.top, hdr
-            );
-        }
     }
 
     pub(crate) fn fnid(&self) -> bytecode::FnId {
@@ -188,16 +166,10 @@ fn slot_value<'a>(slot: &'a stack_access::Slot, upv_alloc: &'a Heap) -> &'a Valu
 
 fn set_slot_value(slot: &mut stack_access::Slot, upv_alloc: &mut Heap, value: Value) {
     let value_slot = match slot {
-        stack_access::Slot::Inline(slot_value) => {
-            eprintln!(".. set inline result = {:?}", value);
-            slot_value
-        }
-        stack_access::Slot::Upvalue(upv_id) => {
-            eprintln!(".. set upvalue {:?} = {:?}", upv_id, value);
-            upv_alloc
-                .get_mut(*upv_id)
-                .expect("gc bug: value deleted but still referenced by stack")
-        }
+        stack_access::Slot::Inline(slot_value) => slot_value,
+        stack_access::Slot::Upvalue(upv_id) => upv_alloc
+            .get_mut(*upv_id)
+            .expect("gc bug: value deleted but still referenced by stack"),
     };
 
     *value_slot = value;
