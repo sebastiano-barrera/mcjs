@@ -65,11 +65,18 @@ struct Scope {
     // TODO Take advantage of identifier interning!
     vars: HashMap<String, IID>,
 }
+impl Scope {
+    fn new() -> Self {
+        Scope {
+            vars: HashMap::new(),
+        }
+    }
+}
 impl FnBuilder {
     fn new(id: FnId) -> Self {
         FnBuilder {
             fnid: id,
-            scopes: vec![Self::new_scope()],
+            scopes: vec![Scope::new()],
             instrs: Vec::new(),
             trace_anchors: HashMap::new(),
             captures: Vec::new(),
@@ -81,10 +88,11 @@ impl FnBuilder {
         bytecode::Function::new(self.instrs.into_boxed_slice(), self.trace_anchors)
     }
 
-    fn new_scope() -> Scope {
-        Scope {
-            vars: HashMap::new(),
-        }
+    fn push_scope(&mut self) {
+        self.scopes.push(Scope::new());
+    }
+    fn pop_scope(&mut self) {
+        self.scopes.pop().unwrap();
     }
 
     fn inner_scope(&self) -> &Scope {
@@ -122,7 +130,12 @@ impl FnBuilder {
 
     fn get_var(&self, sym: &JsWord) -> Option<IID> {
         let name = String::from_utf8_lossy(sym.as_bytes());
-        self.inner_scope().vars.get(name.as_ref()).copied()
+
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.vars.get(name.as_ref()))
+            .copied()
     }
 
     fn define_var(&mut self, name: JsWord, var: IID) {
@@ -198,12 +211,24 @@ impl Builder {
         self.cur_fnb().define_local(name, value_iid)
     }
 
-    fn get_var(&mut self, sym: &JsWord) -> IID {
-        let fnb = &mut self.cur_fnb();
-        if let Some(var_id) = fnb.get_var(sym) {
-            var_id
-        } else {
-            fnb.set_var_captured(sym.clone())
+    fn get_var(&mut self, sym: &JsWord) -> Result<IID> {
+        // self.fn_stack.last_mut().expect("no FnBuilder!")
+        let found_iid = self
+            .fn_stack
+            .iter_mut()
+            .rev()
+            .enumerate()
+            .find_map(|(ndx, fnb)| fnb.get_var(sym).map(|iid| (ndx, iid)));
+        match found_iid {
+            // Hell yeah, found it in the current function, we have a "simple" IID
+            Some((0, iid)) => Ok(iid),
+            Some((_, _)) => {
+                // Found it in one of the enclosing functions.  We'll have to add a capture, but we
+                // know the variable is there
+                let iid = self.cur_fnb().set_var_captured(sym.clone());
+                Ok(iid)
+            }
+            None => Err(error!("unbound symbol: {}", sym)),
         }
     }
 
@@ -284,10 +309,14 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
     match stmt {
         Stmt::Block(block) => {
+            builder.cur_fnb().push_scope();
+
             for stmt in &block.stmts {
                 compile_stmt(builder, stmt)
                     .with_context(error!("in block").with_span(block.span))?;
             }
+
+            builder.cur_fnb().pop_scope();
             Ok(())
         }
         // Stmt::Empty(_) => todo!(),
@@ -445,11 +474,14 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
     // the ClosureNew and any associated ClosureAddCapture are adjacent
     // TODO(performance) avoid this allocation?
-    let cap_vars: Vec<_> = inner_fnb
-        .captures
-        .iter()
-        .map(|var_name| builder.get_var(var_name))
-        .collect();
+    let cap_vars = {
+        let mut cap_vars = Vec::new();
+        for var_name in inner_fnb.captures.iter() {
+            let iid = builder.get_var(var_name)?;
+            cap_vars.push(iid);
+        }
+        cap_vars
+    };
 
     let closure_iid = builder.emit(Instr::ClosureNew {
         fnid: inner_fnb.fnid,
@@ -594,7 +626,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
             let value = if &ident.sym == "undefined" {
                 builder.emit(Instr::Const(Value::Undefined))
             } else {
-                get_var(builder, ident)?
+                builder.get_var(&ident.sym)?
             };
             Ok(value)
         }
@@ -728,7 +760,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
             if let Expr::Ident(ident) = &*update_expr.arg {
                 // NOTE: update_expr.prefix does not matter in this case, but
                 // it will matter when this code is extended to other types of args
-                let var = get_var(builder, ident)?;
+                let var = builder.get_var(&ident.sym)?;
                 // TODO Use integers here, when they get implemented
                 let one = builder.emit(Instr::Const(Value::Number(1.0)));
                 let op = match update_expr.op {
@@ -783,7 +815,7 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
     use swc_ecma_ast::{Expr, MemberExpr, MemberProp, PatOrExpr};
 
     if let Some(ident) = asmt.left.as_ident() {
-        let var = get_var(builder, ident)?;
+        let var = builder.get_var(&ident.sym)?;
         let new_value = compile_assignment_rhs(builder, asmt, var)?;
         builder.emit(Instr::SetVar {
             var,
@@ -893,10 +925,6 @@ fn compile_assignment_rhs(
         other => unsupported_node!(other),
     };
     Ok(value)
-}
-
-fn get_var(builder: &mut Builder, ident: &swc_ecma_ast::Ident) -> Result<IID> {
-    Ok(builder.get_var(&ident.sym))
 }
 
 fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_ecma_ast::Module)> {
@@ -1090,5 +1118,76 @@ mod tests {
 
             fnid.0 += 1;
         }
+    }
+
+    #[test]
+    fn test_bindings_limited_scopes() {
+        let res = Compiler::new().compile_file(
+            "<input>".to_string(),
+            "
+            function f() {
+                function g() {
+                    // All these forms introduce a scope
+
+                    if (false) {
+                        function z() { return 'lol'; }
+                    }
+
+                    while (1) {
+                        function z() { return 'lol'; }
+                    }
+
+                    {
+                        function z() { return 'lol'; }
+                    }
+
+                    if (true) {
+                        // Still unbound here
+                        z();
+                    }
+                }
+            }
+            "
+            .to_string(),
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_bindings_cross_scope() {
+        let res = Compiler::new().compile_file(
+            "<input>".to_string(),
+            "
+            function f() {
+                function g() {
+                    function z() { return 'lol'; }
+
+                    if (true) {
+                        z();
+                    }
+                }
+            }
+            "
+            .to_string(),
+        );
+
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_bindings_unbound_symbol() {
+        let res = Compiler::new().compile_file(
+            "<input>".to_string(),
+            "
+            function f() {
+                function g() {
+                    z();
+                }
+            }
+            "
+            .to_string(),
+        );
+
+        assert!(res.is_err());
     }
 }
