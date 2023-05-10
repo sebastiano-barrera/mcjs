@@ -1692,6 +1692,8 @@ mod tests {
             ",
         );
 
+        assert_eq!(&output.interpreter_sink, &output.jit_sink);
+
         let trace = output.get_trace("t").unwrap();
         trace.dump();
 
