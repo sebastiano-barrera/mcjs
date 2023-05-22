@@ -4,7 +4,7 @@ use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, SourceMap, Span};
 use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
-use crate::bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, Instr, Value, IID};
+use crate::bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, Instr, NativeFnId, Value, IID};
 pub use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::interpreter;
@@ -16,26 +16,29 @@ macro_rules! unsupported_node {
     }};
 }
 
+type NativeFnMap = HashMap<JsWord, NativeFnId>;
+
 pub struct Compiler {
-    builtins: HashMap<JsWord, IID>,
+    builtin_fns: NativeFnMap,
 }
 
 impl Compiler {
     pub fn new() -> Self {
         Compiler {
-            builtins: HashMap::new(),
+            builtin_fns: HashMap::new(),
         }
     }
 
-    pub fn bind_native(&mut self, ident: JsWord, value: IID) {
-        self.builtins.insert(ident, value);
+    pub fn add_builtin_fn(&mut self, name: JsWord, bid: NativeFnId) -> Option<NativeFnId> {
+        self.builtin_fns.insert(name, bid)
     }
 
     pub fn compile_file(&mut self, filename: String, content: String) -> Result<bytecode::Module> {
         use crate::common::Context;
         let (source_map, ast_module) = parse_file(filename.clone(), content)
             .with_context(error!("while parsing file: {filename}"))?;
-        let builder = Builder::new(self.builtins.clone());
+
+        let builder = Builder::new(&self.builtin_fns);
         let res = compile_module(builder, &ast_module)
             .with_context(error!("while compiling module: {filename}"));
         if let Err(err) = &res {
@@ -46,7 +49,8 @@ impl Compiler {
     }
 }
 
-struct Builder {
+struct Builder<'a> {
+    native_fns: &'a NativeFnMap,
     fns: HashMap<FnId, FnBuilder>,
     fn_stack: Vec<FnBuilder>,
     next_fnid: u32,
@@ -60,6 +64,7 @@ struct FnBuilder {
     last_local_ndx: u32,
     captures: Vec<JsWord>,
 }
+
 #[derive(Debug)]
 struct Scope {
     // TODO Take advantage of identifier interning!
@@ -72,6 +77,7 @@ impl Scope {
         }
     }
 }
+
 impl FnBuilder {
     fn new(id: FnId) -> Self {
         FnBuilder {
@@ -152,22 +158,17 @@ impl FnBuilder {
     }
 }
 
-impl Builder {
-    fn new(builtins: HashMap<JsWord, IID>) -> Self {
+impl<'a> Builder<'a> {
+    fn new(native_fns: &'a NativeFnMap) -> Self {
         let next_fnid = 1;
         assert_ne!(FnId(next_fnid), FnId::ROOT_FN);
 
-        let mut builder = Builder {
+        Builder {
+            native_fns,
             fns: HashMap::new(),
             fn_stack: vec![FnBuilder::new(FnId::ROOT_FN)],
             next_fnid,
-        };
-
-        for (name, operand) in builtins.into_iter() {
-            builder.define_var(name.clone(), operand);
         }
-
-        builder
     }
 
     fn build(mut self) -> bytecode::Module {
@@ -218,7 +219,13 @@ impl Builder {
             .iter_mut()
             .rev()
             .enumerate()
-            .find_map(|(ndx, fnb)| fnb.get_var(sym).map(|iid| (ndx, iid)));
+            .find_map(|(ndx, fnb)| fnb.get_var(sym).map(|iid| (ndx, iid)))
+            .or_else(|| {
+                let nfid = self.native_fns.get(sym)?;
+                let iid = self.cur_fnb().emit(Instr::GetNativeFn(*nfid));
+                Some((0, iid))
+            });
+
         match found_iid {
             // Hell yeah, found it in the current function, we have a "simple" IID
             Some((0, iid)) => Ok(iid),

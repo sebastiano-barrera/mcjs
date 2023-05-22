@@ -108,7 +108,6 @@ impl ValueType {
             interpreter::Value::Null => ValueType::Null,
             interpreter::Value::Undefined => ValueType::Undefined,
             interpreter::Value::SelfFunction => ValueType::Function,
-            interpreter::Value::NativeFunction(_) => ValueType::Function,
             interpreter::Value::Object(_) => ValueType::Obj,
             interpreter::Value::Closure(_) => ValueType::Function,
         }
@@ -728,6 +727,7 @@ impl TraceBuilder {
                 let b = self.resolve_operand_as(*b, ValueType::Bool)?;
                 Some(self.emit(Instr::BoolOp { op: *op, a, b })?)
             }
+
             bytecode::Instr::ClosureNew { .. } => {
                 let cap_range_start = self.captures_map.len();
 
@@ -743,6 +743,7 @@ impl TraceBuilder {
             }
             // This is handled as part of the ClosureNew
             bytecode::Instr::ClosureAddCapture(_) => unreachable!(),
+            bytecode::Instr::GetNativeFn(_) => todo!("JIT: GetNativeFn"),
 
             bytecode::Instr::UnaryMinus(_) => {
                 todo!("(small feat) jit::builder: UnaryMinus")

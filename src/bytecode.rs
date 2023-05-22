@@ -82,6 +82,7 @@ pub enum Instr {
         fnid: FnId,
     },
     ClosureAddCapture(IID),
+    GetNativeFn(NativeFnId),
 
     ObjNew,
     ObjSet {
@@ -117,9 +118,9 @@ pub enum Value {
     Undefined,
     // TODO(cleanup) Delete, Closure supersedes this
     SelfFunction,
-    // TODO(cleanup) Delete, Closure supersedes this
-    NativeFunction(u32),
 }
+
+pub type NativeFnId = u32;
 
 impl From<String> for Value {
     fn from(value: String) -> Self {
@@ -132,32 +133,34 @@ type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
 impl Instr {
     fn read_operands<'a>(&'a self) -> Operands {
         match *self {
-            Instr::Nop => Default::default(),
-            Instr::Const(_) => Default::default(),
             Instr::Not(oper) => Operands::from_iter([oper].into_iter()),
             Instr::UnaryMinus(oper) => Operands::from_iter([oper].into_iter()),
             Instr::Arith { op: _, a, b } => Operands::from_iter([a, b].into_iter()),
             Instr::Cmp { op: _, a, b } => Operands::from_iter([a, b].into_iter()),
             Instr::BoolOp { op: _, a, b } => Operands::from_iter([a, b].into_iter()),
             Instr::JmpIf { cond, .. } => Operands::from_iter([cond].into_iter()),
-            Instr::Jmp(_) => Default::default(),
             Instr::SetVar { var: _, value } => Operands::from_iter([value].into_iter()),
-            Instr::GetCapture(_) => Default::default(),
             Instr::PushSink(arg) => Operands::from_iter([arg].into_iter()),
             Instr::Return(arg) => Operands::from_iter([arg].into_iter()),
-            Instr::GetArg(_) => Default::default(),
             Instr::Call {
                 callee: _,
                 ref args,
             } => Operands::from_iter(args.iter().cloned()),
-            Instr::ObjNew => Default::default(),
             Instr::ObjSet { obj, key, value } => Operands::from_iter([obj, key, value].into_iter()),
             Instr::ObjGet { obj, key } => Operands::from_iter([obj, key].into_iter()),
-            Instr::ArrayNew => Default::default(),
             Instr::ArrayPush(arr, value) => Operands::from_iter([arr, value].into_iter()),
             Instr::TypeOf(arg) => Operands::from_iter([arg].into_iter()),
-            Instr::ClosureNew { .. } => Default::default(),
             Instr::ClosureAddCapture(value) => Operands::from_iter([value].into_iter()),
+
+            Instr::GetNativeFn(_) => Default::default(),
+            Instr::ClosureNew { .. } => Default::default(),
+            Instr::ArrayNew => Default::default(),
+            Instr::ObjNew => Default::default(),
+            Instr::GetArg(_) => Default::default(),
+            Instr::GetCapture(_) => Default::default(),
+            Instr::Jmp(_) => Default::default(),
+            Instr::Const(_) => Default::default(),
+            Instr::Nop => Default::default(),
         }
     }
 }
@@ -240,10 +243,7 @@ pub struct LoopInfo {
     interloop_vars: HashSet<IID>,
 }
 impl Function {
-    pub(crate) fn new(
-        instrs: Box<[Instr]>,
-        trace_anchors: HashMap<IID, TraceAnchor>,
-    ) -> Function {
+    pub(crate) fn new(instrs: Box<[Instr]>, trace_anchors: HashMap<IID, TraceAnchor>) -> Function {
         let loop_heads = find_loop_heads(&instrs[..]);
         Function {
             instrs,

@@ -105,7 +105,6 @@ fn encode_value(rt_data: &mut RuntimeData, value: &interpreter::Value) -> (i64, 
         BoxedValue::Null => 0 as _,
         BoxedValue::Undefined => 0 as _,
         BoxedValue::SelfFunction => todo!("(small feat) SelfFunction"),
-        BoxedValue::NativeFunction(_) => todo!("(big feat) NativeFunction"),
         BoxedValue::Closure(_) => todo!("(big feat) encode closure"),
     };
 

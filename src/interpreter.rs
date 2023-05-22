@@ -32,8 +32,6 @@ pub enum Value {
     Undefined,
     // TODO(cleanup) Delete, Closure supersedes this
     SelfFunction,
-    // TODO(cleanup) Delete, Closure supersedes this
-    NativeFunction(u32),
     Closure(Closure),
 }
 
@@ -49,6 +47,12 @@ impl From<&'static str> for Value {
     }
 }
 
+impl From<Closure> for Value {
+    fn from(closure: Closure) -> Self {
+        Value::Closure(closure)
+    }
+}
+
 impl From<bytecode::Value> for Value {
     fn from(bc_value: bytecode::Value) -> Self {
         match bc_value {
@@ -58,7 +62,6 @@ impl From<bytecode::Value> for Value {
             bytecode::Value::Null => Value::Null,
             bytecode::Value::Undefined => Value::Undefined,
             bytecode::Value::SelfFunction => todo!(),
-            bytecode::Value::NativeFunction(nf) => Value::NativeFunction(nf),
         }
     }
 }
@@ -75,7 +78,6 @@ impl Value {
             Value::Null => "object",
             Value::Undefined => "undefined",
             Value::SelfFunction => "function",
-            Value::NativeFunction(_) => "function",
             Value::Closure(_) => "function",
         };
 
@@ -131,7 +133,13 @@ impl ObjectKey {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct Closure {
+pub enum Closure {
+    Native(bytecode::NativeFnId),
+    JS(JSClosure),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct JSClosure {
     fnid: FnId,
     /// TODO There oughta be a better data structure for this
     upvalues: Vec<UpvalueId>,
@@ -139,11 +147,18 @@ pub struct Closure {
 
 impl std::fmt::Debug for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<closure {:?} | ", self.fnid)?;
-        for upv in &self.upvalues {
-            write!(f, "{:?} ", upv)?;
+        match self {
+            Closure::Native(bid) => {
+                write!(f, "<native closure {}>", bid)
+            }
+            Closure::JS(closure) => {
+                write!(f, "<closure {:?} | ", closure.fnid)?;
+                for upv in &closure.upvalues {
+                    write!(f, "{:?} ", upv)?;
+                }
+                write!(f, ">")
+            }
         }
-        write!(f, ">")
     }
 }
 
@@ -170,31 +185,7 @@ impl std::fmt::Debug for NotADirectoryError {
     }
 }
 
-type NativeFunc = fn(&mut Interpreter, &[Value]) -> Result<Value>;
-
-lazy_static! {
-    static ref NATIVE_FUNCS: HashMap<u32, NativeFunc> = {
-        let mut map = HashMap::new();
-        map.insert(VM::NFID_REQUIRE, nf_require as NativeFunc);
-        map
-    };
-}
-
-fn nf_require(intp: &mut Interpreter, args: &[Value]) -> Result<Value> {
-    let arg0 = args.iter().next();
-    match arg0 {
-        Some(Value::String(path)) => {
-            intp.vm.load_module(path)?;
-            Ok(Value::Undefined)
-        }
-        _ => Err(error!("invalid args for require()")),
-    }
-}
-
 impl VM {
-    const NFID_REQUIRE: u32 = 1;
-    const NFID_STRING_NEW: u32 = 2;
-
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         VM {
@@ -256,7 +247,7 @@ impl VM {
         };
 
         let mut bc_compiler = bytecode_compiler::Compiler::new();
-        set_builtins(&mut bc_compiler);
+        set_native_fns(&mut bc_compiler);
         let module = bc_compiler.compile_file(key.clone(), text).unwrap();
 
         if self.opts.debug_dump_module {
@@ -286,7 +277,7 @@ impl VM {
 
     pub fn run_script(&mut self, script_text: String, flags: InterpreterFlags) -> Result<()> {
         let mut bc_compiler = bytecode_compiler::Compiler::new();
-        set_builtins(&mut bc_compiler);
+        set_native_fns(&mut bc_compiler);
         let module = bc_compiler
             .compile_file("<input>".to_string(), script_text)
             .unwrap();
@@ -541,7 +532,6 @@ impl<'a> Interpreter<'a> {
                         Value::Null => Value::Bool(true),
                         Value::Undefined => Value::Bool(true),
                         Value::SelfFunction => Value::Bool(false),
-                        Value::NativeFunction(_) => Value::Bool(false),
                         Value::Closure(_) => Value::Bool(false),
                     };
                     self.data.set_result(self.iid, value);
@@ -560,47 +550,59 @@ impl<'a> Interpreter<'a> {
                 Instr::Call { callee, args } => {
                     let closure = match self.get_operand(*callee) {
                         Value::Closure(closure) => closure,
-                        Value::NativeFunction(nfid) => todo!("call NativeFunction"),
                         other => panic!("invalid callee (not a function): {:?}", other),
                     };
 
-                    // The arguments have to be "read" before adding the stack frame; they will no
-                    // longer be accessible afterwards
-                    let arg_vals: Vec<_> = args.iter().map(|arg| self.get_operand(*arg)).collect();
-                    let callee_func = self.module.get_function(closure.fnid).unwrap();
-                    let n_captures = closure.upvalues.len().try_into().unwrap();
-                    let n_instrs = callee_func.instrs().len().try_into().unwrap();
+                    match closure {
+                        Closure::JS(closure) => {
+                            // The arguments have to be "read" before adding the stack frame;
+                            // they will no longer be accessible
+                            // afterwards
+                            let arg_vals: Vec<_> =
+                                args.iter().map(|arg| self.get_operand(*arg)).collect();
+                            let callee_func = self.module.get_function(closure.fnid).unwrap();
+                            let n_captures = closure.upvalues.len().try_into().unwrap();
+                            let n_instrs = callee_func.instrs().len().try_into().unwrap();
 
-                    if let Some(jitting) = &mut self.jitting {
-                        jitting.builder.set_args(args);
-                        jitting
-                            .builder
-                            .enter_function(self.iid, *callee, n_instrs as usize);
+                            if let Some(jitting) = &mut self.jitting {
+                                jitting.builder.set_args(args);
+                                jitting.builder.enter_function(
+                                    self.iid,
+                                    *callee,
+                                    n_instrs as usize,
+                                );
+                            }
+
+                            self.data.push(stack::CallMeta {
+                                fnid: closure.fnid,
+                                n_instrs,
+                                n_captured_upvalues: n_captures,
+                                n_args: arg_vals.len().try_into().unwrap(),
+                                call_iid: Some(self.iid),
+                            });
+
+                            self.print_indent();
+                            eprintln!("-- fn #{} [{} captures]", closure.fnid.0, n_captures);
+
+                            for (capndx, capture) in closure.upvalues.iter().enumerate() {
+                                self.data.set_capture(capndx, *capture);
+                            }
+                            for (i, arg) in arg_vals.into_iter().enumerate() {
+                                self.data.set_arg(i, arg);
+                            }
+
+                            self.iid = IID(0u32);
+                            // Important: we don't execute the tail part of the instruction's
+                            // execution. This makes it easier
+                            // to keep a consistent value in `func` and other
+                            // variables, and avoid subtle bugs
+                            continue;
+                        }
+                        Closure::Native(nfid) => {
+                            let ret_val = self.invoke_native(nfid, args)?;
+                            self.data.set_result(self.iid, ret_val);
+                        }
                     }
-
-                    self.data.push(stack::CallMeta {
-                        fnid: closure.fnid,
-                        n_instrs,
-                        n_captured_upvalues: n_captures,
-                        n_args: arg_vals.len().try_into().unwrap(),
-                        call_iid: Some(self.iid),
-                    });
-
-                    self.print_indent();
-                    eprintln!("-- fn #{} [{} captures]", closure.fnid.0, n_captures);
-
-                    for (capndx, capture) in closure.upvalues.iter().enumerate() {
-                        self.data.set_capture(capndx, *capture);
-                    }
-                    for (i, arg) in arg_vals.into_iter().enumerate() {
-                        self.data.set_arg(i, arg);
-                    }
-
-                    self.iid = IID(0u32);
-                    // Important: we don't execute the tail part of the instruction's execution.
-                    // This makes it easier to keep a consistent value in `func` and other
-                    // variables, and avoid subtle bugs
-                    continue;
                 }
 
                 Instr::GetArg(arg_ndx) => {
@@ -659,6 +661,7 @@ impl<'a> Interpreter<'a> {
                     };
                     self.data.set_result(self.iid, Value::Bool(res));
                 }
+
                 Instr::ClosureNew { fnid } => {
                     let mut upvalues = Vec::new();
                     while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
@@ -674,15 +677,19 @@ impl<'a> Interpreter<'a> {
                         next_ndx += 1;
                     }
 
-                    let closure = Closure {
+                    let closure = Closure::JS(JSClosure {
                         fnid: *fnid,
                         upvalues,
-                    };
+                    });
 
                     self.data.set_result(self.iid, Value::Closure(closure));
                 }
                 // This is always handled in the code for ClosureNew
                 Instr::ClosureAddCapture(_) => unreachable!(),
+                Instr::GetNativeFn(nfid) => {
+                    self.data
+                        .set_result(self.iid, Closure::Native(*nfid).into());
+                }
 
                 Instr::UnaryMinus(arg) => {
                     let arg: f64 = self.get_operand(*arg).expect_num()?;
@@ -735,22 +742,46 @@ impl<'a> Interpreter<'a> {
         // eprintln!("        {:?} = {:?}", iid, value);
         value
     }
+
+    fn invoke_native(&mut self, nfid: u32, args_iids: &[IID]) -> Result<Value> {
+        // TODO Anything more efficient is appropriate here?
+        let args: Vec<_> = args_iids.iter().map(|iid| self.get_operand(*iid)).collect();
+        if nfid == NativeFnId::Require as u32 {
+            nf_require(self, &args)
+        } else if nfid == NativeFnId::StringNew as u32 {
+            nf_string_new(self, &args)
+        } else {
+            panic!("undefined native function with ID {nfid}")
+        }
+    }
 }
 
-fn set_builtins(_bc_compiler: &mut bytecode_compiler::Compiler) {
-    // TODO(small feat) re-do builtins API
-    // bc_compiler.bind_native(
-    //     "require".into(),
-    //     bytecode::Value::NativeFunction(VM::NFID_REQUIRE).into(),
-    // );
-    // bc_compiler.bind_native(
-    //     "String".into(),
-    //     bytecode::Value::NativeFunction(VM::NFID_STRING_NEW).into(),
-    // );
+enum NativeFnId {
+    Require,
+    StringNew,
+    ArrayNew,
+}
+
+fn set_native_fns(bc_compiler: &mut bytecode_compiler::Compiler) {
+    bc_compiler.add_builtin_fn("require".into(), NativeFnId::Require as u32);
+    bc_compiler.add_builtin_fn("String".into(), NativeFnId::StringNew as u32);
+    bc_compiler.add_builtin_fn("Array".into(), NativeFnId::ArrayNew as u32);
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
-    // bc_compiler.bind_native("Object".into(),
-    // bytecode::Value::Object(Object::new()).into()); bc_compiler.bind_native("Array"
-    // .into(), bytecode::Value::Object(Object::new()).into());
+}
+
+fn nf_require(intp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    let arg0 = args.iter().next();
+    match arg0 {
+        Some(Value::String(path)) => {
+            intp.vm.load_module(path)?;
+            Ok(Value::Undefined)
+        }
+        _ => Err(error!("invalid args for require()")),
+    }
+}
+
+fn nf_string_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    todo!("nf_string_new")
 }
 
 #[derive(Clone, Debug)]
@@ -1000,8 +1031,8 @@ mod tests {
         panic!("not yet implemented");
     }
 
-    #[ignore]
     #[test]
+    #[ignore]
     fn test_for_in() {
         // TODO(small feat) This syntax is not yet implemented
         let output = quick_run(
