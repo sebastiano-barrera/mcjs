@@ -9,6 +9,7 @@ mod common;
 mod interpreter;
 mod jit;
 mod stack;
+mod heap;
 mod util;
 
 mod stack_access;

@@ -10,16 +10,17 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub use crate::common::Error;
 use crate::{
     bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, GlobalIID, Instr, IID},
     bytecode_compiler,
     common::Result,
-    error,
+    error, heap,
     jit::{self, InterpreterStep},
     stack,
     util::Mask,
 };
+
+pub use crate::common::Error;
 
 /// A value that can be input, output, or processed by the program at runtime.
 #[derive(Debug, PartialEq, Clone)]
@@ -27,7 +28,7 @@ pub enum Value {
     Number(f64),
     String(Cow<'static, str>),
     Bool(bool),
-    Object(Object),
+    Object(heap::ObjectId),
     Null,
     Undefined,
     // TODO(cleanup) Delete, Closure supersedes this
@@ -95,39 +96,6 @@ impl Value {
         match self {
             Value::Number(val) => Ok(*val),
             _ => Err(error!("expected a number")),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Object(Arc<RefCell<HashMap<ObjectKey, Value>>>);
-
-impl Object {
-    fn new() -> Self {
-        Object(Arc::new(RefCell::new(HashMap::new())))
-    }
-
-    fn get<'a>(&'a self, key: &ObjectKey) -> Option<Ref<'a, Value>> {
-        let hashmap = self.0.borrow();
-        Ref::filter_map(hashmap, |map| map.get(key)).ok()
-    }
-
-    fn set(&mut self, key: ObjectKey, value: Value) {
-        let mut map = self.0.borrow_mut();
-        map.insert(key, value);
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub enum ObjectKey {
-    String(String),
-}
-impl ObjectKey {
-    fn from_value(value: &Value) -> Option<ObjectKey> {
-        if let Value::String(s) = value {
-            Some(ObjectKey::String(s.to_string()))
-        } else {
-            None
         }
     }
 }
@@ -319,6 +287,8 @@ struct Interpreter<'a> {
     flags: InterpreterFlags,
     jitting: Option<Jitting>,
 
+    heap: heap::ObjectHeap,
+
     // TODO (big feat) This interpreter does not support having multiple modules running. can you
     // believe it?!
     // module_id: bytecode::IID,
@@ -353,6 +323,7 @@ impl<'a> Interpreter<'a> {
 
         Interpreter {
             vm: parent_vm,
+            heap: heap::ObjectHeap::new(),
             flags,
             jitting: None,
             module,
@@ -612,20 +583,22 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::ObjNew => {
-                    self.data.set_result(self.iid, Value::Object(Object::new()));
+                    let oid = self.heap.new_object();
+                    self.data.set_result(self.iid, Value::Object(oid));
                 }
                 Instr::ObjSet { obj, key, value } => {
                     let obj = self.get_operand(*obj);
-                    let mut obj = if let Value::Object(obj) = obj {
+                    let mut oid = if let Value::Object(obj) = obj {
                         obj
                     } else {
                         panic!("ObjSet: not an object");
                     };
                     let key = self.get_operand(*key);
-                    let key = ObjectKey::from_value(&key)
+                    let key = heap::ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = self.get_operand(*value);
-                    obj.set(key, value);
+
+                    self.heap.set_property(oid, key, value);
                 }
                 Instr::ObjGet { obj, key } => {
                     let obj = self.get_operand(*obj);
@@ -635,11 +608,12 @@ impl<'a> Interpreter<'a> {
                         panic!("ObjSet: not an object");
                     };
                     let key = self.get_operand(*key);
-                    let key = ObjectKey::from_value(&key)
+                    let key = heap::ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = obj.get(&key).unwrap_or_else(|| {
-                        panic!("ObjGet: no property for key `{:?}` in object", key)
-                    });
+                    let value = self
+                        .heap
+                        .get_property(obj, &key)
+                        .unwrap_or(&Value::Undefined);
                     self.data.set_result(self.iid, value.clone());
                 }
                 Instr::ArrayNew => {
@@ -1005,30 +979,61 @@ mod tests {
     #[test]
     fn test_object_init() {
         let output = quick_run(
-            "sink({
+            "
+            const obj = {
                 aString: 'asdlol123',
                 aNumber: 1239423.4518923,
                 anotherObject: { x: 123, y: 899 },
                 aFunction: function(pt) { return 42; }
-            })",
+            }
+
+            sink(obj.aString)
+            sink(obj.aNumber)
+            sink(obj.anotherObject.x)
+            sink(obj.anotherObject.y)
+            sink(obj.aFunction)
+            ",
         )
         .unwrap();
 
-        assert_eq!(1, output.sink.len());
-        let obj = if let Value::Object(obj) = &output.sink[0] {
-            obj
-        } else {
-            panic!("not an object")
-        };
-
-        let val = obj.get(&ObjectKey::String("aString".to_string())).unwrap();
-        assert_eq!(&*val, &"asdlol123".into());
+        assert_eq!(5, output.sink.len());
+        assert_eq!(&Value::String("asdlol123".into()), &output.sink[0]);
+        assert_eq!(&Value::Number(1239423.4518923), &output.sink[1]);
+        assert_eq!(&Value::Number(123.0), &output.sink[2]);
+        assert_eq!(&Value::Number(899.0), &output.sink[3]);
+        assert!(matches!(&output.sink[4], Value::Closure(_)));
     }
 
-    #[ignore]
+    #[test]
+    fn test_typeof() {
+        todo!("check all cases for `typeof`");
+    }
+
     #[test]
     fn test_object_member_set() {
-        panic!("not yet implemented");
+        let output = quick_run(
+            "
+            const pt = { x: 123, y: 4 }
+
+            sink(pt.x)
+            sink(pt.y)
+            pt.y = 999
+            sink(pt.x)
+            sink(pt.y)
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(4, output.sink.len());
+        assert_eq!(&Value::Number(123.0), &output.sink[0]);
+        assert_eq!(&Value::Number(4.0), &output.sink[1]);
+        assert_eq!(&Value::Number(123.0), &output.sink[2]);
+        assert_eq!(&Value::Number(999.0), &output.sink[3]);
+    }
+
+    #[test]
+    fn test_object_prototype() {
+        todo!("create an object with a prototype, then lookup a property that requires walking the prototype chain")
     }
 
     #[test]
