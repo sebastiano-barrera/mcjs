@@ -2,7 +2,7 @@ use swc_common::{SourceMap, Span};
 
 struct Item {
     span: Option<Span>,
-    src_filename: &'static str,
+    src_filename: String,
     src_lineno: u32,
     message: String,
 }
@@ -67,7 +67,7 @@ impl std::fmt::Debug for Error {
 macro_rules! error {
     ($($args:expr),+) => {{
         let message = format!($($args),*);
-        Error::new(message, file!(), line!())
+        Error::new(message, file!().to_owned(), line!())
     }}
 }
 
@@ -78,12 +78,12 @@ impl From<std::io::Error> for Error {
 }
 
 impl Error {
-    pub(crate) fn new(message: String, filename: &'static str, lineno: u32) -> Self {
+    pub(crate) fn new(message: String, src_filename: String, src_lineno: u32) -> Self {
         Error {
             head: Item {
                 span: None,
-                src_filename: filename,
-                src_lineno: lineno,
+                src_filename,
+                src_lineno,
                 message,
             },
             chain: Vec::new(),

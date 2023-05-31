@@ -3,6 +3,8 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+use swc_atoms::JsWord;
+
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(clippy::upper_case_acronyms)]
@@ -94,12 +96,25 @@ pub enum Instr {
         obj: IID,
         key: IID,
     },
+    ObjGetKeys(IID),
 
-    // TODO(big feat) Temporary; should be replaced by objects, just like all other "classes"
-    ArrayNew,
     ArrayPush(IID, IID),
+    ArrayNth(IID, IID),
+    ArraySetNth(IID, IID),
+    ArrayLen(IID),
 
     TypeOf(IID),
+
+    NamedImport {
+        module_ndx: usize,
+        identifier: swc_ecma_ast::Ident,
+    },
+    DefaultImport {
+        module_ndx: usize,
+    },
+    AllNamedImports {
+        module_ndx: usize,
+    },
 }
 
 impl Instr {
@@ -146,21 +161,30 @@ impl Instr {
                 callee: _,
                 ref args,
             } => Operands::from_iter(args.iter().cloned()),
-            Instr::ObjSet { obj, key, value } => Operands::from_iter([obj, key, value].into_iter()),
-            Instr::ObjGet { obj, key } => Operands::from_iter([obj, key].into_iter()),
+
+            Instr::ArrayLen(arr) => Operands::from_iter([arr].into_iter()),
+            Instr::ObjNew => Default::default(),
+            Instr::ArrayNth(arr, ndx) => Operands::from_iter([arr, ndx].into_iter()),
             Instr::ArrayPush(arr, value) => Operands::from_iter([arr, value].into_iter()),
+            Instr::ArraySetNth(arr, ndx) => Operands::from_iter([arr, ndx].into_iter()),
+            Instr::ObjGet { obj, key } => Operands::from_iter([obj, key].into_iter()),
+            Instr::ObjGetKeys(obj) => Operands::from_iter([obj].into_iter()),
+            Instr::ObjNew => Default::default(),
+            Instr::ObjSet { obj, key, value } => Operands::from_iter([obj, key, value].into_iter()),
+
             Instr::TypeOf(arg) => Operands::from_iter([arg].into_iter()),
             Instr::ClosureAddCapture(value) => Operands::from_iter([value].into_iter()),
 
-            Instr::GetNativeFn(_) => Default::default(),
-            Instr::ClosureNew { .. } => Default::default(),
-            Instr::ArrayNew => Default::default(),
-            Instr::ObjNew => Default::default(),
-            Instr::GetArg(_) => Default::default(),
-            Instr::GetCapture(_) => Default::default(),
-            Instr::Jmp(_) => Default::default(),
-            Instr::Const(_) => Default::default(),
-            Instr::Nop => Default::default(),
+            Instr::GetNativeFn(_)
+            | Instr::ClosureNew { .. }
+            | Instr::GetArg(_)
+            | Instr::GetCapture(_)
+            | Instr::Jmp(_)
+            | Instr::Const(_)
+            | Instr::Nop
+            | Instr::NamedImport { .. }
+            | Instr::DefaultImport { .. }
+            | Instr::AllNamedImports { .. } => Default::default(),
         }
     }
 }
@@ -190,14 +214,15 @@ pub enum BoolOp {
 }
 
 pub struct Module {
-    fns: HashMap<FnId, Function>,
+    // This is a bit overshared, but I didn't want to have a whole-ass
+    // Builder just for this struct
+    pub fns: HashMap<FnId, Function>,
+    pub module_exports_named: HashMap<JsWord, IID>,
+    pub module_export_default: Option<IID>,
+    pub module_imports: Vec<JsWord>,
 }
 
 impl Module {
-    pub fn new(fns: HashMap<FnId, Function>) -> Self {
-        Module { fns }
-    }
-
     pub fn get_function(&self, fnid: FnId) -> Option<&Function> {
         self.fns.get(&fnid)
     }

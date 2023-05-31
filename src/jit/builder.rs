@@ -110,6 +110,7 @@ impl ValueType {
             interpreter::Value::SelfFunction => ValueType::Function,
             interpreter::Value::Object(_) => ValueType::Obj,
             interpreter::Value::Closure(_) => ValueType::Function,
+            interpreter::Value::Internal(_) => todo!(),
         }
     }
 
@@ -711,12 +712,18 @@ impl TraceBuilder {
 
                 Some(self.emit(Instr::ObjGet { obj, key })?)
             }
-            bytecode::Instr::ArrayNew => {
+
+            bytecode::Instr::ObjNew => {
                 todo!("(big feat) array new")
             }
             bytecode::Instr::ArrayPush(_arr, _elem) => {
                 todo!("(big feat) array push")
             }
+            bytecode::Instr::ObjGetKeys(_) => todo!(),
+            bytecode::Instr::ArrayNth(_, _) => todo!(),
+            bytecode::Instr::ArraySetNth(_, _) => todo!(),
+            bytecode::Instr::ArrayLen(_) => todo!(),
+
             bytecode::Instr::TypeOf(arg) => {
                 let arg = self.resolve_interpreter_operand(*arg)?;
                 Some(self.emit(Instr::TypeOf(arg))?)
@@ -748,6 +755,10 @@ impl TraceBuilder {
             bytecode::Instr::UnaryMinus(_) => {
                 todo!("(small feat) jit::builder: UnaryMinus")
             }
+            
+            bytecode::Instr::NamedImport { module_ndx, identifier } => todo!("NamedImport"),
+            bytecode::Instr::DefaultImport { module_ndx } => todo!("DefaultImport"),
+            bytecode::Instr::AllNamedImports { module_ndx } => todo!("AllNamedImports"),
         };
 
         // Map IID to the result operand

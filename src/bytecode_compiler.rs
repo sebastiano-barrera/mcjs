@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, SourceMap, Span};
+use swc_ecma_ast::VarDeclOrPat;
 use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
 
 use crate::bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, Instr, NativeFnId, Value, IID};
@@ -54,6 +55,39 @@ struct Builder<'a> {
     fns: HashMap<FnId, FnBuilder>,
     fn_stack: Vec<FnBuilder>,
     next_fnid: u32,
+
+    /// Values exported by the module as named exports, e.g.:
+    ///
+    /// ```js
+    /// export function foobar() { ... }
+    /// ```
+    ///
+    /// The IIDs associated to each identifier refers to the module's root function, i.e.
+    /// `self.fns[FnId::ROOT_FN]`
+    module_exports_named: HashMap<JsWord, IID>,
+    module_export_default: Option<IID>,
+
+    module_imports: Vec<JsWord>,
+}
+
+impl<'a> Builder<'a> {
+    fn set_default_export(&mut self, value: IID) {
+        let prev = self.module_export_default.replace(value);
+        if prev.is_some() {
+            // TODO Is this really a warning? Or an error...?
+            eprintln!("Warning: default export redefined");
+        }
+    }
+
+    fn ensure_imported(&mut self, path: &JsWord) -> usize {
+        for (ndx, p) in self.module_imports.iter().enumerate() {
+            if p == path {
+                return ndx;
+            }
+        }
+        self.module_imports.push(path.to_owned());
+        self.module_imports.len() - 1
+    }
 }
 
 struct FnBuilder {
@@ -168,6 +202,9 @@ impl<'a> Builder<'a> {
             fns: HashMap::new(),
             fn_stack: vec![FnBuilder::new(FnId::ROOT_FN)],
             next_fnid,
+            module_exports_named: HashMap::new(),
+            module_export_default: None,
+            module_imports: Vec::new(),
         }
     }
 
@@ -185,7 +222,13 @@ impl<'a> Builder<'a> {
             .drain()
             .map(|(fn_id, fn_builder)| (fn_id, fn_builder.build()))
             .collect();
-        bytecode::Module::new(fns)
+        
+        bytecode::Module {
+            fns,
+            module_exports_named: self.module_exports_named,
+            module_export_default: self.module_export_default,
+            module_imports: self.module_imports,
+        }
     }
 
     fn reserve(&mut self) -> IID {
@@ -287,19 +330,91 @@ fn compile_module(
         builder.define_var("module".into(), obj);
     }
 
+    let mut defs = Vec::new();
+
     for item in &ast_module.body {
         match item {
-            // ModuleItem::ModuleDecl(decl) => match decl {
-            //     ModuleDecl::Import(_) => todo!(),
-            //     ModuleDecl::ExportDecl(_) => todo!(),
-            //     ModuleDecl::ExportNamed(_) => todo!(),
-            //     ModuleDecl::ExportDefaultDecl(_) => todo!(),
-            //     ModuleDecl::ExportDefaultExpr(_) => todo!(),
-            //     ModuleDecl::ExportAll(_) => todo!(),
-            //     ModuleDecl::TsImportEquals(_) => todo!(),
-            //     ModuleDecl::TsExportAssignment(_) => todo!(),
-            //     ModuleDecl::TsNamespaceExport(_) => todo!(),
-            // },
+            ModuleItem::ModuleDecl(decl) => match decl {
+                ModuleDecl::Import(decl) => {
+                    if decl.type_only {
+                        // TODO(small feat) make up a system for warnings
+                        eprintln!(
+                            "bytecode_compiler: warning: discarding type-only import statement"
+                        );
+                        continue;
+                    }
+
+                    let module_ndx = builder.ensure_imported(&decl.src.value);
+
+                    for spec in &decl.specifiers {
+                        match spec {
+                            swc_ecma_ast::ImportSpecifier::Named(d) => {
+                                if d.is_type_only {
+                                    eprintln!(
+                                        "bytecode_compiler: warning: discarding type-only import specifier"
+                                    );
+                                } else {
+                                    if d.imported.is_some() {
+                                        todo!("import specifier with rename");
+                                    }
+                                    let value = builder.emit(Instr::NamedImport {
+                                        module_ndx,
+                                        identifier: d.local.clone(),
+                                    });
+                                    builder.define_var(d.local.sym.clone(), value);
+                                }
+                            }
+                            swc_ecma_ast::ImportSpecifier::Default(d) => {
+                                let value = builder.emit(Instr::DefaultImport { module_ndx });
+                                builder.define_var(d.local.sym.clone(), value);
+                            }
+                            swc_ecma_ast::ImportSpecifier::Namespace(d) => {
+                                let value = builder.emit(Instr::AllNamedImports { module_ndx });
+                                builder.define_var(d.local.sym.clone(), value);
+                            }
+                        }
+                    }
+                }
+
+                ModuleDecl::ExportDecl(decl) => {
+                    defs.clear();
+                    compile_decl(&mut builder, &decl.decl, Some(&mut defs))?;
+
+                    assert_eq!(builder.cur_fnb().fnid, FnId::ROOT_FN);
+                    for (name, iid) in &defs {
+                        let prev = builder.module_exports_named.insert(name.clone(), *iid);
+                        if prev.is_none() {
+                            // TODO Is this really a warning? Or an error...?
+                            eprintln!("Warning: exported symbol redefined: {}", name);
+                        }
+                    }
+                }
+                ModuleDecl::ExportNamed(_) => todo!("ExportNamed"),
+                ModuleDecl::ExportDefaultDecl(decl) => match &decl.decl {
+                    swc_ecma_ast::DefaultDecl::Class(_) => todo!("export default class"),
+                    swc_ecma_ast::DefaultDecl::Fn(fn_expr) => {
+                        let name = fn_expr.ident.as_ref().map(|ident| ident.sym.clone());
+                        let value = compile_function(&mut builder, name, &*fn_expr.function)?;
+                        builder.set_default_export(value);
+                    }
+                    swc_ecma_ast::DefaultDecl::TsInterfaceDecl(ts_decl) => eprintln!(
+                        "warning: discarded TypeScript interface export: {}",
+                        ts_decl.id.to_string()
+                    ),
+                },
+                ModuleDecl::ExportDefaultExpr(decl) => {
+                    let value = compile_expr(&mut builder, &*decl.expr)?;
+                    builder.set_default_export(value);
+                }
+                ModuleDecl::ExportAll(_) => todo!("export all"),
+
+                ModuleDecl::TsImportEquals(_)
+                | ModuleDecl::TsExportAssignment(_)
+                | ModuleDecl::TsNamespaceExport(_) => {
+                    // TODO(small feat) make up a system for warnings
+                    eprintln!("bytecode_compiler: warning: discarding TypeScript-only declaration");
+                }
+            },
             ModuleItem::Stmt(stmt) => {
                 compile_stmt(&mut builder, stmt)
                     .with_context(error!("while compiling statement"))?;
@@ -364,9 +479,69 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
         // Stmt::DoWhile(_) => todo!(),
         // Stmt::For(_) => todo!(),
-        // Stmt::ForIn(_) => todo!(),
+        Stmt::ForIn(forin_stmt) => {
+            let iteree = compile_expr(builder, &forin_stmt.right)?;
+
+            let item_var = match &forin_stmt.left {
+                VarDeclOrPat::VarDecl(var_decl) => var_decl.as_ref(),
+                VarDeclOrPat::Pat(_) => panic!(
+                    "unsupported syntax: destructuring pattern as `<pattern>` in: `for (<pattern> in ...) {{ ... }}`"
+                ),
+            };
+
+            assert_eq!(item_var.decls.len(), 1);
+
+            let item_var_name = match &item_var.decls[0].name {
+                Pat::Ident(swc_ecma_ast::BindingIdent { id, .. }) => &id.sym,
+                other => panic!(
+                    "unsupported type of pattern in: `for (<pattern> in ...) {{ ... }}: {:?}",
+                    other
+                ),
+            };
+
+            let keys = builder.emit(Instr::ObjGetKeys(iteree));
+            let keys_count = builder.emit(Instr::ArrayLen(keys));
+            let key_ndx = builder.emit(Instr::Const(Value::Number(0.0)));
+
+            builder.cur_fnb().push_scope();
+
+            let has_next = builder.emit(Instr::Cmp {
+                op: CmpOp::GE,
+                a: key_ndx,
+                b: keys_count,
+            });
+            let exit = builder.reserve();
+            let key = builder.emit(Instr::ArrayNth(keys, key_ndx));
+            builder.define_var(item_var_name.clone(), key);
+
+            compile_stmt(builder, &forin_stmt.body)?;
+
+            let one = builder.emit(Instr::Const(Value::Number(1.0)));
+            let next_key_ndx = builder.emit(Instr::Arith {
+                op: ArithOp::Add,
+                a: key_ndx,
+                b: one,
+            });
+            builder.emit(Instr::SetVar {
+                var: key_ndx,
+                value: next_key_ndx,
+            });
+
+            builder.cur_fnb().pop_scope();
+            builder.emit(Instr::Jmp(has_next));
+
+            let exit_label = builder.peek_iid();
+
+            *builder.get_mut(exit).unwrap() = Instr::JmpIf {
+                cond: has_next,
+                dest: exit_label,
+            };
+
+            Ok(())
+        }
+
         // Stmt::ForOf(_) => todo!(),
-        Stmt::Decl(decl) => compile_decl(builder, decl),
+        Stmt::Decl(decl) => compile_decl(builder, decl, None),
 
         Stmt::Expr(expr) => {
             compile_expr(builder, &expr.expr)?;
@@ -422,7 +597,11 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
     }
 }
 
-fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
+fn compile_decl(
+    builder: &mut Builder,
+    decl: &Decl,
+    defs: Option<&mut Vec<(JsWord, IID)>>,
+) -> Result<()> {
     match decl {
         // Decl::Class(_) => todo!(),
         Decl::Fn(fn_decl) => {
@@ -437,7 +616,7 @@ fn compile_decl(builder: &mut Builder, decl: &Decl) -> Result<()> {
         }
 
         Decl::Var(var_decl) => {
-            compile_var_decl(builder, var_decl)
+            compile_var_decl(builder, var_decl, defs)
                 .with_context(error!("in variable declaration").with_span(var_decl.span))?;
         }
 
@@ -501,7 +680,11 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     Ok(closure_iid.into())
 }
 
-fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> Result<()> {
+fn compile_var_decl(
+    builder: &mut Builder,
+    var_decl: &swc_ecma_ast::VarDecl,
+    mut defs: Option<&mut Vec<(JsWord, IID)>>,
+) -> Result<()> {
     use swc_ecma_ast::VarDeclKind;
 
     let _is_const = match var_decl.kind {
@@ -516,12 +699,16 @@ fn compile_var_decl(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) -> 
             None => builder.emit(Instr::Const(Value::Undefined)).into(),
         };
 
-        if let Some(ident) = decl.name.as_ident() {
-            let name: JsWord = ident.id.to_id().0;
-            builder.define_var(name, operand);
-        } else {
-            unsupported_node!(decl)
+        let ident = decl
+            .name
+            .as_ident()
+            .unwrap_or_else(|| unsupported_node!(decl));
+
+        let name: JsWord = ident.id.to_id().0;
+        if let Some(defs) = &mut defs {
+            defs.push((name.clone(), operand));
         }
+        builder.define_var(name, operand);
     }
 
     Ok(())
@@ -607,6 +794,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                 BinaryOp::NotEq => cmp(CmpOp::NE, a, b),
 
                 BinaryOp::LogicalAnd => bool_op(BoolOp::And, a, b),
+                BinaryOp::LogicalOr => bool_op(BoolOp::Or, a, b),
 
                 _ => panic!("unsupported binary op: {:?}", bin_expr.op),
             };
@@ -616,17 +804,50 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
 
         Expr::Lit(lit) => {
             let value = match lit {
-                Lit::Num(number) => Value::Number(number.value),
-                Lit::Str(s) => s.value.to_string().into(),
-                Lit::Bool(bv) => Value::Bool(bv.value),
-                Lit::Null(_) => Value::Null,
+                Lit::Num(number) => builder.emit(Instr::Const(Value::Number(number.value))),
+                Lit::Str(s) => {
+                    let value = s.value.to_string();
+                    builder.emit(Instr::Const(Value::String(value)))
+                }
+                Lit::Bool(bv) => builder.emit(Instr::Const(Value::Bool(bv.value))),
+                Lit::Null(_) => builder.emit(Instr::Const(Value::Null)),
+                Lit::Regex(re_lit) => {
+                    let constructor_fid = *builder
+                        .native_fns
+                        .get(&JsWord::from("RegExp"))
+                        .expect("undefined native constructor: RegExp");
+
+                    // TODO More efficient bytecode here?
+                    let constructor = builder.emit(Instr::GetNativeFn(constructor_fid));
+                    let re_str = re_lit.exp.to_string().into();
+                    let re_str = builder.emit(Instr::Const(re_str));
+                    let obj = builder.emit(Instr::Call {
+                        callee: constructor,
+                        args: vec![re_str],
+                    });
+
+                    let prototype_literal =
+                        builder.emit(Instr::Const(Value::String("prototype".into())));
+                    let proto = builder.emit(Instr::ObjGet {
+                        obj: constructor,
+                        key: prototype_literal,
+                    });
+
+                    let key = builder.emit(Instr::Const(Value::String("__proto__".into())));
+                    builder.emit(Instr::ObjSet {
+                        obj,
+                        key,
+                        value: proto,
+                    });
+
+                    obj
+                }
                 // Lit::BigInt(_) => todo!(),
-                // Lit::Regex(_) => todo!(),
                 // Lit::JSXText(_) => todo!(),
                 other => unsupported_node!(other),
             };
 
-            Ok(builder.emit(Instr::Const(value)).into())
+            Ok(value)
         }
 
         Expr::Ident(ident) => {
@@ -653,23 +874,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                     swc_ecma_ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
                         swc_ecma_ast::Prop::KeyValue(kv_expr) => {
                             let value = compile_expr(builder, &kv_expr.value)?;
-                            let key = match &kv_expr.key {
-                                swc_ecma_ast::PropName::Ident(ident) => {
-                                    Value::from(ident.sym.to_string())
-                                }
-                                swc_ecma_ast::PropName::Str(s) => Value::from(s.value.to_string()),
-                                swc_ecma_ast::PropName::Num(num) => Value::Number(num.value),
-                                swc_ecma_ast::PropName::Computed(x) => {
-                                    return Err(
-                                        error!("unsupported node: {:?}", x).with_span(x.span)
-                                    )
-                                }
-                                swc_ecma_ast::PropName::BigInt(x) => {
-                                    return Err(
-                                        error!("unsupported node: {:?}", x).with_span(x.span)
-                                    )
-                                }
-                            };
+                            let key = compile_prop_name(&kv_expr.key)?;
                             let key = builder.emit(Instr::Const(key)).into();
 
                             builder.emit(Instr::ObjSet {
@@ -692,9 +897,16 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
                         swc_ecma_ast::Prop::Setter(expr) => {
                             return Err(error!("unsupported node: {:?}", expr).with_span(expr.span));
                         }
-                        swc_ecma_ast::Prop::Method(expr) => {
-                            return Err(error!("unsupported node: {:?}", expr)
-                                .with_span(expr.function.span));
+                        swc_ecma_ast::Prop::Method(method_prop) => {
+                            let value = compile_function(builder, None, &*method_prop.function)?;
+                            let key = compile_prop_name(&method_prop.key)?;
+                            let key = builder.emit(Instr::Const(key)).into();
+
+                            builder.emit(Instr::ObjSet {
+                                obj: obj.clone(),
+                                key,
+                                value,
+                            });
                         }
                     },
                 }
@@ -706,7 +918,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
         // Expr::This(_) => todo!(),
         Expr::Array(arr_expr) => {
             use swc_ecma_ast::ExprOrSpread;
-            let array = builder.emit(Instr::ArrayNew);
+            let array = builder.emit(Instr::ObjNew);
             for elem in arr_expr.elems.iter() {
                 match elem {
                     Some(ExprOrSpread { spread, expr }) => {
@@ -788,6 +1000,9 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
             let (_, _, value) = compile_member_access(builder, member_expr)?;
             Ok(value)
         }
+
+        Expr::Paren(inner) => compile_expr(builder, &inner.expr),
+
         // Expr::SuperProp(_) => todo!(),
         // Expr::Cond(_) => todo!(),
         // Expr::New(_) => todo!(),
@@ -799,7 +1014,6 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
         // Expr::Yield(_) => todo!(),
         // Expr::MetaProp(_) => todo!(),
         // Expr::Await(_) => todo!(),
-        // Expr::Paren(_) => todo!(),
         // Expr::JSXMember(_) => todo!(),
         // Expr::JSXNamespacedName(_) => todo!(),
         // Expr::JSXEmpty(_) => todo!(),
@@ -815,6 +1029,20 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<IID>
         // Expr::OptChain(_) => todo!(),
         // Expr::Invalid(_) => todo!(),
         other => unsupported_node!(other),
+    }
+}
+
+fn compile_prop_name(prop_name: &swc_ecma_ast::PropName) -> Result<Value> {
+    match &prop_name {
+        swc_ecma_ast::PropName::Ident(ident) => Ok(Value::from(ident.sym.to_string())),
+        swc_ecma_ast::PropName::Str(s) => Ok(Value::from(s.value.to_string())),
+        swc_ecma_ast::PropName::Num(num) => Ok(Value::Number(num.value)),
+        swc_ecma_ast::PropName::Computed(x) => {
+            Err(error!("unsupported node: {:?}", x).with_span(x.span))
+        }
+        swc_ecma_ast::PropName::BigInt(x) => {
+            Err(error!("unsupported node: {:?}", x).with_span(x.span))
+        }
     }
 }
 

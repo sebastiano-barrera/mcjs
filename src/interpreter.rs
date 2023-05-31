@@ -1,4 +1,5 @@
 use lazy_static::lazy_static;
+use swc_atoms::JsWord;
 
 use std::{
     borrow::Cow,
@@ -34,6 +35,8 @@ pub enum Value {
     // TODO(cleanup) Delete, Closure supersedes this
     SelfFunction,
     Closure(Closure),
+
+    Internal(usize),
 }
 
 impl From<String> for Value {
@@ -80,6 +83,7 @@ impl Value {
             Value::Undefined => "undefined",
             Value::SelfFunction => "function",
             Value::Closure(_) => "function",
+            Value::Internal(_) => panic!("internal value has no typeof!"),
         };
 
         ty_s.to_string().into()
@@ -199,15 +203,40 @@ impl VM {
         }
     }
 
-    pub fn load_module(&mut self, path: &str) -> Result<()> {
-        self.load_module_ex(path, Default::default())
+    pub fn load_module(&mut self, root_path: &JsWord) -> Result<()> {
+        self.load_module_ex(root_path, Default::default())
     }
-    pub fn load_module_ex(&mut self, path: &str, flags: InterpreterFlags) -> Result<()> {
-        use std::io::Read;
+    pub fn load_module_ex(&mut self, root_path: &JsWord, flags: InterpreterFlags) -> Result<()> {
+        let mut queue: Vec<JsWord> = vec![root_path.clone()];
 
+        while let Some(path) = queue.pop() {
+            if queue.contains(&path) {
+                let root_path = root_path.to_string();
+
+                queue.push(path);
+                let queue: Vec<_> = queue.into_iter().map(|atom| atom.to_string()).collect();
+                let recursive_path = queue.join(", ");
+                let message = format!("circular import dependency: {}", recursive_path);
+
+                return Err(Error::new(message, root_path, 0));
+            }
+
+            let module = self.load_module_file(&path, flags)?;
+            queue.extend_from_slice(&module.module_imports);
+        }
+
+        Ok(())
+    }
+
+    fn load_module_file(
+        &mut self,
+        path: &str,
+        flags: InterpreterFlags,
+    ) -> Result<bytecode::Module> {
         let (file_path, key): (PathBuf, String) = self.find_module(path.to_string())?;
 
         let text = {
+            use std::io::Read;
             let mut source_file = std::fs::File::open(file_path).map_err(Error::from)?;
             let mut buf = String::new();
             source_file.read_to_string(&mut buf).map_err(Error::from)?;
@@ -223,7 +252,9 @@ impl VM {
             module.dump();
         }
 
-        self.run_module(&module, flags)
+        self.run_module(&module, flags)?;
+
+        Ok(module)
     }
 
     fn find_module(&self, require_path: String) -> Result<(PathBuf, String)> {
@@ -280,6 +311,11 @@ impl VM {
         self.sink = sink;
         Ok(())
     }
+
+    fn get_module(&self, module_path: &JsWord) -> Result<&bytecode::Module> {
+        todo!()
+    }
+
 }
 
 struct Interpreter<'a> {
@@ -504,6 +540,9 @@ impl<'a> Interpreter<'a> {
                         Value::Undefined => Value::Bool(true),
                         Value::SelfFunction => Value::Bool(false),
                         Value::Closure(_) => Value::Bool(false),
+                        Value::Internal(_) => {
+                            panic!("bytecode compiler bug: internal value should be unreachable")
+                        }
                     };
                     self.data.set_result(self.iid, value);
                 }
@@ -587,12 +626,10 @@ impl<'a> Interpreter<'a> {
                     self.data.set_result(self.iid, Value::Object(oid));
                 }
                 Instr::ObjSet { obj, key, value } => {
-                    let obj = self.get_operand(*obj);
-                    let mut oid = if let Value::Object(obj) = obj {
-                        obj
-                    } else {
-                        panic!("ObjSet: not an object");
-                    };
+                    let oid = self
+                        .get_operand_object(*obj)
+                        // TODO(big feat) use TypeError exception here
+                        .unwrap_or_else(|| panic!("ObjSet: cannot set properties of: {:?}", obj));
                     let key = self.get_operand(*key);
                     let key = heap::ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
@@ -601,27 +638,59 @@ impl<'a> Interpreter<'a> {
                     self.heap.set_property(oid, key, value);
                 }
                 Instr::ObjGet { obj, key } => {
-                    let obj = self.get_operand(*obj);
-                    let obj = if let Value::Object(obj) = obj {
-                        obj
-                    } else {
-                        panic!("ObjSet: not an object");
-                    };
+                    let oid = self
+                        .get_operand_object(*obj)
+                        // TODO(big feat) use TypeError exception here
+                        .unwrap_or_else(|| panic!("ObjGet: cannot read properties of: {:?}", obj));
                     let key = self.get_operand(*key);
                     let key = heap::ObjectKey::from_value(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = self
                         .heap
-                        .get_property(obj, &key)
-                        .unwrap_or(&Value::Undefined);
+                        .get_property(oid, &key)
+                        .unwrap_or(Value::Undefined);
                     self.data.set_result(self.iid, value.clone());
                 }
-                Instr::ArrayNew => {
-                    eprintln!("ArrayNew does nothing for now");
+                Instr::ObjGetKeys(obj) => {
+                    let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
+                        panic!("ObjGetKeys: can't get keys of non-object: {:?}", obj)
+                    });
+                    let keys = self.heap.get_keys_as_array(oid);
+                    self.data.set_result(self.iid, Value::Object(keys));
                 }
+
                 Instr::ArrayPush(_arr, _elem) => {
-                    eprintln!("ArrayPush does nothing for now");
+                    todo!("ArrayPush does nothing for now")
                 }
+                Instr::ArrayNth(obj, ndx) => {
+                    let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
+                        panic!("ArrayNth: can't get element of non-array: {:?}", obj)
+                    });
+
+                    let operand = self.get_operand(*ndx);
+                    let value = if let Value::Number(num) = operand {
+                        let num_trunc = num.trunc();
+                        if num_trunc == num {
+                            let ndx = num_trunc as usize;
+                            self.heap.array_nth(oid, ndx).unwrap_or(Value::Undefined)
+                        } else {
+                            Value::Undefined
+                        }
+                    } else {
+                        panic!("ArrayNth: index is not a number: {:?}", operand);
+                    };
+
+                    self.data.set_result(self.iid, value);
+                }
+                Instr::ArraySetNth(_, _) => todo!("ArraySetNth"),
+                Instr::ArrayLen(obj) => {
+                    let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
+                        panic!("ArrayLen: can't get length of non-object/array: {:?}", obj)
+                    });
+                    let len: usize = self.heap.array_len(oid);
+                    self.data.set_result(self.iid, Value::Number(len as f64));
+                }
+
                 Instr::TypeOf(arg) => {
                     let value = self.get_operand(*arg);
                     self.data.set_result(self.iid, value.js_typeof());
@@ -656,7 +725,8 @@ impl<'a> Interpreter<'a> {
                         upvalues,
                     });
 
-                    self.data.set_result(self.iid, Value::Closure(closure));
+                    let oid = self.heap.new_function(closure);
+                    self.data.set_result(self.iid, Value::Object(oid));
                 }
                 // This is always handled in the code for ClosureNew
                 Instr::ClosureAddCapture(_) => unreachable!(),
@@ -668,6 +738,17 @@ impl<'a> Interpreter<'a> {
                 Instr::UnaryMinus(arg) => {
                     let arg: f64 = self.get_operand(*arg).expect_num()?;
                     self.data.set_result(self.iid, Value::Number(-arg));
+                }
+
+                Instr::NamedImport {
+                    module_ndx,
+                    identifier,
+                } => todo!("NamedImport"),
+                Instr::DefaultImport { module_ndx } => todo!("DefaultImport"),
+                Instr::AllNamedImports { module_ndx } => {
+                    let module_path = &self.module.module_imports[*module_ndx];
+                    let module = self.vm.get_module(&module_path).expect("dependency module not loaded!");
+                    module.module_exports_named
                 }
             }
 
@@ -682,6 +763,15 @@ impl<'a> Interpreter<'a> {
             }
 
             self.iid.0 = next_ndx;
+        }
+    }
+
+    fn get_operand_object(&mut self, operand: IID) -> Option<heap::ObjectId> {
+        let obj = self.get_operand(operand);
+        if let Value::Object(oid) = obj {
+            Some(oid)
+        } else {
+            None
         }
     }
 
@@ -720,10 +810,13 @@ impl<'a> Interpreter<'a> {
     fn invoke_native(&mut self, nfid: u32, args_iids: &[IID]) -> Result<Value> {
         // TODO Anything more efficient is appropriate here?
         let args: Vec<_> = args_iids.iter().map(|iid| self.get_operand(*iid)).collect();
+        // TODO Use some sort of enum-based From instance (there are libraries for this)
         if nfid == NativeFnId::Require as u32 {
             nf_require(self, &args)
         } else if nfid == NativeFnId::StringNew as u32 {
             nf_string_new(self, &args)
+        } else if nfid == NativeFnId::RegExpNew as u32 {
+            nf_regexp_new(self, &args)
         } else {
             panic!("undefined native function with ID {nfid}")
         }
@@ -734,12 +827,14 @@ enum NativeFnId {
     Require,
     StringNew,
     ArrayNew,
+    RegExpNew,
 }
 
 fn set_native_fns(bc_compiler: &mut bytecode_compiler::Compiler) {
     bc_compiler.add_builtin_fn("require".into(), NativeFnId::Require as u32);
     bc_compiler.add_builtin_fn("String".into(), NativeFnId::StringNew as u32);
     bc_compiler.add_builtin_fn("Array".into(), NativeFnId::ArrayNew as u32);
+    bc_compiler.add_builtin_fn("RegExp".into(), NativeFnId::RegExpNew as u32);
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 }
 
@@ -747,7 +842,8 @@ fn nf_require(intp: &mut Interpreter, args: &[Value]) -> Result<Value> {
     let arg0 = args.iter().next();
     match arg0 {
         Some(Value::String(path)) => {
-            intp.vm.load_module(path)?;
+            let path: JsWord = path.to_owned().into();
+            intp.vm.load_module(&path)?;
             Ok(Value::Undefined)
         }
         _ => Err(error!("invalid args for require()")),
@@ -758,7 +854,11 @@ fn nf_string_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
     todo!("nf_string_new")
 }
 
-#[derive(Clone, Debug)]
+fn nf_regexp_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    todo!("nf_regexp_new")
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct InterpreterFlags {
     pub indent_level: u8,
     pub jit_mode: JitMode,
@@ -1006,7 +1106,56 @@ mod tests {
 
     #[test]
     fn test_typeof() {
-        todo!("check all cases for `typeof`");
+        let output = quick_run(
+            "
+            let anObj = {}
+
+            sink(typeof undefined)
+            sink(typeof anObj.aNonExistantProperty)
+
+            sink(typeof null)
+            sink(typeof {})
+            sink(typeof anObj)
+
+            sink(typeof true)
+            sink(typeof false)
+
+            sink(typeof 123.0)
+            sink(typeof -99.2)
+            sink(typeof (156.0/0))
+            sink(typeof (-156.0/0))
+            sink(typeof (0/0))
+
+            sink(typeof '')
+            sink(typeof 'a string')
+
+            sink(typeof (function() {}))
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(
+            &output.sink[..],
+            &[
+                Value::String("undefined".into()).into(),
+                Value::String("undefined".into()).into(),
+                Value::String("object".into()).into(),
+                Value::String("object".into()).into(),
+                Value::String("object".into()).into(),
+                Value::String("boolean".into()).into(),
+                Value::String("boolean".into()).into(),
+                Value::String("number".into()).into(),
+                Value::String("number".into()).into(),
+                Value::String("number".into()).into(),
+                Value::String("number".into()).into(),
+                Value::String("number".into()).into(),
+                Value::String("string".into()).into(),
+                Value::String("string".into()).into(),
+                Value::String("function".into()).into(),
+                // TODO(feat) BigInt (typeof -> "bigint")
+                // TODO(feat) Symbol (typeof -> "symbol")
+            ]
+        );
     }
 
     #[test]
@@ -1033,11 +1182,39 @@ mod tests {
 
     #[test]
     fn test_object_prototype() {
-        todo!("create an object with a prototype, then lookup a property that requires walking the prototype chain")
+        let output = quick_run(
+            "
+            const a = { count: 99, name: 'lol', pos: {x: 32, y: 99} }
+            const b = { name: 'another name' }
+            b.__proto__ = a
+            const c = { __proto__: b, count: 0 } 
+
+            sink(c.pos.y)
+            sink(c.pos.x)
+            c.pos.x = 12304
+            sink(b.pos.x)
+            sink(c.count)
+            sink(c.name)
+            b.name = 'another name yet'
+            sink(c.name)
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(
+            &output.sink[..],
+            &[
+                Value::Number(99.0),
+                Value::Number(32.0),
+                Value::Number(12304.0),
+                Value::Number(0.0),
+                Value::String("another name".into()),
+                Value::String("another name yet".into()),
+            ]
+        );
     }
 
     #[test]
-    #[ignore]
     fn test_for_in() {
         // TODO(small feat) This syntax is not yet implemented
         let output = quick_run(
@@ -1053,6 +1230,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(&output.sink[..], &["x".into(), "y".into(), "name".into(),]);
+        let mut sink: Vec<_> = output
+            .sink
+            .into_iter()
+            .map(|value| match value {
+                Value::String(s) => s,
+                other => panic!("not a String: {:?}", other),
+            })
+            .collect();
+        sink.sort();
+        assert_eq!(&sink[..], &["name", "x", "y"]);
     }
 }

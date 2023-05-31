@@ -33,7 +33,8 @@ pub fn main() {
         indent_level: 0,
         jit_mode: mcjs::JitMode::Compile,
     };
-    vm.load_module_ex(&opts.script_filename, flags).unwrap();
+    let module_path = swc_atoms::JsWord::from(opts.script_filename);
+    vm.load_module_ex(&module_path, flags).unwrap();
 
     let trace = vm.take_trace();
     match trace {

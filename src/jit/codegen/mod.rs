@@ -106,6 +106,8 @@ fn encode_value(rt_data: &mut RuntimeData, value: &interpreter::Value) -> (i64, 
         BoxedValue::Undefined => 0 as _,
         BoxedValue::SelfFunction => todo!("(small feat) SelfFunction"),
         BoxedValue::Closure(_) => todo!("(big feat) encode closure"),
+
+        BoxedValue::Internal(_) => panic!("bug: internal value should be unreachable"),
     };
 
     (rt_val, ValueType::of(value))
