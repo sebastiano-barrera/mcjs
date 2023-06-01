@@ -8,7 +8,7 @@ use swc_atoms::JsWord;
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(clippy::upper_case_acronyms)]
-pub struct IID(pub u32);
+pub struct IID(pub u16);
 
 impl std::fmt::Display for IID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -18,9 +18,6 @@ impl std::fmt::Display for IID {
 
 #[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
 pub struct FnId(pub u32);
-impl FnId {
-    pub const ROOT_FN: FnId = FnId(0);
-}
 
 /// NOTE cross-module function calls are unsupported yet
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,96 +33,91 @@ impl std::fmt::Debug for IID {
 }
 
 pub type ConstIndex = u16;
+pub type ArgIndex = u8;
 pub type CaptureIndex = u16;
+
+pub type VReg = u16;
+
+/// Global ID of a module.  Can be used, among other things, to fetch the Module object
+/// from importing modules.
+// 64K module ought to be enough for everyone, node_modules not withstanding
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct ModuleId(pub u16);
 
 #[derive(Debug)]
 pub enum Instr {
     Nop,
-    Const(Value),
+    /// Load constant in accu
+    LoadConst(ConstIndex),
+    LoadNull,
+    LoadUndefined,
+    LoadArg(u8),
 
-    SetVar {
-        var: IID,
-        value: IID,
-    },
-    GetCapture(CaptureIndex),
+    /// Store: accumulator -> register
+    StoAR(VReg),
+    /// Load: register -> accumulator
+    LoadRA(VReg),
 
-    Not(IID),
-    UnaryMinus(IID),
-    Arith {
-        op: ArithOp,
-        a: IID,
-        b: IID,
-    },
-    Cmp {
-        op: CmpOp,
-        a: IID,
-        b: IID,
-    },
-    BoolOp {
-        op: BoolOp,
-        a: IID,
-        b: IID,
-    },
+    /// Load closure capture in accu
+    LoadCapture(CaptureIndex),
+
+    BoolNot,
+    UnaryMinus,
+    Arith(ArithOp, VReg),
+    Cmp(CmpOp, VReg),
+    BoolOp(BoolOp, VReg),
+
     JmpIf {
-        cond: IID,
         dest: IID,
     },
     Jmp(IID),
-    PushSink(IID),
-    Return(IID),
-    GetArg(usize),
-    Call {
-        callee: IID,
-        // smallvec?
-        args: Vec<IID>,
-    },
+    PushToSink,
+    Return,
+
+    // Push the value of accu to the argument list for the next Call
+    CallArg,
+    Call,
 
     ClosureNew {
         fnid: FnId,
     },
-    ClosureAddCapture(IID),
+    ClosureAddCapture(VReg),
     GetNativeFn(NativeFnId),
 
     ObjNew,
     ObjSet {
-        obj: IID,
-        key: IID,
-        value: IID,
+        obj: VReg,
+        key: VReg,
+        // Implicitly, value = accu
     },
     ObjGet {
-        obj: IID,
-        key: IID,
+        key: VReg,
     },
-    ObjGetKeys(IID),
+    ObjGetKeys,
 
-    ArrayPush(IID, IID),
-    ArrayNth(IID, IID),
-    ArraySetNth(IID, IID),
-    ArrayLen(IID),
+    // TODO: Remove this bytecode (should be implemented as a method with a native impl)
+    ArrayPush(VReg /* array */),
+    ArrayNth(VReg),
+    ArraySetNth {
+        index: VReg,
+        value: VReg,
+    },
+    ArrayLen,
 
-    TypeOf(IID),
+    TypeOf,
 
-    NamedImport {
-        module_ndx: usize,
-        identifier: swc_ecma_ast::Ident,
-    },
-    DefaultImport {
-        module_ndx: usize,
-    },
-    AllNamedImports {
-        module_ndx: usize,
-    },
+    GetModule(ModuleId),
 }
 
 impl Instr {
     const MAX_OPERANDS: usize = 4;
 }
 
-type Operands = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
+type Operands = crate::util::LimVec<{ Instr::MAX_OPERANDS }, VReg>;
 
 /// A value literal that is allowed to appear in the bytecode.
 #[derive(Debug, PartialEq, Clone)]
-pub enum Value {
+pub enum Literal {
     Number(f64),
     String(String),
     Bool(bool),
@@ -137,57 +129,13 @@ pub enum Value {
 
 pub type NativeFnId = u32;
 
-impl From<String> for Value {
+impl From<String> for Literal {
     fn from(value: String) -> Self {
-        Value::String(value)
+        Literal::String(value)
     }
 }
 
 type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
-
-impl Instr {
-    fn read_operands<'a>(&'a self) -> Operands {
-        match *self {
-            Instr::Not(oper) => Operands::from_iter([oper].into_iter()),
-            Instr::UnaryMinus(oper) => Operands::from_iter([oper].into_iter()),
-            Instr::Arith { op: _, a, b } => Operands::from_iter([a, b].into_iter()),
-            Instr::Cmp { op: _, a, b } => Operands::from_iter([a, b].into_iter()),
-            Instr::BoolOp { op: _, a, b } => Operands::from_iter([a, b].into_iter()),
-            Instr::JmpIf { cond, .. } => Operands::from_iter([cond].into_iter()),
-            Instr::SetVar { var: _, value } => Operands::from_iter([value].into_iter()),
-            Instr::PushSink(arg) => Operands::from_iter([arg].into_iter()),
-            Instr::Return(arg) => Operands::from_iter([arg].into_iter()),
-            Instr::Call {
-                callee: _,
-                ref args,
-            } => Operands::from_iter(args.iter().cloned()),
-
-            Instr::ArrayLen(arr) => Operands::from_iter([arr].into_iter()),
-            Instr::ObjNew => Default::default(),
-            Instr::ArrayNth(arr, ndx) => Operands::from_iter([arr, ndx].into_iter()),
-            Instr::ArrayPush(arr, value) => Operands::from_iter([arr, value].into_iter()),
-            Instr::ArraySetNth(arr, ndx) => Operands::from_iter([arr, ndx].into_iter()),
-            Instr::ObjGet { obj, key } => Operands::from_iter([obj, key].into_iter()),
-            Instr::ObjGetKeys(obj) => Operands::from_iter([obj].into_iter()),
-            Instr::ObjNew => Default::default(),
-            Instr::ObjSet { obj, key, value } => Operands::from_iter([obj, key, value].into_iter()),
-
-            Instr::TypeOf(arg) => Operands::from_iter([arg].into_iter()),
-            Instr::ClosureAddCapture(value) => Operands::from_iter([value].into_iter()),
-
-            Instr::GetNativeFn(_)
-            | Instr::ClosureNew { .. }
-            | Instr::GetArg(_)
-            | Instr::GetCapture(_)
-            | Instr::Jmp(_)
-            | Instr::Const(_)
-            | Instr::Nop
-            | Instr::NamedImport { .. }
-            | Instr::DefaultImport { .. }
-            | Instr::AllNamedImports { .. } => Default::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ArithOp {
@@ -213,26 +161,37 @@ pub enum BoolOp {
     Or,
 }
 
-pub struct Module {
-    // This is a bit overshared, but I didn't want to have a whole-ass
-    // Builder just for this struct
-    pub fns: HashMap<FnId, Function>,
-    pub module_exports_named: HashMap<JsWord, IID>,
-    pub module_export_default: Option<IID>,
-    pub module_imports: Vec<JsWord>,
+pub struct Codebase {
+    fns: HashMap<FnId, Function>,
+    rootfn_of_module: HashMap<ModuleId, FnId>,
 }
 
-impl Module {
+impl Codebase {
+    pub fn new(fns: HashMap<FnId, Function>, rootfn_of_module: HashMap<ModuleId, FnId>) -> Self {
+        Codebase {
+            fns,
+            rootfn_of_module,
+        }
+    }
+
     pub fn get_function(&self, fnid: FnId) -> Option<&Function> {
         self.fns.get(&fnid)
     }
 
-    pub(crate) fn dump(&self) {
-        eprintln!("=== module");
+    pub fn get_module_root_fn(&self, module_id: ModuleId) -> Option<FnId> {
+        self.rootfn_of_module.get(&module_id).copied()
+    }
+
+    pub fn all_functions(&self) -> impl Iterator<Item = (FnId, &Function)> {
+        self.fns.iter().map(|(fnid, func_ref)| (*fnid, func_ref))
+    }
+
+    pub fn dump(&self) {
+        eprintln!("=== code base");
         for (fnid, func) in self.fns.iter() {
             eprintln!("fn #{}:", fnid.0);
             for (ndx, instr) in func.instrs.iter().enumerate() {
-                let lh = func.loop_heads.get(&IID(ndx as u32));
+                let lh = func.loop_heads.get(&IID(ndx as _));
                 eprintln!(
                     "  {:4}{:4}: {:?}",
                     if lh.is_some() { ">>" } else { "" },
@@ -247,13 +206,20 @@ impl Module {
                     eprintln!(")");
                 }
             }
+
+            let size_code = func.instrs().len() * std::mem::size_of::<Instr>();
+            let size_data = func.consts().len() * std::mem::size_of::<Literal>();
+            eprintln!("size of code: ............ {}", size_code);
+            eprintln!("size of const data: ...... {}", size_data);
+            eprintln!("total size: .............. {}", size_code + size_data);
+            eprintln!("---");
         }
-        eprintln!("---");
     }
 }
 
 pub struct Function {
     instrs: Box<[Instr]>,
+    consts: Box<[Literal]>,
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
     trace_anchors: HashMap<IID, TraceAnchor>,
@@ -268,10 +234,18 @@ pub struct LoopInfo {
     interloop_vars: HashSet<IID>,
 }
 impl Function {
-    pub(crate) fn new(instrs: Box<[Instr]>, trace_anchors: HashMap<IID, TraceAnchor>) -> Function {
+    pub(crate) fn new(
+        instrs: Box<[Instr]>,
+        consts: Box<[Literal]>,
+        trace_anchors: HashMap<IID, TraceAnchor>,
+    ) -> Function {
+        #[cfg(to_be_rewritten)]
         let loop_heads = find_loop_heads(&instrs[..]);
+        #[cfg(not(to_be_rewritten))]
+        let loop_heads = HashMap::new();
         Function {
             instrs,
+            consts,
             loop_heads,
             trace_anchors,
         }
@@ -279,6 +253,10 @@ impl Function {
 
     pub(crate) fn instrs(&self) -> &[Instr] {
         self.instrs.as_ref()
+    }
+
+    pub(crate) fn consts(&self) -> &[Literal] {
+        self.consts.as_ref()
     }
 
     pub(crate) fn is_loop_head(&self, iid: IID) -> bool {
@@ -296,6 +274,7 @@ impl Function {
     }
 }
 
+#[cfg(to_be_rewritten)]
 fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
     // The set of interloop variables is the set of variables where, within a
     // loop, at least one read happens before a write.

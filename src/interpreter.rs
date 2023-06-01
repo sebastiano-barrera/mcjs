@@ -57,15 +57,15 @@ impl From<Closure> for Value {
     }
 }
 
-impl From<bytecode::Value> for Value {
-    fn from(bc_value: bytecode::Value) -> Self {
+impl From<bytecode::Literal> for Value {
+    fn from(bc_value: bytecode::Literal) -> Self {
         match bc_value {
-            bytecode::Value::Number(nu) => Value::Number(nu),
-            bytecode::Value::String(st) => Value::String(st.into()),
-            bytecode::Value::Bool(bo) => Value::Bool(bo),
-            bytecode::Value::Null => Value::Null,
-            bytecode::Value::Undefined => Value::Undefined,
-            bytecode::Value::SelfFunction => todo!(),
+            bytecode::Literal::Number(nu) => Value::Number(nu),
+            bytecode::Literal::String(st) => Value::String(st.into()),
+            bytecode::Literal::Bool(bo) => Value::Bool(bo),
+            bytecode::Literal::Null => Value::Null,
+            bytecode::Literal::Undefined => Value::Undefined,
+            bytecode::Literal::SelfFunction => todo!(),
         }
     }
 }
@@ -315,7 +315,6 @@ impl VM {
     fn get_module(&self, module_path: &JsWord) -> Result<&bytecode::Module> {
         todo!()
     }
-
 }
 
 struct Interpreter<'a> {
@@ -442,7 +441,7 @@ impl<'a> Interpreter<'a> {
             }
 
             match instr {
-                Instr::Const(value) => {
+                Instr::LoadConst(value) => {
                     self.data.set_result(self.iid, value.clone().into());
                 }
                 Instr::Arith { op, a, b } => {
@@ -463,7 +462,7 @@ impl<'a> Interpreter<'a> {
                         panic!("invalid operands for arith op: {:?}; {:?}", a, b);
                     }
                 }
-                Instr::PushSink(operand) => {
+                Instr::PushToSink(operand) => {
                     let value = self.get_operand(*operand);
                     self.sink.push(value);
                 }
@@ -525,12 +524,12 @@ impl<'a> Interpreter<'a> {
                 Instr::SetVar { var, value } => {
                     self.data.set_result(*var, self.get_operand(*value));
                 }
-                Instr::GetCapture(cap_ndx) => {
+                Instr::LoadCapture(cap_ndx) => {
                     self.data.capture_to_var(*cap_ndx, self.iid);
                 }
 
                 Instr::Nop => {}
-                Instr::Not(value) => {
+                Instr::BoolNot(value) => {
                     let value = match self.get_operand(*value) {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         Value::Number(num) => Value::Bool(num == 0.0),
@@ -707,7 +706,7 @@ impl<'a> Interpreter<'a> {
 
                 Instr::ClosureNew { fnid } => {
                     let mut upvalues = Vec::new();
-                    while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
+                    while let Instr::ClosureStoreCapture(cap) = func.instrs()[next_ndx as usize] {
                         let upv_id = self.data.ensure_in_upvalue(cap);
                         #[cfg(test)]
                         {
@@ -729,7 +728,7 @@ impl<'a> Interpreter<'a> {
                     self.data.set_result(self.iid, Value::Object(oid));
                 }
                 // This is always handled in the code for ClosureNew
-                Instr::ClosureAddCapture(_) => unreachable!(),
+                Instr::ClosureStoreCapture(_) => unreachable!(),
                 Instr::GetNativeFn(nfid) => {
                     self.data
                         .set_result(self.iid, Closure::Native(*nfid).into());
@@ -740,15 +739,8 @@ impl<'a> Interpreter<'a> {
                     self.data.set_result(self.iid, Value::Number(-arg));
                 }
 
-                Instr::NamedImport {
-                    module_ndx,
-                    identifier,
-                } => todo!("NamedImport"),
-                Instr::DefaultImport { module_ndx } => todo!("DefaultImport"),
-                Instr::AllNamedImports { module_ndx } => {
-                    let module_path = &self.module.module_imports[*module_ndx];
-                    let module = self.vm.get_module(&module_path).expect("dependency module not loaded!");
-                    module.module_exports_named
+                Instr::GetImportedModule { import_ndx } => {
+                    todo!("GetImportedModule")
                 }
             }
 

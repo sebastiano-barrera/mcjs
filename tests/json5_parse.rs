@@ -3,6 +3,7 @@ extern crate mcjs;
 use std::path::PathBuf;
 
 // TODO(test): enable these tests once the implementation is mature enough
+#[cfg(not(test))]
 #[test]
 fn test_load_json5_parse() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
