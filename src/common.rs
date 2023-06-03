@@ -1,9 +1,11 @@
+use std::rc::Rc;
+
 use swc_common::{SourceMap, Span};
 
 struct Item {
     span: Option<Span>,
-    src_filename: String,
-    src_lineno: u32,
+    vm_filename: String,
+    vm_lineno: u32,
     message: String,
 }
 
@@ -13,37 +15,55 @@ impl std::fmt::Debug for Item {
             write!(
                 f,
                 "{:?}: {} [VM code at {}:{}]",
-                span, self.message, self.src_filename, self.src_lineno
+                span, self.message, self.vm_filename, self.vm_lineno
             )
         } else {
             write!(
                 f,
                 "{} [VM code at {}:{}]",
-                self.message, self.src_filename, self.src_lineno
+                self.message, self.vm_filename, self.vm_lineno
             )
         }
     }
 }
 
 impl Item {
-    fn message(&self, buf: &mut String, source_map: &SourceMap, indent_level: usize) {
+    fn message(&self, buf: &mut String, source_map: Option<&SourceMap>, indent_level: usize) {
         use std::fmt::Write;
 
         for _ in 0..indent_level {
             write!(buf, "  ").unwrap();
         }
 
-        match self.span {
-            Some(span) => {
-                let span_str = source_map.span_to_string(span);
+        match (source_map, self.span) {
+            (Some(source_map), Some(span)) => {
+                let lo = source_map.lookup_char_pos(span.lo);
+                let hi = source_map.lookup_char_pos(span.hi);
                 write!(
                     buf,
-                    "{span_str}: {} [VM code at {}:{}]",
-                    self.message, self.src_filename, self.src_lineno
+                    "{}: {},{} - {},{}: {} [VM code at {}:{}]",
+                    lo.file.name,
+                    lo.line,
+                    lo.col_display,
+                    hi.line,
+                    hi.col_display,
+                    self.message,
+                    self.vm_filename,
+                    self.vm_lineno
                 )
                 .unwrap();
             }
-            None => buf.push_str(self.message.as_str()),
+
+            (None, Some(span)) => {
+                write!(
+                    buf,
+                    "byte {} - byte {}: {} [VM code at {}:{}]",
+                    span.lo.0, span.hi.0, self.message, self.vm_filename, self.vm_lineno
+                )
+                .unwrap();
+            }
+
+            (_, None) => buf.push_str(self.message.as_str()),
         }
     }
 }
@@ -51,6 +71,7 @@ impl Item {
 pub struct Error {
     head: Item,
     chain: Vec<Item>,
+    source_map: Option<Rc<SourceMap>>,
 }
 
 impl std::fmt::Debug for Error {
@@ -82,11 +103,12 @@ impl Error {
         Error {
             head: Item {
                 span: None,
-                src_filename,
-                src_lineno,
+                vm_filename: src_filename,
+                vm_lineno: src_lineno,
                 message,
             },
             chain: Vec::new(),
+            source_map: None,
         }
     }
 
@@ -95,16 +117,22 @@ impl Error {
         self
     }
 
-    pub fn message(&self, source_map: &SourceMap) -> String {
-        self.message_ex(source_map, 0)
+    pub(crate) fn with_source_map(mut self, source_map: Rc<SourceMap>) -> Self {
+        self.source_map = Some(source_map);
+        self
     }
 
-    pub fn message_ex(&self, source_map: &SourceMap, indent_level: usize) -> String {
+    pub fn message(&self) -> String {
+        self.message_ex(0)
+    }
+
+    pub fn message_ex(&self, indent_level: usize) -> String {
         let mut buf = String::new();
-        self.head.message(&mut buf, source_map, indent_level);
+        let sm = self.source_map.as_ref().map(|rc| rc.as_ref());
+        self.head.message(&mut buf, sm, indent_level);
         for ctx_item in self.chain.iter() {
             buf.push('\n');
-            ctx_item.message(&mut buf, source_map, indent_level + 1);
+            ctx_item.message(&mut buf, sm, indent_level + 1);
         }
 
         buf
@@ -116,9 +144,12 @@ pub trait Context<Err> {
 }
 
 impl Context<Error> for Error {
-    fn with_context(mut self, other: Self) -> Self {
+    fn with_context(mut self, mut other: Self) -> Self {
         self.chain.push(other.head);
         self.chain.extend(other.chain);
+        if self.source_map.is_none() {
+            self.source_map = other.source_map.take();
+        }
         self
     }
 }

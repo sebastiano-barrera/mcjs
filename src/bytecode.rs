@@ -64,8 +64,11 @@ pub enum Instr {
     BoolNot,
     UnaryMinus,
     Arith(ArithOp, VReg),
+    Inc,
+    Dec,
     Cmp(CmpOp, VReg),
     BoolOp(BoolOp, VReg),
+    IsInstanceOf(VReg),
 
     JmpIf {
         dest: IID,
@@ -84,7 +87,8 @@ pub enum Instr {
     ClosureAddCapture(VReg),
     GetNativeFn(NativeFnId),
 
-    ObjNew,
+    ObjCreateEmpty,
+    ObjCallNew,
     ObjSet {
         obj: VReg,
         key: VReg,
@@ -104,9 +108,17 @@ pub enum Instr {
     },
     ArrayLen,
 
+    NewIterator,
+    IteratorGetCurrent,
+    IteratorAdvance,
+    JmpIfIteratorFinished(IID),
+
     TypeOf,
 
     GetModule(ModuleId),
+
+    // TODO exceptions are completely unimplemented yet, lol
+    Throw,
 }
 
 impl Instr {

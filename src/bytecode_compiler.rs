@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, SourceMap, Span};
-use swc_ecma_ast::VarDeclOrPat;
-use swc_ecma_ast::{AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp};
+use swc_ecma_ast::{ArrowExpr, AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp, VarDecl};
+use swc_ecma_ast::{ExportDecl, VarDeclOrPat};
 
 use crate::bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, Instr, Literal, NativeFnId, VReg, IID};
 pub use crate::common::{Context, Error, Result};
@@ -32,11 +32,14 @@ pub struct Builder {
     native_fns: NativeFnMap,
     loader: Box<dyn Loader>,
     fns: HashMap<FnId, FnBuilder>,
-    fn_stack: Vec<FnBuilder>,
     next_fnid: u32,
     next_module_id: u16,
 
     rootfn_of_module: HashMap<bytecode::ModuleId, FnId>,
+
+    // --- below this line, things are valid during the compilation of a single module.  at the
+    // end, these are reset
+    fn_stack: Vec<FnBuilder>,
 }
 
 impl BuilderParams {
@@ -70,17 +73,18 @@ impl Builder {
         let (source_map, ast_module) = parse_file(filename.clone(), content)
             .with_context(error!("while parsing file: {filename}"))?;
 
-        let res = compile_module(self, &ast_module)
-            .with_context(error!("while compiling module: {filename}"));
-        match res {
-            Ok(root_fnid) => {
-                let prev = self.rootfn_of_module.insert(module_id, root_fnid);
-                assert!(prev.is_none(), "duplicate module id");
-            }
-            Err(err) => {
-                eprintln!("\nbytecode compiler error: {}\n", err.message(&source_map))
-            }
-        }
+        assert!(self.fn_stack.is_empty());
+
+        let res = compile_module(self, &ast_module);
+        // In case of an error, fn_stack needs to be reset to allow for another compilation in
+        // the future.
+        self.fn_stack.clear();
+        let root_fnid = res.with_context(
+            error!("while compiling module: {filename}").with_source_map(source_map),
+        )?;
+
+        let prev = self.rootfn_of_module.insert(module_id, root_fnid);
+        assert!(prev.is_none(), "duplicate module id");
 
         Ok(module_id)
     }
@@ -97,14 +101,18 @@ struct FnBuilder {
     consts: Vec<Literal>,
     trace_anchors: HashMap<IID, bytecode::TraceAnchor>,
     next_vreg: VReg,
-    captures: Vec<JsWord>,
+    // Places where a break instruction must be placed when the break target is finally "written"
+    // by the compiler.
+    pending_break_instrs: Vec<IID>,
+    pending_continue_instrs: Vec<IID>,
+    captures: Vec<String>,
 }
 
 #[derive(Debug)]
 struct Scope {
     // TODO Take advantage of identifier interning!
     // TODO After introducing VRegs, this could become a Vec
-    vars: HashMap<String, VReg>,
+    vars: HashMap<JsWord, VReg>,
 }
 impl Scope {
     fn new() -> Self {
@@ -124,15 +132,48 @@ impl FnBuilder {
             trace_anchors: HashMap::new(),
             captures: Vec::new(),
             next_vreg: 0,
+            pending_break_instrs: Vec::new(),
+            pending_continue_instrs: Vec::new(),
         }
     }
 
     fn build(self) -> bytecode::Function {
+        assert!(
+            self.pending_break_instrs.is_empty(),
+            "bytecode compiler bug: the function is over, but some break instructions were not placed yet"
+        );
         bytecode::Function::new(
             self.instrs.into_boxed_slice(),
             self.consts.into_boxed_slice(),
             self.trace_anchors,
         )
+    }
+
+    fn get_mut(&mut self, iid: IID) -> Option<&mut Instr> {
+        self.instrs.get_mut(iid.0 as usize)
+    }
+    fn reserve(&mut self) -> IID {
+        self.emit(Instr::Nop)
+    }
+    fn reserve_break(&mut self) {
+        let iid = self.peek_iid();
+        self.emit(Instr::Nop);
+        self.pending_break_instrs.push(iid);
+    }
+    fn resolve_break_to(&mut self, break_target: IID) {
+        for iid in self.pending_break_instrs.drain(0..) {
+            *self.instrs.get_mut(iid.0 as usize).unwrap() = Instr::Jmp(break_target);
+        }
+    }
+    fn reserve_continue(&mut self) {
+        let iid = self.peek_iid();
+        self.emit(Instr::Nop);
+        self.pending_continue_instrs.push(iid);
+    }
+    fn resolve_continue_to(&mut self, continue_target: IID) {
+        for iid in self.pending_continue_instrs.drain(0..) {
+            *self.instrs.get_mut(iid.0 as usize).unwrap() = Instr::Jmp(continue_target);
+        }
     }
 
     fn push_scope(&mut self) {
@@ -163,37 +204,43 @@ impl FnBuilder {
     // instruction.
     // Subsequent calls to get_var will return  the IID for the GetCapture instruction.
     fn set_var_captured(&mut self, name: JsWord) -> VReg {
-        assert!(!self.captures.contains(&name));
-        self.captures.push(name.clone());
+        let name_str = name.to_string();
+        assert!(!self.captures.iter().any(|cap| cap == &name_str));
+        self.captures.push(name_str);
 
         let cap_ndx = self.captures.len().try_into().expect("too many captures!");
         self.emit(Instr::LoadCapture(cap_ndx));
         let var = self.next_vreg();
-        self.define_var(name, var);
+        self.emit(Instr::StoAR(var));
+
+        // The variable now has to be defined in the outermost scope of this function.  Otherwise
+        // it's likely that subsequent lookups will fail
+        let prev = self
+            .scopes
+            .first_mut()
+            .unwrap()
+            .vars
+            .insert(name.clone(), var);
+        if prev.is_some() {
+            // definition of var $name shadows previous definition
+        }
 
         var
     }
 
-    fn get_var(&self, sym: &JsWord) -> Option<VReg> {
-        let name = String::from_utf8_lossy(sym.as_bytes());
-
+    fn get_var(&self, name: &JsWord) -> Option<VReg> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.vars.get(name.as_ref()))
+            .find_map(|scope| scope.vars.get(name))
             .copied()
     }
 
     fn define_var(&mut self, name: JsWord, vreg: VReg) {
-        let name = String::from_utf8(name.as_bytes().to_owned())
-            .expect("only UTF-8 identifiers are supporeted!");
         let scope = self.inner_scope_mut();
-        let prev = scope.vars.insert(name.clone(), vreg);
+        let prev = scope.vars.insert(name, vreg);
         if prev.is_some() {
-            panic!(
-                "definition of var `{}` shadows previous definition (compiler limitation)",
-                name
-            );
+            // definition of var $name shadows previous definition
         }
     }
 
@@ -218,7 +265,23 @@ impl Builder {
     }
 
     fn reserve(&mut self) -> IID {
-        self.emit(Instr::Nop)
+        self.cur_fnb().reserve()
+    }
+
+    fn reserve_break(&mut self) {
+        self.cur_fnb().reserve_break();
+    }
+    fn resolve_break_to(&mut self, break_target: IID) {
+        self.cur_fnb().resolve_break_to(break_target)
+    }
+    fn reserve_continue(&mut self) {
+        self.cur_fnb().reserve_continue();
+    }
+    fn resolve_continue_to(&mut self, continue_target: IID) {
+        self.cur_fnb().resolve_continue_to(continue_target)
+    }
+    fn get_mut(&mut self, iid: IID) -> Option<&mut Instr> {
+        self.cur_fnb().get_mut(iid)
     }
 
     fn cur_fnb(&mut self) -> &mut FnBuilder {
@@ -247,19 +310,13 @@ impl Builder {
         self.cur_fnb().peek_iid()
     }
 
-    fn get_mut(&mut self, iid: IID) -> Option<&mut Instr> {
-        self.cur_fnb().instrs.get_mut(iid.0 as usize)
-    }
-
     fn define_var(&mut self, name: JsWord, vreg: VReg) {
         self.cur_fnb().define_var(name, vreg)
     }
 
-    fn get_var(&mut self, sym: &JsWord) -> Result<VReg> {
-        // self.fn_stack.last_mut().expect("no FnBuilder!")
-        let found_iid = self
-            .fn_stack
-            .iter_mut()
+    fn find_vreg(&mut self, sym: &JsWord) -> Option<(usize, VReg)> {
+        self.fn_stack
+            .iter()
             .rev()
             .enumerate()
             .find_map(|(ndx, fnb)| fnb.get_var(sym).map(|vreg| (ndx, vreg)))
@@ -268,26 +325,38 @@ impl Builder {
                 self.cur_fnb().emit(Instr::GetNativeFn(nfid));
                 let vreg = self.accu_to_vreg();
                 Some((0, vreg))
-            });
+            })
+    }
 
-        match found_iid {
+    fn get_var(&mut self, sym: &JsWord) -> Result<VReg> {
+        match self.find_vreg(sym) {
             // Hell yeah, found it in the current function, we have a "simple" IID
-            Some((0, iid)) => Ok(iid),
+            Some((0, vreg)) => Ok(vreg),
             Some((_, _)) => {
                 // Found it in one of the enclosing functions.  We'll have to add a capture, but we
                 // know the variable is there
-                let iid = self.cur_fnb().set_var_captured(sym.clone());
-                Ok(iid)
+                let vreg = self.cur_fnb().set_var_captured(sym.clone());
+
+                {
+                    let (depth, _) = self.find_vreg(sym).unwrap();
+                    assert_eq!(depth, 0);
+                }
+
+                Ok(vreg)
             }
             None => Err(error!("unbound symbol: {}", sym)),
         }
     }
 
     fn accu_to_vreg(&mut self) -> VReg {
-        let fnb = &mut self.cur_fnb();
-        let vreg = fnb.next_vreg();
+        let vreg = self.new_vreg();
         self.emit(Instr::StoAR(vreg));
         vreg
+    }
+
+    fn new_vreg(&mut self) -> u16 {
+        let fnb = &mut self.cur_fnb();
+        fnb.next_vreg()
     }
 
     fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
@@ -333,7 +402,7 @@ fn compile_module(
     builder: &mut Builder,
     ast_module: &swc_ecma_ast::Module,
 ) -> Result<bytecode::FnId> {
-    use swc_ecma_ast::{ModuleDecl, ModuleItem, Stmt, VarDeclKind};
+    use swc_ecma_ast::{ExportDecl, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
 
     builder.start_function(None, &[]);
 
@@ -343,11 +412,11 @@ fn compile_module(
     builder.push_const(Literal::String("__default".to_string()));
     let lit_default = builder.accu_to_vreg();
 
-    // Exports object.  TODO Actually make it accessible via `require`!
-    builder.emit(Instr::ObjNew);
+    // Exports object.
+    builder.emit(Instr::ObjCreateEmpty);
     let module_obj = builder.accu_to_vreg();
 
-    builder.emit(Instr::ObjNew);
+    builder.emit(Instr::ObjCreateEmpty);
     let mod_named_exports = builder.accu_to_vreg();
     builder.emit(Instr::ObjSet {
         obj: module_obj,
@@ -360,6 +429,26 @@ fn compile_module(
         obj: module_obj,
         key: lit_default,
     });
+
+    // We have to handle hoisting here like we do for blocks.  See [#hoisting].
+
+    for item in &ast_module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl)))
+            | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+                decl: Decl::Var(var_decl),
+                ..
+            })) => compile_var_decl_namedef(builder, var_decl),
+
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl)))
+            | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+                decl: Decl::Fn(fn_decl),
+                ..
+            })) => compile_fn_decl_namedef(builder, fn_decl),
+
+            _ => {}
+        }
+    }
 
     for item in &ast_module.body {
         match item {
@@ -421,20 +510,21 @@ fn compile_module(
                     }
                 }
 
-                ModuleDecl::ExportDecl(decl) => {
-                    let mut defs = Vec::new();
-                    compile_decl(builder, &decl.decl, Some(&mut defs))?;
-
-                    for (name, vreg) in defs.into_iter() {
-                        builder.push_const(Literal::String(name.to_string()));
-                        let key = builder.accu_to_vreg();
-                        builder.emit(Instr::LoadRA(vreg));
-                        builder.emit(Instr::ObjSet {
-                            obj: mod_named_exports,
-                            key,
-                        });
+                ModuleDecl::ExportDecl(export_decl) => match &export_decl.decl {
+                    // Skip: already processed in previous phase
+                    Decl::Fn(fn_decl) => {
+                        compile_fn_decl_assignment(builder, &*fn_decl)?;
                     }
-                }
+                    // Only do assignment part
+                    Decl::Var(var_decl) => {
+                        compile_var_decl_assignment(builder, &*var_decl)?;
+                    }
+                    Decl::Class(_)
+                    | Decl::TsInterface(_)
+                    | Decl::TsTypeAlias(_)
+                    | Decl::TsEnum(_)
+                    | Decl::TsModule(_) => unsupported_node!(export_decl.decl),
+                },
                 ModuleDecl::ExportNamed(_) => todo!("ExportNamed"),
                 ModuleDecl::ExportDefaultDecl(decl) => match &decl.decl {
                     swc_ecma_ast::DefaultDecl::Class(_) => todo!("export default class"),
@@ -468,6 +558,28 @@ fn compile_module(
         }
     }
 
+    for item in &ast_module.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+            decl: Decl::Var(var_decl),
+            ..
+        })) = item
+        {
+            for decl in &var_decl.decls {
+                let name = get_var_decl_name(decl);
+                let vreg = builder
+                    .get_var(&name)
+                    .with_context(error!("in decl").with_span(decl.span))?;
+                builder.push_const(Literal::String(name.to_string()));
+                let key = builder.accu_to_vreg();
+                builder.emit(Instr::LoadRA(vreg));
+                builder.emit(Instr::ObjSet {
+                    obj: mod_named_exports,
+                    key,
+                });
+            }
+        }
+    }
+
     builder.emit(Instr::LoadRA(module_obj));
     builder.emit(Instr::Return);
     let root_fnid = builder.end_function();
@@ -486,10 +598,9 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::Block(block) => {
             builder.cur_fnb().push_scope();
 
-            for stmt in &block.stmts {
-                compile_stmt(builder, stmt)
-                    .with_context(error!("in block").with_span(block.span))?;
-            }
+            let stmts = &block.stmts;
+
+            compile_block(builder, stmts)?;
 
             builder.cur_fnb().pop_scope();
             Ok(())
@@ -508,10 +619,65 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             Ok(())
         }
         // Stmt::Labeled(_) => todo!(),
-        // Stmt::Break(_) => todo!(),
-        // Stmt::Continue(_) => todo!(),
-        // Stmt::Switch(_) => todo!(),
-        // Stmt::Throw(_) => todo!(),
+        Stmt::Break(_) => {
+            builder.reserve_break();
+            Ok(())
+        }
+
+        Stmt::Continue(continue_stmt) => {
+            assert!(
+                continue_stmt.label.is_none(),
+                "unsupported: continue to label"
+            );
+            builder.reserve_continue();
+            Ok(())
+        }
+        Stmt::Switch(switch_stmt) => {
+            compile_expr(builder, &switch_stmt.discriminant)?;
+            let discriminant = builder.accu_to_vreg();
+
+            // TODO(performance): any better allocation strategy?
+            // NOTE: This Vec skips the `default:` label!
+            let mut case_jumps = Vec::with_capacity(switch_stmt.cases.len());
+
+            for case in &switch_stmt.cases {
+                if let Some(test) = &case.test {
+                    compile_expr(builder, test)?;
+                    builder.emit(Instr::Cmp(CmpOp::EQ, discriminant));
+                    case_jumps.push(builder.reserve()); // Jump to label for this case
+                }
+            }
+
+            let default_jump_iid = builder.reserve();
+            let mut case_jumps = case_jumps.into_iter();
+
+            for case in switch_stmt.cases.iter() {
+                let label = builder.peek_iid();
+                if let Some(test) = &case.test {
+                    let jump_iid = case_jumps.next().unwrap();
+                    *builder.get_mut(jump_iid).unwrap() = Instr::JmpIf { dest: label };
+                } else {
+                    *builder.get_mut(default_jump_iid).unwrap() = Instr::Jmp(label);
+                }
+
+                for stmt in &case.cons {
+                    compile_stmt(builder, stmt)?;
+                }
+            }
+
+            let break_target = builder.peek_iid();
+            builder.resolve_break_to(break_target);
+
+            Ok(())
+        }
+
+        Stmt::Throw(throw_stmt) => {
+            compile_expr(builder, &*throw_stmt.arg)?;
+            builder.emit(Instr::Throw);
+
+            Ok(())
+        }
+
         // Stmt::Try(_) => todo!(),
         Stmt::While(while_stmt) => {
             let while_header_iid = builder.peek_iid();
@@ -529,8 +695,55 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             Ok(())
         }
 
-        // Stmt::DoWhile(_) => todo!(),
-        // Stmt::For(_) => todo!(),
+        Stmt::DoWhile(stmt) => {
+            let loop_start = builder.peek_iid();
+            compile_stmt(builder, &*stmt.body)?;
+            compile_expr(builder, &*stmt.test)?;
+            builder.emit(Instr::JmpIf { dest: loop_start });
+            Ok(())
+        }
+
+        Stmt::For(stmt) => {
+            if let Some(init) = &stmt.init {
+                use swc_ecma_ast::VarDeclOrExpr;
+                match init {
+                    VarDeclOrExpr::VarDecl(var_decl) => {
+                        // This one we don't need to hoist really.  The for statement has its own
+                        // scope.
+                        compile_var_decl_namedef(builder, &var_decl);
+                        compile_var_decl_assignment(builder, &var_decl)?;
+                    }
+                    VarDeclOrExpr::Expr(expr) => {
+                        compile_expr(builder, &expr)?;
+                    }
+                }
+            }
+
+            let loop_start = builder.peek_iid();
+            if let Some(test) = &stmt.test {
+                compile_expr(builder, &*test)?;
+                builder.push_const(Literal::Bool(true));
+            } else {
+                builder.emit(Instr::BoolNot);
+            }
+            let jmpif = builder.reserve();
+            compile_stmt(builder, &stmt.body)?;
+
+            let continue_target = builder.peek_iid();
+            if let Some(update) = &stmt.update {
+                compile_expr(builder, &*update)?;
+            }
+
+            builder.emit(Instr::Jmp(loop_start));
+            let loop_end = builder.peek_iid();
+
+            *builder.get_mut(jmpif).unwrap() = Instr::JmpIf { dest: loop_end };
+            builder.resolve_break_to(loop_end);
+            builder.resolve_continue_to(continue_target);
+
+            Ok(())
+        }
+
         Stmt::ForIn(forin_stmt) => {
             let item_var = match &forin_stmt.left {
                     VarDeclOrPat::VarDecl(var_decl) => var_decl.as_ref(),
@@ -586,8 +799,55 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             Ok(())
         }
 
-        // Stmt::ForOf(_) => todo!(),
-        Stmt::Decl(decl) => compile_decl(builder, decl, None),
+        Stmt::ForOf(forof_stmt) => {
+            let item_var = match &forof_stmt.left {
+                    VarDeclOrPat::VarDecl(var_decl) => var_decl.as_ref(),
+                    VarDeclOrPat::Pat(_) => panic!(
+                        "unsupported syntax: destructuring pattern as `<pattern>` in: `for (<pattern> of ...) {{ ... }}`"
+                    ),
+                };
+
+            assert_eq!(item_var.decls.len(), 1);
+
+            let item_var_name = match &item_var.decls[0].name {
+                Pat::Ident(swc_ecma_ast::BindingIdent { id, .. }) => &id.sym,
+                other => panic!(
+                    "unsupported type of pattern in: `for (<pattern> in ...) {{ ... }}: {:?}",
+                    other
+                ),
+            };
+
+            compile_expr(builder, &forof_stmt.right)?;
+            builder.emit(Instr::NewIterator);
+            let iterator = builder.accu_to_vreg();
+
+            let loop_start = builder.peek_iid();
+            let exit = builder.reserve();
+
+            builder.cur_fnb().push_scope();
+
+            builder.emit(Instr::IteratorGetCurrent);
+            let item = builder.accu_to_vreg();
+            builder.define_var(item_var_name.clone(), item);
+            compile_stmt(builder, &forof_stmt.body)?;
+
+            builder.cur_fnb().pop_scope();
+
+            builder.emit(Instr::LoadRA(iterator));
+            builder.emit(Instr::IteratorAdvance);
+            builder.emit(Instr::Jmp(loop_start));
+            let exit_label = builder.peek_iid();
+
+            *builder.get_mut(exit).unwrap() = Instr::JmpIfIteratorFinished(exit_label);
+
+            Ok(())
+        }
+
+        // Function declarations are be processed in a dedicated phase, not here.
+        // The assignment part of variable declarations is evaluated here instead.
+        // See [#hoisting]
+        Stmt::Decl(Decl::Var(var_decl)) => compile_var_decl_assignment(builder, &var_decl),
+        Stmt::Decl(Decl::Fn(_)) => Ok(()),
 
         Stmt::Expr(expr) => {
             compile_expr(builder, &expr.expr)?;
@@ -618,38 +878,107 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
     }
 }
 
-fn compile_decl(
-    builder: &mut Builder,
-    decl: &Decl,
-    defs: Option<&mut Vec<(JsWord, VReg)>>,
-) -> Result<()> {
-    match decl {
-        // Decl::Class(_) => todo!(),
-        Decl::Fn(fn_decl) => {
-            if fn_decl.declare {
-                panic!("unsupported case: fn_decl.declare");
+fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Result<()> {
+    use swc_ecma_ast::Stmt;
+
+    for stmt in stmts {
+        match stmt {
+            Stmt::Decl(Decl::Var(var_decl)) => {
+                compile_var_decl_namedef(builder, var_decl);
             }
-
-            let (name, _) = fn_decl.ident.to_id();
-            let func = &fn_decl.function;
-            compile_function(builder, Some(name.clone()), func)?;
-            let value = builder.accu_to_vreg();
-            builder.define_var(name, value);
+            Stmt::Decl(Decl::Fn(fn_decl)) => {
+                compile_fn_decl_namedef(builder, fn_decl);
+            }
+            _ => (),
         }
+    }
 
-        Decl::Var(var_decl) => {
-            compile_var_decl(builder, var_decl, defs)
-                .with_context(error!("in variable declaration").with_span(var_decl.span))?;
+    for stmt in stmts {
+        if let Stmt::Decl(Decl::Fn(fn_decl)) = stmt {
+            compile_fn_decl_assignment(builder, fn_decl)?;
         }
+    }
 
-        Decl::TsInterface(_) | Decl::TsTypeAlias(_) | Decl::TsEnum(_) | Decl::TsModule(_) => {
-            panic!("TypeScript syntax not supported (for now!)")
-        }
-
-        other => unsupported_node!(other),
+    for stmt in stmts {
+        compile_stmt(builder, stmt)?;
     }
 
     Ok(())
+}
+
+fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) {
+    for decl in &var_decl.decls {
+        let name = get_var_decl_name(decl);
+        // Yet-unassigned vregs are implicitly initialized to Undefined, so no
+        // explicit instruction is required here.
+        let vreg = builder.new_vreg();
+        builder.define_var(name, vreg);
+    }
+}
+
+fn compile_var_decl_assignment(
+    builder: &mut Builder,
+    var_decl: &swc_ecma_ast::VarDecl,
+) -> Result<()> {
+    use swc_ecma_ast::VarDeclKind;
+
+    let _is_const = match var_decl.kind {
+        VarDeclKind::Var => panic!("limitation: `var` bindings not supported"),
+        VarDeclKind::Let => false,
+        VarDeclKind::Const => true,
+    };
+
+    for decl in &var_decl.decls {
+        let ident = decl
+            .name
+            .as_ident()
+            .unwrap_or_else(|| unsupported_node!(decl));
+        let name: JsWord = ident.id.to_id().0;
+        let vreg = builder
+            .get_var(&name)
+            .with_context(error!("resolving identifier").with_span(ident.span))?;
+
+        if let Some(expr) = &decl.init {
+            compile_expr(builder, expr)?;
+        } else {
+            builder.push_const(Literal::Undefined);
+        }
+        builder.emit(Instr::StoAR(vreg));
+    }
+
+    Ok(())
+}
+
+fn get_var_decl_name(decl: &swc_ecma_ast::VarDeclarator) -> JsWord {
+    let ident = decl
+        .name
+        .as_ident()
+        .unwrap_or_else(|| unsupported_node!(decl));
+    ident.id.to_id().0
+}
+
+fn compile_fn_decl_namedef(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnDecl) {
+    let name = get_fn_decl_name(fn_decl);
+    let vreg = builder.new_vreg();
+    builder.define_var(name, vreg);
+}
+
+fn compile_fn_decl_assignment(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnDecl) -> Result<()> {
+    if fn_decl.declare {
+        panic!("unsupported case: fn_decl.declare");
+    }
+    let name = get_fn_decl_name(fn_decl);
+    let vreg = builder
+        .get_var(&name)
+        .with_context(error!("resolving identifier").with_span(fn_decl.ident.span))?;
+    compile_function(builder, Some(name.clone()), &fn_decl.function)?;
+    builder.emit(Instr::StoAR(vreg));
+    Ok(())
+}
+
+fn get_fn_decl_name(fn_decl: &swc_ecma_ast::FnDecl) -> JsWord {
+    let (name, _) = fn_decl.ident.to_id();
+    name
 }
 
 fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function) -> Result<()> {
@@ -672,10 +1001,7 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     builder.start_function(name, func.params.as_slice());
 
     let stmts = &func.body.as_ref().expect("function without body?!").stmts;
-    for stmt in stmts {
-        compile_stmt(builder, stmt)
-            .with_context(error!("in function declaration").with_span(func.span))?;
-    }
+    compile_block(builder, stmts)?;
 
     let inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
 
@@ -683,7 +1009,10 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     // the ClosureNew and any associated ClosureAddCapture are adjacent
     // TODO(performance) avoid this allocation?
     for var_name in inner_fnb.captures.iter() {
-        let vreg = builder.get_var(var_name)?;
+        let var_name = JsWord::from(var_name.as_str());
+        let vreg = builder.get_var(&var_name).with_context(
+            error!("resolving identifier for function's capture").with_span(func.span),
+        )?;
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
     builder.emit(Instr::ClosureNew {
@@ -694,39 +1023,57 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     Ok(())
 }
 
-fn compile_var_decl(
-    builder: &mut Builder,
-    var_decl: &swc_ecma_ast::VarDecl,
-    mut defs: Option<&mut Vec<(JsWord, VReg)>>,
-) -> Result<()> {
-    use swc_ecma_ast::VarDeclKind;
-
-    let _is_const = match var_decl.kind {
-        VarDeclKind::Var => panic!("limitation: `var` bindings not supported"),
-        VarDeclKind::Let => false,
-        VarDeclKind::Const => true,
-    };
-
-    for decl in &var_decl.decls {
-        let ident = decl
-            .name
-            .as_ident()
-            .unwrap_or_else(|| unsupported_node!(decl));
-
-        if let Some(expr) = &decl.init {
-            compile_expr(builder, expr)?;
-        } else {
-            builder.push_const(Literal::Undefined);
-        }
-        let operand = builder.accu_to_vreg();
-
-        let name: JsWord = ident.id.to_id().0;
-        if let Some(defs) = &mut defs {
-            defs.push((name.clone(), operand));
-        }
-        builder.define_var(name, operand);
+fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<()> {
+    if arrow.is_async {
+        panic!("unsupported: async functions");
+    }
+    if arrow.is_generator {
+        panic!("unsupported: generator functions");
+    }
+    if arrow.return_type.is_some() {
+        panic!("unsupported: TypeScript syntax (return type)");
+    }
+    if arrow.type_params.is_some() {
+        panic!("unsupported: TypeScript syntax (return type)");
     }
 
+    let mut param_idents = Vec::new();
+    for param_pat in arrow.params.iter() {
+        param_idents.push(swc_ecma_ast::Param {
+            span: arrow.span,
+            decorators: Vec::new(),
+            pat: param_pat.clone(),
+        });
+    }
+
+    builder.start_function(None, param_idents.as_slice());
+
+    match &arrow.body {
+        swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block) => {
+            compile_block(builder, &block.stmts)?;
+        }
+        swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
+            compile_expr(builder, &*expr)?;
+        }
+    }
+
+    let inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
+
+    // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
+    // the ClosureNew and any associated ClosureAddCapture are adjacent
+    // TODO(performance) avoid this allocation?
+    for var_name in inner_fnb.captures.iter() {
+        let var_name = JsWord::from(var_name.as_str());
+        let vreg = builder.get_var(&var_name).with_context(
+            error!("resolving identifier for function's capture").with_span(arrow.span),
+        )?;
+        builder.emit(Instr::ClosureAddCapture(vreg));
+    }
+    builder.emit(Instr::ClosureNew {
+        fnid: inner_fnb.fnid,
+    });
+
+    builder.fns.insert(inner_fnb.fnid, inner_fnb);
     Ok(())
 }
 
@@ -804,6 +1151,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                 BinaryOp::LogicalAnd => Instr::BoolOp(BoolOp::And, a),
                 BinaryOp::LogicalOr => Instr::BoolOp(BoolOp::Or, a),
 
+                BinaryOp::InstanceOf => Instr::IsInstanceOf(a),
                 _ => panic!("unsupported binary op: {:?}", bin_expr.op),
             };
 
@@ -832,26 +1180,13 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                     .native_fns
                     .get(&JsWord::from("RegExp"))
                     .expect("undefined native constructor: RegExp");
-
-                builder.push_const(Literal::String("__proto__".into()));
-                let proto_lit = builder.accu_to_vreg();
+                let re_str = re_lit.exp.to_string().into();
 
                 // TODO More efficient bytecode here?
-                let re_str = re_lit.exp.to_string().into();
                 builder.push_const(re_str);
                 builder.emit(Instr::CallArg);
-                let constructor = builder.emit(Instr::GetNativeFn(constructor_fid));
-                builder.emit(Instr::Call);
-                let obj = builder.accu_to_vreg();
-
-                builder.push_const(Literal::String("prototype".into()));
-                let key = builder.accu_to_vreg();
                 builder.emit(Instr::GetNativeFn(constructor_fid));
-                builder.emit(Instr::ObjGet { key });
-                builder.emit(Instr::ObjSet {
-                    obj,
-                    key: proto_lit,
-                });
+                builder.emit(Instr::ObjCallNew);
             }
             // Lit::BigInt(_) => todo!(),
             // Lit::JSXText(_) => todo!(),
@@ -859,12 +1194,23 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
         },
 
         Expr::Ident(ident) => {
-            if &ident.sym == "undefined" {
-                builder.push_const(Literal::Undefined);
-            } else {
-                let vreg = builder.get_var(&ident.sym)?;
-                builder.emit(Instr::LoadRA(vreg));
-            }
+            match ident.sym.as_bytes() {
+                b"undefined" => {
+                    builder.push_const(Literal::Undefined);
+                }
+                b"Infinity" => {
+                    builder.push_const(Literal::Number(f64::INFINITY));
+                }
+                b"NaN" => {
+                    builder.push_const(Literal::Number(f64::NAN));
+                }
+                _ => {
+                    let vreg = builder
+                        .get_var(&ident.sym)
+                        .with_context(error!("resolving identifier").with_span(ident.span))?;
+                    builder.emit(Instr::LoadRA(vreg));
+                }
+            };
         }
 
         Expr::Assign(asmt) => {
@@ -873,7 +1219,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
         }
 
         Expr::Object(obj_expr) => {
-            builder.emit(Instr::ObjNew);
+            builder.emit(Instr::ObjCreateEmpty);
             let obj = builder.accu_to_vreg();
 
             for prop_or_spread in obj_expr.props.iter() {
@@ -891,20 +1237,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                             compile_expr(builder, &kv_expr.value)?;
                             builder.emit(Instr::ObjSet { obj, key });
                         }
-                        swc_ecma_ast::Prop::Shorthand(expr) => {
-                            return Err(error!("unsupported node: {:?}", expr).with_span(expr.span))
-                        }
-                        swc_ecma_ast::Prop::Assign(expr) => {
-                            return Err(
-                                error!("unsupported node: {:?}", expr).with_span(expr.key.span)
-                            );
-                        }
-                        swc_ecma_ast::Prop::Getter(expr) => {
-                            return Err(error!("unsupported node: {:?}", expr).with_span(expr.span));
-                        }
-                        swc_ecma_ast::Prop::Setter(expr) => {
-                            return Err(error!("unsupported node: {:?}", expr).with_span(expr.span));
-                        }
+
                         swc_ecma_ast::Prop::Method(method_prop) => {
                             let key = compile_prop_name(&method_prop.key)?;
                             builder.push_const(key);
@@ -913,6 +1246,25 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                             compile_function(builder, None, &*method_prop.function)?;
 
                             builder.emit(Instr::ObjSet { obj, key });
+                        }
+
+                        swc_ecma_ast::Prop::Shorthand(sh) => {
+                            builder.push_const(Literal::String(sh.sym.to_string()));
+                            let key = builder.accu_to_vreg();
+
+                            let var = builder.get_var(&sh.sym).with_context(
+                                error!("in short-hand object short-hand initializer")
+                                    .with_span(sh.span),
+                            )?;
+                            builder.emit(Instr::LoadRA(var));
+                            builder.emit(Instr::ObjSet { obj, key });
+                        }
+
+                        swc_ecma_ast::Prop::Assign(_)
+                        | swc_ecma_ast::Prop::Getter(_)
+                        | swc_ecma_ast::Prop::Setter(_) => {
+                            return Err(error!("unsupported node: {:?}", prop_or_spread)
+                                .with_span(obj_expr.span))
                         }
                     },
                 }
@@ -925,7 +1277,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
         Expr::Array(arr_expr) => {
             use swc_ecma_ast::ExprOrSpread;
 
-            builder.emit(Instr::ObjNew);
+            builder.emit(Instr::ObjCreateEmpty);
             let array = builder.accu_to_vreg();
 
             for elem in arr_expr.elems.iter() {
@@ -948,6 +1300,10 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
             }
         }
 
+        Expr::Arrow(arrow_expr) => {
+            // TODO Refactor this with Decl::Fn
+            compile_arrow_function(builder, arrow_expr)?;
+        }
         Expr::Fn(fn_expr) => {
             // TODO Refactor this with Decl::Fn
             let name = fn_expr.ident.as_ref().map(|ident| ident.to_id().0);
@@ -975,22 +1331,26 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
             builder.emit(instr);
         }
         Expr::Update(update_expr) => {
-            if let Expr::Ident(ident) = &*update_expr.arg {
-                // NOTE: update_expr.prefix does not matter in this case, but
-                // it will matter when this code is extended to other types of args
-                let var = builder.get_var(&ident.sym)?;
+            match &*update_expr.arg {
+                Expr::Ident(ident) => {
+                    // NOTE: update_expr.prefix does not matter in this case, but
+                    // it will matter when this code is extended to other types of args
+                    let var = builder
+                        .get_var(&ident.sym)
+                        .with_context(error!("resolving identifier").with_span(ident.span))?;
 
-                let op = match update_expr.op {
-                    UpdateOp::PlusPlus => ArithOp::Add,
-                    UpdateOp::MinusMinus => ArithOp::Sub,
-                };
-
-                // TODO Use integers here, when they get implemented
-                builder.push_const(Literal::Number(1.0));
-                let value: IID = builder.emit(Instr::Arith(op, var));
-                builder.emit(Instr::StoAR(var));
-            } else {
-                todo!("unsupported: UpdateExpr on anything other than an identifier")
+                    compile_value_update(builder, update_expr.op);
+                    builder.emit(Instr::StoAR(var));
+                }
+                Expr::Member(member_expr) => {
+                    let MemberAccess { obj, key } = compile_member_access(builder, member_expr)?;
+                    compile_value_update(builder, update_expr.op);
+                    builder.emit(Instr::ObjSet { obj, key });
+                }
+                other => todo!(
+                    "unsupported: UpdateExpr on anything other than an identifier: {:?}",
+                    other
+                ),
             }
         }
         Expr::Member(member_expr) => {
@@ -1001,9 +1361,38 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
             compile_expr(builder, &inner.expr)?;
         }
 
+        Expr::Cond(cond_expr) => {
+            compile_expr(builder, &cond_expr.test)?;
+            builder.emit(Instr::BoolNot);
+            let jmpif = builder.reserve();
+
+            compile_expr(builder, &cond_expr.cons)?;
+            let jmp_to_end = builder.reserve();
+
+            let alt = builder.peek_iid();
+            *builder.get_mut(jmpif).unwrap() = Instr::JmpIf { dest: alt };
+            compile_expr(builder, &cond_expr.alt)?;
+
+            let end = builder.peek_iid();
+            *builder.get_mut(jmp_to_end).unwrap() = Instr::Jmp(end);
+        }
+
+        Expr::New(new_expr) => {
+            if let Some(args) = &new_expr.args {
+                for arg_or_spread in args {
+                    assert!(
+                        arg_or_spread.spread.is_none(),
+                        "unsupported: spread (...) in call args"
+                    );
+                    compile_expr(builder, &arg_or_spread.expr)?;
+                    builder.emit(Instr::CallArg);
+                }
+            }
+            compile_expr(builder, &*new_expr.callee)?;
+            builder.emit(Instr::ObjCallNew);
+        }
+
         // Expr::SuperProp(_) => todo!(),
-        // Expr::Cond(_) => todo!(),
-        // Expr::New(_) => todo!(),
         // Expr::Seq(_) => todo!(),
         // Expr::Tpl(_) => todo!(),
         // Expr::TaggedTpl(_) => todo!(),
@@ -1032,6 +1421,13 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
     Ok(())
 }
 
+fn compile_value_update(builder: &mut Builder, op: swc_ecma_ast::UpdateOp) {
+    builder.emit(match op {
+        UpdateOp::PlusPlus => Instr::Inc,
+        UpdateOp::MinusMinus => Instr::Dec,
+    });
+}
+
 fn compile_prop_name(prop_name: &swc_ecma_ast::PropName) -> Result<Literal> {
     match &prop_name {
         swc_ecma_ast::PropName::Ident(ident) => Ok(Literal::from(ident.sym.to_string())),
@@ -1053,7 +1449,10 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
         compile_expr(builder, &asmt.right)?;
         let rhs = builder.accu_to_vreg();
 
-        let var = builder.get_var(&ident.sym)?;
+        let var = builder
+            .get_var(&ident.sym)
+            .with_context(error!("resolving identifier").with_span(ident.span))?;
+
         builder.emit(Instr::LoadRA(var));
         compile_assignment_rhs(builder, asmt.op, rhs)?;
         builder.emit(Instr::StoAR(var));
@@ -1091,18 +1490,17 @@ fn compile_member_access(
     builder: &mut Builder,
     member_expr: &swc_ecma_ast::MemberExpr,
 ) -> Result<MemberAccess> {
-    use swc_ecma_ast::MemberProp;
+    use swc_ecma_ast::{ComputedPropName, MemberProp};
 
     match &member_expr.prop {
         MemberProp::Ident(prop_ident) => {
             let prop_ident = prop_ident.sym.to_string().into();
             builder.push_const(prop_ident);
         }
-        _ => {
-            let error = error!("accessing an object with non-identifer key is unsupported")
-                .with_span(member_expr.span);
-            return Err(error);
+        MemberProp::Computed(ComputedPropName { expr, .. }) => {
+            compile_expr(builder, expr)?;
         }
+        other @ MemberProp::PrivateName(_) => unsupported_node!(other),
     };
     let key = builder.accu_to_vreg();
 
@@ -1196,7 +1594,7 @@ mod tests {
         const THE_MODULE_ID: bytecode::ModuleId = bytecode::ModuleId(1);
     }
     impl Loader for NullLoader {
-        fn get_module_id(&self, filename: &str) -> bytecode::ModuleId {
+        fn get_module_id(&mut self, filename: &str) -> bytecode::ModuleId {
             Self::THE_MODULE_ID
         }
 
@@ -1345,7 +1743,7 @@ mod tests {
                             Instr::ClosureNew { .. } => true,
                             _ => false,
                         },
-                        "ClosureAddCapture preceded by {:?} instead of a ClosureNew or another ClosureAddCapture", 
+                        "ClosureAddCapture preceded by {:?} instead of a ClosureNew or another ClosureAddCapture",
                         prev_instr
                     );
                 }
