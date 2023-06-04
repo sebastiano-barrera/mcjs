@@ -5,7 +5,7 @@ use swc_common::{sync::Lrc, SourceMap, Span};
 use swc_ecma_ast::{ArrowExpr, AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp, VarDecl};
 use swc_ecma_ast::{ExportDecl, VarDeclOrPat};
 
-use crate::bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, Instr, Literal, NativeFnId, VReg, IID};
+use crate::bytecode::{self, FnId, Instr, Literal, NativeFnId, VReg, IID};
 pub use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::util::Mask;
@@ -100,7 +100,7 @@ struct FnBuilder {
     instrs: Vec<Instr>,
     consts: Vec<Literal>,
     trace_anchors: HashMap<IID, bytecode::TraceAnchor>,
-    next_vreg: VReg,
+    next_vreg: u8,
     // Places where a break instruction must be placed when the break target is finally "written"
     // by the compiler.
     pending_break_instrs: Vec<IID>,
@@ -108,11 +108,19 @@ struct FnBuilder {
     captures: Vec<String>,
 }
 
+/// Represents the location where a certain variable's value is stored.  This location
+/// determines the correct instruction to use to read/write the variable.
+#[derive(Clone, Copy, Debug)]
+enum Loc {
+    VReg(VReg),
+    Capture(bytecode::CaptureIndex),
+}
+
 #[derive(Debug)]
 struct Scope {
     // TODO Take advantage of identifier interning!
     // TODO After introducing VRegs, this could become a Vec
-    vars: HashMap<JsWord, VReg>,
+    vars: HashMap<JsWord, Loc>,
 }
 impl Scope {
     fn new() -> Self {
@@ -203,32 +211,31 @@ impl FnBuilder {
     // Assign a new upvalue index to the given variable, and emits the necessary "GetCapture"
     // instruction.
     // Subsequent calls to get_var will return  the IID for the GetCapture instruction.
-    fn set_var_captured(&mut self, name: JsWord) -> VReg {
+    fn set_var_captured(&mut self, name: JsWord) -> Loc {
         let name_str = name.to_string();
         assert!(!self.captures.iter().any(|cap| cap == &name_str));
         self.captures.push(name_str);
 
-        let cap_ndx = self.captures.len().try_into().expect("too many captures!");
-        self.emit(Instr::LoadCapture(cap_ndx));
-        let var = self.next_vreg();
-        self.emit(Instr::StoAR(var));
+        let cap_ndx: u16 = self.captures.len().try_into().expect("too many captures!");
+        let cap_ndx = bytecode::CaptureIndex(cap_ndx);
 
         // The variable now has to be defined in the outermost scope of this function.  Otherwise
         // it's likely that subsequent lookups will fail
+        let loc = Loc::Capture(cap_ndx);
         let prev = self
             .scopes
             .first_mut()
             .unwrap()
             .vars
-            .insert(name.clone(), var);
+            .insert(name.clone(), loc);
         if prev.is_some() {
             // definition of var $name shadows previous definition
         }
 
-        var
+        loc
     }
 
-    fn get_var(&self, name: &JsWord) -> Option<VReg> {
+    fn get_var(&self, name: &JsWord) -> Option<Loc> {
         self.scopes
             .iter()
             .rev()
@@ -236,18 +243,18 @@ impl FnBuilder {
             .copied()
     }
 
-    fn define_var(&mut self, name: JsWord, vreg: VReg) {
+    fn define_var(&mut self, name: JsWord, loc: Loc) {
         let scope = self.inner_scope_mut();
-        let prev = scope.vars.insert(name, vreg);
+        let prev = scope.vars.insert(name, loc);
         if prev.is_some() {
             // definition of var $name shadows previous definition
         }
     }
 
     fn next_vreg(&mut self) -> VReg {
-        let vreg = self.next_vreg;
+        let vreg_ndx = self.next_vreg;
         self.next_vreg += 1;
-        vreg
+        VReg(vreg_ndx)
     }
 }
 
@@ -292,29 +299,29 @@ impl Builder {
         self.cur_fnb().emit(instr)
     }
 
-    fn push_const(&mut self, value: bytecode::Literal) -> IID {
+    fn set_const(&mut self, vreg: VReg, value: bytecode::Literal) {
         match value {
-            bytecode::Literal::Null => self.emit(Instr::LoadNull),
-            bytecode::Literal::Undefined => self.emit(Instr::LoadUndefined),
+            bytecode::Literal::Null => self.emit(Instr::LoadNull(vreg)),
+            bytecode::Literal::Undefined => self.emit(Instr::LoadUndefined(vreg)),
             _ => {
                 let fnb = self.cur_fnb();
                 fnb.consts.push(value);
                 let ndx = fnb.consts.len() - 1;
                 let ndx = TryFrom::try_from(ndx).expect("too many constants!");
-                self.emit(Instr::LoadConst(ndx))
+                self.emit(Instr::LoadConst(vreg, bytecode::ConstIndex(ndx)))
             }
-        }
+        };
     }
 
     fn peek_iid(&mut self) -> IID {
         self.cur_fnb().peek_iid()
     }
 
-    fn define_var(&mut self, name: JsWord, vreg: VReg) {
-        self.cur_fnb().define_var(name, vreg)
+    fn define_var(&mut self, name: JsWord, loc: Loc) {
+        self.cur_fnb().define_var(name, loc)
     }
 
-    fn find_vreg(&mut self, sym: &JsWord) -> Option<(usize, VReg)> {
+    fn find_vreg(&mut self, sym: &JsWord) -> Option<(usize, Loc)> {
         self.fn_stack
             .iter()
             .rev()
@@ -322,13 +329,13 @@ impl Builder {
             .find_map(|(ndx, fnb)| fnb.get_var(sym).map(|vreg| (ndx, vreg)))
             .or_else(|| {
                 let nfid = *self.native_fns.get(sym)?;
-                self.cur_fnb().emit(Instr::GetNativeFn(nfid));
-                let vreg = self.accu_to_vreg();
-                Some((0, vreg))
+                let vreg = self.new_vreg();
+                self.cur_fnb().emit(Instr::GetNativeFn(vreg, nfid));
+                Some((0, Loc::VReg(vreg)))
             })
     }
 
-    fn get_var(&mut self, sym: &JsWord) -> Result<VReg> {
+    fn get_var(&mut self, sym: &JsWord) -> Result<Loc> {
         match self.find_vreg(sym) {
             // Hell yeah, found it in the current function, we have a "simple" IID
             Some((0, vreg)) => Ok(vreg),
@@ -348,15 +355,21 @@ impl Builder {
         }
     }
 
-    fn accu_to_vreg(&mut self) -> VReg {
-        let vreg = self.new_vreg();
-        self.emit(Instr::StoAR(vreg));
-        vreg
+    fn read_var(&mut self, sym: &JsWord) -> Result<VReg> {
+        let loc = self.get_var(sym)?;
+        let vreg = match loc {
+            Loc::VReg(vreg) => vreg,
+            Loc::Capture(cap_ndx) => {
+                let vreg = self.new_vreg();
+                self.emit(Instr::LoadCapture(vreg, cap_ndx));
+                vreg
+            },
+        };
+        Ok(vreg)
     }
 
-    fn new_vreg(&mut self) -> u16 {
-        let fnb = &mut self.cur_fnb();
-        fnb.next_vreg()
+    fn new_vreg(&mut self) -> VReg {
+        self.cur_fnb().next_vreg()
     }
 
     fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
@@ -374,9 +387,14 @@ impl Builder {
 
             match &param.pat {
                 Pat::Ident(ident) => {
-                    self.emit(Instr::LoadArg(param_ndx));
-                    let vreg = self.accu_to_vreg();
-                    self.define_var(ident.sym.clone(), vreg);
+                    // [#call-parameter-passing]
+                    //
+                    // We're using a trick similar the same "register window" trick as Lua.  For a
+                    // call to a function with N arguments, the first N VRegs in the callee stack
+                    // frame are initialized directly by the caller.  What we have to do here is
+                    // "just" to refer to those registers with the name of the callee's parameters.
+                    let vreg = VReg(param_ndx);
+                    self.define_var(ident.sym.clone(), Loc::VReg(vreg));
                 }
                 other => unsupported_node!(other),
             }
@@ -406,29 +424,20 @@ fn compile_module(
 
     builder.start_function(None, &[]);
 
-    builder.push_const(Literal::String("__named".to_string()));
-    let lit_named = builder.accu_to_vreg();
+    let lit_named = builder.new_vreg();
+    builder.set_const(lit_named, Literal::String("__named".to_string()));
 
-    builder.push_const(Literal::String("__default".to_string()));
-    let lit_default = builder.accu_to_vreg();
+    let lit_default = builder.new_vreg();
+    builder.set_const(lit_default, Literal::String("__default".to_string()));
 
     // Exports object.
-    builder.emit(Instr::ObjCreateEmpty);
-    let module_obj = builder.accu_to_vreg();
+    let module_obj = builder.new_vreg();
+    builder.emit(Instr::ObjCreateEmpty(module_obj));
 
-    builder.emit(Instr::ObjCreateEmpty);
-    let mod_named_exports = builder.accu_to_vreg();
-    builder.emit(Instr::ObjSet {
-        obj: module_obj,
-        key: lit_named,
-    });
+    let mod_named_exports = builder.new_vreg();
+    builder.emit(Instr::ObjCreateEmpty(mod_named_exports));
 
-    builder.push_const(Literal::Undefined);
-    let mod_default_export = builder.accu_to_vreg();
-    builder.emit(Instr::ObjSet {
-        obj: module_obj,
-        key: lit_default,
-    });
+    let mut mod_default_export = None;
 
     // We have to handle hoisting here like we do for blocks.  See [#hoisting].
 
@@ -481,30 +490,50 @@ fn compile_module(
                                         todo!("import specifier with rename");
                                     }
 
-                                    builder.push_const(Literal::String(d.local.sym.to_string()));
-                                    let item_name = builder.accu_to_vreg();
+                                    let item_name = builder.new_vreg();
+                                    builder.set_const(
+                                        item_name,
+                                        Literal::String(d.local.sym.to_string()),
+                                    );
 
-                                    builder.emit(Instr::GetModule(module_id));
-                                    builder.emit(Instr::ObjGet { key: lit_named });
-                                    builder.emit(Instr::ObjGet { key: item_name });
-                                    let local_var = builder.accu_to_vreg();
-                                    builder.define_var(d.local.sym.clone(), local_var);
+                                    let local_var = builder.new_vreg();
+                                    builder.emit(Instr::GetModule(local_var, module_id));
+                                    builder.emit(Instr::ObjGet {
+                                        dest: local_var,
+                                        obj: local_var,
+                                        key: lit_named,
+                                    });
+                                    builder.emit(Instr::ObjGet {
+                                        dest: local_var,
+                                        obj: local_var,
+                                        key: item_name,
+                                    });
+                                    builder.define_var(d.local.sym.clone(), Loc::VReg(local_var));
                                 }
                             }
                             swc_ecma_ast::ImportSpecifier::Default(d) => {
-                                builder.emit(Instr::GetModule(module_id));
-                                builder.emit(Instr::ObjGet { key: lit_default });
-                                let local_var = builder.accu_to_vreg();
-                                builder.define_var(d.local.sym.clone(), local_var);
+                                let local_var = builder.new_vreg();
+                                builder.emit(Instr::GetModule(local_var, module_id));
+                                builder.emit(Instr::ObjGet {
+                                    dest: local_var,
+                                    obj: local_var,
+                                    key: lit_default,
+                                });
+                                builder.define_var(d.local.sym.clone(), Loc::VReg(local_var));
                             }
                             swc_ecma_ast::ImportSpecifier::Namespace(d) => {
-                                builder.push_const(Literal::String("__named".to_string()));
-                                let lit_named = builder.accu_to_vreg();
+                                let lit_named = builder.new_vreg();
+                                builder
+                                    .set_const(lit_named, Literal::String("__named".to_string()));
 
-                                builder.emit(Instr::GetModule(module_id));
-                                builder.emit(Instr::ObjGet { key: lit_named });
-                                let local_var = builder.accu_to_vreg();
-                                builder.define_var(d.local.sym.clone(), local_var);
+                                let local_var = builder.new_vreg();
+                                builder.emit(Instr::GetModule(local_var, module_id));
+                                builder.emit(Instr::ObjGet {
+                                    dest: local_var,
+                                    obj: local_var,
+                                    key: lit_named,
+                                });
+                                builder.define_var(d.local.sym.clone(), Loc::VReg(local_var));
                             }
                         }
                     }
@@ -530,8 +559,8 @@ fn compile_module(
                     swc_ecma_ast::DefaultDecl::Class(_) => todo!("export default class"),
                     swc_ecma_ast::DefaultDecl::Fn(fn_expr) => {
                         let name = fn_expr.ident.as_ref().map(|ident| ident.sym.clone());
-                        compile_function(builder, name, &*fn_expr.function)?;
-                        builder.emit(Instr::StoAR(mod_default_export));
+                        let vreg = compile_function(builder, name, &*fn_expr.function)?;
+                        mod_default_export = Some(vreg);
                     }
                     swc_ecma_ast::DefaultDecl::TsInterfaceDecl(ts_decl) => eprintln!(
                         "warning: discarded TypeScript interface export: {}",
@@ -539,8 +568,8 @@ fn compile_module(
                     ),
                 },
                 ModuleDecl::ExportDefaultExpr(decl) => {
-                    compile_expr(builder, &*decl.expr)?;
-                    builder.emit(Instr::StoAR(mod_default_export));
+                    let vreg = compile_expr(builder, &*decl.expr)?;
+                    mod_default_export = Some(vreg);
                 }
                 ModuleDecl::ExportAll(_) => todo!("export all"),
 
@@ -566,22 +595,36 @@ fn compile_module(
         {
             for decl in &var_decl.decls {
                 let name = get_var_decl_name(decl);
-                let vreg = builder
-                    .get_var(&name)
+                let value = builder
+                    .read_var(&name)
                     .with_context(error!("in decl").with_span(decl.span))?;
-                builder.push_const(Literal::String(name.to_string()));
-                let key = builder.accu_to_vreg();
-                builder.emit(Instr::LoadRA(vreg));
+
+                let key = builder.new_vreg();
+                builder.set_const(key, Literal::String(name.to_string()));
+
                 builder.emit(Instr::ObjSet {
                     obj: mod_named_exports,
                     key,
+                    value,
                 });
             }
         }
     }
 
-    builder.emit(Instr::LoadRA(module_obj));
-    builder.emit(Instr::Return);
+    builder.emit(Instr::ObjSet {
+        obj: module_obj,
+        key: lit_named,
+        value: mod_named_exports,
+    });
+
+    let mod_default_export = mod_default_export.unwrap_or_else(|| builder.new_vreg());
+    builder.emit(Instr::ObjSet {
+        obj: module_obj,
+        key: lit_default,
+        value: mod_default_export,
+    });
+
+    builder.emit(Instr::Return(module_obj));
     let root_fnid = builder.end_function();
 
     // The root function is the outermost scope, and therefore must capture
@@ -609,13 +652,15 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         // Stmt::Debugger(_) => todo!(),
         // Stmt::With(_) => todo!(),
         Stmt::Return(stmt) => {
-            if let Some(arg) = &stmt.arg {
-                compile_expr(builder, arg)?;
+            let reg = if let Some(arg) = &stmt.arg {
+                compile_expr(builder, arg)?
             } else {
-                builder.push_const(Literal::Undefined);
-            }
+                let reg = builder.new_vreg();
+                builder.set_const(reg, Literal::Undefined);
+                reg
+            };
 
-            builder.emit(Instr::Return);
+            builder.emit(Instr::Return(reg));
             Ok(())
         }
         // Stmt::Labeled(_) => todo!(),
@@ -633,17 +678,17 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             Ok(())
         }
         Stmt::Switch(switch_stmt) => {
-            compile_expr(builder, &switch_stmt.discriminant)?;
-            let discriminant = builder.accu_to_vreg();
+            let discriminant = compile_expr(builder, &switch_stmt.discriminant)?;
 
             // TODO(performance): any better allocation strategy?
             // NOTE: This Vec skips the `default:` label!
+            let cmp_result = builder.new_vreg();
             let mut case_jumps = Vec::with_capacity(switch_stmt.cases.len());
 
             for case in &switch_stmt.cases {
                 if let Some(test) = &case.test {
-                    compile_expr(builder, test)?;
-                    builder.emit(Instr::Cmp(CmpOp::EQ, discriminant));
+                    let value = compile_expr(builder, test)?;
+                    builder.emit(Instr::CmpEQ(cmp_result, discriminant, value));
                     case_jumps.push(builder.reserve()); // Jump to label for this case
                 }
             }
@@ -655,7 +700,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 let label = builder.peek_iid();
                 if let Some(test) = &case.test {
                     let jump_iid = case_jumps.next().unwrap();
-                    *builder.get_mut(jump_iid).unwrap() = Instr::JmpIf { dest: label };
+                    *builder.get_mut(jump_iid).unwrap() = Instr::JmpIf {
+                        cond: cmp_result,
+                        dest: label,
+                    };
                 } else {
                     *builder.get_mut(default_jump_iid).unwrap() = Instr::Jmp(label);
                 }
@@ -672,23 +720,25 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         }
 
         Stmt::Throw(throw_stmt) => {
-            compile_expr(builder, &*throw_stmt.arg)?;
-            builder.emit(Instr::Throw);
-
+            let exception = compile_expr(builder, &*throw_stmt.arg)?;
+            builder.emit(Instr::Throw(exception));
             Ok(())
         }
 
         // Stmt::Try(_) => todo!(),
         Stmt::While(while_stmt) => {
             let while_header_iid = builder.peek_iid();
-            compile_expr(builder, &while_stmt.test)?;
-            builder.emit(Instr::BoolNot);
+
+            let cond = compile_expr(builder, &while_stmt.test)?;
+            builder.emit(Instr::BoolNot(cond));
             let jmpif = builder.reserve();
+
             compile_stmt(builder, &while_stmt.body)?;
             builder.emit(Instr::Jmp(while_header_iid));
             let while_end_iid = builder.peek_iid();
 
             *builder.get_mut(jmpif).unwrap() = Instr::JmpIf {
+                cond,
                 dest: while_end_iid,
             };
 
@@ -698,8 +748,11 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::DoWhile(stmt) => {
             let loop_start = builder.peek_iid();
             compile_stmt(builder, &*stmt.body)?;
-            compile_expr(builder, &*stmt.test)?;
-            builder.emit(Instr::JmpIf { dest: loop_start });
+            let cond = compile_expr(builder, &*stmt.test)?;
+            builder.emit(Instr::JmpIf {
+                cond,
+                dest: loop_start,
+            });
             Ok(())
         }
 
@@ -720,13 +773,12 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             }
 
             let loop_start = builder.peek_iid();
-            if let Some(test) = &stmt.test {
-                compile_expr(builder, &*test)?;
-                builder.push_const(Literal::Bool(true));
-            } else {
-                builder.emit(Instr::BoolNot);
-            }
+            let cond = match &stmt.test {
+                Some(test) => Some(compile_expr(builder, &*test)?),
+                None => None,
+            };
             let jmpif = builder.reserve();
+
             compile_stmt(builder, &stmt.body)?;
 
             let continue_target = builder.peek_iid();
@@ -737,7 +789,14 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             builder.emit(Instr::Jmp(loop_start));
             let loop_end = builder.peek_iid();
 
-            *builder.get_mut(jmpif).unwrap() = Instr::JmpIf { dest: loop_end };
+            *builder.get_mut(jmpif).unwrap() = if let Some(cond) = cond {
+                Instr::JmpIf {
+                    cond,
+                    dest: loop_end,
+                }
+            } else {
+                Instr::Jmp(loop_end)
+            };
             builder.resolve_break_to(loop_end);
             builder.resolve_continue_to(continue_target);
 
@@ -762,39 +821,47 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 ),
             };
 
-            builder.push_const(Literal::Number(0.0));
-            let key_ndx = builder.accu_to_vreg();
+            let key_ndx = builder.new_vreg();
+            builder.set_const(key_ndx, Literal::Number(0.0));
 
-            compile_expr(builder, &forin_stmt.right)?;
-            builder.emit(Instr::ObjGetKeys);
-            let keys = builder.accu_to_vreg();
+            let iteree = compile_expr(builder, &forin_stmt.right)?;
+            let keys = builder.new_vreg();
+            builder.emit(Instr::ObjGetKeys {
+                dest: keys,
+                obj: iteree,
+            });
 
             let while_begin = builder.peek_iid();
-            builder.emit(Instr::LoadRA(keys));
-            builder.emit(Instr::ArrayLen);
-            builder.emit(Instr::Cmp(CmpOp::LT, key_ndx));
-            builder.emit(Instr::BoolNot);
+            let cond = builder.new_vreg();
+            builder.emit(Instr::ArrayLen {
+                dest: cond,
+                arr: keys,
+            });
+            builder.emit(Instr::CmpLT(cond, key_ndx, cond));
+            builder.emit(Instr::BoolNot(cond));
             let exit = builder.reserve();
 
             builder.cur_fnb().push_scope();
-            builder.emit(Instr::LoadRA(keys));
-            builder.emit(Instr::ArrayNth(key_ndx));
-            let key = builder.accu_to_vreg();
-            builder.define_var(item_var_name.clone(), key);
+            let key = builder.new_vreg();
+            builder.emit(Instr::ArrayNth {
+                dest: key,
+                arr: keys,
+                index: key_ndx,
+            });
+            builder.define_var(item_var_name.clone(), Loc::VReg(key));
 
             compile_stmt(builder, &forin_stmt.body)?;
 
-            builder.push_const(Literal::Number(1.0));
-            let one = builder.accu_to_vreg();
-            builder.emit(Instr::LoadRA(key_ndx));
-            builder.emit(Instr::Arith(ArithOp::Add, one));
-            builder.emit(Instr::StoAR(key_ndx));
+            builder.emit(Instr::ArithInc(key_ndx, key_ndx));
 
             builder.cur_fnb().pop_scope();
             builder.emit(Instr::Jmp(while_begin));
             let exit_label = builder.peek_iid();
 
-            *builder.get_mut(exit).unwrap() = Instr::JmpIf { dest: exit_label };
+            *builder.get_mut(exit).unwrap() = Instr::JmpIf {
+                cond,
+                dest: exit_label,
+            };
 
             Ok(())
         }
@@ -817,28 +884,36 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 ),
             };
 
-            compile_expr(builder, &forof_stmt.right)?;
-            builder.emit(Instr::NewIterator);
-            let iterator = builder.accu_to_vreg();
+            let iteree = compile_expr(builder, &forof_stmt.right)?;
+            let iterator = builder.new_vreg();
+            builder.emit(Instr::NewIterator {
+                dest: iterator,
+                obj: iteree,
+            });
 
             let loop_start = builder.peek_iid();
             let exit = builder.reserve();
 
             builder.cur_fnb().push_scope();
 
-            builder.emit(Instr::IteratorGetCurrent);
-            let item = builder.accu_to_vreg();
-            builder.define_var(item_var_name.clone(), item);
+            let item = builder.new_vreg();
+            builder.emit(Instr::IteratorGetCurrent {
+                dest: item,
+                iter: iterator,
+            });
+            builder.define_var(item_var_name.clone(), Loc::VReg(item));
             compile_stmt(builder, &forof_stmt.body)?;
 
             builder.cur_fnb().pop_scope();
 
-            builder.emit(Instr::LoadRA(iterator));
-            builder.emit(Instr::IteratorAdvance);
+            builder.emit(Instr::IteratorAdvance { iter: iterator });
             builder.emit(Instr::Jmp(loop_start));
             let exit_label = builder.peek_iid();
 
-            *builder.get_mut(exit).unwrap() = Instr::JmpIfIteratorFinished(exit_label);
+            *builder.get_mut(exit).unwrap() = Instr::JmpIfIteratorFinished {
+                iter: iterator,
+                dest: exit_label,
+            };
 
             Ok(())
         }
@@ -855,9 +930,9 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         }
 
         Stmt::If(if_stmt) => {
-            compile_expr(builder, &if_stmt.test)
+            let cond = compile_expr(builder, &if_stmt.test)
                 .with_context(error!("in if statement").with_span(if_stmt.span))?;
-            builder.emit(Instr::BoolNot);
+            builder.emit(Instr::BoolNot(cond));
             let jmp_to_alt = builder.reserve();
 
             compile_stmt(builder, &if_stmt.cons)?;
@@ -870,8 +945,8 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
             let end: IID = builder.peek_iid();
 
-            *builder.get_mut(jmp_to_alt).unwrap() = Instr::JmpIf { dest: alt };
-            *builder.get_mut(jmp_to_end).unwrap() = Instr::JmpIf { dest: end };
+            *builder.get_mut(jmp_to_alt).unwrap() = Instr::JmpIf { cond, dest: alt };
+            *builder.get_mut(jmp_to_end).unwrap() = Instr::JmpIf { cond, dest: end };
             Ok(())
         }
         other => unsupported_node!(other),
@@ -912,7 +987,7 @@ fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarD
         // Yet-unassigned vregs are implicitly initialized to Undefined, so no
         // explicit instruction is required here.
         let vreg = builder.new_vreg();
-        builder.define_var(name, vreg);
+        builder.define_var(name, Loc::VReg(vreg));
     }
 }
 
@@ -923,7 +998,7 @@ fn compile_var_decl_assignment(
     use swc_ecma_ast::VarDeclKind;
 
     let _is_const = match var_decl.kind {
-        VarDeclKind::Var => panic!("limitation: `var` bindings not supported"),
+        VarDeclKind::Var => false, // panic!("limitation: `var` bindings not supported"),
         VarDeclKind::Let => false,
         VarDeclKind::Const => true,
     };
@@ -935,15 +1010,19 @@ fn compile_var_decl_assignment(
             .unwrap_or_else(|| unsupported_node!(decl));
         let name: JsWord = ident.id.to_id().0;
         let vreg = builder
-            .get_var(&name)
+            .read_var(&name)
             .with_context(error!("resolving identifier").with_span(ident.span))?;
 
         if let Some(expr) = &decl.init {
-            compile_expr(builder, expr)?;
+            let value = compile_expr(builder, expr)?;
+            // TODO Remove this instruction.
+            builder.emit(Instr::Copy {
+                dst: vreg,
+                src: value,
+            });
         } else {
-            builder.push_const(Literal::Undefined);
+            builder.set_const(vreg, Literal::Undefined);
         }
-        builder.emit(Instr::StoAR(vreg));
     }
 
     Ok(())
@@ -960,7 +1039,7 @@ fn get_var_decl_name(decl: &swc_ecma_ast::VarDeclarator) -> JsWord {
 fn compile_fn_decl_namedef(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnDecl) {
     let name = get_fn_decl_name(fn_decl);
     let vreg = builder.new_vreg();
-    builder.define_var(name, vreg);
+    builder.define_var(name, Loc::VReg(vreg));
 }
 
 fn compile_fn_decl_assignment(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnDecl) -> Result<()> {
@@ -969,10 +1048,13 @@ fn compile_fn_decl_assignment(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnD
     }
     let name = get_fn_decl_name(fn_decl);
     let vreg = builder
-        .get_var(&name)
+        .read_var(&name)
         .with_context(error!("resolving identifier").with_span(fn_decl.ident.span))?;
-    compile_function(builder, Some(name.clone()), &fn_decl.function)?;
-    builder.emit(Instr::StoAR(vreg));
+    let value = compile_function(builder, Some(name.clone()), &fn_decl.function)?;
+    builder.emit(Instr::Copy {
+        dst: vreg,
+        src: value,
+    });
     Ok(())
 }
 
@@ -981,7 +1063,7 @@ fn get_fn_decl_name(fn_decl: &swc_ecma_ast::FnDecl) -> JsWord {
     name
 }
 
-fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function) -> Result<()> {
+fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function) -> Result<VReg> {
     if !func.decorators.is_empty() {
         panic!("unsupported: function decorators");
     }
@@ -1007,23 +1089,21 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
 
     // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
     // the ClosureNew and any associated ClosureAddCapture are adjacent
-    // TODO(performance) avoid this allocation?
     for var_name in inner_fnb.captures.iter() {
         let var_name = JsWord::from(var_name.as_str());
-        let vreg = builder.get_var(&var_name).with_context(
+        let vreg = builder.read_var(&var_name).with_context(
             error!("resolving identifier for function's capture").with_span(func.span),
         )?;
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
-    builder.emit(Instr::ClosureNew {
-        fnid: inner_fnb.fnid,
-    });
+    let dest = builder.new_vreg();
+    builder.emit(Instr::ClosureNew(dest, inner_fnb.fnid));
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
-    Ok(())
+    Ok(dest)
 }
 
-fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<()> {
+fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VReg> {
     if arrow.is_async {
         panic!("unsupported: async functions");
     }
@@ -1064,23 +1144,23 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<()
     // TODO(performance) avoid this allocation?
     for var_name in inner_fnb.captures.iter() {
         let var_name = JsWord::from(var_name.as_str());
-        let vreg = builder.get_var(&var_name).with_context(
+        let vreg = builder.read_var(&var_name).with_context(
             error!("resolving identifier for function's capture").with_span(arrow.span),
         )?;
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
-    builder.emit(Instr::ClosureNew {
-        fnid: inner_fnb.fnid,
-    });
+    let res = builder.new_vreg();
+    builder.emit(Instr::ClosureNew(res, inner_fnb.fnid));
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
-    Ok(())
+
+    Ok(res)
 }
 
 /// Compile the given expression.
 ///
 /// The resulting code implicitly leaves the result in the accumulator register.
-fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> {
+fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg> {
     use swc_ecma_ast::{CallExpr, Expr};
 
     match expr {
@@ -1094,12 +1174,13 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                 let sym = callee.sym.as_ref();
                 if sym == "sink" {
                     for arg in args {
-                        compile_expr(builder, &arg.expr)?;
-                        builder.emit(Instr::PushToSink);
+                        let var = compile_expr(builder, &arg.expr)?;
+                        builder.emit(Instr::PushToSink(var));
                     }
 
-                    builder.push_const(Literal::Null);
-                    return Ok(());
+                    let ret = builder.new_vreg();
+                    builder.set_const(ret, Literal::Undefined);
+                    return Ok(ret);
                 } else if sym == "__start_trace" {
                     let trace_id = match args[0].expr.as_ref() {
                         Expr::Lit(Lit::Str(trace_id)) => trace_id.value.to_string(),
@@ -1109,8 +1190,9 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                     };
 
                     builder.place_trace_anchor(trace_id);
-                    builder.push_const(Literal::Undefined);
-                    return Ok(());
+                    let ret = builder.new_vreg();
+                    builder.set_const(ret, Literal::Undefined);
+                    return Ok(ret);
                 }
             }
 
@@ -1118,109 +1200,119 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                 if arg.spread.is_some() {
                     panic!("unsupported: spread function parameter: function(a, b, ...)");
                 }
-                compile_expr(builder, &arg.expr)?;
-                builder.emit(Instr::CallArg);
+                let reg = compile_expr(builder, &arg.expr)?;
+                builder.emit(Instr::CallArg(reg));
             }
 
-            compile_expr(builder, callee)?;
-            builder.emit(Instr::Call);
+            let callee_var = compile_expr(builder, callee)?;
+            let ret = builder.new_vreg();
+            builder.emit(Instr::Call(ret, callee_var));
+            Ok(ret)
         }
 
         Expr::Bin(bin_expr) => {
-            compile_expr(builder, &bin_expr.left)?;
-            let a = builder.accu_to_vreg();
-            compile_expr(builder, &bin_expr.right)?;
+            let a = compile_expr(builder, &bin_expr.left)?;
+            let b = compile_expr(builder, &bin_expr.right)?;
 
+            // TODO There must be a better way.  2-operand instructions?  accumulator register?
+            let ret = builder.new_vreg();
             let instr = match bin_expr.op {
-                BinaryOp::Add => Instr::Arith(ArithOp::Add, a),
-                BinaryOp::Sub => Instr::Arith(ArithOp::Sub, a),
-                BinaryOp::Mul => Instr::Arith(ArithOp::Mul, a),
-                BinaryOp::Div => Instr::Arith(ArithOp::Div, a),
-                BinaryOp::Lt => Instr::Cmp(CmpOp::LT, a),
-                BinaryOp::LtEq => Instr::Cmp(CmpOp::LE, a),
-                BinaryOp::Gt => Instr::Cmp(CmpOp::GT, a),
-                BinaryOp::GtEq => Instr::Cmp(CmpOp::GE, a),
-                BinaryOp::EqEqEq => Instr::Cmp(CmpOp::EQ, a),
-                BinaryOp::NotEqEq => Instr::Cmp(CmpOp::NE, a),
+                BinaryOp::Add => Instr::ArithAdd(ret, a, b),
+                BinaryOp::Sub => Instr::ArithSub(ret, a, b),
+                BinaryOp::Mul => Instr::ArithMul(ret, a, b),
+                BinaryOp::Div => Instr::ArithDiv(ret, a, b),
+                BinaryOp::Lt => Instr::CmpLT(ret, a, b),
+                BinaryOp::LtEq => Instr::CmpLE(ret, a, b),
+                BinaryOp::Gt => Instr::CmpGT(ret, a, b),
+                BinaryOp::GtEq => Instr::CmpGE(ret, a, b),
+                BinaryOp::EqEqEq => Instr::CmpEQ(ret, a, b),
+                BinaryOp::NotEqEq => Instr::CmpNE(ret, a, b),
 
                 // TODO TODO TODO This does not implement any of the 'wat' semantics of JavaScript
                 // See https://www.destroyallsoftware.com/talks/wat
-                BinaryOp::EqEq => Instr::Cmp(CmpOp::EQ, a),
-                BinaryOp::NotEq => Instr::Cmp(CmpOp::NE, a),
+                BinaryOp::EqEq => Instr::CmpEQ(ret, a, b),
+                BinaryOp::NotEq => Instr::CmpNE(ret, a, b),
 
-                BinaryOp::LogicalAnd => Instr::BoolOp(BoolOp::And, a),
-                BinaryOp::LogicalOr => Instr::BoolOp(BoolOp::Or, a),
+                BinaryOp::LogicalAnd => Instr::BoolOpAnd(ret, a, b),
+                BinaryOp::LogicalOr => Instr::BoolOpOr(ret, a, b),
 
-                BinaryOp::InstanceOf => Instr::IsInstanceOf(a),
+                BinaryOp::InstanceOf => Instr::IsInstanceOf(ret, a, b),
                 _ => panic!("unsupported binary op: {:?}", bin_expr.op),
             };
 
             builder.emit(instr);
+
+            Ok(ret)
         }
 
-        Expr::Lit(lit) => match lit {
-            Lit::Num(number) => {
-                let lit = Literal::Number(number.value);
-                builder.push_const(lit);
-            }
-            Lit::Str(s) => {
-                let value = s.value.to_string();
-                let lit = Literal::String(value);
-                builder.push_const(lit);
-            }
-            Lit::Bool(bv) => {
-                let lit = Literal::Bool(bv.value);
-                builder.push_const(lit);
-            }
-            Lit::Null(_) => {
-                builder.push_const(Literal::Null);
-            }
-            Lit::Regex(re_lit) => {
-                let constructor_fid = *builder
-                    .native_fns
-                    .get(&JsWord::from("RegExp"))
-                    .expect("undefined native constructor: RegExp");
-                let re_str = re_lit.exp.to_string().into();
+        Expr::Lit(lit) => {
+            let ret = builder.new_vreg();
+            match lit {
+                Lit::Num(number) => {
+                    builder.set_const(ret, Literal::Number(number.value));
+                }
+                Lit::Str(s) => {
+                    let value = s.value.to_string();
+                    builder.set_const(ret, Literal::String(value));
+                }
+                Lit::Bool(bv) => {
+                    builder.set_const(ret, Literal::Bool(bv.value));
+                }
+                Lit::Null(_) => {
+                    builder.set_const(ret, Literal::Null);
+                }
+                Lit::Regex(re_lit) => {
+                    let constructor_fid = *builder
+                        .native_fns
+                        .get(&JsWord::from("RegExp"))
+                        .expect("undefined native constructor: RegExp");
+                    let re_str = re_lit.exp.to_string().into();
 
-                // TODO More efficient bytecode here?
-                builder.push_const(re_str);
-                builder.emit(Instr::CallArg);
-                builder.emit(Instr::GetNativeFn(constructor_fid));
-                builder.emit(Instr::ObjCallNew);
-            }
-            // Lit::BigInt(_) => todo!(),
-            // Lit::JSXText(_) => todo!(),
-            other => unsupported_node!(other),
-        },
+                    builder.set_const(ret, re_str);
+                    builder.emit(Instr::CallArg(ret));
+                    builder.emit(Instr::GetNativeFn(ret, constructor_fid));
+                    builder.emit(Instr::ObjCallNew {
+                        dest: ret,
+                        callee: ret,
+                    });
+                }
+                // Lit::BigInt(_) => todo!(),
+                // Lit::JSXText(_) => todo!(),
+                other => unsupported_node!(other),
+            };
+            Ok(ret)
+        }
 
         Expr::Ident(ident) => {
-            match ident.sym.as_bytes() {
+            let ret = match ident.sym.as_bytes() {
                 b"undefined" => {
-                    builder.push_const(Literal::Undefined);
+                    let ret = builder.new_vreg();
+                    builder.set_const(ret, Literal::Undefined);
+                    ret
                 }
                 b"Infinity" => {
-                    builder.push_const(Literal::Number(f64::INFINITY));
+                    let ret = builder.new_vreg();
+                    builder.set_const(ret, Literal::Number(f64::INFINITY));
+                    ret
                 }
                 b"NaN" => {
-                    builder.push_const(Literal::Number(f64::NAN));
+                    let ret = builder.new_vreg();
+                    builder.set_const(ret, Literal::Number(f64::NAN));
+                    ret
                 }
-                _ => {
-                    let vreg = builder
-                        .get_var(&ident.sym)
-                        .with_context(error!("resolving identifier").with_span(ident.span))?;
-                    builder.emit(Instr::LoadRA(vreg));
-                }
+                _ => builder
+                    .read_var(&ident.sym)
+                    .with_context(error!("resolving identifier").with_span(ident.span))?,
             };
+            Ok(ret)
         }
 
-        Expr::Assign(asmt) => {
-            compile_assignment(asmt, builder)
-                .with_context(error!("in assignment").with_span(asmt.span))?;
-        }
+        Expr::Assign(asmt) => compile_assignment(asmt, builder)
+            .with_context(error!("in assignment").with_span(asmt.span)),
 
         Expr::Object(obj_expr) => {
-            builder.emit(Instr::ObjCreateEmpty);
-            let obj = builder.accu_to_vreg();
+            let obj = builder.new_vreg();
+            builder.emit(Instr::ObjCreateEmpty(obj));
 
             for prop_or_spread in obj_expr.props.iter() {
                 match prop_or_spread {
@@ -1230,34 +1322,38 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                     }
                     swc_ecma_ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
                         swc_ecma_ast::Prop::KeyValue(kv_expr) => {
-                            let key = compile_prop_name(&kv_expr.key)?;
-                            builder.push_const(key);
-                            let key = builder.accu_to_vreg();
+                            let key = builder.new_vreg();
+                            let name = compile_prop_name(&kv_expr.key)?;
+                            builder.set_const(key, name);
 
-                            compile_expr(builder, &kv_expr.value)?;
-                            builder.emit(Instr::ObjSet { obj, key });
+                            let value = compile_expr(builder, &kv_expr.value)?;
+
+                            builder.emit(Instr::ObjSet { obj, key, value });
                         }
 
                         swc_ecma_ast::Prop::Method(method_prop) => {
-                            let key = compile_prop_name(&method_prop.key)?;
-                            builder.push_const(key);
-                            let key = builder.accu_to_vreg();
+                            let key = builder.new_vreg();
+                            let name = compile_prop_name(&method_prop.key)?;
+                            builder.set_const(key, name);
 
-                            compile_function(builder, None, &*method_prop.function)?;
+                            let value = compile_function(builder, None, &*method_prop.function)?;
 
-                            builder.emit(Instr::ObjSet { obj, key });
+                            builder.emit(Instr::ObjSet { obj, key, value });
                         }
 
                         swc_ecma_ast::Prop::Shorthand(sh) => {
-                            builder.push_const(Literal::String(sh.sym.to_string()));
-                            let key = builder.accu_to_vreg();
+                            let key = builder.new_vreg();
+                            builder.set_const(key, Literal::String(sh.sym.to_string()));
 
-                            let var = builder.get_var(&sh.sym).with_context(
+                            let var = builder.read_var(&sh.sym).with_context(
                                 error!("in short-hand object short-hand initializer")
                                     .with_span(sh.span),
                             )?;
-                            builder.emit(Instr::LoadRA(var));
-                            builder.emit(Instr::ObjSet { obj, key });
+                            builder.emit(Instr::ObjSet {
+                                obj,
+                                key,
+                                value: var,
+                            });
                         }
 
                         swc_ecma_ast::Prop::Assign(_)
@@ -1270,15 +1366,15 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                 }
             }
 
-            builder.emit(Instr::LoadRA(obj));
+            Ok(obj)
         }
 
         // Expr::This(_) => todo!(),
         Expr::Array(arr_expr) => {
             use swc_ecma_ast::ExprOrSpread;
 
-            builder.emit(Instr::ObjCreateEmpty);
-            let array = builder.accu_to_vreg();
+            let array = builder.new_vreg();
+            builder.emit(Instr::ObjCreateEmpty(array));
 
             for elem in arr_expr.elems.iter() {
                 match elem {
@@ -1287,8 +1383,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                             return Err(error!("spread syntax is currently unsupported")
                                 .with_span(arr_expr.span));
                         }
-                        compile_expr(builder, expr)?;
-                        builder.emit(Instr::ArrayPush(array));
+                        let value = compile_expr(builder, expr)?;
+                        builder.emit(Instr::ArrayPush { arr: array, value });
                     }
                     None => {
                         eprintln!(
@@ -1298,37 +1394,40 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                     }
                 }
             }
+
+            Ok(array)
         }
 
         Expr::Arrow(arrow_expr) => {
             // TODO Refactor this with Decl::Fn
-            compile_arrow_function(builder, arrow_expr)?;
+            compile_arrow_function(builder, arrow_expr)
         }
         Expr::Fn(fn_expr) => {
             // TODO Refactor this with Decl::Fn
             let name = fn_expr.ident.as_ref().map(|ident| ident.to_id().0);
             let func = &fn_expr.function;
-            compile_function(builder, name.clone(), func)?;
+            let func = compile_function(builder, name.clone(), func)?;
 
             if let Some(name) = name {
-                let value = builder.accu_to_vreg();
-                builder.define_var(name, value);
+                builder.define_var(name, Loc::VReg(func));
             }
+
+            Ok(func)
         }
 
         Expr::Unary(unary_expr) => {
-            compile_expr(builder, &unary_expr.arg)?;
+            let value = compile_expr(builder, &unary_expr.arg)?;
             let instr = match unary_expr.op {
-                swc_ecma_ast::UnaryOp::Bang => Instr::BoolNot,
-                swc_ecma_ast::UnaryOp::TypeOf => Instr::TypeOf,
-                swc_ecma_ast::UnaryOp::Minus => Instr::UnaryMinus,
+                swc_ecma_ast::UnaryOp::Bang => Instr::BoolNot(value),
+                swc_ecma_ast::UnaryOp::TypeOf => Instr::TypeOf { dest: value, value },
+                swc_ecma_ast::UnaryOp::Minus => Instr::UnaryMinus(value),
                 other => unsupported_node!(other),
                 // swc_ecma_ast::UnaryOp::Plus => todo!(),
                 // swc_ecma_ast::UnaryOp::Tilde => todo!(),
                 // swc_ecma_ast::UnaryOp::Void => todo!(),
                 // swc_ecma_ast::UnaryOp::Delete => todo!(),
             };
-            builder.emit(instr);
+            Ok(value)
         }
         Expr::Update(update_expr) => {
             match &*update_expr.arg {
@@ -1336,16 +1435,18 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                     // NOTE: update_expr.prefix does not matter in this case, but
                     // it will matter when this code is extended to other types of args
                     let var = builder
-                        .get_var(&ident.sym)
+                        .read_var(&ident.sym)
                         .with_context(error!("resolving identifier").with_span(ident.span))?;
 
-                    compile_value_update(builder, update_expr.op);
-                    builder.emit(Instr::StoAR(var));
+                    compile_value_update(builder, update_expr.op, var);
+                    Ok(var)
                 }
                 Expr::Member(member_expr) => {
-                    let MemberAccess { obj, key } = compile_member_access(builder, member_expr)?;
-                    compile_value_update(builder, update_expr.op);
-                    builder.emit(Instr::ObjSet { obj, key });
+                    let MemberAccess { obj, key, value } =
+                        compile_member_access(builder, member_expr)?;
+                    compile_value_update(builder, update_expr.op, value);
+                    builder.emit(Instr::ObjSet { obj, key, value });
+                    Ok(value)
                 }
                 other => todo!(
                     "unsupported: UpdateExpr on anything other than an identifier: {:?}",
@@ -1353,28 +1454,36 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                 ),
             }
         }
-        Expr::Member(member_expr) => {
-            compile_member_access(builder, member_expr)?;
-        }
+        Expr::Member(member_expr) => Ok(compile_member_access(builder, member_expr)?.value),
 
-        Expr::Paren(inner) => {
-            compile_expr(builder, &inner.expr)?;
-        }
+        Expr::Paren(inner) => compile_expr(builder, &inner.expr),
 
         Expr::Cond(cond_expr) => {
-            compile_expr(builder, &cond_expr.test)?;
-            builder.emit(Instr::BoolNot);
+            let ret = builder.new_vreg();
+
+            let cond = compile_expr(builder, &cond_expr.test)?;
+            builder.emit(Instr::BoolNot(cond));
             let jmpif = builder.reserve();
 
-            compile_expr(builder, &cond_expr.cons)?;
+            let value = compile_expr(builder, &cond_expr.cons)?;
+            builder.emit(Instr::Copy {
+                dst: ret,
+                src: value,
+            });
             let jmp_to_end = builder.reserve();
 
             let alt = builder.peek_iid();
-            *builder.get_mut(jmpif).unwrap() = Instr::JmpIf { dest: alt };
-            compile_expr(builder, &cond_expr.alt)?;
+            *builder.get_mut(jmpif).unwrap() = Instr::JmpIf { cond, dest: alt };
+            let value = compile_expr(builder, &cond_expr.alt)?;
+            builder.emit(Instr::Copy {
+                dst: ret,
+                src: value,
+            });
 
             let end = builder.peek_iid();
             *builder.get_mut(jmp_to_end).unwrap() = Instr::Jmp(end);
+
+            Ok(ret)
         }
 
         Expr::New(new_expr) => {
@@ -1384,12 +1493,15 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
                         arg_or_spread.spread.is_none(),
                         "unsupported: spread (...) in call args"
                     );
-                    compile_expr(builder, &arg_or_spread.expr)?;
-                    builder.emit(Instr::CallArg);
+                    let arg = compile_expr(builder, &arg_or_spread.expr)?;
+                    builder.emit(Instr::CallArg(arg));
                 }
             }
-            compile_expr(builder, &*new_expr.callee)?;
-            builder.emit(Instr::ObjCallNew);
+
+            let ret = builder.new_vreg();
+            let callee = compile_expr(builder, &*new_expr.callee)?;
+            builder.emit(Instr::ObjCallNew { dest: ret, callee });
+            Ok(ret)
         }
 
         // Expr::SuperProp(_) => todo!(),
@@ -1417,14 +1529,12 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<()> 
         // Expr::Invalid(_) => todo!(),
         other => unsupported_node!(other),
     }
-
-    Ok(())
 }
 
-fn compile_value_update(builder: &mut Builder, op: swc_ecma_ast::UpdateOp) {
+fn compile_value_update(builder: &mut Builder, op: swc_ecma_ast::UpdateOp, arg: VReg) {
     builder.emit(match op {
-        UpdateOp::PlusPlus => Instr::Inc,
-        UpdateOp::MinusMinus => Instr::Dec,
+        UpdateOp::PlusPlus => Instr::ArithInc(arg, arg),
+        UpdateOp::MinusMinus => Instr::ArithDec(arg, arg),
     });
 }
 
@@ -1442,29 +1552,28 @@ fn compile_prop_name(prop_name: &swc_ecma_ast::PropName) -> Result<Literal> {
     }
 }
 
-fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) -> Result<()> {
+fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) -> Result<VReg> {
     use swc_ecma_ast::{Expr, MemberExpr, MemberProp, PatOrExpr};
 
     if let Some(ident) = asmt.left.as_ident() {
         compile_expr(builder, &asmt.right)?;
-        let rhs = builder.accu_to_vreg();
+        let rhs = builder.new_vreg();
 
         let var = builder
-            .get_var(&ident.sym)
+            .read_var(&ident.sym)
             .with_context(error!("resolving identifier").with_span(ident.span))?;
-
-        builder.emit(Instr::LoadRA(var));
-        compile_assignment_rhs(builder, asmt.op, rhs)?;
-        builder.emit(Instr::StoAR(var));
+        compile_assignment_rhs(builder, asmt.op, var, rhs)?;
+        Ok(var)
     } else if let Some(target_expr) = asmt.left.as_expr() {
         match target_expr {
             Expr::Member(member_expr) => {
                 compile_expr(builder, &asmt.right)?;
-                let rhs = builder.accu_to_vreg();
+                let rhs = builder.new_vreg();
 
-                let MemberAccess { obj, key } = compile_member_access(builder, member_expr)?;
-                compile_assignment_rhs(builder, asmt.op, rhs)?;
-                builder.emit(Instr::ObjSet { obj, key });
+                let MemberAccess { obj, key, value } = compile_member_access(builder, member_expr)?;
+                compile_assignment_rhs(builder, asmt.op, value, rhs)?;
+                builder.emit(Instr::ObjSet { obj, key, value });
+                Ok(value)
             }
             // We should have already handled this case in the `if let ... = asm.left.as_ident()`
             // case
@@ -1472,19 +1581,18 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
             _ => {
                 let error =
                     error!("assignment to an expression is unsupported").with_span(asmt.span);
-                return Err(error);
+                Err(error)
             }
         }
     } else {
         panic!("unsupported pattern as assignment target: {:?}", asmt.left)
     }
-
-    Ok(())
 }
 
 struct MemberAccess {
     obj: VReg,
     key: VReg,
+    value: VReg,
 }
 fn compile_member_access(
     builder: &mut Builder,
@@ -1492,23 +1600,27 @@ fn compile_member_access(
 ) -> Result<MemberAccess> {
     use swc_ecma_ast::{ComputedPropName, MemberProp};
 
-    match &member_expr.prop {
+    let key = match &member_expr.prop {
         MemberProp::Ident(prop_ident) => {
+            let key = builder.new_vreg();
             let prop_ident = prop_ident.sym.to_string().into();
-            builder.push_const(prop_ident);
+            builder.set_const(key, prop_ident);
+            key
         }
-        MemberProp::Computed(ComputedPropName { expr, .. }) => {
-            compile_expr(builder, expr)?;
-        }
+        MemberProp::Computed(ComputedPropName { expr, .. }) => compile_expr(builder, expr)?,
         other @ MemberProp::PrivateName(_) => unsupported_node!(other),
     };
-    let key = builder.accu_to_vreg();
 
-    // obj
-    compile_expr(builder, member_expr.obj.as_ref())?;
-    let obj = builder.accu_to_vreg();
-    builder.emit(Instr::ObjGet { key });
-    Ok(MemberAccess { obj, key })
+    let obj = compile_expr(builder, member_expr.obj.as_ref())?;
+
+    let value = builder.new_vreg();
+    builder.emit(Instr::ObjGet {
+        dest: value,
+        obj,
+        key,
+    });
+
+    Ok(MemberAccess { obj, key, value })
 }
 
 /// Read the operand and compute its new value, as requested by the given assignment
@@ -1516,14 +1628,15 @@ fn compile_member_access(
 fn compile_assignment_rhs(
     builder: &mut Builder,
     assign_op: swc_ecma_ast::AssignOp,
+    lhs: VReg,
     rhs: VReg,
-) -> Result<IID> {
-    let value = match assign_op {
-        AssignOp::Assign => builder.emit(Instr::LoadRA(rhs)),
-        AssignOp::AddAssign => builder.emit(Instr::Arith(ArithOp::Add, rhs)),
-        AssignOp::SubAssign => builder.emit(Instr::Arith(ArithOp::Sub, rhs)),
-        AssignOp::MulAssign => builder.emit(Instr::Arith(ArithOp::Mul, rhs)),
-        AssignOp::DivAssign => builder.emit(Instr::Arith(ArithOp::Div, rhs)),
+) -> Result<()> {
+    match assign_op {
+        AssignOp::Assign => builder.emit(Instr::Copy { dst: lhs, src: rhs }),
+        AssignOp::AddAssign => builder.emit(Instr::ArithAdd(lhs, lhs, rhs)),
+        AssignOp::SubAssign => builder.emit(Instr::ArithSub(lhs, lhs, rhs)),
+        AssignOp::MulAssign => builder.emit(Instr::ArithMul(lhs, lhs, rhs)),
+        AssignOp::DivAssign => builder.emit(Instr::ArithDiv(lhs, lhs, rhs)),
         // AssignOp::ModAssign => todo!(),
         // AssignOp::LShiftAssign => todo!(),
         // AssignOp::RShiftAssign => todo!(),
@@ -1537,7 +1650,7 @@ fn compile_assignment_rhs(
         // AssignOp::NullishAssign => todo!(),
         other => unsupported_node!(other),
     };
-    Ok(value)
+    Ok(())
 }
 
 fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_ecma_ast::Module)> {

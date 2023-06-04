@@ -32,15 +32,35 @@ impl std::fmt::Debug for IID {
     }
 }
 
-pub type ConstIndex = u16;
-pub type ArgIndex = u8;
-pub type CaptureIndex = u16;
+#[derive(Clone, Copy)]
+pub struct ConstIndex(pub u16);
 
-pub type VReg = u16;
+#[derive(Clone, Copy)]
+pub struct CaptureIndex(pub u16);
+
+#[derive(Clone, Copy)]
+pub struct VReg(pub u8);
+
+impl std::fmt::Debug for ConstIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "const[{}]", self.0)
+    }
+}
+impl std::fmt::Debug for CaptureIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "capture[{}]", self.0)
+    }
+}
+impl std::fmt::Debug for VReg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
 
 /// Global ID of a module.  Can be used, among other things, to fetch the Module object
 /// from importing modules.
-// 64K module ought to be enough for everyone, node_modules not withstanding
+// me: "64K modules ought to be enough for anyone."
+// guy with knife: node_modules
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ModuleId(pub u16);
 
@@ -48,77 +68,115 @@ pub struct ModuleId(pub u16);
 pub enum Instr {
     Nop,
     /// Load constant in accu
-    LoadConst(ConstIndex),
-    LoadNull,
-    LoadUndefined,
-    LoadArg(u8),
+    LoadConst(VReg, ConstIndex),
+    LoadNull(VReg),
+    LoadUndefined(VReg),
+    LoadCapture(VReg, CaptureIndex),
+    Copy{dst: VReg, src: VReg},
 
-    /// Store: accumulator -> register
-    StoAR(VReg),
-    /// Load: register -> accumulator
-    LoadRA(VReg),
+    BoolNot(VReg),
+    UnaryMinus(VReg),
 
-    /// Load closure capture in accu
-    LoadCapture(CaptureIndex),
+    ArithAdd(VReg, VReg, VReg),
+    ArithSub(VReg, VReg, VReg),
+    ArithMul(VReg, VReg, VReg),
+    ArithDiv(VReg, VReg, VReg),
+    ArithInc(VReg, VReg),
+    ArithDec(VReg, VReg),
 
-    BoolNot,
-    UnaryMinus,
-    Arith(ArithOp, VReg),
-    Inc,
-    Dec,
-    Cmp(CmpOp, VReg),
-    BoolOp(BoolOp, VReg),
-    IsInstanceOf(VReg),
+    CmpGE(VReg, VReg, VReg),
+    CmpGT(VReg, VReg, VReg),
+    CmpLT(VReg, VReg, VReg),
+    CmpLE(VReg, VReg, VReg),
+    CmpEQ(VReg, VReg, VReg),
+    CmpNE(VReg, VReg, VReg),
+
+    BoolOpAnd(VReg, VReg, VReg),
+    BoolOpOr(VReg, VReg, VReg),
+    IsInstanceOf(VReg, VReg, VReg),
 
     JmpIf {
+        cond: VReg,
         dest: IID,
     },
     Jmp(IID),
-    PushToSink,
-    Return,
+    PushToSink(VReg),
+    Return(VReg),
 
     // Push the value of accu to the argument list for the next Call
-    CallArg,
-    Call,
+    Call(VReg, VReg),
+    CallArg(VReg),
 
-    ClosureNew {
-        fnid: FnId,
-    },
+    ClosureNew(VReg, FnId),
     ClosureAddCapture(VReg),
-    GetNativeFn(NativeFnId),
+    GetNativeFn(VReg, NativeFnId),
 
-    ObjCreateEmpty,
-    ObjCallNew,
+    ObjCreateEmpty(VReg),
+    /// TODO Replace this with a seq of simpler ops?
+    ObjCallNew {
+        dest: VReg,
+        callee: VReg,
+    },
     ObjSet {
         obj: VReg,
         key: VReg,
-        // Implicitly, value = accu
+        value: VReg,
     },
     ObjGet {
+        dest: VReg,
+        obj: VReg,
         key: VReg,
     },
-    ObjGetKeys,
+    ObjGetKeys {
+        dest: VReg,
+        obj: VReg,
+    },
 
     // TODO: Remove this bytecode (should be implemented as a method with a native impl)
-    ArrayPush(VReg /* array */),
-    ArrayNth(VReg),
+    ArrayPush {
+        arr: VReg,
+        value: VReg,
+    },
+    ArrayNth {
+        dest: VReg,
+        arr: VReg,
+        index: VReg,
+    },
     ArraySetNth {
+        arr: VReg,
         index: VReg,
         value: VReg,
     },
-    ArrayLen,
+    ArrayLen {
+        dest: VReg,
+        arr: VReg,
+    },
 
-    NewIterator,
-    IteratorGetCurrent,
-    IteratorAdvance,
-    JmpIfIteratorFinished(IID),
+    NewIterator {
+        dest: VReg,
+        obj: VReg,
+    },
+    IteratorGetCurrent {
+        dest: VReg,
+        iter: VReg,
+    },
+    IteratorAdvance {
+        iter: VReg,
+    },
+    JmpIfIteratorFinished {
+        iter: VReg,
+        dest: IID,
+    },
 
-    TypeOf,
+    TypeOf {
+        dest: VReg,
+        value: VReg,
+    },
 
-    GetModule(ModuleId),
+    GetModule(VReg, ModuleId),
 
     // TODO exceptions are completely unimplemented yet, lol
-    Throw,
+    Throw(VReg),
 }
 
 impl Instr {
@@ -148,30 +206,6 @@ impl From<String> for Literal {
 }
 
 type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ArithOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CmpOp {
-    GE,
-    GT,
-    LT,
-    LE,
-    EQ,
-    NE,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BoolOp {
-    And,
-    Or,
-}
 
 pub struct Codebase {
     fns: HashMap<FnId, Function>,
