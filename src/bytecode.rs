@@ -36,11 +36,19 @@ impl std::fmt::Debug for IID {
 pub struct ConstIndex(pub u16);
 
 #[derive(Clone, Copy)]
+pub struct ArgIndex(pub u8);
+
+#[derive(Clone, Copy)]
 pub struct CaptureIndex(pub u16);
 
 #[derive(Clone, Copy)]
 pub struct VReg(pub u8);
 
+impl std::fmt::Debug for ArgIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "arg[{}]", self.0)
+    }
+}
 impl std::fmt::Debug for ConstIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "const[{}]", self.0)
@@ -72,7 +80,11 @@ pub enum Instr {
     LoadNull(VReg),
     LoadUndefined(VReg),
     LoadCapture(VReg, CaptureIndex),
-    Copy{dst: VReg, src: VReg},
+    LoadArg(VReg, ArgIndex),
+    Copy {
+        dst: VReg,
+        src: VReg,
+    },
 
     BoolNot(VReg),
     UnaryMinus(VReg),
@@ -104,7 +116,10 @@ pub enum Instr {
     Return(VReg),
 
     // Push the value of accu to the argument list for the next Call
-    Call(VReg, VReg),
+    Call {
+        return_value: VReg,
+        callee: VReg,
+    },
     CallArg(VReg),
 
     ClosureNew(VReg, FnId),

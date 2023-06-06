@@ -26,7 +26,7 @@
 //
 //
 
-use crate::bytecode::{FnId, IID};
+use crate::bytecode::{FnId, IID, VReg};
 use crate::interpreter::{UpvalueId, Value};
 use std::mem::size_of;
 use std::{marker::PhantomData, ops::Range};
@@ -103,6 +103,7 @@ pub(crate) struct FrameHeader {
     pub(crate) n_instrs: u32,
     pub(crate) n_args: u16,
     pub(crate) n_captures: u16,
+    pub(crate) return_value_vreg: Option<VReg>,
     pub(crate) call_iid: Option<IID>,
     pub(crate) fn_id: FnId,
 }
@@ -221,7 +222,8 @@ mod tests {
             n_instrs: rand::random::<u32>() % 100,
             n_captures: rand::random::<u16>() % 100,
             n_args: rand::random::<u16>() % 100,
-            call_iid: Some(IID(rand::random::<u32>())),
+            return_value_vreg: Some(VReg(rand::random())),
+            call_iid: Some(IID(rand::random())),
             fn_id: FnId(rand::random::<u32>()),
         }
     }

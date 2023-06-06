@@ -20,6 +20,10 @@ impl ObjectHeap {
         self.objects.insert(Object::new_function(closure))
     }
 
+    pub(crate) fn get_closure(&self, oid: ObjectId) -> Option<&Closure> {
+        let obj = self.objects.get(oid).unwrap();
+        obj.closure.as_ref()
+    }
 
     pub(crate) fn set_property(&mut self, oid: ObjectId, key: ObjectKey, value: Value) {
         let obj = self.objects.get_mut(oid).unwrap();
@@ -114,7 +118,7 @@ impl ObjectHeap {
 slotmap::new_key_type! { pub struct ObjectId; }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Object {
+struct Object {
     proto_id: Option<ObjectId>,
     properties: HashMap<PropertyKey, Value>,
     array_items: Vec<Value>,

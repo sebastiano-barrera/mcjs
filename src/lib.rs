@@ -7,17 +7,17 @@ mod bytecode;
 mod fs;
 mod bytecode_compiler;
 mod common;
-// mod interpreter;
+mod interpreter;
 // mod jit;
-// mod stack;
-// mod heap;
+mod stack;
+mod heap;
 mod util;
 
 pub use bytecode::Codebase;
 pub use bytecode_compiler::{BuilderParams, Loader};
 pub use fs::FileLoader;
 
-// mod stack_access;
+mod stack_access;
 
 // pub use interpreter::{InterpreterFlags, JitMode, TracerFlags, VM};
 //

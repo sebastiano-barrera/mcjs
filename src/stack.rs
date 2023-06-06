@@ -24,6 +24,7 @@ pub(crate) struct CallMeta {
     pub n_instrs: u32,
     pub n_captured_upvalues: u16,
     pub n_args: u16,
+    pub return_value_reg: Option<bytecode::VReg>,
     pub call_iid: Option<bytecode::IID>,
 }
 
@@ -51,6 +52,7 @@ impl InterpreterData {
             n_instrs: call_meta.n_instrs,
             n_args: call_meta.n_args,
             n_captures: call_meta.n_captured_upvalues,
+            return_value_vreg: call_meta.return_value_reg,
             call_iid: call_meta.call_iid,
             fn_id: call_meta.fnid,
         };
@@ -73,21 +75,26 @@ impl InterpreterData {
         frame_hdr.fn_id
     }
 
+    pub(crate) fn caller_retval_reg(&self) -> Option<bytecode::VReg> {
+        let frame_hdr = self.metrics.header().get(&self.stack_buffer);
+        frame_hdr.return_value_vreg
+    }
+
     pub(crate) fn call_iid(&self) -> Option<bytecode::IID> {
         let frame_hdr = self.metrics.header().get(&self.stack_buffer);
         frame_hdr.call_iid
     }
 
-    pub(crate) fn get_result(&self, iid: bytecode::IID) -> &Value {
-        let ndx = iid.0 as usize;
+    pub(crate) fn get_result(&self, vreg: bytecode::VReg) -> &Value {
+        let ndx = vreg.0 as usize;
         let slot = self
             .metrics
             .result_slot(ndx, &self.stack_buffer)
             .get(&self.stack_buffer);
         slot_value(slot, &self.upv_alloc)
     }
-    pub(crate) fn set_result(&mut self, iid: bytecode::IID, value: Value) {
-        let ndx = iid.0 as usize;
+    pub(crate) fn set_result(&mut self, vreg: bytecode::VReg, value: Value) {
+        let ndx = vreg.0 as usize;
         let slot = self
             .metrics
             .result_slot(ndx, &self.stack_buffer)
@@ -110,7 +117,7 @@ impl InterpreterData {
         set_slot_value(slot, &mut self.upv_alloc, value);
     }
 
-    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::IID) -> UpvalueId {
+    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {
         let varndx = var.0 as usize;
         let slot = self
             .metrics
@@ -132,16 +139,16 @@ impl InterpreterData {
     pub(crate) fn capture_to_var(
         &mut self,
         capture_ndx: bytecode::CaptureIndex,
-        var: bytecode::IID,
+        vreg: bytecode::VReg,
     ) {
         let upvalue_id = *self
             .metrics
-            .capture_slot(capture_ndx.into(), &self.stack_buffer)
+            .capture_slot(capture_ndx.0 as usize, &self.stack_buffer)
             .get(&self.stack_buffer);
 
         let slot = self
             .metrics
-            .result_slot(var.0 as usize, &self.stack_buffer)
+            .result_slot(vreg.0 as usize, &self.stack_buffer)
             .get_mut(&mut self.stack_buffer);
         *slot = stack_access::Slot::Upvalue(upvalue_id);
     }

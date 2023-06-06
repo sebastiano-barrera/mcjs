@@ -12,11 +12,12 @@ use std::{
 };
 
 use crate::{
-    bytecode::{self, ArithOp, BoolOp, CmpOp, FnId, GlobalIID, Instr, IID},
+    bytecode::{self, FnId, GlobalIID, Instr, VReg, IID},
     bytecode_compiler,
     common::Result,
-    error, heap,
-    jit::{self, InterpreterStep},
+    error,
+    heap,
+    // jit::{self, InterpreterStep},
     stack,
     util::Mask,
 };
@@ -32,9 +33,7 @@ pub enum Value {
     Object(heap::ObjectId),
     Null,
     Undefined,
-    // TODO(cleanup) Delete, Closure supersedes this
     SelfFunction,
-    Closure(Closure),
 
     Internal(usize),
 }
@@ -48,12 +47,6 @@ impl From<String> for Value {
 impl From<&'static str> for Value {
     fn from(value: &'static str) -> Self {
         Value::String(Cow::Borrowed(value))
-    }
-}
-
-impl From<Closure> for Value {
-    fn from(closure: Closure) -> Self {
-        Value::Closure(closure)
     }
 }
 
@@ -71,24 +64,6 @@ impl From<bytecode::Literal> for Value {
 }
 
 impl Value {
-    fn js_typeof(&self) -> Value {
-        let ty_s = match self {
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Bool(_) => "boolean",
-            Value::Object(_) => "object",
-            // TODO(cleanup) This is actually an error in our type system.  null is really a value
-            // of the 'object' type
-            Value::Null => "object",
-            Value::Undefined => "undefined",
-            Value::SelfFunction => "function",
-            Value::Closure(_) => "function",
-            Value::Internal(_) => panic!("internal value has no typeof!"),
-        };
-
-        ty_s.to_string().into()
-    }
-
     pub(crate) fn expect_bool(&self) -> Result<bool> {
         match self {
             Value::Bool(val) => Ok(*val),
@@ -136,18 +111,25 @@ impl std::fmt::Debug for Closure {
 
 slotmap::new_key_type! { pub struct UpvalueId; }
 
-// TODO Rename to a better name ("Driver"?)
-pub struct VM {
-    include_paths: Vec<PathBuf>,
-    modules: HashMap<String, bytecode::Module>,
-    opts: VMOptions,
-    sink: Vec<Value>,
-    traces: HashMap<String, (jit::Trace, jit::NativeThunk)>,
+pub struct Options {
+    pub debug_dump_module: bool,
+    pub indent_level: u8,
+    pub jit_mode: JitMode,
+}
+#[derive(Clone, Copy, Debug)]
+pub enum JitMode {
+    Compile,
+    UseTraces,
 }
 
-#[derive(Default)]
-pub struct VMOptions {
-    pub debug_dump_module: bool,
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            debug_dump_module: false,
+            indent_level: 0,
+            jit_mode: JitMode::UseTraces,
+        }
+    }
 }
 
 pub struct NotADirectoryError(PathBuf);
@@ -157,19 +139,46 @@ impl std::fmt::Debug for NotADirectoryError {
     }
 }
 
-impl VM {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        VM {
-            include_paths: Vec::new(),
+struct Interpreter<'a> {
+    iid: bytecode::IID,
+    data: stack::InterpreterData,
+    heap: heap::ObjectHeap,
+
+    #[cfg(enable_jit)]
+    jitting: Option<Jitting>,
+
+    modules: HashMap<bytecode::ModuleId, heap::ObjectId>,
+
+    codebase: &'a bytecode::Codebase,
+    sink: Vec<Value>,
+    // traces: HashMap<String, (jit::Trace, jit::NativeThunk)>,
+    opts: Options,
+}
+
+#[cfg(enable_jit)]
+struct Jitting {
+    fnid: FnId,
+    iid: IID,
+    trace_id: String,
+    builder: jit::TraceBuilder,
+}
+
+impl<'a> Interpreter<'a> {
+    fn new(codebase: &'a bytecode::Codebase) -> Self {
+        Interpreter {
+            iid: bytecode::IID(0),
+            data: stack::InterpreterData::new(),
+            heap: heap::ObjectHeap::new(),
+            #[cfg(enable_jit)]
+            jitting: None,
             modules: HashMap::new(),
-            opts: Default::default(),
+            codebase,
             sink: Vec::new(),
-            traces: HashMap::new(),
+            opts: Default::default(),
         }
     }
 
-    pub fn options_mut(&mut self) -> &mut VMOptions {
+    pub fn options_mut(&mut self) -> &mut Options {
         &mut self.opts
     }
 
@@ -179,122 +188,43 @@ impl VM {
         swap_area
     }
 
+    #[cfg(enable_jit)]
     pub fn take_trace(&mut self) -> Option<jit::Trace> {
         todo!("(cleanup) delete this method")
     }
 
+    #[cfg(enable_jit)]
     pub fn get_trace(&self, trace_id: &str) -> Option<&(jit::Trace, jit::NativeThunk)> {
         self.traces.get(trace_id)
     }
 
+    #[cfg(enable_jit)]
     pub fn trace_ids(&self) -> impl ExactSizeIterator<Item = &String> {
         self.traces.keys()
     }
 
-    pub fn add_include_path(
-        &mut self,
-        path: PathBuf,
-    ) -> std::result::Result<(), NotADirectoryError> {
-        if path.is_dir() {
-            self.include_paths.push(path);
-            Ok(())
-        } else {
-            Err(NotADirectoryError(path))
-        }
-    }
+    pub fn run_module(&mut self, module_id: bytecode::ModuleId) -> Result<()> {
+        let fnid = self
+            .codebase
+            .get_module_root_fn(module_id)
+            .ok_or_else(|| error!("no such module: {module_id:?}"))?;
+        let root_fn = self.codebase.get_function(fnid).unwrap();
+        let n_instrs = root_fn.instrs().len().try_into().unwrap();
 
-    pub fn load_module(&mut self, root_path: &JsWord) -> Result<()> {
-        self.load_module_ex(root_path, Default::default())
-    }
-    pub fn load_module_ex(&mut self, root_path: &JsWord, flags: InterpreterFlags) -> Result<()> {
-        let mut queue: Vec<JsWord> = vec![root_path.clone()];
+        assert!(self.data.len() == 0);
+        self.data.push(stack::CallMeta {
+            fnid,
+            n_instrs,
+            n_captured_upvalues: 0,
+            n_args: 0,
+            return_value_reg: None,
+            call_iid: None,
+        });
 
-        while let Some(path) = queue.pop() {
-            if queue.contains(&path) {
-                let root_path = root_path.to_string();
+        self.run_until_done()?;
 
-                queue.push(path);
-                let queue: Vec<_> = queue.into_iter().map(|atom| atom.to_string()).collect();
-                let recursive_path = queue.join(", ");
-                let message = format!("circular import dependency: {}", recursive_path);
-
-                return Err(Error::new(message, root_path, 0));
-            }
-
-            let module = self.load_module_file(&path, flags)?;
-            queue.extend_from_slice(&module.module_imports);
-        }
-
-        Ok(())
-    }
-
-    fn load_module_file(
-        &mut self,
-        path: &str,
-        flags: InterpreterFlags,
-    ) -> Result<bytecode::Module> {
-        let (file_path, key): (PathBuf, String) = self.find_module(path.to_string())?;
-
-        let text = {
-            use std::io::Read;
-            let mut source_file = std::fs::File::open(file_path).map_err(Error::from)?;
-            let mut buf = String::new();
-            source_file.read_to_string(&mut buf).map_err(Error::from)?;
-            buf
-        };
-
-        let mut bc_compiler = bytecode_compiler::Compiler::new();
-        set_native_fns(&mut bc_compiler);
-        let module = bc_compiler.compile_file(key.clone(), text).unwrap();
-
-        if self.opts.debug_dump_module {
-            eprintln!("=== loaded module: {}", key);
-            module.dump();
-        }
-
-        self.run_module(&module, flags)?;
-
-        Ok(module)
-    }
-
-    fn find_module(&self, require_path: String) -> Result<(PathBuf, String)> {
-        let mut key = require_path;
-        if !key.ends_with(".js") {
-            key.push_str(".js");
-        }
-        let require_path = Path::new(&key[..]);
-
-        for inc_path in self.include_paths.iter() {
-            let potential_path = inc_path.join(require_path);
-            if potential_path.is_file() {
-                return Ok((potential_path.canonicalize().unwrap(), key));
-            }
-        }
-
-        Err(error!("no such module: {key}"))
-    }
-
-    pub fn run_script(&mut self, script_text: String, flags: InterpreterFlags) -> Result<()> {
-        let mut bc_compiler = bytecode_compiler::Compiler::new();
-        set_native_fns(&mut bc_compiler);
-        let module = bc_compiler
-            .compile_file("<input>".to_string(), script_text)
-            .unwrap();
-
-        #[cfg(test)]
-        {
-            module.dump();
-        }
-
-        self.run_module(&module, flags)
-    }
-
-    fn run_module(&mut self, module: &bytecode::Module, flags: InterpreterFlags) -> Result<()> {
-        let mut intrp = Interpreter::new(self, flags, module);
-        intrp.run()?;
-        let Interpreter { sink, jitting, .. } = intrp;
-
-        if let Some(jitting) = jitting {
+        #[cfg(enable_jit)]
+        if let Some(jitting) = intrp.jitting {
             if let Some(trace) = jitting.builder.build() {
                 #[cfg(test)]
                 {
@@ -308,75 +238,13 @@ impl VM {
             }
         }
 
-        self.sink = sink;
         Ok(())
     }
 
-    fn get_module(&self, module_path: &JsWord) -> Result<&bytecode::Module> {
-        todo!()
-    }
-}
-
-struct Interpreter<'a> {
-    vm: &'a mut VM,
-    flags: InterpreterFlags,
-    jitting: Option<Jitting>,
-
-    heap: heap::ObjectHeap,
-
-    // TODO (big feat) This interpreter does not support having multiple modules running. can you
-    // believe it?!
-    // module_id: bytecode::IID,
-    module: &'a bytecode::Module,
-    data: stack::InterpreterData,
-    iid: bytecode::IID,
-
-    sink: Vec<Value>,
-}
-
-struct Jitting {
-    fnid: FnId,
-    iid: IID,
-    trace_id: String,
-    builder: jit::TraceBuilder,
-}
-
-impl<'a> Interpreter<'a> {
-    fn new(parent_vm: &'a mut VM, flags: InterpreterFlags, module: &'a bytecode::Module) -> Self {
-        eprintln!("Interpreter: flags: {:?}", flags);
-
-        let mut stack = stack::InterpreterData::new();
-        let main_func = module.get_function(FnId::ROOT_FN).unwrap();
-        eprintln!("-- main");
-        stack.push(stack::CallMeta {
-            fnid: FnId::ROOT_FN,
-            n_instrs: main_func.instrs().len().try_into().unwrap(),
-            n_captured_upvalues: 0,
-            n_args: 0,
-            call_iid: None,
-        });
-
-        Interpreter {
-            vm: parent_vm,
-            heap: heap::ObjectHeap::new(),
-            flags,
-            jitting: None,
-            module,
-            iid: bytecode::IID(0),
-            data: stack,
-            sink: Vec::new(),
-        }
-    }
-
-    fn run(&mut self) -> Result<()> {
-        loop {
-            if self.data.len() == 0 {
-                return Ok(());
-            }
-
+    fn run_until_done(&mut self) -> Result<()> {
+        while self.data.len() != 0 {
             let fnid = self.data.fnid();
-            // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
-            let func = self.module.get_function(fnid).unwrap();
+            let func = self.get_function(fnid);
 
             assert!(
                 self.iid.0 as usize <= func.instrs().len(),
@@ -399,7 +267,9 @@ impl<'a> Interpreter<'a> {
             eprintln!("{:4}: {:?}", self.iid.0, instr);
 
             let mut next_ndx = self.iid.0 + 1;
+            drop(func);
 
+            #[cfg(enable_jit)]
             if let Some(tanch) = func.get_trace_anchor(self.iid) {
                 match self.flags.jit_mode {
                     JitMode::Compile => {
@@ -441,75 +311,39 @@ impl<'a> Interpreter<'a> {
             }
 
             match instr {
-                Instr::LoadConst(value) => {
-                    self.data.set_result(self.iid, value.clone().into());
+                Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
+                    let value = func.consts()[*const_ndx as usize].clone();
+                    self.data.set_result(*dest, value.into());
                 }
-                Instr::Arith { op, a, b } => {
-                    let a = self.get_operand(*a);
-                    let b = self.get_operand(*b);
 
-                    if let (Value::Number(a), Value::Number(b)) = (&a, &b) {
-                        self.data.set_result(
-                            self.iid,
-                            Value::Number(match op {
-                                ArithOp::Add => a + b,
-                                ArithOp::Sub => a - b,
-                                ArithOp::Mul => a * b,
-                                ArithOp::Div => a / b,
-                            }),
-                        );
-                    } else {
-                        panic!("invalid operands for arith op: {:?}; {:?}", a, b);
-                    }
-                }
+                Instr::ArithAdd(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x + y),
+                Instr::ArithSub(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x - y),
+                Instr::ArithMul(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x * y),
+                Instr::ArithDiv(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x / y),
+
                 Instr::PushToSink(operand) => {
                     let value = self.get_operand(*operand);
                     self.sink.push(value);
                 }
-                Instr::Cmp { op, a, b } => {
-                    let a = self.get_operand(*a);
-                    let b = self.get_operand(*b);
-
-                    match (&a, &b) {
-                        (Value::Number(a), Value::Number(b)) => {
-                            self.data.set_result(
-                                self.iid,
-                                Value::Bool(match op {
-                                    CmpOp::GE => a >= b,
-                                    CmpOp::GT => a > b,
-                                    CmpOp::LT => a < b,
-                                    CmpOp::LE => a <= b,
-                                    CmpOp::EQ => a == b,
-                                    CmpOp::NE => a != b,
-                                }),
-                            );
-                        }
-                        (Value::String(a), Value::String(b)) => {
-                            let ordering = a.cmp(b);
-                            self.data.set_result(
-                                self.iid,
-                                Value::Bool(matches!(
-                                    (op, ordering),
-                                    (CmpOp::GE, Ordering::Greater)
-                                        | (CmpOp::GE, Ordering::Equal)
-                                        | (CmpOp::GT, Ordering::Greater)
-                                        | (CmpOp::LT, Ordering::Less)
-                                        | (CmpOp::LE, Ordering::Less)
-                                        | (CmpOp::LE, Ordering::Equal)
-                                        | (CmpOp::EQ, Ordering::Equal)
-                                        | (CmpOp::NE, Ordering::Greater)
-                                        | (CmpOp::NE, Ordering::Less)
-                                )),
-                            );
-                        }
-
-                        _ => {
-                            self.data.set_result(self.iid, Value::Bool(false));
-                            // panic!("invalid operands for cmp op: {:?}; {:?}", a,
-                            // b);
-                        }
-                    }
+                Instr::CmpGE(dest, a, b) => {
+                    self.compare(*dest, *a, *b, |x, y| x >= y, |x, y| x >= y, |x, y| x >= y)
                 }
+                Instr::CmpGT(dest, a, b) => {
+                    self.compare(*dest, *a, *b, |x, y| x > y, |x, y| x > y, |x, y| x > y)
+                }
+                Instr::CmpLT(dest, a, b) => {
+                    self.compare(*dest, *a, *b, |x, y| x < y, |x, y| x < y, |x, y| x < y)
+                }
+                Instr::CmpLE(dest, a, b) => {
+                    self.compare(*dest, *a, *b, |x, y| x <= y, |x, y| x <= y, |x, y| x <= y)
+                }
+                Instr::CmpEQ(dest, a, b) => {
+                    self.compare(*dest, *a, *b, |x, y| x == y, |x, y| x == y, |x, y| x == y)
+                }
+                Instr::CmpNE(dest, a, b) => {
+                    self.compare(*dest, *a, *b, |x, y| x != y, |x, y| x != y, |x, y| x != y)
+                }
+
                 Instr::JmpIf { cond, dest } => {
                     let cond_value = self.get_operand(*cond);
                     match cond_value {
@@ -521,16 +355,16 @@ impl<'a> Interpreter<'a> {
                     }
                 }
 
-                Instr::SetVar { var, value } => {
-                    self.data.set_result(*var, self.get_operand(*value));
+                Instr::Copy { dst, src } => {
+                    self.data.set_result(*dst, self.get_operand(*src));
                 }
-                Instr::LoadCapture(cap_ndx) => {
-                    self.data.capture_to_var(*cap_ndx, self.iid);
+                Instr::LoadCapture(dest, cap_ndx) => {
+                    self.data.capture_to_var(*cap_ndx, *dest);
                 }
 
                 Instr::Nop => {}
-                Instr::BoolNot(value) => {
-                    let value = match self.get_operand(*value) {
+                Instr::BoolNot(var) => {
+                    let value = match self.get_operand(*var) {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         Value::Number(num) => Value::Bool(num == 0.0),
                         Value::String(str) => Value::Bool(str.is_empty()),
@@ -538,12 +372,11 @@ impl<'a> Interpreter<'a> {
                         Value::Null => Value::Bool(true),
                         Value::Undefined => Value::Bool(true),
                         Value::SelfFunction => Value::Bool(false),
-                        Value::Closure(_) => Value::Bool(false),
                         Value::Internal(_) => {
                             panic!("bytecode compiler bug: internal value should be unreachable")
                         }
                     };
-                    self.data.set_result(self.iid, value);
+                    self.data.set_result(*var, value);
                 }
                 Instr::Jmp(IID(dest_ndx)) => {
                     next_ndx = *dest_ndx;
@@ -556,23 +389,39 @@ impl<'a> Interpreter<'a> {
                         return Ok(());
                     }
                 }
-                Instr::Call { callee, args } => {
-                    let closure = match self.get_operand(*callee) {
-                        Value::Closure(closure) => closure,
-                        other => panic!("invalid callee (not a function): {:?}", other),
-                    };
+                Instr::Call {
+                    callee,
+                    return_value,
+                } => {
+                    let oid = self
+                        .get_operand_object(*callee)
+                        .expect("invalid function (not an object)");
+                    let closure: &Closure = self
+                        .heap
+                        .get_closure(oid)
+                        .expect("invalid function (object is not callable)");
+
+                    // The arguments have to be "read" before adding the stack frame;
+                    // they will no longer be accessible
+                    // afterwards
+                    // TODO make the above fact false, and avoid this allocation
+                    let arg_vals: Vec<_> = func
+                        .instrs()
+                        .iter()
+                        .skip(self.iid.0 as usize + 1)
+                        .map_while(|instr| match instr {
+                            Instr::CallArg(arg_reg) => Some(*arg_reg),
+                            _ => None,
+                        })
+                        .map(|vreg| self.get_operand(vreg))
+                        .collect();
+                    self.iid.0 += TryInto::<u16>::try_into(arg_vals.len()).unwrap();
 
                     match closure {
                         Closure::JS(closure) => {
-                            // The arguments have to be "read" before adding the stack frame;
-                            // they will no longer be accessible
-                            // afterwards
-                            let arg_vals: Vec<_> =
-                                args.iter().map(|arg| self.get_operand(*arg)).collect();
-                            let callee_func = self.module.get_function(closure.fnid).unwrap();
-                            let n_captures = closure.upvalues.len().try_into().unwrap();
-                            let n_instrs = callee_func.instrs().len().try_into().unwrap();
-
+                            // This code was moved.  Put it back where it belongs, when you
+                            // re-enable the JIT.
+                            #[cfg(enable_jit)]
                             if let Some(jitting) = &mut self.jitting {
                                 jitting.builder.set_args(args);
                                 jitting.builder.enter_function(
@@ -582,25 +431,32 @@ impl<'a> Interpreter<'a> {
                                 );
                             }
 
-                            self.data.push(stack::CallMeta {
+                            let n_args = arg_vals.len().try_into().unwrap();
+                            let callee_func = self.codebase.get_function(closure.fnid).unwrap();
+                            let call_meta = stack::CallMeta {
                                 fnid: closure.fnid,
-                                n_instrs,
-                                n_captured_upvalues: n_captures,
-                                n_args: arg_vals.len().try_into().unwrap(),
+                                n_instrs: callee_func.instrs().len().try_into().unwrap(),
+                                n_captured_upvalues: closure.upvalues.len().try_into().unwrap(),
+                                n_args,
+                                return_value_reg: Some(*return_value),
                                 call_iid: Some(self.iid),
-                            });
+                            };
 
                             self.print_indent();
-                            eprintln!("-- fn #{} [{} captures]", closure.fnid.0, n_captures);
+                            eprintln!(
+                                "-- fn #{} [{} captures]",
+                                call_meta.fnid.0, call_meta.n_captured_upvalues
+                            );
 
+                            self.data.push(call_meta);
                             for (capndx, capture) in closure.upvalues.iter().enumerate() {
                                 self.data.set_capture(capndx, *capture);
                             }
                             for (i, arg) in arg_vals.into_iter().enumerate() {
                                 self.data.set_arg(i, arg);
                             }
+                            self.iid = IID(0u16);
 
-                            self.iid = IID(0u32);
                             // Important: we don't execute the tail part of the instruction's
                             // execution. This makes it easier
                             // to keep a consistent value in `func` and other
@@ -608,21 +464,25 @@ impl<'a> Interpreter<'a> {
                             continue;
                         }
                         Closure::Native(nfid) => {
-                            let ret_val = self.invoke_native(nfid, args)?;
-                            self.data.set_result(self.iid, ret_val);
+                            let ret_val = self.invoke_native(*nfid, &arg_vals)?;
+                            self.data.set_result(*return_value, ret_val);
                         }
                     }
                 }
-
-                Instr::GetArg(arg_ndx) => {
-                    // TODO extra copy?
-                    let value = self.data.get_arg(*arg_ndx).clone();
-                    self.data.set_result(self.iid, value);
+                Instr::CallArg(_) => {
+                    unreachable!("interpreter bug: CallArg goes through another path!")
                 }
 
-                Instr::ObjNew => {
+                Instr::LoadArg(dest, bytecode::ArgIndex(arg_ndx)) => {
+                    // TODO extra copy?
+                    // TODO usize is a bit too wide
+                    let value = self.data.get_arg(*arg_ndx as usize).clone();
+                    self.data.set_result(*dest, value);
+                }
+
+                Instr::ObjCreateEmpty(dest) => {
                     let oid = self.heap.new_object();
-                    self.data.set_result(self.iid, Value::Object(oid));
+                    self.data.set_result(*dest, Value::Object(oid));
                 }
                 Instr::ObjSet { obj, key, value } => {
                     let oid = self
@@ -636,7 +496,7 @@ impl<'a> Interpreter<'a> {
 
                     self.heap.set_property(oid, key, value);
                 }
-                Instr::ObjGet { obj, key } => {
+                Instr::ObjGet { dest, obj, key } => {
                     let oid = self
                         .get_operand_object(*obj)
                         // TODO(big feat) use TypeError exception here
@@ -648,65 +508,65 @@ impl<'a> Interpreter<'a> {
                         .heap
                         .get_property(oid, &key)
                         .unwrap_or(Value::Undefined);
-                    self.data.set_result(self.iid, value.clone());
+                    self.data.set_result(*dest, value.clone());
                 }
-                Instr::ObjGetKeys(obj) => {
+                Instr::ObjGetKeys { dest, obj } => {
                     let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
                         panic!("ObjGetKeys: can't get keys of non-object: {:?}", obj)
                     });
                     let keys = self.heap.get_keys_as_array(oid);
-                    self.data.set_result(self.iid, Value::Object(keys));
+                    self.data.set_result(*dest, Value::Object(keys));
                 }
 
-                Instr::ArrayPush(_arr, _elem) => {
+                Instr::ArrayPush { arr, value } => {
                     todo!("ArrayPush does nothing for now")
                 }
-                Instr::ArrayNth(obj, ndx) => {
-                    let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
-                        panic!("ArrayNth: can't get element of non-array: {:?}", obj)
+                Instr::ArrayNth { dest, arr, index } => {
+                    let oid = self.get_operand_object(*arr).unwrap_or_else(|| {
+                        panic!("ArrayNth: can't get element of non-array: {:?}", arr)
                     });
 
-                    let operand = self.get_operand(*ndx);
-                    let value = if let Value::Number(num) = operand {
-                        let num_trunc = num.trunc();
-                        if num_trunc == num {
-                            let ndx = num_trunc as usize;
-                            self.heap.array_nth(oid, ndx).unwrap_or(Value::Undefined)
-                        } else {
-                            Value::Undefined
-                        }
+                    let num = self.get_operand(*index).expect_num()?;
+                    let num_trunc = num.trunc();
+                    let value = if num_trunc == num {
+                        let ndx = num_trunc as usize;
+                        self.heap.array_nth(oid, ndx).unwrap_or(Value::Undefined)
                     } else {
-                        panic!("ArrayNth: index is not a number: {:?}", operand);
+                        Value::Undefined
                     };
 
-                    self.data.set_result(self.iid, value);
+                    self.data.set_result(*dest, value);
                 }
-                Instr::ArraySetNth(_, _) => todo!("ArraySetNth"),
-                Instr::ArrayLen(obj) => {
-                    let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
-                        panic!("ArrayLen: can't get length of non-object/array: {:?}", obj)
+                Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
+                Instr::ArrayLen { dest, arr } => {
+                    let oid = self.get_operand_object(*arr).unwrap_or_else(|| {
+                        panic!("ArrayLen: can't get length of non-object/array: {:?}", arr)
                     });
                     let len: usize = self.heap.array_len(oid);
-                    self.data.set_result(self.iid, Value::Number(len as f64));
+                    self.data.set_result(*dest, Value::Number(len as f64));
                 }
 
-                Instr::TypeOf(arg) => {
-                    let value = self.get_operand(*arg);
-                    self.data.set_result(self.iid, value.js_typeof());
+                Instr::TypeOf { dest, value } => {
+                    let value = self.get_operand(*value);
+                    self.data.set_result(*dest, self.js_typeof(&value));
                 }
-                Instr::BoolOp { op, a, b } => {
+
+                Instr::BoolOpAnd(dest, a, b) => {
                     let a: bool = self.get_operand(*a).expect_bool()?;
                     let b: bool = self.get_operand(*b).expect_bool()?;
-                    let res = match op {
-                        BoolOp::And => a && b,
-                        BoolOp::Or => a || b,
-                    };
-                    self.data.set_result(self.iid, Value::Bool(res));
+                    let res = a && b;
+                    self.data.set_result(*dest, Value::Bool(res));
+                }
+                Instr::BoolOpOr(dest, a, b) => {
+                    let a: bool = self.get_operand(*a).expect_bool()?;
+                    let b: bool = self.get_operand(*b).expect_bool()?;
+                    let res = a || b;
+                    self.data.set_result(*dest, Value::Bool(res));
                 }
 
-                Instr::ClosureNew { fnid } => {
+                Instr::ClosureNew(dest, fnid) => {
                     let mut upvalues = Vec::new();
-                    while let Instr::ClosureStoreCapture(cap) = func.instrs()[next_ndx as usize] {
+                    while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
                         let upv_id = self.data.ensure_in_upvalue(cap);
                         #[cfg(test)]
                         {
@@ -725,25 +585,72 @@ impl<'a> Interpreter<'a> {
                     });
 
                     let oid = self.heap.new_function(closure);
-                    self.data.set_result(self.iid, Value::Object(oid));
+                    self.data.set_result(*dest, Value::Object(oid));
                 }
                 // This is always handled in the code for ClosureNew
-                Instr::ClosureStoreCapture(_) => unreachable!(),
-                Instr::GetNativeFn(nfid) => {
-                    self.data
-                        .set_result(self.iid, Closure::Native(*nfid).into());
+                Instr::ClosureAddCapture(_) => {
+                    unreachable!(
+                        "interpreter bug: ClosureAddCapture should be handled with ClosureNew"
+                    )
+                }
+                Instr::GetNativeFn(dest, nfid) => {
+                    let closure = Closure::Native(*nfid);
+                    let oid = self.heap.new_function(closure);
+                    self.data.set_result(*dest, Value::Object(oid));
                 }
 
-                Instr::UnaryMinus(arg) => {
-                    let arg: f64 = self.get_operand(*arg).expect_num()?;
-                    self.data.set_result(self.iid, Value::Number(-arg));
+                Instr::UnaryMinus(var) => {
+                    let arg: f64 = self.get_operand(*var).expect_num()?;
+                    self.data.set_result(*var, Value::Number(-arg));
                 }
 
-                Instr::GetImportedModule { import_ndx } => {
-                    todo!("GetImportedModule")
+                Instr::GetModule(dest, module_id) => {
+                    let module_obj =
+                        *self.modules.entry(*module_id).or_insert_with(|| {
+                            let root_fn = self
+                                .codebase
+                                .get_module_root_fn(*module_id)
+                                .expect("no such module ID");
+
+                            todo!(
+                            "call root_fn, store the result value's object ID (must be an object!)"
+                            // use start_call? refactor it?
+                        )
+                        });
+
+                    self.data.set_result(*dest, Value::Object(module_obj));
                 }
+
+                Instr::LoadNull(dest) => {
+                    self.data.set_result(*dest, Value::Null);
+                }
+                Instr::LoadUndefined(dest) => {
+                    self.data.set_result(*dest, Value::Undefined);
+                }
+                Instr::ArithInc(dest, src) => {
+                    let val = self
+                        .get_operand(*src)
+                        .expect_num()
+                        .expect("bytecode bug: ArithInc on non-number");
+                    self.data.set_result(*dest, Value::Number(val + 1.0));
+                }
+                Instr::ArithDec(dest, src) => {
+                    let val = self
+                        .get_operand(*src)
+                        .expect_num()
+                        .expect("bytecode bug: ArithDec on non-number");
+                    self.data.set_result(*dest, Value::Number(val - 1.0));
+                }
+                Instr::IsInstanceOf(_dest, _obj, _sup) => todo!("IsInstanceOf"),
+                Instr::ObjCallNew { dest, callee } => todo!(),
+                Instr::NewIterator { dest, obj } => todo!(),
+                Instr::IteratorGetCurrent { dest, iter } => todo!(),
+                Instr::IteratorAdvance { iter } => todo!(),
+                Instr::JmpIfIteratorFinished { iter, dest } => todo!(),
+                Instr::Throw(_) => todo!(),
             }
 
+            #[cfg(enable_jit)]
             if let Some(jitting) = &mut self.jitting {
                 jitting.builder.interpreter_step(&InterpreterStep {
                     fnid,
@@ -756,9 +663,71 @@ impl<'a> Interpreter<'a> {
 
             self.iid.0 = next_ndx;
         }
+
+        Ok(())
     }
 
-    fn get_operand_object(&mut self, operand: IID) -> Option<heap::ObjectId> {
+    fn get_function(&mut self, fnid: FnId) -> &'a bytecode::Function {
+        // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
+        self.codebase.get_function(fnid).unwrap()
+    }
+
+    fn exit_function(&mut self, callee_retval_reg: Option<VReg>) -> Option<IID> {
+        let return_value = callee_retval_reg
+            .map(|vreg| self.get_operand(vreg))
+            .unwrap_or(Value::Undefined);
+        let caller_retval_reg: Option<VReg> = self.data.caller_retval_reg();
+        let call_iid: Option<IID> = self.data.call_iid();
+        self.data.pop();
+
+        if let Some(vreg) = caller_retval_reg {
+            self.data.set_result(vreg, return_value);
+        }
+
+        #[cfg(enable_jit)]
+        if let Some(jitting) = &mut self.jitting {
+            jitting.builder.exit_function(callee_retval_reg);
+        }
+
+        call_iid
+    }
+
+    fn with_numbers<F>(&mut self, dest: VReg, a: VReg, b: VReg, op: F)
+    where
+        F: FnOnce(f64, f64) -> f64,
+    {
+        let a = self.get_operand(a).expect_num().unwrap();
+        let b = self.get_operand(b).expect_num().unwrap();
+        self.data.set_result(dest, Value::Number(op(a, b)));
+    }
+
+    fn compare<FB, FN, FS>(
+        &mut self,
+        dest: VReg,
+        a: VReg,
+        b: VReg,
+        op_bool: FB,
+        op_num: FN,
+        op_str: FS,
+    ) where
+        FB: FnOnce(bool, bool) -> bool,
+        FN: FnOnce(f64, f64) -> bool,
+        FS: FnOnce(&str, &str) -> bool,
+    {
+        let a = self.get_operand(a);
+        let b = self.get_operand(b);
+
+        let result = match (&a, &b) {
+            (Value::Bool(a), Value::Bool(b)) => op_bool(*a, *b),
+            (Value::Number(a), Value::Number(b)) => op_num(*a, *b),
+            (Value::String(a), Value::String(b)) => op_str(a, b),
+            _ => false,
+        };
+
+        self.data.set_result(dest, Value::Bool(result));
+    }
+
+    fn get_operand_object(&self, operand: VReg) -> Option<heap::ObjectId> {
         let obj = self.get_operand(operand);
         if let Value::Object(oid) = obj {
             Some(oid)
@@ -767,21 +736,13 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn exit_function(&mut self, return_value_iid: Option<IID>) -> Option<IID> {
-        let return_value = return_value_iid
-            .map(|iid| self.get_operand(iid))
-            .unwrap_or(Value::Undefined);
-        let call_iid: Option<_> = self.data.call_iid();
-        self.data.pop();
-
-        if let Some(call_iid) = call_iid {
-            self.data.set_result(call_iid, return_value);
-        }
-        if let Some(jitting) = &mut self.jitting {
-            jitting.builder.exit_function(return_value_iid);
-        }
-
-        call_iid
+    fn get_operand_function(&self, operand: VReg) -> &Closure {
+        let oid = self
+            .get_operand_object(operand)
+            .expect("invalid function (not an object)");
+        self.heap
+            .get_closure(oid)
+            .expect("invalid function (object is not callable)")
     }
 
     fn print_indent(&self) {
@@ -790,21 +751,42 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // TODO(cleanup) inline this function. It now adds nothing
-    fn get_operand(&self, iid: bytecode::IID) -> Value {
-        let value = self.data.get_result(iid).clone();
+    // TODO(cleanup) inline this function? It now adds nothing
+    fn get_operand(&self, vreg: bytecode::VReg) -> Value {
+        let value = self.data.get_result(vreg).clone();
         //  TODO(cleanup) Move to a global logger. This is just for debugging!
-        // self.print_indent();
-        // eprintln!("        {:?} = {:?}", iid, value);
+        #[cfg(test)]
+        {
+            self.print_indent();
+            eprintln!("        {:?} = {:?}", vreg, value);
+        }
         value
     }
 
-    fn invoke_native(&mut self, nfid: u32, args_iids: &[IID]) -> Result<Value> {
-        // TODO Anything more efficient is appropriate here?
-        let args: Vec<_> = args_iids.iter().map(|iid| self.get_operand(*iid)).collect();
+    fn js_typeof(&self, value: &Value) -> Value {
+        let ty_s = match value {
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Bool(_) => "boolean",
+            Value::Object(oid) => match self.heap.get_closure(*oid) {
+                Some(_) => "function",
+                None => "object",
+            },
+            // TODO(cleanup) This is actually an error in our type system.  null is really a value
+            // of the 'object' type
+            Value::Null => "object",
+            Value::Undefined => "undefined",
+            Value::SelfFunction => "function",
+            Value::Internal(_) => panic!("internal value has no typeof!"),
+        };
+
+        ty_s.to_string().into()
+    }
+
+    fn invoke_native(&mut self, nfid: u32, args: &[Value]) -> Result<Value> {
         // TODO Use some sort of enum-based From instance (there are libraries for this)
-        if nfid == NativeFnId::Require as u32 {
-            nf_require(self, &args)
+        if nfid == NativeFnId::StringNew as u32 {
+            nf_array_new(self, &args)
         } else if nfid == NativeFnId::StringNew as u32 {
             nf_string_new(self, &args)
         } else if nfid == NativeFnId::RegExpNew as u32 {
@@ -816,30 +798,26 @@ impl<'a> Interpreter<'a> {
 }
 
 enum NativeFnId {
-    Require,
     StringNew,
     ArrayNew,
     RegExpNew,
 }
 
-fn set_native_fns(bc_compiler: &mut bytecode_compiler::Compiler) {
-    bc_compiler.add_builtin_fn("require".into(), NativeFnId::Require as u32);
-    bc_compiler.add_builtin_fn("String".into(), NativeFnId::StringNew as u32);
-    bc_compiler.add_builtin_fn("Array".into(), NativeFnId::ArrayNew as u32);
-    bc_compiler.add_builtin_fn("RegExp".into(), NativeFnId::RegExpNew as u32);
+lazy_static! {
+    pub static ref BUILTINS: bytecode_compiler::NativeFnMap = get_builtins();
+}
+fn get_builtins() -> bytecode_compiler::NativeFnMap {
+    let mut builtins = HashMap::new();
+    builtins.insert("String".into(), NativeFnId::StringNew as u32);
+    builtins.insert("Array".into(), NativeFnId::ArrayNew as u32);
+    builtins.insert("RegExp".into(), NativeFnId::RegExpNew as u32);
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
+
+    builtins
 }
 
-fn nf_require(intp: &mut Interpreter, args: &[Value]) -> Result<Value> {
-    let arg0 = args.iter().next();
-    match arg0 {
-        Some(Value::String(path)) => {
-            let path: JsWord = path.to_owned().into();
-            intp.vm.load_module(&path)?;
-            Ok(Value::Undefined)
-        }
-        _ => Err(error!("invalid args for require()")),
-    }
+fn nf_array_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    todo!("nf_array_new")
 }
 
 fn nf_string_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
@@ -850,32 +828,6 @@ fn nf_regexp_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
     todo!("nf_regexp_new")
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct InterpreterFlags {
-    pub indent_level: u8,
-    pub jit_mode: JitMode,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum JitMode {
-    Compile,
-    UseTraces,
-}
-
-#[derive(Clone, Debug)]
-pub struct TracerFlags {
-    pub start_depth: u32,
-}
-
-impl Default for InterpreterFlags {
-    fn default() -> Self {
-        Self {
-            indent_level: 0,
-            jit_mode: JitMode::UseTraces,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,9 +836,54 @@ mod tests {
         sink: Vec<Value>,
     }
 
+    struct MockLoader {
+        mid_of_file: HashMap<String, bytecode::ModuleId>,
+        code_of_module: HashMap<bytecode::ModuleId, String>,
+    }
+    impl MockLoader {
+        fn new() -> Self {
+            MockLoader {
+                mid_of_file: HashMap::new(),
+                code_of_module: HashMap::new(),
+            }
+        }
+        fn add_module(&mut self, filename: String, module_id: bytecode::ModuleId, code: String) {
+            self.mid_of_file.insert(filename, module_id);
+            self.code_of_module.insert(module_id, code);
+        }
+    }
+    impl bytecode_compiler::Loader for MockLoader {
+        fn get_module_id(&mut self, filename: &str) -> bytecode::ModuleId {
+            self.mid_of_file.get(filename).copied().unwrap()
+        }
+
+        fn read_source(&self, module_id: bytecode::ModuleId) -> String {
+            self.code_of_module.get(&module_id).cloned().unwrap()
+        }
+    }
+
     fn quick_run(code: &str) -> Result<Output> {
-        let mut vm = VM::new();
-        vm.run_script(code.to_string(), Default::default())?;
+        let module_id = bytecode::ModuleId(123);
+
+        let mut mock_loader = Box::new(MockLoader::new());
+        mock_loader.add_module("the_script.js".to_owned(), module_id, code.to_owned());
+
+        let codebase = {
+            let bcparams = bytecode_compiler::BuilderParams {
+                native_fns: BUILTINS.clone(),
+                loader: mock_loader,
+            };
+            let mut builder = bcparams.to_builder();
+            builder
+                .compile_file("the_script.js".to_string())
+                .expect("compile error");
+            builder.build()
+        };
+
+        codebase.dump();
+
+        let mut vm = Interpreter::new(&codebase);
+        vm.run_module(module_id)?;
         Ok(Output {
             sink: vm.take_sink(),
         })
@@ -1093,7 +1090,7 @@ mod tests {
         assert_eq!(&Value::Number(1239423.4518923), &output.sink[1]);
         assert_eq!(&Value::Number(123.0), &output.sink[2]);
         assert_eq!(&Value::Number(899.0), &output.sink[3]);
-        assert!(matches!(&output.sink[4], Value::Closure(_)));
+        assert!(matches!(&output.sink[4], Value::Object(_)));
     }
 
     #[test]

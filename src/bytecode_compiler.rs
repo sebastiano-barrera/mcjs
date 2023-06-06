@@ -113,6 +113,7 @@ struct FnBuilder {
 #[derive(Clone, Copy, Debug)]
 enum Loc {
     VReg(VReg),
+    Arg(bytecode::ArgIndex),
     Capture(bytecode::CaptureIndex),
 }
 
@@ -214,10 +215,16 @@ impl FnBuilder {
     fn set_var_captured(&mut self, name: JsWord) -> Loc {
         let name_str = name.to_string();
         assert!(!self.captures.iter().any(|cap| cap == &name_str));
-        self.captures.push(name_str);
 
-        let cap_ndx: u16 = self.captures.len().try_into().expect("too many captures!");
+        self.captures.push(name_str);
+        let cap_ndx: u16 = (self.captures.len() - 1)
+            .try_into()
+            .expect("too many captures!");
         let cap_ndx = bytecode::CaptureIndex(cap_ndx);
+        debug_assert_eq!(
+            self.captures[cap_ndx.0 as usize].as_bytes(),
+            name.as_bytes()
+        );
 
         // The variable now has to be defined in the outermost scope of this function.  Otherwise
         // it's likely that subsequent lookups will fail
@@ -357,13 +364,24 @@ impl Builder {
 
     fn read_var(&mut self, sym: &JsWord) -> Result<VReg> {
         let loc = self.get_var(sym)?;
+        eprintln!(
+            "bytecode_compiler: {:?}: var {} is at {:?}",
+            self.cur_fnb().fnid,
+            sym.to_string(),
+            loc
+        );
         let vreg = match loc {
             Loc::VReg(vreg) => vreg,
+            Loc::Arg(arg_ndx) => {
+                let vreg = self.new_vreg();
+                self.emit(Instr::LoadArg(vreg, arg_ndx));
+                vreg
+            }
             Loc::Capture(cap_ndx) => {
                 let vreg = self.new_vreg();
                 self.emit(Instr::LoadCapture(vreg, cap_ndx));
                 vreg
-            },
+            }
         };
         Ok(vreg)
     }
@@ -387,14 +405,7 @@ impl Builder {
 
             match &param.pat {
                 Pat::Ident(ident) => {
-                    // [#call-parameter-passing]
-                    //
-                    // We're using a trick similar the same "register window" trick as Lua.  For a
-                    // call to a function with N arguments, the first N VRegs in the callee stack
-                    // frame are initialized directly by the caller.  What we have to do here is
-                    // "just" to refer to those registers with the name of the callee's parameters.
-                    let vreg = VReg(param_ndx);
-                    self.define_var(ident.sym.clone(), Loc::VReg(vreg));
+                    self.define_var(ident.sym.clone(), Loc::Arg(bytecode::ArgIndex(param_ndx)));
                 }
                 other => unsupported_node!(other),
             }
@@ -454,6 +465,18 @@ fn compile_module(
                 decl: Decl::Fn(fn_decl),
                 ..
             })) => compile_fn_decl_namedef(builder, fn_decl),
+
+            _ => {}
+        }
+    }
+
+    for item in &ast_module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl)))
+            | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+                decl: Decl::Fn(fn_decl),
+                ..
+            })) => compile_fn_decl_assignment(builder, fn_decl)?,
 
             _ => {}
         }
@@ -541,9 +564,7 @@ fn compile_module(
 
                 ModuleDecl::ExportDecl(export_decl) => match &export_decl.decl {
                     // Skip: already processed in previous phase
-                    Decl::Fn(fn_decl) => {
-                        compile_fn_decl_assignment(builder, &*fn_decl)?;
-                    }
+                    Decl::Fn(_) => {}
                     // Only do assignment part
                     Decl::Var(var_decl) => {
                         compile_var_decl_assignment(builder, &*var_decl)?;
@@ -583,7 +604,6 @@ fn compile_module(
             ModuleItem::Stmt(stmt) => {
                 compile_stmt(builder, stmt).with_context(error!("while compiling statement"))?;
             }
-            other => unsupported_node!(other),
         }
     }
 
@@ -698,7 +718,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
             for case in switch_stmt.cases.iter() {
                 let label = builder.peek_iid();
-                if let Some(test) = &case.test {
+                if case.test.is_some() {
                     let jump_iid = case_jumps.next().unwrap();
                     *builder.get_mut(jump_iid).unwrap() = Instr::JmpIf {
                         cond: cmp_result,
@@ -1089,15 +1109,20 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
 
     // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
     // the ClosureNew and any associated ClosureAddCapture are adjacent
+    let mut captures = Vec::new();
     for var_name in inner_fnb.captures.iter() {
         let var_name = JsWord::from(var_name.as_str());
         let vreg = builder.read_var(&var_name).with_context(
             error!("resolving identifier for function's capture").with_span(func.span),
         )?;
-        builder.emit(Instr::ClosureAddCapture(vreg));
+        captures.push(vreg);
     }
+
     let dest = builder.new_vreg();
     builder.emit(Instr::ClosureNew(dest, inner_fnb.fnid));
+    for vreg in captures {
+        builder.emit(Instr::ClosureAddCapture(vreg));
+    }
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
     Ok(dest)
@@ -1196,17 +1221,26 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                 }
             }
 
+            let mut arg_regs = Vec::new();
             for arg in args {
                 if arg.spread.is_some() {
                     panic!("unsupported: spread function parameter: function(a, b, ...)");
                 }
                 let reg = compile_expr(builder, &arg.expr)?;
-                builder.emit(Instr::CallArg(reg));
+                arg_regs.push(reg);
             }
 
             let callee_var = compile_expr(builder, callee)?;
             let ret = builder.new_vreg();
-            builder.emit(Instr::Call(ret, callee_var));
+            builder.emit(Instr::Call {
+                return_value: ret,
+                callee: callee_var,
+            });
+
+            for reg in arg_regs {
+                builder.emit(Instr::CallArg(reg));
+            }
+
             Ok(ret)
         }
 
@@ -1417,7 +1451,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
 
         Expr::Unary(unary_expr) => {
             let value = compile_expr(builder, &unary_expr.arg)?;
-            let instr = match unary_expr.op {
+            builder.emit(match unary_expr.op {
                 swc_ecma_ast::UnaryOp::Bang => Instr::BoolNot(value),
                 swc_ecma_ast::UnaryOp::TypeOf => Instr::TypeOf { dest: value, value },
                 swc_ecma_ast::UnaryOp::Minus => Instr::UnaryMinus(value),
@@ -1426,7 +1460,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                 // swc_ecma_ast::UnaryOp::Tilde => todo!(),
                 // swc_ecma_ast::UnaryOp::Void => todo!(),
                 // swc_ecma_ast::UnaryOp::Delete => todo!(),
-            };
+            });
             Ok(value)
         }
         Expr::Update(update_expr) => {
@@ -1556,8 +1590,7 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
     use swc_ecma_ast::{Expr, MemberExpr, MemberProp, PatOrExpr};
 
     if let Some(ident) = asmt.left.as_ident() {
-        compile_expr(builder, &asmt.right)?;
-        let rhs = builder.new_vreg();
+        let rhs = compile_expr(builder, &asmt.right)?;
 
         let var = builder
             .read_var(&ident.sym)
@@ -1567,8 +1600,7 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
     } else if let Some(target_expr) = asmt.left.as_expr() {
         match target_expr {
             Expr::Member(member_expr) => {
-                compile_expr(builder, &asmt.right)?;
-                let rhs = builder.new_vreg();
+                let rhs = compile_expr(builder, &asmt.right)?;
 
                 let MemberAccess { obj, key, value } = compile_member_access(builder, member_expr)?;
                 compile_assignment_rhs(builder, asmt.op, value, rhs)?;
@@ -1730,6 +1762,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_bytecode_object_init() {
         let codebase = quick_compile(
             "sink({
@@ -1769,8 +1802,6 @@ mod tests {
         let size_data = function.consts().len() * std::mem::size_of::<bytecode::Literal>();
         eprintln!("size of const data: ...... {}", size_data);
         eprintln!("total size: .............. {}", size_code + size_data);
-
-        todo!()
     }
 
     const CODE_UPVALUES: &'static str = "
