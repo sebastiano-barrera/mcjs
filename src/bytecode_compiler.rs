@@ -19,7 +19,7 @@ macro_rules! unsupported_node {
 pub type NativeFnMap = HashMap<JsWord, NativeFnId>;
 
 pub trait Loader {
-    fn get_module_id(&mut self, filename: &str) -> bytecode::ModuleId;
+    fn get_module_id(&mut self, filename: &str) -> Option<bytecode::ModuleId>;
     fn read_source(&self, module_id: bytecode::ModuleId) -> String;
 }
 
@@ -62,7 +62,10 @@ impl Builder {
         use crate::common::Context;
 
         // TODO(performance) Does it make sense to mmap the input file?
-        let module_id = self.loader.get_module_id(&filename);
+        let module_id = self
+            .loader
+            .get_module_id(&filename)
+            .ok_or_else(|| error!("no such file: {}", filename))?;
         if self.rootfn_of_module.contains_key(&module_id) {
             // The module had already been compiled
             return Ok(module_id);
@@ -73,12 +76,14 @@ impl Builder {
         let (source_map, ast_module) = parse_file(filename.clone(), content)
             .with_context(error!("while parsing file: {filename}"))?;
 
-        assert!(self.fn_stack.is_empty());
+        let old_fn_stack_len = self.fn_stack.len();
 
         let res = compile_module(self, &ast_module);
         // In case of an error, fn_stack needs to be reset to allow for another compilation in
-        // the future.
-        self.fn_stack.clear();
+        // the future, or to resume the previous compilation (of the importing modulue).
+        assert!(self.fn_stack.len() >= old_fn_stack_len);
+        self.fn_stack.truncate(old_fn_stack_len);
+
         let root_fnid = res.with_context(
             error!("while compiling module: {filename}").with_source_map(source_map),
         )?;
@@ -101,6 +106,7 @@ struct FnBuilder {
     consts: Vec<Literal>,
     trace_anchors: HashMap<IID, bytecode::TraceAnchor>,
     next_vreg: u8,
+    n_params: bytecode::ArgIndex,
     // Places where a break instruction must be placed when the break target is finally "written"
     // by the compiler.
     pending_break_instrs: Vec<IID>,
@@ -141,6 +147,7 @@ impl FnBuilder {
             trace_anchors: HashMap::new(),
             captures: Vec::new(),
             next_vreg: 0,
+            n_params: bytecode::ArgIndex(0),
             pending_break_instrs: Vec::new(),
             pending_continue_instrs: Vec::new(),
         }
@@ -154,6 +161,7 @@ impl FnBuilder {
         bytecode::Function::new(
             self.instrs.into_boxed_slice(),
             self.consts.into_boxed_slice(),
+            self.n_params,
             self.trace_anchors,
         )
     }
@@ -251,6 +259,12 @@ impl FnBuilder {
     }
 
     fn define_var(&mut self, name: JsWord, loc: Loc) {
+        if let Loc::Arg(arg_ndx) = loc {
+            if self.n_params.0 < arg_ndx.0 {
+                self.n_params.0 = arg_ndx.0;
+            }
+        }
+
         let scope = self.inner_scope_mut();
         let prev = scope.vars.insert(name, loc);
         if prev.is_some() {
@@ -364,12 +378,6 @@ impl Builder {
 
     fn read_var(&mut self, sym: &JsWord) -> Result<VReg> {
         let loc = self.get_var(sym)?;
-        eprintln!(
-            "bytecode_compiler: {:?}: var {} is at {:?}",
-            self.cur_fnb().fnid,
-            sym.to_string(),
-            loc
-        );
         let vreg = match loc {
             Loc::VReg(vreg) => vreg,
             Loc::Arg(arg_ndx) => {
@@ -1302,13 +1310,14 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                         .expect("undefined native constructor: RegExp");
                     let re_str = re_lit.exp.to_string().into();
 
-                    builder.set_const(ret, re_str);
-                    builder.emit(Instr::CallArg(ret));
-                    builder.emit(Instr::GetNativeFn(ret, constructor_fid));
-                    builder.emit(Instr::ObjCallNew {
-                        dest: ret,
-                        callee: ret,
-                    });
+                    let constructor = builder.new_vreg();
+                    builder.emit(Instr::GetNativeFn(constructor, constructor_fid));
+
+                    let arg = builder.new_vreg();
+                    builder.set_const(arg, re_str);
+                    let args = vec![arg];
+
+                    compile_new(builder, constructor, ret, &args);
                 }
                 // Lit::BigInt(_) => todo!(),
                 // Lit::JSXText(_) => todo!(),
@@ -1451,15 +1460,36 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
 
         Expr::Unary(unary_expr) => {
             let value = compile_expr(builder, &unary_expr.arg)?;
-            builder.emit(match unary_expr.op {
-                swc_ecma_ast::UnaryOp::Bang => Instr::BoolNot(value),
-                swc_ecma_ast::UnaryOp::TypeOf => Instr::TypeOf { dest: value, value },
-                swc_ecma_ast::UnaryOp::Minus => Instr::UnaryMinus(value),
+            (match unary_expr.op {
+                swc_ecma_ast::UnaryOp::Bang => {
+                    builder.emit(Instr::BoolNot(value));
+                }
+                swc_ecma_ast::UnaryOp::TypeOf => {
+                    builder.emit(Instr::TypeOf { dest: value, value });
+                }
+                swc_ecma_ast::UnaryOp::Minus => {
+                    builder.emit(Instr::UnaryMinus(value));
+                }
+                swc_ecma_ast::UnaryOp::Delete => {
+                    let member_expr = match &*unary_expr.arg {
+                        Expr::Member(member_expr) => member_expr,
+                         _ => {
+                             return Err(error!("`delete` operator can only be applied to an object member (e.g. `delete obj[key]`, `delete obj.property`)").with_span(unary_expr.span))
+                        },
+                    };
+
+                    let obj = compile_expr(builder, &member_expr.obj)?;
+                    let key = compile_obj_member_prop(builder, &member_expr.prop)?;
+                    builder.emit(Instr::ObjDelete {
+                        dest: value,
+                        obj,
+                        key,
+                    });
+                }
                 other => unsupported_node!(other),
                 // swc_ecma_ast::UnaryOp::Plus => todo!(),
                 // swc_ecma_ast::UnaryOp::Tilde => todo!(),
                 // swc_ecma_ast::UnaryOp::Void => todo!(),
-                // swc_ecma_ast::UnaryOp::Delete => todo!(),
             });
             Ok(value)
         }
@@ -1521,6 +1551,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
         }
 
         Expr::New(new_expr) => {
+            let mut arg_regs = Vec::new();
             if let Some(args) = &new_expr.args {
                 for arg_or_spread in args {
                     assert!(
@@ -1528,19 +1559,39 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                         "unsupported: spread (...) in call args"
                     );
                     let arg = compile_expr(builder, &arg_or_spread.expr)?;
-                    builder.emit(Instr::CallArg(arg));
+                    arg_regs.push(arg);
                 }
             }
 
             let ret = builder.new_vreg();
             let callee = compile_expr(builder, &*new_expr.callee)?;
-            builder.emit(Instr::ObjCallNew { dest: ret, callee });
+            compile_new(builder, callee, ret, &arg_regs);
             Ok(ret)
+        }
+
+        Expr::Tpl(tpl) => {
+            assert_eq!(tpl.quasis.len(), tpl.exprs.len() + 1);
+
+            let buf_reg = builder.new_vreg();
+            builder.emit(Instr::StrCreateEmpty(buf_reg));
+            let tmp_reg = builder.new_vreg();
+            for (quasi, expr) in tpl.quasis.iter().zip(tpl.exprs.iter()) {
+                builder.set_const(tmp_reg, Literal::String(quasi.raw.to_string()));
+                builder.emit(Instr::StrAppend(buf_reg, tmp_reg));
+
+                let value = compile_expr(builder, expr)?;
+                builder.emit(Instr::StrAppend(buf_reg, value));
+            }
+
+            let last_str = tpl.quasis.last().unwrap().raw.to_string();
+            builder.set_const(tmp_reg, Literal::String(last_str));
+            builder.emit(Instr::StrAppend(buf_reg, tmp_reg));
+
+            Ok(buf_reg)
         }
 
         // Expr::SuperProp(_) => todo!(),
         // Expr::Seq(_) => todo!(),
-        // Expr::Tpl(_) => todo!(),
         // Expr::TaggedTpl(_) => todo!(),
         // Expr::Arrow(_) => todo!(),
         // Expr::Class(_) => todo!(),
@@ -1563,6 +1614,30 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
         // Expr::Invalid(_) => todo!(),
         other => unsupported_node!(other),
     }
+}
+
+fn compile_new(builder: &mut Builder, constructor: VReg, ret: VReg, args: &[VReg]) {
+    builder.emit(Instr::Call {
+        return_value: ret,
+        callee: constructor,
+    });
+    for arg in args {
+        builder.emit(Instr::CallArg(*arg));
+    }
+    let key = builder.new_vreg();
+    builder.set_const(key, Literal::String("prototype".into()));
+    // reusing register `constructor` for the prototype
+    builder.emit(Instr::ObjGet {
+        dest: constructor,
+        obj: constructor,
+        key,
+    });
+    builder.set_const(key, Literal::String("__proto__".into()));
+    builder.emit(Instr::ObjSet {
+        obj: ret,
+        key,
+        value: constructor,
+    });
 }
 
 fn compile_value_update(builder: &mut Builder, op: swc_ecma_ast::UpdateOp, arg: VReg) {
@@ -1630,9 +1705,26 @@ fn compile_member_access(
     builder: &mut Builder,
     member_expr: &swc_ecma_ast::MemberExpr,
 ) -> Result<MemberAccess> {
+    let member_prop = &member_expr.prop;
+    let key = compile_obj_member_prop(builder, member_prop)?;
+    let obj = compile_expr(builder, member_expr.obj.as_ref())?;
+    let value = builder.new_vreg();
+    builder.emit(Instr::ObjGet {
+        dest: value,
+        obj,
+        key,
+    });
+
+    Ok(MemberAccess { obj, key, value })
+}
+
+fn compile_obj_member_prop(
+    builder: &mut Builder,
+    member_prop: &swc_ecma_ast::MemberProp,
+) -> Result<VReg> {
     use swc_ecma_ast::{ComputedPropName, MemberProp};
 
-    let key = match &member_expr.prop {
+    let key = match member_prop {
         MemberProp::Ident(prop_ident) => {
             let key = builder.new_vreg();
             let prop_ident = prop_ident.sym.to_string().into();
@@ -1642,17 +1734,7 @@ fn compile_member_access(
         MemberProp::Computed(ComputedPropName { expr, .. }) => compile_expr(builder, expr)?,
         other @ MemberProp::PrivateName(_) => unsupported_node!(other),
     };
-
-    let obj = compile_expr(builder, member_expr.obj.as_ref())?;
-
-    let value = builder.new_vreg();
-    builder.emit(Instr::ObjGet {
-        dest: value,
-        obj,
-        key,
-    });
-
-    Ok(MemberAccess { obj, key, value })
+    Ok(key)
 }
 
 /// Read the operand and compute its new value, as requested by the given assignment
@@ -1739,8 +1821,8 @@ mod tests {
         const THE_MODULE_ID: bytecode::ModuleId = bytecode::ModuleId(1);
     }
     impl Loader for NullLoader {
-        fn get_module_id(&mut self, filename: &str) -> bytecode::ModuleId {
-            Self::THE_MODULE_ID
+        fn get_module_id(&mut self, filename: &str) -> Option<bytecode::ModuleId> {
+            Some(Self::THE_MODULE_ID)
         }
 
         fn read_source(&self, module_id: bytecode::ModuleId) -> String {

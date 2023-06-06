@@ -76,9 +76,11 @@ pub struct Error {
 
 impl std::fmt::Debug for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.head)?;
+        write!(f, "{}", self.message())?;
+        let mut buf = String::new();
         for ctx_item in self.chain.iter() {
-            write!(f, "\n  {:?}", ctx_item)?;
+            ctx_item.message(&mut buf, self.source_map.as_deref(), 0);
+            write!(f, "\n  {}", buf)?;
         }
         Ok(())
     }

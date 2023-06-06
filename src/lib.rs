@@ -13,9 +13,10 @@ mod stack;
 mod heap;
 mod util;
 
-pub use bytecode::Codebase;
+pub use bytecode::{Codebase, ModuleId};
 pub use bytecode_compiler::{BuilderParams, Loader};
-pub use fs::FileLoader;
+pub use fs::{FileLoader, MockLoader, CombinedLoader};
+pub use interpreter::{BUILTINS, Interpreter};
 
 mod stack_access;
 

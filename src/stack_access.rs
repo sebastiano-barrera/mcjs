@@ -101,7 +101,7 @@ pub(crate) enum Slot {
 #[repr(packed)]
 pub(crate) struct FrameHeader {
     pub(crate) n_instrs: u32,
-    pub(crate) n_args: u16,
+    pub(crate) n_args: u8,
     pub(crate) n_captures: u16,
     pub(crate) return_value_vreg: Option<VReg>,
     pub(crate) call_iid: Option<IID>,
@@ -221,7 +221,7 @@ mod tests {
         FrameHeader {
             n_instrs: rand::random::<u32>() % 100,
             n_captures: rand::random::<u16>() % 100,
-            n_args: rand::random::<u16>() % 100,
+            n_args: rand::random::<u8>() % 100,
             return_value_vreg: Some(VReg(rand::random())),
             call_iid: Some(IID(rand::random())),
             fn_id: FnId(rand::random::<u32>()),

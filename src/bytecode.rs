@@ -127,11 +127,6 @@ pub enum Instr {
     GetNativeFn(VReg, NativeFnId),
 
     ObjCreateEmpty(VReg),
-    /// TODO Replace this with a seq of simpler ops?
-    ObjCallNew {
-        dest: VReg,
-        callee: VReg,
-    },
     ObjSet {
         obj: VReg,
         key: VReg,
@@ -145,6 +140,11 @@ pub enum Instr {
     ObjGetKeys {
         dest: VReg,
         obj: VReg,
+    },
+    ObjDelete {
+        dest: VReg,
+        obj: VReg,
+        key: VReg,
     },
 
     // TODO: Remove this bytecode (should be implemented as a method with a native impl)
@@ -166,6 +166,10 @@ pub enum Instr {
         dest: VReg,
         arr: VReg,
     },
+
+    // TODO Replace these ops with native functions (?)
+    StrCreateEmpty(VReg),
+    StrAppend(VReg, VReg),
 
     NewIterator {
         dest: VReg,
@@ -281,6 +285,7 @@ impl Codebase {
 pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
+    n_params: ArgIndex,
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
     trace_anchors: HashMap<IID, TraceAnchor>,
@@ -298,6 +303,7 @@ impl Function {
     pub(crate) fn new(
         instrs: Box<[Instr]>,
         consts: Box<[Literal]>,
+        n_params: ArgIndex,
         trace_anchors: HashMap<IID, TraceAnchor>,
     ) -> Function {
         #[cfg(to_be_rewritten)]
@@ -307,6 +313,7 @@ impl Function {
         Function {
             instrs,
             consts,
+            n_params,
             loop_heads,
             trace_anchors,
         }
@@ -332,6 +339,10 @@ impl Function {
         self.trace_anchors
             .get(&iid)
             .map(|tanch| tanch.trace_id.as_str())
+    }
+
+    pub(crate) fn n_params(&self) -> ArgIndex {
+        self.n_params
     }
 }
 

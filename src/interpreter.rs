@@ -77,6 +77,20 @@ impl Value {
             _ => Err(error!("expected a number")),
         }
     }
+
+    pub(crate) fn into_str(mut self) -> Result<String> {
+        match self {
+            Value::String(s) => Ok(s.into_owned()),
+            _ => Err(error!("expected a string")),
+        }
+    }
+
+    pub(crate) fn expect_str(&self) -> Result<&str> {
+        match self {
+            Value::String(s) => Ok(s.as_ref()),
+            _ => Err(error!("expected a string")),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -139,7 +153,7 @@ impl std::fmt::Debug for NotADirectoryError {
     }
 }
 
-struct Interpreter<'a> {
+pub struct Interpreter<'a> {
     iid: bytecode::IID,
     data: stack::InterpreterData,
     heap: heap::ObjectHeap,
@@ -164,7 +178,7 @@ struct Jitting {
 }
 
 impl<'a> Interpreter<'a> {
-    fn new(codebase: &'a bytecode::Codebase) -> Self {
+    pub fn new(codebase: &'a bytecode::Codebase) -> Self {
         Interpreter {
             iid: bytecode::IID(0),
             data: stack::InterpreterData::new(),
@@ -264,7 +278,12 @@ impl<'a> Interpreter<'a> {
             let instr = &func.instrs()[self.iid.0 as usize];
 
             self.print_indent();
-            eprintln!("{:4}: {:?}", self.iid.0, instr);
+            eprint!("{:4}: {:?}", self.iid.0, instr);
+            if let Instr::LoadConst(_, const_ndx) = instr {
+                let lit = &func.consts()[const_ndx.0 as usize];
+                eprint!(" = ({:?})", lit);
+            }
+            eprintln!();
 
             let mut next_ndx = self.iid.0 + 1;
             drop(func);
@@ -405,7 +424,7 @@ impl<'a> Interpreter<'a> {
                     // they will no longer be accessible
                     // afterwards
                     // TODO make the above fact false, and avoid this allocation
-                    let arg_vals: Vec<_> = func
+                    let mut arg_vals: Vec<_> = func
                         .instrs()
                         .iter()
                         .skip(self.iid.0 as usize + 1)
@@ -415,7 +434,7 @@ impl<'a> Interpreter<'a> {
                         })
                         .map(|vreg| self.get_operand(vreg))
                         .collect();
-                    self.iid.0 += TryInto::<u16>::try_into(arg_vals.len()).unwrap();
+                    next_ndx += TryInto::<u16>::try_into(arg_vals.len()).unwrap();
 
                     match closure {
                         Closure::JS(closure) => {
@@ -431,8 +450,9 @@ impl<'a> Interpreter<'a> {
                                 );
                             }
 
-                            let n_args = arg_vals.len().try_into().unwrap();
                             let callee_func = self.codebase.get_function(closure.fnid).unwrap();
+                            let n_args = callee_func.n_params().0;
+                            arg_vals.truncate(n_args as usize);
                             let call_meta = stack::CallMeta {
                                 fnid: closure.fnid,
                                 n_instrs: callee_func.instrs().len().try_into().unwrap(),
@@ -516,6 +536,20 @@ impl<'a> Interpreter<'a> {
                     });
                     let keys = self.heap.get_keys_as_array(oid);
                     self.data.set_result(*dest, Value::Object(keys));
+                }
+                Instr::ObjDelete { dest, obj, key } => {
+                    // TODO Adjust return value: true for all cases except when the property is an
+                    // own non-configurable property, in which case false is returned in non-strict
+                    // mode. (Source: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/delete)
+                    let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
+                        panic!("ObjGetKeys: can't delete property of non-object: {:?}", obj)
+                    });
+                    let key = self.get_operand(*key);
+                    let key = heap::ObjectKey::from_value(&key)
+                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+
+                    self.heap.delete_property(oid, &key);
+                    self.data.set_result(*dest, Value::Bool(true));
                 }
 
                 Instr::ArrayPush { arr, value } => {
@@ -605,20 +639,33 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::GetModule(dest, module_id) => {
-                    let module_obj =
-                        *self.modules.entry(*module_id).or_insert_with(|| {
-                            let root_fn = self
-                                .codebase
-                                .get_module_root_fn(*module_id)
-                                .expect("no such module ID");
+                    if let Some(module_oid) = self.modules.get(module_id) {
+                        self.data.set_result(*dest, Value::Object(*module_oid));
+                    } else {
+                        // TODO Refactor with other implementations of Call?
+                        let root_fnid = self
+                            .codebase
+                            .get_module_root_fn(*module_id)
+                            .expect("no such module ID");
+                        let root_fn = self.codebase.get_function(root_fnid).unwrap();
+                        let n_instrs = root_fn.instrs().len().try_into().unwrap();
 
-                            todo!(
-                            "call root_fn, store the result value's object ID (must be an object!)"
-                            // use start_call? refactor it?
-                        )
-                        });
+                        let call_meta = stack::CallMeta {
+                            fnid: root_fnid,
+                            n_instrs,
+                            n_captured_upvalues: 0,
+                            n_args: 0,
+                            return_value_reg: Some(*dest),
+                            call_iid: Some(self.iid),
+                        };
 
-                    self.data.set_result(*dest, Value::Object(module_obj));
+                        self.print_indent();
+                        eprintln!("-- loading module m#{}", module_id.0);
+
+                        self.data.push(call_meta);
+                        self.iid = IID(0u16);
+                        continue;
+                    }
                 }
 
                 Instr::LoadNull(dest) => {
@@ -642,12 +689,27 @@ impl<'a> Interpreter<'a> {
                     self.data.set_result(*dest, Value::Number(val - 1.0));
                 }
                 Instr::IsInstanceOf(_dest, _obj, _sup) => todo!("IsInstanceOf"),
-                Instr::ObjCallNew { dest, callee } => todo!(),
                 Instr::NewIterator { dest, obj } => todo!(),
                 Instr::IteratorGetCurrent { dest, iter } => todo!(),
                 Instr::IteratorAdvance { iter } => todo!(),
                 Instr::JmpIfIteratorFinished { iter, dest } => todo!(),
+
                 Instr::Throw(_) => todo!(),
+
+                Instr::StrCreateEmpty(dest) => self
+                    .data
+                    .set_result(*dest, Value::String(String::new().into())),
+                Instr::StrAppend(buf_reg, tail) => {
+                    // TODO Make this *decently* efficient!
+                    let buf = self.get_operand(*buf_reg);
+                    let mut buf: String = buf.into_str()?;
+
+                    let tail = self.get_operand(*tail);
+                    let tail: &str = tail.expect_str()?;
+
+                    buf.push_str(tail);
+                    self.data.set_result(*buf_reg, Value::String(buf.into()));
+                }
             }
 
             #[cfg(enable_jit)]
@@ -798,9 +860,16 @@ impl<'a> Interpreter<'a> {
 }
 
 enum NativeFnId {
+    BooleanNew,
+    NumberNew,
+    ObjectNew,
     StringNew,
     ArrayNew,
     RegExpNew,
+    ParseInt,
+    SyntaxErrorNew,
+    TypeErrorNew,
+    MathFloor,
 }
 
 lazy_static! {
@@ -808,9 +877,17 @@ lazy_static! {
 }
 fn get_builtins() -> bytecode_compiler::NativeFnMap {
     let mut builtins = HashMap::new();
+    builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
+    builtins.insert("Object".into(), NativeFnId::ObjectNew as u32);
+    builtins.insert("Number".into(), NativeFnId::NumberNew as u32);
     builtins.insert("String".into(), NativeFnId::StringNew as u32);
     builtins.insert("Array".into(), NativeFnId::ArrayNew as u32);
     builtins.insert("RegExp".into(), NativeFnId::RegExpNew as u32);
+    builtins.insert("parseInt".into(), NativeFnId::ParseInt as u32);
+    builtins.insert("SyntaxError".into(), NativeFnId::SyntaxErrorNew as u32);
+    builtins.insert("TypeError".into(), NativeFnId::TypeErrorNew as u32);
+    builtins.insert("Math_floor".into(), NativeFnId::MathFloor as u32);
+
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
     builtins
@@ -824,8 +901,9 @@ fn nf_string_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
     todo!("nf_string_new")
 }
 
-fn nf_regexp_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
-    todo!("nf_regexp_new")
+fn nf_regexp_new(intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    let oid = intrp.heap.new_object();
+    Ok(Value::Object(oid))
 }
 
 #[cfg(test)]
@@ -836,31 +914,7 @@ mod tests {
         sink: Vec<Value>,
     }
 
-    struct MockLoader {
-        mid_of_file: HashMap<String, bytecode::ModuleId>,
-        code_of_module: HashMap<bytecode::ModuleId, String>,
-    }
-    impl MockLoader {
-        fn new() -> Self {
-            MockLoader {
-                mid_of_file: HashMap::new(),
-                code_of_module: HashMap::new(),
-            }
-        }
-        fn add_module(&mut self, filename: String, module_id: bytecode::ModuleId, code: String) {
-            self.mid_of_file.insert(filename, module_id);
-            self.code_of_module.insert(module_id, code);
-        }
-    }
-    impl bytecode_compiler::Loader for MockLoader {
-        fn get_module_id(&mut self, filename: &str) -> bytecode::ModuleId {
-            self.mid_of_file.get(filename).copied().unwrap()
-        }
-
-        fn read_source(&self, module_id: bytecode::ModuleId) -> String {
-            self.code_of_module.get(&module_id).cloned().unwrap()
-        }
-    }
+    use crate::fs::MockLoader;
 
     fn quick_run(code: &str) -> Result<Output> {
         let module_id = bytecode::ModuleId(123);

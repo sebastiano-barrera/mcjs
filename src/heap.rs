@@ -77,6 +77,23 @@ impl ObjectHeap {
         }
     }
 
+    pub(crate) fn delete_property(&mut self, oid: ObjectId, key: &ObjectKey) -> Option<Value> {
+        let obj = self.objects.get_mut(oid).unwrap();
+
+        match key {
+            // TODO(performance) Right now this .cloned() is inefficient due to the fact that
+            // we may be copying a whole string.
+            ObjectKey::ArrayIndex(ndx) => obj.delete_arr_element(*ndx),
+            ObjectKey::Property(pkey) => {
+                let PropertyKey::String(key_str) = &pkey;
+                if key_str == "__proto__" {
+                    return None;
+                }
+                obj.delete_property(pkey)
+            }
+        }
+    }
+
     // TODO(performance) This stuff works, but is terribly inefficient.
     //
     // - Allocating a whole ass object just to use its array part puts pressure on the garbage
@@ -173,6 +190,18 @@ impl Object {
                     .map(|pkey| ObjectKey::Property(pkey.clone())),
             )
             .collect()
+    }
+
+    fn delete_arr_element(&mut self, ndx: usize) -> Option<Value> {
+        if ndx < self.array_items.len() {
+            Some(self.array_items.remove(ndx))
+        } else {
+            None
+        }
+    }
+
+    fn delete_property(&mut self, pkey: &PropertyKey) -> Option<Value> {
+        self.properties.remove(pkey)
     }
 }
 

@@ -16,14 +16,14 @@ pub(crate) struct InterpreterData {
     n_frames: usize,
 }
 
-const STACK_SIZE: usize = 16 * 1024;
+const STACK_SIZE: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct CallMeta {
     pub fnid: bytecode::FnId,
     pub n_instrs: u32,
     pub n_captured_upvalues: u16,
-    pub n_args: u16,
+    pub n_args: u8,
     pub return_value_reg: Option<bytecode::VReg>,
     pub call_iid: Option<bytecode::IID>,
 }
@@ -58,6 +58,10 @@ impl InterpreterData {
         };
 
         let frame_sz = frame_hdr.expected_frame_size();
+        eprintln!(
+            "  (allocated frame of size {} for {} args, {} captures, {} instrs)",
+            frame_sz, call_meta.n_args, call_meta.n_captured_upvalues, call_meta.n_instrs,
+        );
         self.metrics.top -= frame_sz;
         *self.metrics.header().get_mut(&mut self.stack_buffer) = frame_hdr;
         self.n_frames += 1;
