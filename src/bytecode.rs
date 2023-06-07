@@ -85,6 +85,10 @@ pub enum Instr {
         dst: VReg,
         src: VReg,
     },
+    GetGlobal {
+        dest: VReg,
+        key: VReg,
+    },
 
     BoolNot(VReg),
     UnaryMinus(VReg),
@@ -124,7 +128,6 @@ pub enum Instr {
 
     ClosureNew(VReg, FnId),
     ClosureAddCapture(VReg),
-    GetNativeFn(VReg, NativeFnId),
 
     ObjCreateEmpty(VReg),
     ObjSet {

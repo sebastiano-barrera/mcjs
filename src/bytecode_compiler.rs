@@ -24,12 +24,10 @@ pub trait Loader {
 }
 
 pub struct BuilderParams {
-    pub native_fns: NativeFnMap,
     pub loader: Box<dyn Loader>,
 }
 
 pub struct Builder {
-    native_fns: NativeFnMap,
     loader: Box<dyn Loader>,
     fns: HashMap<FnId, FnBuilder>,
     next_fnid: u32,
@@ -45,7 +43,6 @@ pub struct Builder {
 impl BuilderParams {
     pub fn to_builder(self) -> Builder {
         Builder {
-            native_fns: self.native_fns,
             loader: self.loader,
             fns: HashMap::new(),
             fn_stack: Vec::new(),
@@ -349,9 +346,12 @@ impl Builder {
             .enumerate()
             .find_map(|(ndx, fnb)| fnb.get_var(sym).map(|vreg| (ndx, vreg)))
             .or_else(|| {
-                let nfid = *self.native_fns.get(sym)?;
                 let vreg = self.new_vreg();
-                self.cur_fnb().emit(Instr::GetNativeFn(vreg, nfid));
+                self.set_const(vreg, Literal::String(sym.to_string()));
+                self.emit(Instr::GetGlobal {
+                    dest: vreg,
+                    key: vreg,
+                });
                 Some((0, Loc::VReg(vreg)))
             })
     }
@@ -1304,14 +1304,10 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     builder.set_const(ret, Literal::Null);
                 }
                 Lit::Regex(re_lit) => {
-                    let constructor_fid = *builder
-                        .native_fns
-                        .get(&JsWord::from("RegExp"))
+                    let constructor = builder
+                        .read_var(&JsWord::from("RegExp"))
                         .expect("undefined native constructor: RegExp");
                     let re_str = re_lit.exp.to_string().into();
-
-                    let constructor = builder.new_vreg();
-                    builder.emit(Instr::GetNativeFn(constructor, constructor_fid));
 
                     let arg = builder.new_vreg();
                     builder.set_const(arg, re_str);
@@ -1833,7 +1829,6 @@ mod tests {
 
     fn quick_compile(code: &str) -> bytecode::Codebase {
         let mut builder = BuilderParams {
-            native_fns: HashMap::new(),
             loader: Box::new(NullLoader(code.to_string())),
         }
         .to_builder();

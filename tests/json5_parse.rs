@@ -22,7 +22,6 @@ fn test_load_json5_parse() {
     mock_loader.add_module("test.mjs".to_owned(), mcjs::ModuleId(1), code.to_owned());
 
     let mut builder = mcjs::BuilderParams {
-        native_fns: mcjs::BUILTINS.clone(),
         loader: Box::new(mcjs::CombinedLoader::new(vec![file_loader, mock_loader])),
     }
     .to_builder();

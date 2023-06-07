@@ -134,7 +134,7 @@ impl ObjectHeap {
 
 slotmap::new_key_type! { pub struct ObjectId; }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 struct Object {
     proto_id: Option<ObjectId>,
     properties: HashMap<PropertyKey, Value>,

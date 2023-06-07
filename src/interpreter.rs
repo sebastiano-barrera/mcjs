@@ -16,7 +16,7 @@ use crate::{
     bytecode_compiler,
     common::Result,
     error,
-    heap,
+    heap::{self, ObjectHeap},
     // jit::{self, InterpreterStep},
     stack,
     util::Mask,
@@ -93,11 +93,13 @@ impl Value {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum Closure {
-    Native(bytecode::NativeFnId),
+    Native(&'static NativeFunction),
     JS(JSClosure),
 }
+
+type NativeFunction = dyn Fn(&mut Interpreter, &[Value]) -> Result<Value>;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct JSClosure {
@@ -109,8 +111,8 @@ pub struct JSClosure {
 impl std::fmt::Debug for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Closure::Native(bid) => {
-                write!(f, "<native closure {}>", bid)
+            Closure::Native(nf) => {
+                write!(f, "<native closure {:?}>", (nf as *const _))
             }
             Closure::JS(closure) => {
                 write!(f, "<closure {:?} | ", closure.fnid)?;
@@ -162,6 +164,7 @@ pub struct Interpreter<'a> {
     jitting: Option<Jitting>,
 
     modules: HashMap<bytecode::ModuleId, heap::ObjectId>,
+    global_obj: heap::ObjectId,
 
     codebase: &'a bytecode::Codebase,
     sink: Vec<Value>,
@@ -179,13 +182,16 @@ struct Jitting {
 
 impl<'a> Interpreter<'a> {
     pub fn new(codebase: &'a bytecode::Codebase) -> Self {
+        let mut heap = heap::ObjectHeap::new();
+        let global_obj = init_builtins(&mut heap);
         Interpreter {
             iid: bytecode::IID(0),
             data: stack::InterpreterData::new(),
-            heap: heap::ObjectHeap::new(),
+            heap,
             #[cfg(enable_jit)]
             jitting: None,
             modules: HashMap::new(),
+            global_obj,
             codebase,
             sink: Vec::new(),
             opts: Default::default(),
@@ -483,8 +489,8 @@ impl<'a> Interpreter<'a> {
                             // variables, and avoid subtle bugs
                             continue;
                         }
-                        Closure::Native(nfid) => {
-                            let ret_val = self.invoke_native(*nfid, &arg_vals)?;
+                        Closure::Native(nf) => {
+                            let ret_val = (*nf)(self, &arg_vals)?;
                             self.data.set_result(*return_value, ret_val);
                         }
                     }
@@ -627,11 +633,6 @@ impl<'a> Interpreter<'a> {
                         "interpreter bug: ClosureAddCapture should be handled with ClosureNew"
                     )
                 }
-                Instr::GetNativeFn(dest, nfid) => {
-                    let closure = Closure::Native(*nfid);
-                    let oid = self.heap.new_function(closure);
-                    self.data.set_result(*dest, Value::Object(oid));
-                }
 
                 Instr::UnaryMinus(var) => {
                     let arg: f64 = self.get_operand(*var).expect_num()?;
@@ -709,6 +710,18 @@ impl<'a> Interpreter<'a> {
 
                     buf.push_str(tail);
                     self.data.set_result(*buf_reg, Value::String(buf.into()));
+                }
+
+                Instr::GetGlobal { dest, key } => {
+                    let key = self.get_operand(*key);
+                    let key = heap::ObjectKey::from_value(&key)
+                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+
+                    let value = self
+                        .heap
+                        .get_property(self.global_obj, &key)
+                        .unwrap_or(Value::Undefined);
+                    self.data.set_result(*dest, value);
                 }
             }
 
@@ -844,64 +857,48 @@ impl<'a> Interpreter<'a> {
 
         ty_s.to_string().into()
     }
+}
 
-    fn invoke_native(&mut self, nfid: u32, args: &[Value]) -> Result<Value> {
-        // TODO Use some sort of enum-based From instance (there are libraries for this)
-        if nfid == NativeFnId::StringNew as u32 {
-            nf_array_new(self, &args)
-        } else if nfid == NativeFnId::StringNew as u32 {
-            nf_string_new(self, &args)
-        } else if nfid == NativeFnId::RegExpNew as u32 {
-            nf_regexp_new(self, &args)
-        } else {
-            panic!("undefined native function with ID {nfid}")
-        }
+fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
+    #![allow(non_snake_case)]
+
+    let global = heap.new_object();
+
+    {
+        let array = heap.new_object();
+        let Array_isArray = heap.new_function(Closure::Native(&nf_Array_isArray));
+        heap.set_property(
+            array,
+            "isArray".to_string().into(),
+            Value::Object(Array_isArray),
+        );
+        heap.set_property(global, "Array".to_string().into(), Value::Object(array));
     }
-}
 
-enum NativeFnId {
-    BooleanNew,
-    NumberNew,
-    ObjectNew,
-    StringNew,
-    ArrayNew,
-    RegExpNew,
-    ParseInt,
-    SyntaxErrorNew,
-    TypeErrorNew,
-    MathFloor,
-}
+    let RegExp = heap.new_function(Closure::Native(&nf_RegExp));
+    heap.set_property(global, "RegExp".to_string().into(), Value::Object(RegExp));
 
-lazy_static! {
-    pub static ref BUILTINS: bytecode_compiler::NativeFnMap = get_builtins();
-}
-fn get_builtins() -> bytecode_compiler::NativeFnMap {
-    let mut builtins = HashMap::new();
-    builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
-    builtins.insert("Object".into(), NativeFnId::ObjectNew as u32);
-    builtins.insert("Number".into(), NativeFnId::NumberNew as u32);
-    builtins.insert("String".into(), NativeFnId::StringNew as u32);
-    builtins.insert("Array".into(), NativeFnId::ArrayNew as u32);
-    builtins.insert("RegExp".into(), NativeFnId::RegExpNew as u32);
-    builtins.insert("parseInt".into(), NativeFnId::ParseInt as u32);
-    builtins.insert("SyntaxError".into(), NativeFnId::SyntaxErrorNew as u32);
-    builtins.insert("TypeError".into(), NativeFnId::TypeErrorNew as u32);
-    builtins.insert("Math_floor".into(), NativeFnId::MathFloor as u32);
+    // builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
+    // builtins.insert("Object".into(), NativeFnId::ObjectNew as u32);
+    // builtins.insert("Number".into(), NativeFnId::NumberNew as u32);
+    // builtins.insert("String".into(), NativeFnId::StringNew as u32);
+    // builtins.insert("Array".into(), NativeFnId::ArrayNew as u32);
+    // builtins.insert("RegExp".into(), NativeFnId::RegExpNew as u32);
+    // builtins.insert("parseInt".into(), NativeFnId::ParseInt as u32);
+    // builtins.insert("SyntaxError".into(), NativeFnId::SyntaxErrorNew as u32);
+    // builtins.insert("TypeError".into(), NativeFnId::TypeErrorNew as u32);
+    // builtins.insert("Math_floor".into(), NativeFnId::MathFloor as u32);
 
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
-    builtins
+    global
 }
 
-fn nf_array_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
-    todo!("nf_array_new")
+fn nf_Array_isArray(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    todo!("nf_Array_isArray")
 }
 
-fn nf_string_new(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
-    todo!("nf_string_new")
-}
-
-fn nf_regexp_new(intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+fn nf_RegExp(intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
     let oid = intrp.heap.new_object();
     Ok(Value::Object(oid))
 }
@@ -924,7 +921,6 @@ mod tests {
 
         let codebase = {
             let bcparams = bytecode_compiler::BuilderParams {
-                native_fns: BUILTINS.clone(),
                 loader: mock_loader,
             };
             let mut builder = bcparams.to_builder();
@@ -1283,5 +1279,18 @@ mod tests {
             .collect();
         sink.sort();
         assert_eq!(&sink[..], &["name", "x", "y"]);
+    }
+
+    #[test]
+    fn test_builtin() {
+        let output = quick_run(
+            "
+            sink(Array.isArray([1, 2, 3]));
+            sink(Array.isArray('not an array'));
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(&output.sink, &[Value::Bool(true), Value::Bool(false)]);
     }
 }

@@ -25,7 +25,6 @@ fn main() {
         native_fns.insert(JsWord::from(word), 123);
     }
     let mut builder = mcjs::BuilderParams {
-        native_fns,
         loader: Box::new(loader),
     }
     .to_builder();
