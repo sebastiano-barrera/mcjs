@@ -16,7 +16,7 @@ mod util;
 pub use bytecode::{Codebase, ModuleId};
 pub use bytecode_compiler::{BuilderParams, Loader};
 pub use fs::{FileLoader, MockLoader, CombinedLoader};
-pub use interpreter::Interpreter;
+pub use interpreter::{Interpreter, Value as InterpreterValue};
 
 mod stack_access;
 

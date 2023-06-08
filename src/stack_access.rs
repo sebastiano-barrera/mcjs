@@ -26,7 +26,7 @@
 //
 //
 
-use crate::bytecode::{FnId, IID, VReg};
+use crate::bytecode::{FnId, VReg, IID};
 use crate::interpreter::{UpvalueId, Value};
 use std::mem::size_of;
 use std::{marker::PhantomData, ops::Range};
@@ -104,7 +104,7 @@ pub(crate) struct FrameHeader {
     pub(crate) n_args: u8,
     pub(crate) n_captures: u16,
     pub(crate) return_value_vreg: Option<VReg>,
-    pub(crate) call_iid: Option<IID>,
+    pub(crate) return_to_iid: Option<IID>,
     pub(crate) fn_id: FnId,
 }
 
@@ -157,27 +157,33 @@ impl FrameMetrics {
     // That's not a problem I'm going to solve tonight though, so, I'll keep the unsafe
     // situation going for a little while more.
 
-    pub(crate) fn result_slot(&self, result_ndx: usize, buf: &[u8]) -> Offset<ResultSlot> {
+    pub(crate) fn result_slot(&self, result_ndx: usize, buf: &[u8]) -> Option<Offset<ResultSlot>> {
         let hdr = self.header().get(buf);
-        assert!(result_ndx < hdr.n_instrs as usize);
-        Offset::at(
-            self.top
-                + Self::HEADER_SIZE
-                + size_of::<CaptureSlot>() * hdr.n_captures as usize
-                + size_of::<ResultSlot>() * result_ndx,
-        )
+        if result_ndx < hdr.n_instrs as usize {
+            Some(Offset::at(
+                self.top
+                    + Self::HEADER_SIZE
+                    + size_of::<CaptureSlot>() * hdr.n_captures as usize
+                    + size_of::<ResultSlot>() * result_ndx,
+            ))
+        } else {
+            None
+        }
     }
 
-    pub(crate) fn arg_slot(&self, arg_ndx: usize, buf: &[u8]) -> Offset<ArgSlot> {
+    pub(crate) fn arg_slot(&self, arg_ndx: usize, buf: &[u8]) -> Option<Offset<ArgSlot>> {
         let hdr = self.header().get(buf);
-        assert!(arg_ndx < hdr.n_args as usize);
-        Offset::at(
-            self.top
-                + Self::HEADER_SIZE
-                + size_of::<CaptureSlot>() * hdr.n_captures as usize
-                + size_of::<ResultSlot>() * hdr.n_instrs as usize
-                + size_of::<ArgSlot>() * arg_ndx,
-        )
+        if arg_ndx < hdr.n_args as usize {
+            Some(Offset::at(
+                self.top
+                    + Self::HEADER_SIZE
+                    + size_of::<CaptureSlot>() * hdr.n_captures as usize
+                    + size_of::<ResultSlot>() * hdr.n_instrs as usize
+                    + size_of::<ArgSlot>() * arg_ndx,
+            ))
+        } else {
+            None
+        }
     }
 }
 
@@ -199,11 +205,11 @@ mod tests {
         }
         for i in 0..hdr.n_instrs {
             let comment = format!("result #{i}");
-            handle_range(metrics.result_slot(i as usize, buf).range(), &comment);
+            handle_range(metrics.result_slot(i as usize, buf).unwrap().range(), &comment);
         }
         for i in 0..hdr.n_args {
             let comment = format!("arg #{i}");
-            handle_range(metrics.arg_slot(i as usize, buf).range(), &comment);
+            handle_range(metrics.arg_slot(i as usize, buf).unwrap().range(), &comment);
         }
     }
 
@@ -223,7 +229,7 @@ mod tests {
             n_captures: rand::random::<u16>() % 100,
             n_args: rand::random::<u8>() % 100,
             return_value_vreg: Some(VReg(rand::random())),
-            call_iid: Some(IID(rand::random())),
+            return_to_iid: Some(IID(rand::random())),
             fn_id: FnId(rand::random::<u32>()),
         }
     }

@@ -257,8 +257,8 @@ impl FnBuilder {
 
     fn define_var(&mut self, name: JsWord, loc: Loc) {
         if let Loc::Arg(arg_ndx) = loc {
-            if self.n_params.0 < arg_ndx.0 {
-                self.n_params.0 = arg_ndx.0;
+            if self.n_params.0 < arg_ndx.0 + 1 {
+                self.n_params.0 = arg_ndx.0 + 1;
             }
         }
 
@@ -722,6 +722,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             }
 
             let default_jump_iid = builder.reserve();
+            let mut default_written = false;
             let mut case_jumps = case_jumps.into_iter();
 
             for case in switch_stmt.cases.iter() {
@@ -734,6 +735,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                     };
                 } else {
                     *builder.get_mut(default_jump_iid).unwrap() = Instr::Jmp(label);
+                    default_written = true;
                 }
 
                 for stmt in &case.cons {
@@ -742,6 +744,9 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             }
 
             let break_target = builder.peek_iid();
+            if !default_written {
+                *builder.get_mut(default_jump_iid).unwrap() = Instr::Jmp(break_target);
+            }
             builder.resolve_break_to(break_target);
 
             Ok(())
@@ -758,7 +763,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             let while_header_iid = builder.peek_iid();
 
             let cond = compile_expr(builder, &while_stmt.test)?;
-            builder.emit(Instr::BoolNot(cond));
+            builder.emit(Instr::BoolNot {
+                dest: cond,
+                arg: cond,
+            });
             let jmpif = builder.reserve();
 
             compile_stmt(builder, &while_stmt.body)?;
@@ -866,7 +874,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 arr: keys,
             });
             builder.emit(Instr::CmpLT(cond, key_ndx, cond));
-            builder.emit(Instr::BoolNot(cond));
+            builder.emit(Instr::BoolNot {
+                dest: cond,
+                arg: cond,
+            });
             let exit = builder.reserve();
 
             builder.cur_fnb().push_scope();
@@ -960,7 +971,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::If(if_stmt) => {
             let cond = compile_expr(builder, &if_stmt.test)
                 .with_context(error!("in if statement").with_span(if_stmt.span))?;
-            builder.emit(Instr::BoolNot(cond));
+            builder.emit(Instr::BoolNot {
+                dest: cond,
+                arg: cond,
+            });
             let jmp_to_alt = builder.reserve();
 
             compile_stmt(builder, &if_stmt.cons)?;
@@ -1455,39 +1469,38 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
         }
 
         Expr::Unary(unary_expr) => {
-            let value = compile_expr(builder, &unary_expr.arg)?;
-            (match unary_expr.op {
+            let dest = builder.new_vreg();
+            match unary_expr.op {
                 swc_ecma_ast::UnaryOp::Bang => {
-                    builder.emit(Instr::BoolNot(value));
+                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    builder.emit(Instr::BoolNot { dest, arg });
                 }
                 swc_ecma_ast::UnaryOp::TypeOf => {
-                    builder.emit(Instr::TypeOf { dest: value, value });
+                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    builder.emit(Instr::TypeOf { dest, arg });
                 }
                 swc_ecma_ast::UnaryOp::Minus => {
-                    builder.emit(Instr::UnaryMinus(value));
+                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    builder.emit(Instr::UnaryMinus { dest, arg });
                 }
                 swc_ecma_ast::UnaryOp::Delete => {
                     let member_expr = match &*unary_expr.arg {
                         Expr::Member(member_expr) => member_expr,
-                         _ => {
-                             return Err(error!("`delete` operator can only be applied to an object member (e.g. `delete obj[key]`, `delete obj.property`)").with_span(unary_expr.span))
+                        _ => {
+                            return Err(error!("`delete` operator can only be applied to an object member (e.g. `delete obj[key]`, `delete obj.property`)").with_span(unary_expr.span))
                         },
                     };
 
                     let obj = compile_expr(builder, &member_expr.obj)?;
                     let key = compile_obj_member_prop(builder, &member_expr.prop)?;
-                    builder.emit(Instr::ObjDelete {
-                        dest: value,
-                        obj,
-                        key,
-                    });
+                    builder.emit(Instr::ObjDelete { dest, obj, key });
                 }
                 other => unsupported_node!(other),
                 // swc_ecma_ast::UnaryOp::Plus => todo!(),
                 // swc_ecma_ast::UnaryOp::Tilde => todo!(),
                 // swc_ecma_ast::UnaryOp::Void => todo!(),
-            });
-            Ok(value)
+            }
+            Ok(dest)
         }
         Expr::Update(update_expr) => {
             match &*update_expr.arg {
@@ -1522,7 +1535,10 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             let ret = builder.new_vreg();
 
             let cond = compile_expr(builder, &cond_expr.test)?;
-            builder.emit(Instr::BoolNot(cond));
+            builder.emit(Instr::BoolNot {
+                dest: cond,
+                arg: cond,
+            });
             let jmpif = builder.reserve();
 
             let value = compile_expr(builder, &cond_expr.cons)?;

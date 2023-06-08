@@ -1,5 +1,7 @@
 extern crate mcjs;
 
+use mcjs::InterpreterValue;
+
 use std::path::PathBuf;
 
 // TODO(test): enable these tests once the implementation is mature enough
@@ -12,11 +14,11 @@ fn test_load_json5_parse() {
     let code = r#"
         import mod from 'index.mjs';
 
-        sink(mod.stringify({
-            a: 2345.123,
-            b: 'asdlol',
-            pt: {x: 123, y: 456}
-        }));
+        sink(mod.stringify(null));
+        sink(mod.stringify(123));
+        sink(mod.stringify(456.78));
+        sink(mod.stringify(true));
+        sink(mod.stringify(false));
     "#;
     let mut mock_loader = Box::new(mcjs::MockLoader::new());
     mock_loader.add_module("test.mjs".to_owned(), mcjs::ModuleId(1), code.to_owned());
@@ -35,5 +37,14 @@ fn test_load_json5_parse() {
         .unwrap_or_else(|err| panic!("runtime error: {:?}", err));
 
     let sink = vm.take_sink();
-    assert!(false, "{:?}", sink);
+    assert_eq!(
+        &sink,
+        &[
+            InterpreterValue::String("null".into()),
+            InterpreterValue::String("123".into()),
+            InterpreterValue::String("456.78".into()),
+            InterpreterValue::String("true".into()),
+            InterpreterValue::String("false".into()),
+        ]
+    );
 }

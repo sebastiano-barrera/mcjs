@@ -25,7 +25,7 @@ pub(crate) struct CallMeta {
     pub n_captured_upvalues: u16,
     pub n_args: u8,
     pub return_value_reg: Option<bytecode::VReg>,
-    pub call_iid: Option<bytecode::IID>,
+    pub return_to_iid: Option<bytecode::IID>,
 }
 
 impl InterpreterData {
@@ -53,7 +53,7 @@ impl InterpreterData {
             n_args: call_meta.n_args,
             n_captures: call_meta.n_captured_upvalues,
             return_value_vreg: call_meta.return_value_reg,
-            call_iid: call_meta.call_iid,
+            return_to_iid: call_meta.return_to_iid,
             fn_id: call_meta.fnid,
         };
 
@@ -84,39 +84,41 @@ impl InterpreterData {
         frame_hdr.return_value_vreg
     }
 
-    pub(crate) fn call_iid(&self) -> Option<bytecode::IID> {
+    pub(crate) fn return_to_iid(&self) -> Option<bytecode::IID> {
         let frame_hdr = self.metrics.header().get(&self.stack_buffer);
-        frame_hdr.call_iid
+        frame_hdr.return_to_iid
     }
 
-    pub(crate) fn get_result(&self, vreg: bytecode::VReg) -> &Value {
+    pub(crate) fn get_result(&self, vreg: bytecode::VReg) -> Option<&Value> {
         let ndx = vreg.0 as usize;
         let slot = self
             .metrics
-            .result_slot(ndx, &self.stack_buffer)
+            .result_slot(ndx, &self.stack_buffer)?
             .get(&self.stack_buffer);
-        slot_value(slot, &self.upv_alloc)
+        Some(slot_value(slot, &self.upv_alloc))
     }
     pub(crate) fn set_result(&mut self, vreg: bytecode::VReg, value: Value) {
         let ndx = vreg.0 as usize;
         let slot = self
             .metrics
             .result_slot(ndx, &self.stack_buffer)
+            .unwrap()
             .get_mut(&mut self.stack_buffer);
         set_slot_value(slot, &mut self.upv_alloc, value);
     }
 
-    pub(crate) fn get_arg(&self, arg_ndx: usize) -> &Value {
+    pub(crate) fn get_arg(&self, arg_ndx: usize) -> Option<&Value> {
         let slot = self
             .metrics
-            .arg_slot(arg_ndx, &self.stack_buffer)
+            .arg_slot(arg_ndx, &self.stack_buffer)?
             .get(&self.stack_buffer);
-        slot_value(slot, &self.upv_alloc)
+        Some(slot_value(slot, &self.upv_alloc))
     }
     pub(crate) fn set_arg(&mut self, arg_ndx: usize, value: Value) {
         let slot = self
             .metrics
             .arg_slot(arg_ndx, &self.stack_buffer)
+            .unwrap()
             .get_mut(&mut self.stack_buffer);
         set_slot_value(slot, &mut self.upv_alloc, value);
     }
@@ -126,6 +128,7 @@ impl InterpreterData {
         let slot = self
             .metrics
             .result_slot(varndx, &self.stack_buffer)
+            .unwrap()
             .get_mut(&mut self.stack_buffer);
         match slot {
             stack_access::Slot::Inline(value) => {
@@ -153,6 +156,7 @@ impl InterpreterData {
         let slot = self
             .metrics
             .result_slot(vreg.0 as usize, &self.stack_buffer)
+            .unwrap()
             .get_mut(&mut self.stack_buffer);
         *slot = stack_access::Slot::Upvalue(upvalue_id);
     }

@@ -90,8 +90,14 @@ pub enum Instr {
         key: VReg,
     },
 
-    BoolNot(VReg),
-    UnaryMinus(VReg),
+    BoolNot {
+        dest: VReg,
+        arg: VReg,
+    },
+    UnaryMinus {
+        dest: VReg,
+        arg: VReg,
+    },
 
     ArithAdd(VReg, VReg, VReg),
     ArithSub(VReg, VReg, VReg),
@@ -192,7 +198,7 @@ pub enum Instr {
 
     TypeOf {
         dest: VReg,
-        value: VReg,
+        arg: VReg,
     },
 
     GetModule(VReg, ModuleId),

@@ -19,6 +19,29 @@ impl ObjectHeap {
     pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectId {
         self.objects.insert(Object::new_function(closure))
     }
+    /// Create an object for which Array.isArray returns true.  (It doesn't depend on the
+    /// object's prototype chain.)
+    pub(crate) fn new_array(&mut self) -> ObjectId {
+        self.objects.insert(Object::new_array())
+    }
+
+    pub(crate) fn is_instance_of(&self, oid: ObjectId, sup_oid: ObjectId) -> bool {
+        let mut cur_oid = Some(oid);
+        while let Some(oid) = cur_oid {
+            let proto_id = self.objects.get(oid).unwrap().proto_id;
+            if proto_id == Some(sup_oid) {
+                return true;
+            }
+            cur_oid = proto_id;
+        }
+
+        false
+    }
+
+    pub(crate) fn is_array(&self, oid: ObjectId) -> Option<bool> {
+        let obj = self.objects.get(oid)?;
+        Some(obj.is_array)
+    }
 
     pub(crate) fn get_closure(&self, oid: ObjectId) -> Option<&Closure> {
         let obj = self.objects.get(oid).unwrap();
@@ -140,6 +163,7 @@ struct Object {
     properties: HashMap<PropertyKey, Value>,
     array_items: Vec<Value>,
     closure: Option<Closure>,
+    is_array: bool,
 }
 
 impl Object {
@@ -149,6 +173,7 @@ impl Object {
             properties: HashMap::new(),
             array_items: Vec::new(),
             closure: None,
+            is_array: false,
         }
     }
 
@@ -158,6 +183,17 @@ impl Object {
             properties: HashMap::new(),
             array_items: Vec::new(),
             closure: Some(closure),
+            is_array: false,
+        }
+    }
+
+    fn new_array() -> Object {
+        Object {
+            proto_id: None,
+            properties: HashMap::new(),
+            array_items: Vec::new(),
+            closure: None,
+            is_array: true,
         }
     }
 

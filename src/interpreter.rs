@@ -78,7 +78,7 @@ impl Value {
         }
     }
 
-    pub(crate) fn into_str(mut self) -> Result<String> {
+    pub(crate) fn into_str(self) -> Result<String> {
         match self {
             Value::String(s) => Ok(s.into_owned()),
             _ => Err(error!("expected a string")),
@@ -238,7 +238,7 @@ impl<'a> Interpreter<'a> {
             n_captured_upvalues: 0,
             n_args: 0,
             return_value_reg: None,
-            call_iid: None,
+            return_to_iid: None,
         });
 
         self.run_until_done()?;
@@ -273,8 +273,8 @@ impl<'a> Interpreter<'a> {
                 func.instrs().len()
             );
             if self.iid.0 as usize == func.instrs().len() {
-                if let Some(call_iid) = self.exit_function(None) {
-                    self.iid.0 = call_iid.0 + 1;
+                if let Some(return_to_iid) = self.exit_function(None) {
+                    self.iid = return_to_iid;
                     continue;
                 } else {
                     return Ok(());
@@ -289,7 +289,7 @@ impl<'a> Interpreter<'a> {
                 let lit = &func.consts()[const_ndx.0 as usize];
                 eprint!(" = ({:?})", lit);
             }
-            eprintln!();
+            eprint!("    ");
 
             let mut next_ndx = self.iid.0 + 1;
             drop(func);
@@ -388,8 +388,8 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::Nop => {}
-                Instr::BoolNot(var) => {
-                    let value = match self.get_operand(*var) {
+                Instr::BoolNot { dest, arg } => {
+                    let value = match self.get_operand(*arg) {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         Value::Number(num) => Value::Bool(num == 0.0),
                         Value::String(str) => Value::Bool(str.is_empty()),
@@ -401,14 +401,14 @@ impl<'a> Interpreter<'a> {
                             panic!("bytecode compiler bug: internal value should be unreachable")
                         }
                     };
-                    self.data.set_result(*var, value);
+                    self.data.set_result(*dest, value);
                 }
                 Instr::Jmp(IID(dest_ndx)) => {
                     next_ndx = *dest_ndx;
                 }
                 Instr::Return(value) => {
-                    if let Some(call_iid) = self.exit_function(Some(*value)) {
-                        self.iid.0 = call_iid.0 + 1;
+                    if let Some(return_to_iid) = self.exit_function(Some(*value)) {
+                        self.iid = return_to_iid;
                         continue;
                     } else {
                         return Ok(());
@@ -440,7 +440,8 @@ impl<'a> Interpreter<'a> {
                         })
                         .map(|vreg| self.get_operand(vreg))
                         .collect();
-                    next_ndx += TryInto::<u16>::try_into(arg_vals.len()).unwrap();
+                    let n_args_u16 = TryInto::<u16>::try_into(arg_vals.len()).unwrap();
+                    let return_to_iid = IID(self.iid.0 + n_args_u16 + 1);
 
                     match closure {
                         Closure::JS(closure) => {
@@ -457,15 +458,22 @@ impl<'a> Interpreter<'a> {
                             }
 
                             let callee_func = self.codebase.get_function(closure.fnid).unwrap();
-                            let n_args = callee_func.n_params().0;
-                            arg_vals.truncate(n_args as usize);
+                            let n_params = callee_func.n_params().0;
+                            arg_vals.truncate(n_params as usize);
+                            arg_vals.resize(n_params as usize, Value::Undefined);
+                            assert_eq!(arg_vals.len(), n_params as usize);
+                            eprintln!("     - call with {} params", n_params);
+                            for (i, arg) in arg_vals.iter().enumerate() {
+                                eprintln!("     - call arg[{}]: {:?}", i, arg);
+                            }
+
                             let call_meta = stack::CallMeta {
                                 fnid: closure.fnid,
                                 n_instrs: callee_func.instrs().len().try_into().unwrap(),
                                 n_captured_upvalues: closure.upvalues.len().try_into().unwrap(),
-                                n_args,
+                                n_args: n_params,
                                 return_value_reg: Some(*return_value),
-                                call_iid: Some(self.iid),
+                                return_to_iid: Some(return_to_iid),
                             };
 
                             self.print_indent();
@@ -492,6 +500,7 @@ impl<'a> Interpreter<'a> {
                         Closure::Native(nf) => {
                             let ret_val = (*nf)(self, &arg_vals)?;
                             self.data.set_result(*return_value, ret_val);
+                            next_ndx = return_to_iid.0;
                         }
                     }
                 }
@@ -502,7 +511,12 @@ impl<'a> Interpreter<'a> {
                 Instr::LoadArg(dest, bytecode::ArgIndex(arg_ndx)) => {
                     // TODO extra copy?
                     // TODO usize is a bit too wide
-                    let value = self.data.get_arg(*arg_ndx as usize).clone();
+                    let value = self
+                        .data
+                        .get_arg(*arg_ndx as usize)
+                        .cloned()
+                        .unwrap_or(Value::Undefined);
+                    eprint!("-> {:?}", value);
                     self.data.set_result(*dest, value);
                 }
 
@@ -534,6 +548,7 @@ impl<'a> Interpreter<'a> {
                         .heap
                         .get_property(oid, &key)
                         .unwrap_or(Value::Undefined);
+                    eprint!("  -> {:?}", value);
                     self.data.set_result(*dest, value.clone());
                 }
                 Instr::ObjGetKeys { dest, obj } => {
@@ -586,9 +601,11 @@ impl<'a> Interpreter<'a> {
                     self.data.set_result(*dest, Value::Number(len as f64));
                 }
 
-                Instr::TypeOf { dest, value } => {
+                Instr::TypeOf { dest, arg: value } => {
                     let value = self.get_operand(*value);
-                    self.data.set_result(*dest, self.js_typeof(&value));
+                    let result = self.js_typeof(&value);
+                    eprint!("-> {:?}", result);
+                    self.data.set_result(*dest, result);
                 }
 
                 Instr::BoolOpAnd(dest, a, b) => {
@@ -634,9 +651,9 @@ impl<'a> Interpreter<'a> {
                     )
                 }
 
-                Instr::UnaryMinus(var) => {
-                    let arg: f64 = self.get_operand(*var).expect_num()?;
-                    self.data.set_result(*var, Value::Number(-arg));
+                Instr::UnaryMinus { dest, arg } => {
+                    let arg_val: f64 = self.get_operand(*arg).expect_num()?;
+                    self.data.set_result(*dest, Value::Number(-arg_val));
                 }
 
                 Instr::GetModule(dest, module_id) => {
@@ -657,7 +674,7 @@ impl<'a> Interpreter<'a> {
                             n_captured_upvalues: 0,
                             n_args: 0,
                             return_value_reg: Some(*dest),
-                            call_iid: Some(self.iid),
+                            return_to_iid: Some(IID(self.iid.0 + 1)),
                         };
 
                         self.print_indent();
@@ -689,7 +706,15 @@ impl<'a> Interpreter<'a> {
                         .expect("bytecode bug: ArithDec on non-number");
                     self.data.set_result(*dest, Value::Number(val - 1.0));
                 }
-                Instr::IsInstanceOf(_dest, _obj, _sup) => todo!("IsInstanceOf"),
+                Instr::IsInstanceOf(dest, obj, sup) => {
+                    let result = if let Some(obj_oid) = self.get_operand_object(*obj) {
+                        let sup_oid = self.get_operand_object(*sup).unwrap();
+                        self.heap.is_instance_of(obj_oid, sup_oid)
+                    } else {
+                        false
+                    };
+                    self.data.set_result(*dest, Value::Bool(result));
+                }
                 Instr::NewIterator { dest, obj } => todo!(),
                 Instr::IteratorGetCurrent { dest, iter } => todo!(),
                 Instr::IteratorAdvance { iter } => todo!(),
@@ -725,6 +750,8 @@ impl<'a> Interpreter<'a> {
                 }
             }
 
+            eprintln!();
+
             #[cfg(enable_jit)]
             if let Some(jitting) = &mut self.jitting {
                 jitting.builder.interpreter_step(&InterpreterStep {
@@ -752,7 +779,7 @@ impl<'a> Interpreter<'a> {
             .map(|vreg| self.get_operand(vreg))
             .unwrap_or(Value::Undefined);
         let caller_retval_reg: Option<VReg> = self.data.caller_retval_reg();
-        let call_iid: Option<IID> = self.data.call_iid();
+        let return_to_iid: Option<IID> = self.data.return_to_iid();
         self.data.pop();
 
         if let Some(vreg) = caller_retval_reg {
@@ -764,7 +791,7 @@ impl<'a> Interpreter<'a> {
             jitting.builder.exit_function(callee_retval_reg);
         }
 
-        call_iid
+        return_to_iid
     }
 
     fn with_numbers<F>(&mut self, dest: VReg, a: VReg, b: VReg, op: F)
@@ -796,6 +823,8 @@ impl<'a> Interpreter<'a> {
             (Value::Bool(a), Value::Bool(b)) => op_bool(*a, *b),
             (Value::Number(a), Value::Number(b)) => op_num(*a, *b),
             (Value::String(a), Value::String(b)) => op_str(a, b),
+            (Value::Null, Value::Null) => op_bool(true, true),
+            (Value::Undefined, Value::Undefined) => op_bool(true, true),
             _ => false,
         };
 
@@ -828,7 +857,7 @@ impl<'a> Interpreter<'a> {
 
     // TODO(cleanup) inline this function? It now adds nothing
     fn get_operand(&self, vreg: bytecode::VReg) -> Value {
-        let value = self.data.get_result(vreg).clone();
+        let value = self.data.get_result(vreg).unwrap().clone();
         //  TODO(cleanup) Move to a global logger. This is just for debugging!
         #[cfg(test)]
         {
@@ -878,6 +907,15 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
     let RegExp = heap.new_function(Closure::Native(&nf_RegExp));
     heap.set_property(global, "RegExp".to_string().into(), Value::Object(RegExp));
 
+    let Number = heap.new_function(Closure::Native(&nf_Number));
+    heap.set_property(global, "Number".to_string().into(), Value::Object(Number));
+
+    let String = heap.new_function(Closure::Native(&nf_String));
+    heap.set_property(global, "String".to_string().into(), Value::Object(String));
+
+    let Boolean = heap.new_function(Closure::Native(&nf_Boolean));
+    heap.set_property(global, "Boolean".to_string().into(), Value::Object(Boolean));
+
     // builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
     // builtins.insert("Object".into(), NativeFnId::ObjectNew as u32);
     // builtins.insert("Number".into(), NativeFnId::NumberNew as u32);
@@ -894,13 +932,37 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
     global
 }
 
-fn nf_Array_isArray(arg: &mut Interpreter, args: &[Value]) -> Result<Value> {
-    todo!("nf_Array_isArray")
+#[allow(non_snake_case)]
+fn nf_Array_isArray(intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    let value = if let Some(Value::Object(oid)) = args.get(0) {
+        intrp.heap.is_array(*oid).unwrap_or(false)
+    } else {
+        false
+    };
+
+    Ok(Value::Bool(value))
 }
 
-fn nf_RegExp(intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+#[allow(non_snake_case)]
+fn nf_RegExp(intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
+    // TODO
     let oid = intrp.heap.new_object();
     Ok(Value::Object(oid))
+}
+
+#[allow(non_snake_case)]
+fn nf_Number(_intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
+    Ok(Value::Number(0.0))
+}
+
+#[allow(non_snake_case)]
+fn nf_String(_intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
+    Ok(Value::String("".into()))
+}
+
+#[allow(non_snake_case)]
+fn nf_Boolean(_intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
+    Ok(Value::Bool(false))
 }
 
 #[cfg(test)]
