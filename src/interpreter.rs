@@ -956,8 +956,21 @@ fn nf_Number(_intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
 }
 
 #[allow(non_snake_case)]
-fn nf_String(_intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
-    Ok(Value::String("".into()))
+fn nf_String(_intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    let value_str = match args.get(0) {
+        Some(Value::Number(num)) => num.to_string().into(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Bool(true)) => "true".into(),
+        Some(Value::Bool(false)) => "false".into(),
+        Some(Value::Object(_)) => "<object>".into(),
+        Some(Value::Null) => "null".into(),
+        Some(Value::Undefined) => "undefined".into(),
+        Some(Value::SelfFunction) => "<function>".into(),
+        Some(Value::Internal(_)) => unreachable!(),
+        None => "".into()
+    };
+
+    Ok(Value::String(value_str))
 }
 
 #[allow(non_snake_case)]
