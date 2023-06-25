@@ -574,7 +574,11 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::ArrayPush { arr, value } => {
-                    todo!("ArrayPush does nothing for now")
+                    let oid = self.get_operand_object(*arr).unwrap_or_else(|| {
+                        panic!("ArrayPush: can't get element of non-array: {:?}", arr)
+                    });
+                    let value = self.get_operand(*value);
+                    self.heap.array_push(oid, value);
                 }
                 Instr::ArrayNth { dest, arr, index } => {
                     let oid = self.get_operand_object(*arr).unwrap_or_else(|| {
@@ -861,8 +865,9 @@ impl<'a> Interpreter<'a> {
         //  TODO(cleanup) Move to a global logger. This is just for debugging!
         #[cfg(test)]
         {
+            eprintln!();
             self.print_indent();
-            eprintln!("        {:?} = {:?}", vreg, value);
+            eprint!("        {:?} = {:?}", vreg, value);
         }
         value
     }
