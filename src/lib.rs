@@ -20,6 +20,9 @@ pub use interpreter::{Interpreter, Value as InterpreterValue};
 
 mod stack_access;
 
+// TODO Compile this module and build/link serde only for test builds
+pub mod inspector_case;
+
 // pub use interpreter::{InterpreterFlags, JitMode, TracerFlags, VM};
 //
 // #[cfg(test)]
