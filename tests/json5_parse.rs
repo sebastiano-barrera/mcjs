@@ -1,41 +1,36 @@
 extern crate mcjs;
 
 use mcjs::InterpreterValue;
-
 use std::path::PathBuf;
 
-// TODO(test): enable these tests once the implementation is mature enough
+#[test]
+fn test_load_json5_stringify() {
+    test_integration_script("test_stringify.mjs".to_owned());
+}
+
 #[test]
 fn test_load_json5_parse() {
+    test_integration_script("test_parse.mjs".to_owned());
+}
+
+fn test_integration_script(filename: String) {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let include_paths = vec![manifest_dir.join("test-resources/modules/json5/dist")];
+    let include_paths = vec![
+        manifest_dir.join("test-resources/modules/json5/dist"),
+        manifest_dir.join("test-resources/test-scripts/json5/"),
+    ];
     let file_loader = Box::new(mcjs::FileLoader::new(include_paths));
-
-    let code = r#"
-        import mod from 'index.mjs';
-
-        sink(mod.stringify(null));
-        sink(mod.stringify(123));
-        sink(mod.stringify(456.78));
-        sink(mod.stringify(true));
-        sink(mod.stringify(false));
-    "#;
-    let mut mock_loader = Box::new(mcjs::MockLoader::new());
-    mock_loader.add_module("test.mjs".to_owned(), mcjs::ModuleId(1), code.to_owned());
-
     let mut builder = mcjs::BuilderParams {
-        loader: Box::new(mcjs::CombinedLoader::new(vec![file_loader, mock_loader])),
+        loader: file_loader,
     }
     .to_builder();
     let test_mod_id = builder
-        .compile_file("test.mjs".to_owned())
+        .compile_file(filename)
         .unwrap_or_else(|err| panic!("compile error: {:?}", err));
     let codebase = builder.build();
-
     let mut vm = mcjs::Interpreter::new(&codebase);
     vm.run_module(test_mod_id)
         .unwrap_or_else(|err| panic!("runtime error: {:?}", err));
-
     let sink = vm.take_sink();
     assert_eq!(
         &sink,

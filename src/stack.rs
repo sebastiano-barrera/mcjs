@@ -24,6 +24,7 @@ pub(crate) struct CallMeta {
     pub n_instrs: u32,
     pub n_captured_upvalues: u16,
     pub n_args: u8,
+    pub this: Value,
     pub return_value_reg: Option<bytecode::VReg>,
     pub return_to_iid: Option<bytecode::IID>,
 }
@@ -52,6 +53,7 @@ impl InterpreterData {
             n_instrs: call_meta.n_instrs,
             n_args: call_meta.n_args,
             n_captures: call_meta.n_captured_upvalues,
+            this: call_meta.this,
             return_value_vreg: call_meta.return_value_reg,
             return_to_iid: call_meta.return_to_iid,
             fn_id: call_meta.fnid,
@@ -121,6 +123,11 @@ impl InterpreterData {
             .unwrap()
             .get_mut(&mut self.stack_buffer);
         set_slot_value(slot, &mut self.upv_alloc, value);
+    }
+
+    pub(crate) fn get_this(&self) -> &Value {
+        let header = self.metrics.header().get(&self.stack_buffer);
+        &header.this
     }
 
     pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {

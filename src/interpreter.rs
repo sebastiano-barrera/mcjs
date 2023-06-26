@@ -78,6 +78,13 @@ impl Value {
         }
     }
 
+    pub(crate) fn expect_obj(&self) -> Result<heap::ObjectId> {
+        match self {
+            Value::Object(oid) => Ok(*oid),
+            _ => Err(error!("expected an object")),
+        }
+    }
+
     pub(crate) fn into_str(self) -> Result<String> {
         match self {
             Value::String(s) => Ok(s.into_owned()),
@@ -99,13 +106,14 @@ pub enum Closure {
     JS(JSClosure),
 }
 
-type NativeFunction = dyn Fn(&mut Interpreter, &[Value]) -> Result<Value>;
+type NativeFunction = dyn Fn(&mut Interpreter, &Value, &[Value]) -> Result<Value>;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub struct JSClosure {
     fnid: FnId,
     /// TODO There oughta be a better data structure for this
     upvalues: Vec<UpvalueId>,
+    forced_this: Option<Value>,
 }
 
 impl std::fmt::Debug for Closure {
@@ -237,6 +245,7 @@ impl<'a> Interpreter<'a> {
             n_instrs,
             n_captured_upvalues: 0,
             n_args: 0,
+            this: Value::Undefined,
             return_value_reg: None,
             return_to_iid: None,
         });
@@ -416,6 +425,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::Call {
                     callee,
+                    this,
                     return_value,
                 } => {
                     let oid = self
@@ -467,11 +477,17 @@ impl<'a> Interpreter<'a> {
                                 eprintln!("     - call arg[{}]: {:?}", i, arg);
                             }
 
+                            let this = closure
+                                .forced_this
+                                .clone()
+                                .unwrap_or_else(|| self.get_operand(*this));
+
                             let call_meta = stack::CallMeta {
                                 fnid: closure.fnid,
                                 n_instrs: callee_func.instrs().len().try_into().unwrap(),
                                 n_captured_upvalues: closure.upvalues.len().try_into().unwrap(),
                                 n_args: n_params,
+                                this,
                                 return_value_reg: Some(*return_value),
                                 return_to_iid: Some(return_to_iid),
                             };
@@ -498,7 +514,8 @@ impl<'a> Interpreter<'a> {
                             continue;
                         }
                         Closure::Native(nf) => {
-                            let ret_val = (*nf)(self, &arg_vals)?;
+                            let this = self.get_operand(*this);
+                            let ret_val = (*nf)(self, &this, &arg_vals)?;
                             self.data.set_result(*return_value, ret_val);
                             next_ndx = return_to_iid.0;
                         }
@@ -625,7 +642,11 @@ impl<'a> Interpreter<'a> {
                     self.data.set_result(*dest, Value::Bool(res));
                 }
 
-                Instr::ClosureNew(dest, fnid) => {
+                Instr::ClosureNew {
+                    dest,
+                    fnid,
+                    forced_this,
+                } => {
                     let mut upvalues = Vec::new();
                     while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
                         let upv_id = self.data.ensure_in_upvalue(cap);
@@ -640,9 +661,11 @@ impl<'a> Interpreter<'a> {
                         next_ndx += 1;
                     }
 
+                    let forced_this = forced_this.map(|reg| self.get_operand(reg));
                     let closure = Closure::JS(JSClosure {
                         fnid: *fnid,
                         upvalues,
+                        forced_this,
                     });
 
                     let oid = self.heap.new_function(closure);
@@ -651,7 +674,7 @@ impl<'a> Interpreter<'a> {
                 // This is always handled in the code for ClosureNew
                 Instr::ClosureAddCapture(_) => {
                     unreachable!(
-                        "interpreter bug: ClosureAddCapture should be handled with ClosureNew"
+                        "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
                     )
                 }
 
@@ -677,6 +700,7 @@ impl<'a> Interpreter<'a> {
                             n_instrs,
                             n_captured_upvalues: 0,
                             n_args: 0,
+                            this: Value::Undefined,
                             return_value_reg: Some(*dest),
                             return_to_iid: Some(IID(self.iid.0 + 1)),
                         };
@@ -695,6 +719,10 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::LoadUndefined(dest) => {
                     self.data.set_result(*dest, Value::Undefined);
+                }
+                Instr::LoadThis(dest) => {
+                    let this = self.data.get_this().clone();
+                    self.data.set_result(*dest, this);
                 }
                 Instr::ArithInc(dest, src) => {
                     let val = self
@@ -899,14 +927,23 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
     let global = heap.new_object();
 
     {
-        let array = heap.new_object();
+        let array_cons = heap.new_function(Closure::Native(&nf_Array));
+        heap.set_property(global, "Array".to_string().into(), Value::Object(array_cons));
         let Array_isArray = heap.new_function(Closure::Native(&nf_Array_isArray));
         heap.set_property(
-            array,
+            array_cons,
             "isArray".to_string().into(),
             Value::Object(Array_isArray),
         );
-        heap.set_property(global, "Array".to_string().into(), Value::Object(array));
+
+        let array_proto = heap.new_object();
+        heap.set_property(array_cons, "prototype".to_string().into(), Value::Object(array_proto));
+
+        let Array_push = heap.new_function(Closure::Native(&nf_Array_push));
+        heap.set_property(array_proto, "push".to_string().into(), Value::Object(Array_push));
+
+        let Array_pop = heap.new_function(Closure::Native(&nf_Array_pop));
+        heap.set_property(array_proto, "pop".to_string().into(), Value::Object(Array_pop));
     }
 
     let RegExp = heap.new_function(Closure::Native(&nf_RegExp));
@@ -938,7 +975,7 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
 }
 
 #[allow(non_snake_case)]
-fn nf_Array_isArray(intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+fn nf_Array_isArray(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
     let value = if let Some(Value::Object(oid)) = args.get(0) {
         intrp.heap.is_array(*oid).unwrap_or(false)
     } else {
@@ -949,19 +986,39 @@ fn nf_Array_isArray(intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
 }
 
 #[allow(non_snake_case)]
-fn nf_RegExp(intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
+fn nf_Array_push(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
+    // TODO Proper error handling, instead of these unwrap
+    let oid = this.expect_obj().unwrap();
+    intrp.heap.array_push(oid, args.get(0).unwrap().clone());
+    Ok(Value::Undefined)
+}
+
+#[allow(non_snake_case)]
+fn nf_Array_pop(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
+    todo!("nf_Array_pop")
+}
+
+#[allow(non_snake_case)]
+fn nf_RegExp(intrp: &mut Interpreter, this: &Value, _: &[Value]) -> Result<Value> {
     // TODO
     let oid = intrp.heap.new_object();
     Ok(Value::Object(oid))
 }
 
 #[allow(non_snake_case)]
-fn nf_Number(_intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
+fn nf_Array(intrp: &mut Interpreter, this: &Value, _: &[Value]) -> Result<Value> {
+    // TODO
+    let oid = intrp.heap.new_object();
+    Ok(Value::Object(oid))
+}
+
+#[allow(non_snake_case)]
+fn nf_Number(_intrp: &mut Interpreter, this: &Value, _: &[Value]) -> Result<Value> {
     Ok(Value::Number(0.0))
 }
 
 #[allow(non_snake_case)]
-fn nf_String(_intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+fn nf_String(_intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
     let value_str = match args.get(0) {
         Some(Value::Number(num)) => num.to_string().into(),
         Some(Value::String(s)) => s.clone(),
@@ -972,14 +1029,14 @@ fn nf_String(_intrp: &mut Interpreter, args: &[Value]) -> Result<Value> {
         Some(Value::Undefined) => "undefined".into(),
         Some(Value::SelfFunction) => "<function>".into(),
         Some(Value::Internal(_)) => unreachable!(),
-        None => "".into()
+        None => "".into(),
     };
 
     Ok(Value::String(value_str))
 }
 
 #[allow(non_snake_case)]
-fn nf_Boolean(_intrp: &mut Interpreter, _: &[Value]) -> Result<Value> {
+fn nf_Boolean(_intrp: &mut Interpreter, this: &Value, _: &[Value]) -> Result<Value> {
     Ok(Value::Bool(false))
 }
 
@@ -1372,5 +1429,53 @@ mod tests {
         .unwrap();
 
         assert_eq!(&output.sink, &[Value::Bool(true), Value::Bool(false)]);
+    }
+
+    #[test]
+    fn test_this() {
+        let output = quick_run(
+            r#"
+            function getThis() {
+                return this;
+            }
+            function getThisViaArrowFunc() {
+                const f = () => { return this; };
+                return f();
+            }
+
+            const obj1 = { name: "obj1" };
+            const obj2 = { name: "obj2" };
+            obj1.getThis = getThis;
+            obj2.getThis = getThis;
+            const obj3 = { __proto__: obj1, name: "obj3" };
+            const obj4 = {
+              name: "obj4",
+              getThis() { return this },
+            };
+            const obj5 = { name: "obj5" };
+            obj5.getThis = obj4.getThis;
+
+            sink(obj1.getThis().name);
+            sink(obj2.getThis().name);
+            sink(obj3.getThis().name);
+            sink(obj5.getThis().name);
+            sink(getThis());
+
+            obj5.getThisViaArrowFunc = getThisViaArrowFunc;
+            sink(obj5.getThisViaArrowFunc().name);
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            &output.sink,
+            &[
+                Value::String("obj1".into()),
+                Value::String("obj2".into()),
+                Value::String("obj3".into()),
+                Value::String("obj5".into()),
+                Value::Undefined,
+                Value::String("obj5".into()),
+            ],
+        );
     }
 }

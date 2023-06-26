@@ -1141,7 +1141,11 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     }
 
     let dest = builder.new_vreg();
-    builder.emit(Instr::ClosureNew(dest, inner_fnb.fnid));
+    builder.emit(Instr::ClosureNew {
+        dest,
+        fnid: inner_fnb.fnid,
+        forced_this: None,
+    });
     for vreg in captures {
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
@@ -1186,22 +1190,38 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
 
     let inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
 
+    let forced_this = builder.new_vreg();
+    builder.emit(Instr::LoadThis(forced_this));
+
     // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
     // the ClosureNew and any associated ClosureAddCapture are adjacent
     // TODO(performance) avoid this allocation?
+    let mut args = Vec::new();
     for var_name in inner_fnb.captures.iter() {
         let var_name = JsWord::from(var_name.as_str());
         let vreg = builder.read_var(&var_name).with_context(
             error!("resolving identifier for function's capture").with_span(arrow.span),
         )?;
+        args.push(vreg);
+    }
+
+    let dest = builder.new_vreg();
+    let fnid = inner_fnb.fnid;
+    builder.emit(Instr::ClosureNew {
+        dest,
+        fnid,
+        forced_this: Some(forced_this),
+    });
+    // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
+    // the ClosureNew and any associated ClosureAddCapture are adjacent
+    // TODO(performance) avoid this allocation?
+    for vreg in args.into_iter() {
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
-    let res = builder.new_vreg();
-    builder.emit(Instr::ClosureNew(res, inner_fnb.fnid));
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
 
-    Ok(res)
+    Ok(dest)
 }
 
 /// Compile the given expression.
@@ -1252,18 +1272,32 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                 arg_regs.push(reg);
             }
 
-            let callee_var = compile_expr(builder, callee)?;
-            let ret = builder.new_vreg();
+            let (this, callee) = match callee.as_ref() {
+                Expr::Member(member_expr) => {
+                    let MemberAccess { obj, key: _, value } =
+                        compile_member_access(builder, &member_expr)?;
+                    (obj, value)
+                }
+                other_expr => {
+                    let this = builder.new_vreg();
+                    builder.set_const(this, bytecode::Literal::Undefined);
+
+                    let callee_func = compile_expr(builder, &other_expr)?;
+                    (this, callee_func)
+                }
+            };
+            let return_value = builder.new_vreg();
             builder.emit(Instr::Call {
-                return_value: ret,
-                callee: callee_var,
+                return_value,
+                this,
+                callee,
             });
 
             for reg in arg_regs {
                 builder.emit(Instr::CallArg(reg));
             }
 
-            Ok(ret)
+            Ok(return_value)
         }
 
         Expr::Bin(bin_expr) => {
@@ -1422,12 +1456,21 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             Ok(obj)
         }
 
-        // Expr::This(_) => todo!(),
+        Expr::This(_) => {
+            let vreg = builder.new_vreg();
+            builder.emit(Instr::LoadThis(vreg));
+            Ok(vreg)
+        }
+
         Expr::Array(arr_expr) => {
             use swc_ecma_ast::ExprOrSpread;
 
             let array = builder.new_vreg();
-            builder.emit(Instr::ObjCreateEmpty(array));
+
+            let constructor = builder
+                .read_var(&JsWord::from("Array"))
+                .expect("undefined native constructor: Array");
+            compile_new(builder, constructor, array, &[]);
 
             for elem in arr_expr.elems.iter() {
                 match elem {
@@ -1483,6 +1526,13 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     let arg = compile_expr(builder, &unary_expr.arg)?;
                     builder.emit(Instr::UnaryMinus { dest, arg });
                 }
+                swc_ecma_ast::UnaryOp::Plus => {
+                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    builder.emit(Instr::Copy {
+                        dst: dest,
+                        src: arg,
+                    });
+                }
                 swc_ecma_ast::UnaryOp::Delete => {
                     let member_expr = match &*unary_expr.arg {
                         Expr::Member(member_expr) => member_expr,
@@ -1496,7 +1546,6 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     builder.emit(Instr::ObjDelete { dest, obj, key });
                 }
                 other => unsupported_node!(other),
-                // swc_ecma_ast::UnaryOp::Plus => todo!(),
                 // swc_ecma_ast::UnaryOp::Tilde => todo!(),
                 // swc_ecma_ast::UnaryOp::Void => todo!(),
             }
@@ -1629,14 +1678,17 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
 }
 
 fn compile_new(builder: &mut Builder, constructor: VReg, ret: VReg, args: &[VReg]) {
+    let key = builder.new_vreg();
+    builder.set_const(key, bytecode::Literal::Undefined);
     builder.emit(Instr::Call {
         return_value: ret,
+        this: key,
         callee: constructor,
     });
     for arg in args {
         builder.emit(Instr::CallArg(*arg));
     }
-    let key = builder.new_vreg();
+
     builder.set_const(key, Literal::String("prototype".into()));
     // reusing register `constructor` for the prototype
     builder.emit(Instr::ObjGet {
@@ -1644,6 +1696,7 @@ fn compile_new(builder: &mut Builder, constructor: VReg, ret: VReg, args: &[VReg
         obj: constructor,
         key,
     });
+
     builder.set_const(key, Literal::String("__proto__".into()));
     builder.emit(Instr::ObjSet {
         obj: ret,

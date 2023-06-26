@@ -81,6 +81,8 @@ pub enum Instr {
     LoadUndefined(VReg),
     LoadCapture(VReg, CaptureIndex),
     LoadArg(VReg, ArgIndex),
+    LoadThis(VReg),
+
     Copy {
         dst: VReg,
         src: VReg,
@@ -128,11 +130,12 @@ pub enum Instr {
     // Push the value of accu to the argument list for the next Call
     Call {
         return_value: VReg,
+        this: VReg,
         callee: VReg,
     },
     CallArg(VReg),
 
-    ClosureNew(VReg, FnId),
+    ClosureNew{ dest: VReg, fnid: FnId, forced_this: Option<VReg> },
     ClosureAddCapture(VReg),
 
     ObjCreateEmpty(VReg),
