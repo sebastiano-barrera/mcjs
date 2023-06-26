@@ -64,8 +64,24 @@ impl InterpreterData {
             "  (allocated frame of size {} for {} args, {} captures, {} instrs)",
             frame_sz, call_meta.n_args, call_meta.n_captured_upvalues, call_meta.n_instrs,
         );
+        assert!(
+            frame_sz < self.metrics.top,
+            "interpreter's stack overflowed"
+        );
         self.metrics.top -= frame_sz;
-        *self.metrics.header().get_mut(&mut self.stack_buffer) = frame_hdr;
+
+        // NOTE: Safety: Initializing the frame completely is *vital*
+        self.metrics.header().put(&mut self.stack_buffer, frame_hdr);
+        for i in 0..call_meta.n_args {
+            self.set_arg(i.into(), Value::Undefined);
+        }
+        for i in 0..call_meta.n_instrs {
+            self.set_result(
+                bytecode::VReg(i.try_into().expect("too many instructions")),
+                Value::Undefined,
+            );
+        }
+
         self.n_frames += 1;
     }
 
@@ -91,38 +107,54 @@ impl InterpreterData {
         frame_hdr.return_to_iid
     }
 
+    fn slot_value<'a, 's: 'a>(&'s self, slot: &'a stack_access::Slot) -> &'a Value {
+        match slot {
+            stack_access::Slot::Inline(value) => value,
+            stack_access::Slot::Upvalue(upv_id) => &self
+                .upv_alloc
+                .get(*upv_id)
+                .expect("gc bug: value deleted but still referenced by stack"),
+        }
+    }
+    fn set_slot_value(&mut self, offset: stack_access::Offset<stack_access::Slot>, value: Value) {
+        let slot = offset.get(&mut self.stack_buffer);
+        match slot {
+            stack_access::Slot::Inline(_) => {
+                offset.put(&mut self.stack_buffer, stack_access::Slot::Inline(value));
+            }
+            stack_access::Slot::Upvalue(upv_id) => {
+                let heap_value = self
+                    .upv_alloc
+                    .get_mut(*upv_id)
+                    .expect("gc bug: value deleted but still referenced by stack");
+                *heap_value = value;
+            }
+        };
+    }
+
     pub(crate) fn get_result(&self, vreg: bytecode::VReg) -> Option<&Value> {
         let ndx = vreg.0 as usize;
         let slot = self
             .metrics
             .result_slot(ndx, &self.stack_buffer)?
             .get(&self.stack_buffer);
-        Some(slot_value(slot, &self.upv_alloc))
+        Some(self.slot_value(slot))
     }
     pub(crate) fn set_result(&mut self, vreg: bytecode::VReg, value: Value) {
         let ndx = vreg.0 as usize;
-        let slot = self
-            .metrics
-            .result_slot(ndx, &self.stack_buffer)
-            .unwrap()
-            .get_mut(&mut self.stack_buffer);
-        set_slot_value(slot, &mut self.upv_alloc, value);
+        let offset = self.metrics.result_slot(ndx, &self.stack_buffer).unwrap();
+        self.set_slot_value(offset, value);
     }
-
     pub(crate) fn get_arg(&self, arg_ndx: usize) -> Option<&Value> {
         let slot = self
             .metrics
             .arg_slot(arg_ndx, &self.stack_buffer)?
             .get(&self.stack_buffer);
-        Some(slot_value(slot, &self.upv_alloc))
+        Some(self.slot_value(slot))
     }
     pub(crate) fn set_arg(&mut self, arg_ndx: usize, value: Value) {
-        let slot = self
-            .metrics
-            .arg_slot(arg_ndx, &self.stack_buffer)
-            .unwrap()
-            .get_mut(&mut self.stack_buffer);
-        set_slot_value(slot, &mut self.upv_alloc, value);
+        let offset = self.metrics.arg_slot(arg_ndx, &self.stack_buffer).unwrap();
+        self.set_slot_value(offset, value);
     }
 
     pub(crate) fn get_this(&self) -> &Value {
@@ -132,18 +164,15 @@ impl InterpreterData {
 
     pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {
         let varndx = var.0 as usize;
-        let slot = self
+        let offset = self
             .metrics
             .result_slot(varndx, &self.stack_buffer)
-            .unwrap()
-            .get_mut(&mut self.stack_buffer);
+            .unwrap();
+        let slot = offset.get(&mut self.stack_buffer);
         match slot {
             stack_access::Slot::Inline(value) => {
-                // This is just to give this shuffle well-defined behavior.  Hopefully it gets
-                // optimized out.
-                let value = std::mem::replace(value, Value::Undefined);
-                let upv_id = self.upv_alloc.insert(value);
-                *slot = stack_access::Slot::Upvalue(upv_id);
+                let upv_id = self.upv_alloc.insert(value.clone());
+                offset.put(&mut self.stack_buffer, stack_access::Slot::Upvalue(upv_id));
                 upv_id
             }
             stack_access::Slot::Upvalue(upv_id) => *upv_id,
@@ -160,20 +189,17 @@ impl InterpreterData {
             .capture_slot(capture_ndx.0 as usize, &self.stack_buffer)
             .get(&self.stack_buffer);
 
-        let slot = self
-            .metrics
+        let value = stack_access::Slot::Upvalue(upvalue_id);
+        self.metrics
             .result_slot(vreg.0 as usize, &self.stack_buffer)
             .unwrap()
-            .get_mut(&mut self.stack_buffer);
-        *slot = stack_access::Slot::Upvalue(upvalue_id);
+            .put(&mut self.stack_buffer, value);
     }
 
     pub(crate) fn set_capture(&mut self, capture_ndx: usize, capture: UpvalueId) {
-        let capture_slot = self
-            .metrics
+        self.metrics
             .capture_slot(capture_ndx, &self.stack_buffer)
-            .get_mut(&mut self.stack_buffer);
-        *capture_slot = capture;
+            .put(&mut self.stack_buffer, capture);
     }
 }
 

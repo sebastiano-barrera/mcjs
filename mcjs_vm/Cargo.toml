@@ -1,0 +1,26 @@
+[package]
+name = "mcjs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+dynasm = "~2.0"
+dynasmrt = "~2.0"
+lazy_static = "~1.4.0"
+rand = "~0.8.5"
+slotmap = "~1.0.6"
+# strum = "~0.24.1"
+# strum_macros = "~0.24.3"
+swc_atoms = "~0.5.6"
+swc_common = "~0.31.0"
+swc_ecma_ast = "~0.106.0"
+swc_ecma_parser = "~0.136.0"
+serde = "1.0"
+rmp-serde = "1.1"
+
+[dev-dependencies]
+iced-x86 = "~1.18.0"
+proptest = "~1.1.0"
+

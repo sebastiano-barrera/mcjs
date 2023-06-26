@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, SourceMap, Span};
-use swc_ecma_ast::{ArrowExpr, AssignOp, BinaryOp, Decl, Function, Lit, Pat, UpdateOp, VarDecl};
-use swc_ecma_ast::{ExportDecl, VarDeclOrPat};
+use swc_ecma_ast::{
+    ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, ForHead, Function, Lit, Pat, UpdateOp, VarDecl,
+};
 
 use crate::bytecode::{self, FnId, Instr, Literal, NativeFnId, VReg, IID};
 pub use crate::common::{Context, Error, Result};
@@ -581,7 +582,8 @@ fn compile_module(
                     | Decl::TsInterface(_)
                     | Decl::TsTypeAlias(_)
                     | Decl::TsEnum(_)
-                    | Decl::TsModule(_) => unsupported_node!(export_decl.decl),
+                    | Decl::TsModule(_)
+                    | Decl::Using(_) => unsupported_node!(export_decl.decl),
                 },
                 ModuleDecl::ExportNamed(_) => todo!("ExportNamed"),
                 ModuleDecl::ExportDefaultDecl(decl) => match &decl.decl {
@@ -841,11 +843,12 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
         Stmt::ForIn(forin_stmt) => {
             let item_var = match &forin_stmt.left {
-                    VarDeclOrPat::VarDecl(var_decl) => var_decl.as_ref(),
-                    VarDeclOrPat::Pat(_) => panic!(
-                        "unsupported syntax: destructuring pattern as `<pattern>` in: `for (<pattern> in ...) {{ ... }}`"
-                    ),
-                };
+                swc_ecma_ast::ForHead::VarDecl(var_decl) => var_decl.as_ref(),
+                swc_ecma_ast::ForHead::UsingDecl(_) => todo!(),
+                swc_ecma_ast::ForHead::Pat(_) => panic!(
+                    "unsupported syntax: destructuring pattern as `<pattern>` in: `for (<pattern> in ...) {{ ... }}`"
+                ),
+            };
 
             assert_eq!(item_var.decls.len(), 1);
 
@@ -907,11 +910,14 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
         Stmt::ForOf(forof_stmt) => {
             let item_var = match &forof_stmt.left {
-                    VarDeclOrPat::VarDecl(var_decl) => var_decl.as_ref(),
-                    VarDeclOrPat::Pat(_) => panic!(
-                        "unsupported syntax: destructuring pattern as `<pattern>` in: `for (<pattern> of ...) {{ ... }}`"
-                    ),
-                };
+                ForHead::VarDecl(var_decl) => var_decl.as_ref(),
+                ForHead::Pat(_) => panic!(
+                    "unsupported syntax: destructuring pattern as `<pattern>` in: `for (<pattern> of ...) {{ ... }}`"
+                ),
+                ForHead::UsingDecl(_) => panic!(
+                    "unsupported syntax: `using` declaration as for head"
+                ),
+            };
 
             assert_eq!(item_var.decls.len(), 1);
 
@@ -1179,7 +1185,7 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
 
     builder.start_function(None, param_idents.as_slice());
 
-    match &arrow.body {
+    match arrow.body.as_ref() {
         swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block) => {
             compile_block(builder, &block.stmts)?;
         }

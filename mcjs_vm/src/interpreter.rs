@@ -484,6 +484,9 @@ impl<'a> Interpreter<'a> {
 
                             let call_meta = stack::CallMeta {
                                 fnid: closure.fnid,
+                                // TODO Actually, we just need to allocate enough space for
+                                // *variables*, not for instructions.  However, this is OK for now,
+                                // as n_instrs is always >= n_variables.
                                 n_instrs: callee_func.instrs().len().try_into().unwrap(),
                                 n_captured_upvalues: closure.upvalues.len().try_into().unwrap(),
                                 n_args: n_params,

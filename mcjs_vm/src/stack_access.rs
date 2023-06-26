@@ -56,12 +56,25 @@ impl<T: 'static> Offset<T> {
 
     pub(crate) fn get<'a>(&self, buf: &'a [u8]) -> &'a T {
         let ofs = self.offset();
+        assert!(self.offset() < buf.len());
+        assert!(self.offset() + self.size() <= buf.len());
         unsafe { std::mem::transmute(&buf[ofs]) }
     }
 
-    pub(crate) fn get_mut<'a>(&self, buf: &'a mut [u8]) -> &'a mut T {
+    pub(crate) fn put(&self, buf: &mut [u8], value: T) {
         let ofs = self.offset();
-        unsafe { std::mem::transmute(&mut buf[ofs]) }
+        let end = ofs + self.size();
+        let dest = &mut buf[ofs..end];
+
+        // memcpy `value` into the buffer without reinterpreting the memory in the buffer as an
+        // "object". If we didn't do that, the compiler would have to call the in-buffer object's
+        // destructor, which would make no sense.
+        let value_raw = unsafe {
+            let addr = &value as *const T as *const u8;
+            let size = std::mem::size_of::<T>();
+            core::slice::from_raw_parts(addr, size)
+        };
+        dest.copy_from_slice(value_raw);
     }
 }
 
@@ -92,6 +105,7 @@ type ResultSlot = Slot;
 type ArgSlot = Slot;
 type CaptureSlot = UpvalueId;
 
+#[derive(Copy)]
 pub(crate) enum Slot {
     Inline(Value),
     Upvalue(UpvalueId),
@@ -205,7 +219,10 @@ mod tests {
         }
         for i in 0..hdr.n_instrs {
             let comment = format!("result #{i}");
-            handle_range(metrics.result_slot(i as usize, buf).unwrap().range(), &comment);
+            handle_range(
+                metrics.result_slot(i as usize, buf).unwrap().range(),
+                &comment,
+            );
         }
         for i in 0..hdr.n_args {
             let comment = format!("arg #{i}");
@@ -241,7 +258,7 @@ mod tests {
         let buf_size = hdr.expected_frame_size();
         let metrics = FrameMetrics { top: 0 };
         let mut buf = vec![0u8; buf_size];
-        *metrics.header().get_mut(&mut buf) = hdr;
+        metrics.header().put(&mut buf, hdr);
 
         let slots = all_slots(&metrics, &buf);
         for i in 0..slots.len() {
@@ -274,7 +291,7 @@ mod tests {
             metrics.top -= frame_sz;
             eprintln!("frame #{}: {} bytes", ndx, frame_sz);
 
-            *metrics.header().get_mut(&mut buf) = header.clone();
+            metrics.header().put(&mut buf, header.clone());
 
             for_each_slot(&metrics, &buf, |range, comment| {
                 assert!(
@@ -311,7 +328,7 @@ mod tests {
         eprintln!("buffer is {} bytes ({} is padding)", buf_size, padding);
 
         let metrics = FrameMetrics { top: padding };
-        *metrics.header().get_mut(&mut buf) = header.clone();
+        metrics.header().put(&mut buf, header.clone());
 
         for_each_slot(&metrics, &buf, |range, comment| {
             assert!(
@@ -338,7 +355,7 @@ mod tests {
         let buf_size = padding + hdr.expected_frame_size();
         let metrics = FrameMetrics { top: padding };
         let mut buf = vec![0u8; buf_size];
-        *metrics.header().get_mut(&mut buf) = hdr;
+        metrics.header().put(&mut buf, hdr);
         let mut covered = vec![false; buf_size];
 
         eprintln!("frame size = {}", buf_size);
@@ -379,8 +396,7 @@ mod tests {
     fn test_encoding() {
         let mut bytes = [9_u8, 22, 0, 0, 0, 0, 99, 11, 90];
         let ofs = Offset::at(2);
-        let value: &mut i32 = ofs.get_mut(&mut bytes);
-        *value = 88724534;
+        ofs.put(&mut bytes, 88724534);
 
         assert_eq!(&[9_u8, 22, 54, 212, 73, 5, 99, 11, 90], &bytes);
     }
@@ -397,13 +413,9 @@ mod tests {
         T: 'static + PartialEq + Clone + Copy + std::fmt::Debug,
     {
         let offset = Offset::at(offset);
-        {
-            let buf_field = offset.get_mut(buf);
-            *buf_field = value.clone();
-        }
-        {
-            let buf_field = offset.get(buf);
-            assert_eq!(*buf_field, value);
-        }
+        offset.put(buf, value.clone());
+
+        let buf_field = offset.get(buf);
+        assert_eq!(*buf_field, value);
     }
 }
