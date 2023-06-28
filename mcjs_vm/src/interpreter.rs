@@ -332,23 +332,24 @@ impl<'a> Interpreter<'a> {
                     let value = self.get_operand(*operand);
                     self.sink.push(value);
                 }
-                Instr::CmpGE(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |x, y| x >= y, |x, y| x >= y, |x, y| x >= y)
-                }
+
+                Instr::CmpGE(dest, a, b) => self.compare(*dest, *a, *b, |ord| {
+                    ord == ValueOrdering::Greater || ord == ValueOrdering::Equal
+                }),
                 Instr::CmpGT(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |x, y| x > y, |x, y| x > y, |x, y| x > y)
+                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Greater)
                 }
                 Instr::CmpLT(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |x, y| x < y, |x, y| x < y, |x, y| x < y)
+                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Less)
                 }
-                Instr::CmpLE(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |x, y| x <= y, |x, y| x <= y, |x, y| x <= y)
-                }
+                Instr::CmpLE(dest, a, b) => self.compare(*dest, *a, *b, |ord| {
+                    ord == ValueOrdering::Less || ord == ValueOrdering::Equal
+                }),
                 Instr::CmpEQ(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |x, y| x == y, |x, y| x == y, |x, y| x == y)
+                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Equal)
                 }
                 Instr::CmpNE(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |x, y| x != y, |x, y| x != y, |x, y| x != y)
+                    self.compare(*dest, *a, *b, |ord| ord != ValueOrdering::Equal)
                 }
 
                 Instr::JmpIf { cond, dest } => {
@@ -822,38 +823,43 @@ impl<'a> Interpreter<'a> {
     {
         let a = self.get_operand(a).expect_num().unwrap();
         let b = self.get_operand(b).expect_num().unwrap();
-        // TODO Terrible.   We have to re-parse the whole frame header before being able to call
-        // set_result!
         self.data.set_result(dest, Value::Number(op(a, b)));
     }
 
-    fn compare<FB, FN, FS>(
+    fn compare(
         &mut self,
         dest: VReg,
         a: VReg,
         b: VReg,
-        op_bool: FB,
-        op_num: FN,
-        _op_str: FS,
-    ) where
-        FB: FnOnce(bool, bool) -> bool,
-        FN: FnOnce(f64, f64) -> bool,
-        FS: FnOnce(&str, &str) -> bool,
-    {
+        test: impl Fn(ValueOrdering) -> bool,
+    ) {
         let a = self.get_operand(a);
         let b = self.get_operand(b);
 
-        let result = match (&a, &b) {
-            (Value::Bool(a), Value::Bool(b)) => op_bool(*a, *b),
-            (Value::Number(a), Value::Number(b)) => op_num(*a, *b),
-            (Value::Null, Value::Null) => op_bool(true, true),
-            (Value::Undefined, Value::Undefined) => op_bool(true, true),
-            _ => false,
+        let ordering = match (&a, &b) {
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b).into(),
+            (Value::Number(a), Value::Number(b)) => a
+                .partial_cmp(b)
+                .map(|x| x.into())
+                .unwrap_or(ValueOrdering::Incomparable),
+            (Value::Null, Value::Null) => ValueOrdering::Equal,
+            (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
+            (Value::Object(a), Value::Object(b)) => {
+                match (self.heap.get_string(*a), self.heap.get_string(*b)) {
+                    (Some(a_str), Some(b_str)) => a_str.cmp(b_str).into(),
+                    _ => {
+                        if *a == *b {
+                            ValueOrdering::Equal
+                        } else {
+                            ValueOrdering::Incomparable
+                        }
+                    }
+                }
+            }
+            _ => ValueOrdering::Incomparable,
         };
 
-        // TODO Terrible.   We have to re-parse the whole frame header before being able to call
-        // set_result!
-        self.data.set_result(dest, Value::Bool(result));
+        self.data.set_result(dest, Value::Bool(test(ordering)));
     }
 
     fn get_operand_object(&self, operand: VReg) -> Option<heap::ObjectId> {
@@ -891,8 +897,6 @@ impl<'a> Interpreter<'a> {
 
     // TODO(cleanup) inline this function? It now adds nothing
     fn get_operand(&self, vreg: bytecode::VReg) -> Value {
-        // TODO Terrible.   We have to re-parse the whole frame header before being able to call
-        // set_result!
         let value = self.data.get_result(vreg);
         //  TODO(cleanup) Move to a global logger. This is just for debugging!
         #[cfg(test)]
@@ -1110,6 +1114,24 @@ fn nf_String(_intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<
 #[allow(non_snake_case)]
 fn nf_Boolean(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     Ok(Value::Bool(false))
+}
+
+#[derive(PartialEq, Eq)]
+enum ValueOrdering {
+    Equal,
+    Less,
+    Greater,
+    /// Not equal, but also not less nor greater.  Just always `!==`
+    Incomparable,
+}
+impl From<std::cmp::Ordering> for ValueOrdering {
+    fn from(cmp_ordering: std::cmp::Ordering) -> Self {
+        match cmp_ordering {
+            Ordering::Less => ValueOrdering::Less,
+            Ordering::Equal => ValueOrdering::Equal,
+            Ordering::Greater => ValueOrdering::Greater,
+        }
+    }
 }
 
 #[cfg(test)]
