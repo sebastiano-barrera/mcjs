@@ -19,83 +19,51 @@ use crate::{
     heap::{self, ObjectHeap},
     // jit::{self, InterpreterStep},
     stack,
+    stack_access,
     util::Mask,
 };
 
 pub use crate::common::Error;
 
 /// A value that can be input, output, or processed by the program at runtime.
-#[derive(Debug, PartialEq, Clone)]
+///
+/// Design notes: Value is `Copy` in an effort to make it as dumb as possible (easy to
+/// copy/move/delete/etc.), as otherwise it becomes really hard to keep memory safety in the
+/// interpreter's stack (which is shared with JIT-compiled code, which is inherently unsafe, so we
+/// have to make some compromises).
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Value {
     Number(f64),
-    String(Cow<'static, str>),
     Bool(bool),
     Object(heap::ObjectId),
     Null,
     Undefined,
     SelfFunction,
 
+    // TODO(small) remove this. society has evolved past the need for values that can't be created
+    // from source code
     Internal(usize),
-}
-
-impl From<String> for Value {
-    fn from(value: String) -> Self {
-        Value::String(Cow::Owned(value))
-    }
-}
-
-impl From<&'static str> for Value {
-    fn from(value: &'static str) -> Self {
-        Value::String(Cow::Borrowed(value))
-    }
-}
-
-impl From<bytecode::Literal> for Value {
-    fn from(bc_value: bytecode::Literal) -> Self {
-        match bc_value {
-            bytecode::Literal::Number(nu) => Value::Number(nu),
-            bytecode::Literal::String(st) => Value::String(st.into()),
-            bytecode::Literal::Bool(bo) => Value::Bool(bo),
-            bytecode::Literal::Null => Value::Null,
-            bytecode::Literal::Undefined => Value::Undefined,
-            bytecode::Literal::SelfFunction => todo!(),
-        }
-    }
 }
 
 impl Value {
     pub(crate) fn expect_bool(&self) -> Result<bool> {
         match self {
             Value::Bool(val) => Ok(*val),
-            _ => Err(error!("expected a boolean")),
+            other => Err(error!("expected an boolean, got {:?}", other)),
         }
     }
 
     pub(crate) fn expect_num(&self) -> Result<f64> {
         match self {
             Value::Number(val) => Ok(*val),
-            _ => Err(error!("expected a number")),
+            other => Err(error!("expected a number, got {:?}", other)),
         }
     }
 
     pub(crate) fn expect_obj(&self) -> Result<heap::ObjectId> {
         match self {
             Value::Object(oid) => Ok(*oid),
-            _ => Err(error!("expected an object")),
-        }
-    }
-
-    pub(crate) fn into_str(self) -> Result<String> {
-        match self {
-            Value::String(s) => Ok(s.into_owned()),
-            _ => Err(error!("expected a string")),
-        }
-    }
-
-    pub(crate) fn expect_str(&self) -> Result<&str> {
-        match self {
-            Value::String(s) => Ok(s.as_ref()),
-            _ => Err(error!("expected a string")),
+            other => Err(error!("expected an object, got {:?}", other)),
         }
     }
 }
@@ -210,10 +178,14 @@ impl<'a> Interpreter<'a> {
         &mut self.opts
     }
 
-    pub fn take_sink(&mut self) -> Vec<Value> {
-        let mut swap_area = Vec::new();
-        std::mem::swap(&mut swap_area, &mut self.sink);
-        swap_area
+    pub fn take_sink(&mut self) -> Vec<Option<bytecode::Literal>> {
+        let mut values = Vec::new();
+        std::mem::swap(&mut values, &mut self.sink);
+
+        values
+            .into_iter()
+            .map(|val| self.try_value_to_literal(val))
+            .collect()
     }
 
     #[cfg(enable_jit)]
@@ -272,7 +244,7 @@ impl<'a> Interpreter<'a> {
 
     fn run_until_done(&mut self) -> Result<()> {
         while self.data.len() != 0 {
-            let fnid = self.data.fnid();
+            let fnid = self.data.header().fn_id;
             let func = self.get_function(fnid);
 
             assert!(
@@ -346,8 +318,9 @@ impl<'a> Interpreter<'a> {
 
             match instr {
                 Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
-                    let value = func.consts()[*const_ndx as usize].clone();
-                    self.data.set_result(*dest, value.into());
+                    let literal = func.consts()[*const_ndx as usize].clone();
+                    let value = self.literal_to_value(literal);
+                    self.data.set_result(*dest, value);
                 }
 
                 Instr::ArithAdd(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x + y),
@@ -390,7 +363,8 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::Copy { dst, src } => {
-                    self.data.set_result(*dst, self.get_operand(*src));
+                    let value = self.get_operand(*src);
+                    self.data.set_result(*dst, value);
                 }
                 Instr::LoadCapture(dest, cap_ndx) => {
                     self.data.capture_to_var(*cap_ndx, *dest);
@@ -401,8 +375,10 @@ impl<'a> Interpreter<'a> {
                     let value = match self.get_operand(*arg) {
                         Value::Bool(bool_val) => Value::Bool(!bool_val),
                         Value::Number(num) => Value::Bool(num == 0.0),
-                        Value::String(str) => Value::Bool(str.is_empty()),
-                        Value::Object(_) => Value::Bool(false),
+                        Value::Object(oid) => match self.heap.get_string(oid) {
+                            Some(str) => Value::Bool(str.is_empty()),
+                            None => Value::Bool(false),
+                        },
                         Value::Null => Value::Bool(true),
                         Value::Undefined => Value::Bool(true),
                         Value::SelfFunction => Value::Bool(false),
@@ -495,6 +471,7 @@ impl<'a> Interpreter<'a> {
                                 return_to_iid: Some(return_to_iid),
                             };
 
+                            eprintln!();
                             self.print_indent();
                             eprintln!(
                                 "-- fn #{} [{} captures]",
@@ -503,10 +480,16 @@ impl<'a> Interpreter<'a> {
 
                             self.data.push(call_meta);
                             for (capndx, capture) in closure.upvalues.iter().enumerate() {
+                                let capndx = bytecode::CaptureIndex(
+                                    capndx.try_into().expect("too many captures!"),
+                                );
+                                self.print_indent();
+                                eprintln!("    capture[{}] = {:?}", capndx.0, capture);
                                 self.data.set_capture(capndx, *capture);
+                                assert_eq!(self.data.get_capture(capndx), *capture);
                             }
                             for (i, arg) in arg_vals.into_iter().enumerate() {
-                                self.data.set_arg(i, arg);
+                                self.data.set_arg(bytecode::ArgIndex(i as _), arg);
                             }
                             self.iid = IID(0u16);
 
@@ -528,14 +511,10 @@ impl<'a> Interpreter<'a> {
                     unreachable!("interpreter bug: CallArg goes through another path!")
                 }
 
-                Instr::LoadArg(dest, bytecode::ArgIndex(arg_ndx)) => {
+                Instr::LoadArg(dest, arg_ndx) => {
                     // TODO extra copy?
                     // TODO usize is a bit too wide
-                    let value = self
-                        .data
-                        .get_arg(*arg_ndx as usize)
-                        .cloned()
-                        .unwrap_or(Value::Undefined);
+                    let value = self.data.get_arg(*arg_ndx).unwrap_or(Value::Undefined);
                     eprint!("-> {:?}", value);
                     self.data.set_result(*dest, value);
                 }
@@ -550,7 +529,8 @@ impl<'a> Interpreter<'a> {
                         // TODO(big feat) use TypeError exception here
                         .unwrap_or_else(|| panic!("ObjSet: cannot set properties of: {:?}", obj));
                     let key = self.get_operand(*key);
-                    let key = heap::ObjectKey::from_value(&key)
+                    let key = self
+                        .value_to_object_key(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = self.get_operand(*value);
 
@@ -562,7 +542,8 @@ impl<'a> Interpreter<'a> {
                         // TODO(big feat) use TypeError exception here
                         .unwrap_or_else(|| panic!("ObjGet: cannot read properties of: {:?}", obj));
                     let key = self.get_operand(*key);
-                    let key = heap::ObjectKey::from_value(&key)
+                    let key = self
+                        .value_to_object_key(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = self
                         .heap
@@ -586,7 +567,8 @@ impl<'a> Interpreter<'a> {
                         panic!("ObjGetKeys: can't delete property of non-object: {:?}", obj)
                     });
                     let key = self.get_operand(*key);
-                    let key = heap::ObjectKey::from_value(&key)
+                    let key = self
+                        .value_to_object_key(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
 
                     self.heap.delete_property(oid, &key);
@@ -724,8 +706,7 @@ impl<'a> Interpreter<'a> {
                     self.data.set_result(*dest, Value::Undefined);
                 }
                 Instr::LoadThis(dest) => {
-                    let this = self.data.get_this().clone();
-                    self.data.set_result(*dest, this);
+                    self.data.set_result(*dest, self.data.header().this);
                 }
                 Instr::ArithInc(dest, src) => {
                     let val = self
@@ -750,31 +731,33 @@ impl<'a> Interpreter<'a> {
                     };
                     self.data.set_result(*dest, Value::Bool(result));
                 }
-                Instr::NewIterator { dest, obj } => todo!(),
-                Instr::IteratorGetCurrent { dest, iter } => todo!(),
-                Instr::IteratorAdvance { iter } => todo!(),
-                Instr::JmpIfIteratorFinished { iter, dest } => todo!(),
+                Instr::NewIterator { dest: _, obj: _ } => todo!(),
+                Instr::IteratorGetCurrent { dest: _, iter: _ } => todo!(),
+                Instr::IteratorAdvance { iter: _ } => todo!(),
+                Instr::JmpIfIteratorFinished { iter: _, dest: _ } => todo!(),
 
                 Instr::Throw(_) => todo!(),
 
-                Instr::StrCreateEmpty(dest) => self
-                    .data
-                    .set_result(*dest, Value::String(String::new().into())),
+                Instr::StrCreateEmpty(dest) => {
+                    let oid = self.heap.new_string(String::new());
+                    self.data.set_result(*dest, Value::Object(oid));
+                }
                 Instr::StrAppend(buf_reg, tail) => {
-                    // TODO Make this *decently* efficient!
-                    let buf = self.get_operand(*buf_reg);
-                    let mut buf: String = buf.into_str()?;
+                    // TODO Make this at least *decently* efficient!
+                    let buf = self.get_operand_string(*buf_reg);
+                    let mut buf: String = buf.to_owned();
 
-                    let tail = self.get_operand(*tail);
-                    let tail: &str = tail.expect_str()?;
+                    let tail: &str = self.get_operand_string(*tail);
 
                     buf.push_str(tail);
-                    self.data.set_result(*buf_reg, Value::String(buf.into()));
+                    let value = self.literal_to_value(bytecode::Literal::String(buf));
+                    self.data.set_result(*buf_reg, value);
                 }
 
                 Instr::GetGlobal { dest, key } => {
                     let key = self.get_operand(*key);
-                    let key = heap::ObjectKey::from_value(&key)
+                    let key = self
+                        .value_to_object_key(&key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
 
                     let value = self
@@ -813,9 +796,13 @@ impl<'a> Interpreter<'a> {
         let return_value = callee_retval_reg
             .map(|vreg| self.get_operand(vreg))
             .unwrap_or(Value::Undefined);
-        let caller_retval_reg: Option<VReg> = self.data.caller_retval_reg();
-        let return_to_iid: Option<IID> = self.data.return_to_iid();
+        let header = self.data.header();
+        let caller_retval_reg = header.return_value_vreg;
+        let return_to_iid = header.return_to_iid;
         self.data.pop();
+
+        // XXX This is a bug.  Get the top frame again.  But the compiler should say something
+        // first!
 
         if let Some(vreg) = caller_retval_reg {
             self.data.set_result(vreg, return_value);
@@ -835,6 +822,8 @@ impl<'a> Interpreter<'a> {
     {
         let a = self.get_operand(a).expect_num().unwrap();
         let b = self.get_operand(b).expect_num().unwrap();
+        // TODO Terrible.   We have to re-parse the whole frame header before being able to call
+        // set_result!
         self.data.set_result(dest, Value::Number(op(a, b)));
     }
 
@@ -845,7 +834,7 @@ impl<'a> Interpreter<'a> {
         b: VReg,
         op_bool: FB,
         op_num: FN,
-        op_str: FS,
+        _op_str: FS,
     ) where
         FB: FnOnce(bool, bool) -> bool,
         FN: FnOnce(f64, f64) -> bool,
@@ -857,12 +846,13 @@ impl<'a> Interpreter<'a> {
         let result = match (&a, &b) {
             (Value::Bool(a), Value::Bool(b)) => op_bool(*a, *b),
             (Value::Number(a), Value::Number(b)) => op_num(*a, *b),
-            (Value::String(a), Value::String(b)) => op_str(a, b),
             (Value::Null, Value::Null) => op_bool(true, true),
             (Value::Undefined, Value::Undefined) => op_bool(true, true),
             _ => false,
         };
 
+        // TODO Terrible.   We have to re-parse the whole frame header before being able to call
+        // set_result!
         self.data.set_result(dest, Value::Bool(result));
     }
 
@@ -884,6 +874,15 @@ impl<'a> Interpreter<'a> {
             .expect("invalid function (object is not callable)")
     }
 
+    fn get_operand_string(&self, operand: VReg) -> &str {
+        let oid = self
+            .get_operand_object(operand)
+            .expect("invalid string (not an object)");
+        self.heap
+            .get_string(oid)
+            .expect("invalid string (object is not a string)")
+    }
+
     fn print_indent(&self) {
         for _ in 0..(self.data.len() - 1) {
             eprint!("    ");
@@ -892,7 +891,9 @@ impl<'a> Interpreter<'a> {
 
     // TODO(cleanup) inline this function? It now adds nothing
     fn get_operand(&self, vreg: bytecode::VReg) -> Value {
-        let value = self.data.get_result(vreg).unwrap().clone();
+        // TODO Terrible.   We have to re-parse the whole frame header before being able to call
+        // set_result!
+        let value = self.data.get_result(vreg);
         //  TODO(cleanup) Move to a global logger. This is just for debugging!
         #[cfg(test)]
         {
@@ -903,14 +904,14 @@ impl<'a> Interpreter<'a> {
         value
     }
 
-    fn js_typeof(&self, value: &Value) -> Value {
+    fn js_typeof(&mut self, value: &Value) -> Value {
         let ty_s = match value {
             Value::Number(_) => "number",
-            Value::String(_) => "string",
             Value::Bool(_) => "boolean",
-            Value::Object(oid) => match self.heap.get_closure(*oid) {
-                Some(_) => "function",
-                None => "object",
+            Value::Object(oid) => match self.heap.get_typeof(*oid) {
+                heap::Typeof::Object => "object",
+                heap::Typeof::Function => "function",
+                heap::Typeof::String => "string",
             },
             // TODO(cleanup) This is actually an error in our type system.  null is really a value
             // of the 'object' type
@@ -920,7 +921,56 @@ impl<'a> Interpreter<'a> {
             Value::Internal(_) => panic!("internal value has no typeof!"),
         };
 
-        ty_s.to_string().into()
+        self.literal_to_value(bytecode::Literal::String(ty_s.to_string()))
+    }
+
+    /// Create a Value based on the given Literal.\
+    ///
+    /// It may allocate an object in the GC-managed heap.
+    fn literal_to_value(&mut self, lit: bytecode::Literal) -> Value {
+        match lit {
+            bytecode::Literal::Number(nu) => Value::Number(nu),
+            bytecode::Literal::String(st) => {
+                // TODO(performance) avoid this allocation
+                let oid = self.heap.new_string(st.clone());
+                Value::Object(oid)
+            }
+            bytecode::Literal::Bool(bo) => Value::Bool(bo),
+            bytecode::Literal::Null => Value::Null,
+            bytecode::Literal::Undefined => Value::Undefined,
+            bytecode::Literal::SelfFunction => todo!(),
+        }
+    }
+
+    fn try_value_to_literal(&self, value: Value) -> Option<bytecode::Literal> {
+        match value {
+            Value::Number(num) => Some(bytecode::Literal::Number(num)),
+            Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
+            Value::Object(oid) => match self.heap.get_string(oid) {
+                Some(s) => Some(bytecode::Literal::String(s.to_owned())),
+                None => None,
+            },
+            Value::Null => Some(bytecode::Literal::Null),
+            Value::Undefined => Some(bytecode::Literal::Undefined),
+            Value::SelfFunction => None,
+            Value::Internal(_) => None,
+        }
+    }
+
+    fn value_to_object_key(&self, value: &Value) -> Option<heap::ObjectKey> {
+        match value {
+            Value::Number(n) if *n >= 0.0 => {
+                let n_trunc = n.trunc();
+                if *n == n_trunc {
+                    let ndx = n_trunc as usize;
+                    Some(heap::ObjectKey::ArrayIndex(ndx))
+                } else {
+                    None
+                }
+            }
+            Value::Object(oid) => self.heap.get_string(*oid).map(|s| s.to_owned().into()),
+            _ => None,
+        }
     }
 }
 
@@ -931,7 +981,11 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
 
     {
         let array_cons = heap.new_function(Closure::Native(&nf_Array));
-        heap.set_property(global, "Array".to_string().into(), Value::Object(array_cons));
+        heap.set_property(
+            global,
+            "Array".to_string().into(),
+            Value::Object(array_cons),
+        );
         let Array_isArray = heap.new_function(Closure::Native(&nf_Array_isArray));
         heap.set_property(
             array_cons,
@@ -940,13 +994,25 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
         );
 
         let array_proto = heap.new_object();
-        heap.set_property(array_cons, "prototype".to_string().into(), Value::Object(array_proto));
+        heap.set_property(
+            array_cons,
+            "prototype".to_string().into(),
+            Value::Object(array_proto),
+        );
 
         let Array_push = heap.new_function(Closure::Native(&nf_Array_push));
-        heap.set_property(array_proto, "push".to_string().into(), Value::Object(Array_push));
+        heap.set_property(
+            array_proto,
+            "push".to_string().into(),
+            Value::Object(Array_push),
+        );
 
         let Array_pop = heap.new_function(Closure::Native(&nf_Array_pop));
-        heap.set_property(array_proto, "pop".to_string().into(), Value::Object(Array_pop));
+        heap.set_property(
+            array_proto,
+            "pop".to_string().into(),
+            Value::Object(Array_pop),
+        );
     }
 
     let RegExp = heap.new_function(Closure::Native(&nf_RegExp));
@@ -978,7 +1044,7 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
 }
 
 #[allow(non_snake_case)]
-fn nf_Array_isArray(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
+fn nf_Array_isArray(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
     let value = if let Some(Value::Object(oid)) = args.get(0) {
         intrp.heap.is_array(*oid).unwrap_or(false)
     } else {
@@ -997,37 +1063,40 @@ fn nf_Array_push(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Resul
 }
 
 #[allow(non_snake_case)]
-fn nf_Array_pop(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
+fn nf_Array_pop(_intrp: &mut Interpreter, _this: &Value, _args: &[Value]) -> Result<Value> {
     todo!("nf_Array_pop")
 }
 
 #[allow(non_snake_case)]
-fn nf_RegExp(intrp: &mut Interpreter, this: &Value, _: &[Value]) -> Result<Value> {
+fn nf_RegExp(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     // TODO
     let oid = intrp.heap.new_object();
     Ok(Value::Object(oid))
 }
 
 #[allow(non_snake_case)]
-fn nf_Array(intrp: &mut Interpreter, this: &Value, _: &[Value]) -> Result<Value> {
+fn nf_Array(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     // TODO
     let oid = intrp.heap.new_object();
     Ok(Value::Object(oid))
 }
 
 #[allow(non_snake_case)]
-fn nf_Number(_intrp: &mut Interpreter, this: &Value, _: &[Value]) -> Result<Value> {
+fn nf_Number(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     Ok(Value::Number(0.0))
 }
 
 #[allow(non_snake_case)]
-fn nf_String(_intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
+fn nf_String(_intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
     let value_str = match args.get(0) {
-        Some(Value::Number(num)) => num.to_string().into(),
-        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(num)) => num.to_string(),
         Some(Value::Bool(true)) => "true".into(),
         Some(Value::Bool(false)) => "false".into(),
-        Some(Value::Object(_)) => "<object>".into(),
+        Some(Value::Object(oid)) => match _intrp.heap.get_typeof(*oid) {
+            heap::Typeof::Object => "<object>".to_owned(),
+            heap::Typeof::Function => "<function>".to_owned(),
+            heap::Typeof::String => _intrp.heap.get_string(*oid).unwrap().to_owned(),
+        },
         Some(Value::Null) => "null".into(),
         Some(Value::Undefined) => "undefined".into(),
         Some(Value::SelfFunction) => "<function>".into(),
@@ -1035,11 +1104,11 @@ fn nf_String(_intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<V
         None => "".into(),
     };
 
-    Ok(Value::String(value_str))
+    Ok(_intrp.literal_to_value(bytecode::Literal::String(value_str)))
 }
 
 #[allow(non_snake_case)]
-fn nf_Boolean(_intrp: &mut Interpreter, this: &Value, _: &[Value]) -> Result<Value> {
+fn nf_Boolean(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     Ok(Value::Bool(false))
 }
 
@@ -1048,10 +1117,10 @@ mod tests {
     use super::*;
 
     struct Output {
-        sink: Vec<Value>,
+        sink: Vec<Option<Literal>>,
     }
 
-    use crate::fs::MockLoader;
+    use crate::{bytecode::Literal, fs::MockLoader};
 
     fn quick_run(code: &str) -> Result<Output> {
         let module_id = bytecode::ModuleId(123);
@@ -1082,7 +1151,7 @@ mod tests {
     #[test]
     fn test_simple_call() {
         let output = quick_run("/* Here is some simple code: */ sink(1 + 4 + 99); ").unwrap();
-        assert_eq!(&[Value::Number(104.0)], &output.sink[..]);
+        assert_eq!(&[Some(Literal::Number(104.0))], &output.sink[..]);
     }
 
     #[test]
@@ -1090,7 +1159,10 @@ mod tests {
         let output =
             quick_run("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ").unwrap();
         assert_eq!(
-            &[Value::Number(12. * 5.), Value::Number(99. - 15.)],
+            &[
+                Some(Literal::Number(12. * 5.)),
+                Some(Literal::Number(99. - 15.))
+            ],
             &output.sink[..]
         );
     }
@@ -1109,8 +1181,7 @@ mod tests {
         )
         .unwrap();
 
-        let val: Value = "b".to_string().into();
-        assert_eq!(&[val], &output.sink[..]);
+        assert_eq!(&[Some(Literal::String("b".to_owned()))], &output.sink[..]);
     }
 
     #[test]
@@ -1123,14 +1194,7 @@ mod tests {
         )
         .unwrap();
 
-        // 0    const 123
-        // 1    const 'a'
-        // 2    cmp v0 < v1
-        // 3    jmpif v2 -> #5
-        // 4    set v2 <- 'b'
-        // 5    push_sink v2
-
-        assert_eq!(&[Value::Number(3.0)], &output.sink[..]);
+        assert_eq!(&[Some(Literal::Number(3.0))], &output.sink[..]);
     }
 
     #[test]
@@ -1151,7 +1215,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(&[Value::Number(9.0 * 8.0)], &output.sink[..]);
+        assert_eq!(&[Some(Literal::Number(9.0 * 8.0))], &output.sink[..]);
     }
 
     #[test]
@@ -1173,12 +1237,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(&[Value::Number(10.0)], &output.sink[..]);
+        assert_eq!(&[Some(Literal::Number(10.0))], &output.sink[..]);
     }
 
     fn try_casting_bool(code: &str, expected_value: bool) {
         let output = quick_run(code).unwrap();
-        assert_eq!(&[Value::Bool(expected_value)], &output.sink[..]);
+        assert_eq!(&[Some(Literal::Bool(expected_value))], &output.sink[..]);
     }
     #[test]
     fn test_boolean_cast_from_number() {
@@ -1246,10 +1310,10 @@ mod tests {
 
         assert_eq!(
             &[
-                Value::Number(2.0),
-                Value::Number(4.0),
-                Value::Number(6.0),
-                Value::Number(1.0)
+                Some(Literal::Number(2.0)),
+                Some(Literal::Number(4.0)),
+                Some(Literal::Number(6.0)),
+                Some(Literal::Number(1.0))
             ],
             &output.sink[..]
         );
@@ -1270,17 +1334,17 @@ mod tests {
             sink(obj.aNumber)
             sink(obj.anotherObject.x)
             sink(obj.anotherObject.y)
-            sink(obj.aFunction)
+            sink(obj.aFunction())
             ",
         )
         .unwrap();
 
         assert_eq!(5, output.sink.len());
-        assert_eq!(&Value::String("asdlol123".into()), &output.sink[0]);
-        assert_eq!(&Value::Number(1239423.4518923), &output.sink[1]);
-        assert_eq!(&Value::Number(123.0), &output.sink[2]);
-        assert_eq!(&Value::Number(899.0), &output.sink[3]);
-        assert!(matches!(&output.sink[4], Value::Object(_)));
+        assert_eq!(&Some(Literal::String("asdlol123".into())), &output.sink[0]);
+        assert_eq!(&Some(Literal::Number(1239423.4518923)), &output.sink[1]);
+        assert_eq!(&Some(Literal::Number(123.0)), &output.sink[2]);
+        assert_eq!(&Some(Literal::Number(899.0)), &output.sink[3]);
+        assert_eq!(&Some(Literal::Number(42.0)), &output.sink[4]);
     }
 
     #[test]
@@ -1316,21 +1380,21 @@ mod tests {
         assert_eq!(
             &output.sink[..],
             &[
-                Value::String("undefined".into()).into(),
-                Value::String("undefined".into()).into(),
-                Value::String("object".into()).into(),
-                Value::String("object".into()).into(),
-                Value::String("object".into()).into(),
-                Value::String("boolean".into()).into(),
-                Value::String("boolean".into()).into(),
-                Value::String("number".into()).into(),
-                Value::String("number".into()).into(),
-                Value::String("number".into()).into(),
-                Value::String("number".into()).into(),
-                Value::String("number".into()).into(),
-                Value::String("string".into()).into(),
-                Value::String("string".into()).into(),
-                Value::String("function".into()).into(),
+                Some(Literal::String("undefined".into())),
+                Some(Literal::String("undefined".into())),
+                Some(Literal::String("object".into())),
+                Some(Literal::String("object".into())),
+                Some(Literal::String("object".into())),
+                Some(Literal::String("boolean".into())),
+                Some(Literal::String("boolean".into())),
+                Some(Literal::String("number".into())),
+                Some(Literal::String("number".into())),
+                Some(Literal::String("number".into())),
+                Some(Literal::String("number".into())),
+                Some(Literal::String("number".into())),
+                Some(Literal::String("string".into())),
+                Some(Literal::String("string".into())),
+                Some(Literal::String("function".into())),
                 // TODO(feat) BigInt (typeof -> "bigint")
                 // TODO(feat) Symbol (typeof -> "symbol")
             ]
@@ -1353,10 +1417,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(4, output.sink.len());
-        assert_eq!(&Value::Number(123.0), &output.sink[0]);
-        assert_eq!(&Value::Number(4.0), &output.sink[1]);
-        assert_eq!(&Value::Number(123.0), &output.sink[2]);
-        assert_eq!(&Value::Number(999.0), &output.sink[3]);
+        assert_eq!(&Some(Literal::Number(123.0)), &output.sink[0]);
+        assert_eq!(&Some(Literal::Number(4.0)), &output.sink[1]);
+        assert_eq!(&Some(Literal::Number(123.0)), &output.sink[2]);
+        assert_eq!(&Some(Literal::Number(999.0)), &output.sink[3]);
     }
 
     #[test]
@@ -1383,12 +1447,12 @@ mod tests {
         assert_eq!(
             &output.sink[..],
             &[
-                Value::Number(99.0),
-                Value::Number(32.0),
-                Value::Number(12304.0),
-                Value::Number(0.0),
-                Value::String("another name".into()),
-                Value::String("another name yet".into()),
+                Some(Literal::Number(99.0)),
+                Some(Literal::Number(32.0)),
+                Some(Literal::Number(12304.0)),
+                Some(Literal::Number(0.0)),
+                Some(Literal::String("another name".into())),
+                Some(Literal::String("another name yet".into())),
             ]
         );
     }
@@ -1413,7 +1477,7 @@ mod tests {
             .sink
             .into_iter()
             .map(|value| match value {
-                Value::String(s) => s,
+                Some(Literal::String(s)) => s,
                 other => panic!("not a String: {:?}", other),
             })
             .collect();
@@ -1431,7 +1495,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(&output.sink, &[Value::Bool(true), Value::Bool(false)]);
+        assert_eq!(
+            &output.sink,
+            &[Some(Literal::Bool(true)), Some(Literal::Bool(false))]
+        );
     }
 
     #[test]
@@ -1472,12 +1539,12 @@ mod tests {
         assert_eq!(
             &output.sink,
             &[
-                Value::String("obj1".into()),
-                Value::String("obj2".into()),
-                Value::String("obj3".into()),
-                Value::String("obj5".into()),
-                Value::Undefined,
-                Value::String("obj5".into()),
+                Some(Literal::String("obj1".into())),
+                Some(Literal::String("obj2".into())),
+                Some(Literal::String("obj3".into())),
+                Some(Literal::String("obj5".into())),
+                Some(Literal::Undefined),
+                Some(Literal::String("obj5".into())),
             ],
         );
     }

@@ -41,7 +41,7 @@ pub struct ArgIndex(pub u8);
 #[derive(Clone, Copy)]
 pub struct CaptureIndex(pub u16);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct VReg(pub u8);
 
 impl std::fmt::Debug for ArgIndex {

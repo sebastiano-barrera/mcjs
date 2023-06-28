@@ -13,7 +13,7 @@ mod stack;
 mod heap;
 mod util;
 
-pub use bytecode::{Codebase, ModuleId};
+pub use bytecode::{Codebase, ModuleId, Literal};
 pub use bytecode_compiler::{BuilderParams, Loader};
 pub use fs::{FileLoader, MockLoader, CombinedLoader};
 pub use interpreter::{Interpreter, Value as InterpreterValue};

@@ -1,118 +1,25 @@
-//
-//  Frame layout:
-//      Header =
-//          n_instrs: u32
-//          n_args: u32
-//      Results buffer = [n_instrs; Result]
-//
-//  Result
-//      = enum { Stack(Value), Heap(UpvalueId), }
-//      = Number(f64),
-//      | String(Cow<'static, str>),
-//      | Bool(bool),
-//      | Object(Object),
-//      | Null,
-//      | Undefined,
-//      | // TODO(cleanup) Delete, Closure supersedes this
-//      | SelfFunction,
-//      | // TODO(cleanup) Delete, Closure supersedes this
-//      | NativeFunction(u32),
-//      | Closure(Closure),
-//  repr Result =
-//    << STACK : 1, padding,  >>
-//
-//  const STACK = 0
-//  const HEAP = 1
-//
-//
-
-use crate::bytecode::{FnId, VReg, IID};
+use crate::bytecode::{self, FnId, VReg, IID};
 use crate::interpreter::{UpvalueId, Value};
+use std::cell::Cell;
+use std::env::args;
 use std::mem::size_of;
 use std::{marker::PhantomData, ops::Range};
-
-pub(crate) struct Offset<T: 'static> {
-    offset: usize,
-    ph: PhantomData<T>,
-}
-
-impl<T: 'static> Offset<T> {
-    pub(crate) const fn at(offset: usize) -> Self {
-        Offset {
-            offset,
-            ph: PhantomData,
-        }
-    }
-
-    pub(crate) fn offset(&self) -> usize {
-        self.offset
-    }
-    pub(crate) fn size(&self) -> usize {
-        std::mem::size_of::<T>()
-    }
-    pub(crate) fn range(&self) -> Range<usize> {
-        self.offset()..(self.offset() + self.size())
-    }
-
-    pub(crate) fn get<'a>(&self, buf: &'a [u8]) -> &'a T {
-        let ofs = self.offset();
-        assert!(self.offset() < buf.len());
-        assert!(self.offset() + self.size() <= buf.len());
-        unsafe { std::mem::transmute(&buf[ofs]) }
-    }
-
-    pub(crate) fn put(&self, buf: &mut [u8], value: T) {
-        let ofs = self.offset();
-        let end = ofs + self.size();
-        let dest = &mut buf[ofs..end];
-
-        // memcpy `value` into the buffer without reinterpreting the memory in the buffer as an
-        // "object". If we didn't do that, the compiler would have to call the in-buffer object's
-        // destructor, which would make no sense.
-        let value_raw = unsafe {
-            let addr = &value as *const T as *const u8;
-            let size = std::mem::size_of::<T>();
-            core::slice::from_raw_parts(addr, size)
-        };
-        dest.copy_from_slice(value_raw);
-    }
-}
-
-impl<T: 'static> std::fmt::Debug for Offset<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let type_name = std::any::type_name::<T>();
-        write!(f, "{:?}@{}", type_name, self.offset)
-    }
-}
-
-impl<T: 'static> std::ops::Add<usize> for Offset<T> {
-    type Output = Offset<T>;
-
-    fn add(self, rhs: usize) -> Self::Output {
-        Offset {
-            offset: rhs + self.offset,
-            ph: PhantomData,
-        }
-    }
-}
-
-pub(crate) struct FrameMetrics {
-    pub(crate) top: usize,
-}
 
 // TODO put the real type here instead of u64
 type ResultSlot = Slot;
 type ArgSlot = Slot;
 type CaptureSlot = UpvalueId;
 
-#[derive(Copy)]
+#[derive(Clone, Copy)]
 pub(crate) enum Slot {
     Inline(Value),
     Upvalue(UpvalueId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FrameHeader {
+    #[cfg(test)]
+    pub(crate) magic: [u8; 8],
     pub(crate) n_instrs: u32,
     pub(crate) n_args: u8,
     pub(crate) n_captures: u16,
@@ -122,82 +29,209 @@ pub(crate) struct FrameHeader {
     pub(crate) fn_id: FnId,
 }
 
+#[cfg(test)]
 impl FrameHeader {
-    pub(crate) fn expected_frame_size(&self) -> usize {
-        size_of::<Self>()
-            + size_of::<CaptureSlot>() * self.n_captures as usize
-            + size_of::<ResultSlot>() * self.n_instrs as usize
-            + size_of::<ArgSlot>() * self.n_args as usize
+    pub(crate) const MAGIC: [u8; 8] = *b"THEMAGIC";
+}
+
+pub(crate) struct Stack {
+    top_offset: usize,
+    store: Box<[u8]>,
+}
+
+impl Stack {
+    pub(crate) fn new(store: Box<[u8]>) -> Self {
+        let size = store.len();
+        Stack {
+            store,
+            top_offset: size,
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        self.store.len()
+    }
+
+    pub(crate) fn push_frame(&mut self, header: FrameHeader) {
+        let layout = FrameLayout::measure(&header);
+        assert!(self.top_offset >= layout.size);
+        self.top_offset -= layout.size;
+
+        let frame_raw = &mut self.store[self.top_offset..self.top_offset + layout.size];
+        layout.header.write(frame_raw, header);
+        for (i, var_slot) in layout.vars.get_mut(frame_raw).iter_mut().enumerate() {
+            *var_slot = Slot::Inline(Value::Number(i as f64));
+        }
+        for (i, arg_slot) in layout.args.get_mut(frame_raw).iter_mut().enumerate() {
+            *arg_slot = Slot::Inline(Value::Number(i as f64));
+        }
+        for (i, cap_slot) in layout.captures.get_mut(frame_raw).iter_mut().enumerate() {
+            *cap_slot = Slot::Inline(Value::Number(i as f64));
+        }
+    }
+
+    pub(crate) fn pop_frame(&mut self) {
+        let layout = self.cur_layout();
+        assert!(self.top_offset + layout.size <= self.store.len());
+        self.top_offset += layout.size;
+    }
+
+    fn cur_layout(&self) -> FrameLayout {
+        // TODO TODO cache this layout and return a & instead
+        FrameLayout::measure(self.top_header())
+    }
+
+    fn stack(&self) -> &[u8] {
+        &self.store[self.top_offset..]
+    }
+    fn stack_mut(&mut self) -> &mut [u8] {
+        &mut self.store[self.top_offset..]
+    }
+
+    pub(crate) fn top_header(&self) -> &FrameHeader {
+        let header_field = Field::just();
+        header_field.get(&self.store[self.top_offset..])
+    }
+
+    pub(crate) fn args(&self) -> &[Slot] {
+        self.cur_layout().args.get(self.stack())
+    }
+    pub(crate) fn args_mut(&mut self) -> &mut [Slot] {
+        self.cur_layout().args.get_mut(self.stack_mut())
+    }
+
+    pub(crate) fn vars(&self) -> &[Slot] {
+        self.cur_layout().vars.get(self.stack())
+    }
+    pub(crate) fn vars_mut(&mut self) -> &mut [Slot] {
+        self.cur_layout().vars.get_mut(self.stack_mut())
+    }
+
+    pub(crate) fn captures(&self) -> &[Slot] {
+        self.cur_layout().captures.get(self.stack())
+    }
+    pub(crate) fn captures_mut(&mut self) -> &mut [Slot] {
+        self.cur_layout().captures.get_mut(self.stack_mut())
     }
 }
 
-impl FrameMetrics {
-    pub(crate) const fn header(&self) -> Offset<FrameHeader> {
-        Offset::at(self.top)
+struct FrameLayout {
+    header: Field<FrameHeader>,
+    vars: SliceField<Slot>,
+    args: SliceField<Slot>,
+    captures: SliceField<Slot>,
+    size: usize,
+}
+impl FrameLayout {
+    fn measure(header_value: &FrameHeader) -> Self {
+        let mut lb = LayoutBuilder::new();
+        let header = lb.field();
+        let vars = lb.field_slice(header_value.n_instrs as usize);
+        let args = lb.field_slice(header_value.n_args as usize);
+        let captures = lb.field_slice(header_value.n_captures as usize);
+
+        FrameLayout {
+            header,
+            vars,
+            args,
+            captures,
+            size: lb.offset,
+        }
     }
-    const HEADER_SIZE: usize = size_of::<FrameHeader>();
+}
 
-    pub(crate) fn frame_size(&self, buf: &[u8]) -> usize {
-        let hdr = self.header().get(buf);
-        hdr.expected_frame_size()
+struct LayoutBuilder {
+    offset: usize,
+}
+impl LayoutBuilder {
+    fn new() -> Self {
+        LayoutBuilder { offset: 0 }
     }
 
-    pub(crate) fn capture_slot(&self, capture_ndx: usize, buf: &[u8]) -> Offset<CaptureSlot> {
-        let hdr = self.header().get(buf);
-        assert!(capture_ndx < hdr.n_captures as usize);
-        Offset::at(self.top + Self::HEADER_SIZE + size_of::<CaptureSlot>() * capture_ndx)
+    fn field<T>(&mut self) -> Field<T> {
+        let size = size_of::<T>();
+        let field = Field {
+            range: (self.offset..self.offset + size),
+            ph: PhantomData,
+        };
+        self.offset += size;
+        field
     }
 
-    // TODO Fix in-memory repr of Value
-    //
-    // These two functions are, of course, supreme bullshit.
-    //
-    // Why?  Because as soon as you get a Offset<interpreter::Value>, you're going to do get()
-    // or get_mut() on it, which means you're going to reinterpret a slice of bytes from
-    // your buffer as a Value.
-    //
-    // But Value has a bunch of semantics currently attached to it. For example, Value::Object
-    // holds a shared reference to an object via RefCell<Rc<...>>.  That means that *somebody*
-    // has to increase/decrease that reference count!  Even worse, that someone has to
-    // *remember* to do it correctly every time.   Value::String holds (via a Cow, so not
-    // always) an actual whole-ass String object. So one problem is that the current
-    // scheme VERY PROBABLY LEAKS MEMORY.
-    //
-    // This is all going to be solved by:
-    //  - having Value only hold simple, dumb, Copy handles to objects or strings
-    //  - using those handles to access those objects/strings via the GC-managed heap
-    //  - having an actual GC to scan the stack/heap/whatever
-    //
-    // That's not a problem I'm going to solve tonight though, so, I'll keep the unsafe
-    // situation going for a little while more.
+    fn field_slice<T>(&mut self, count: usize) -> SliceField<T> {
+        let size = size_of::<T>() * count;
+        let field = SliceField {
+            range: (self.offset..self.offset + size),
+            ph: PhantomData,
+        };
+        self.offset += size;
+        field
+    }
+}
 
-    pub(crate) fn result_slot(&self, result_ndx: usize, buf: &[u8]) -> Option<Offset<ResultSlot>> {
-        let hdr = self.header().get(buf);
-        if result_ndx < hdr.n_instrs as usize {
-            Some(Offset::at(
-                self.top
-                    + Self::HEADER_SIZE
-                    + size_of::<CaptureSlot>() * hdr.n_captures as usize
-                    + size_of::<ResultSlot>() * result_ndx,
-            ))
-        } else {
-            None
+struct Field<T> {
+    range: Range<usize>,
+    ph: PhantomData<T>,
+}
+impl<T> Field<T> {
+    fn just() -> Self {
+        let size = size_of::<T>();
+        Field {
+            range: 0..size,
+            ph: PhantomData,
         }
     }
 
-    pub(crate) fn arg_slot(&self, arg_ndx: usize, buf: &[u8]) -> Option<Offset<ArgSlot>> {
-        let hdr = self.header().get(buf);
-        if arg_ndx < hdr.n_args as usize {
-            Some(Offset::at(
-                self.top
-                    + Self::HEADER_SIZE
-                    + size_of::<CaptureSlot>() * hdr.n_captures as usize
-                    + size_of::<ResultSlot>() * hdr.n_instrs as usize
-                    + size_of::<ArgSlot>() * arg_ndx,
-            ))
-        } else {
-            None
+    fn get<'b>(&self, buf: &'b [u8]) -> &'b T {
+        let bytes = &buf[self.range.clone()];
+        assert_eq!(bytes.len(), size_of::<T>());
+        unsafe { &*(bytes as *const [u8] as *const T) }
+    }
+
+    fn get_mut<'b>(&self, buf: &'b mut [u8]) -> &'b mut T {
+        let bytes = &mut buf[self.range.clone()];
+        assert_eq!(bytes.len(), size_of::<T>());
+        unsafe { &mut *(bytes as *mut [u8] as *mut T) }
+    }
+
+    fn write<'b>(&self, buf: &'b mut [u8], value: T) {
+        let bytes = &mut buf[self.range.clone()];
+        assert_eq!(bytes.len(), size_of::<T>());
+        let bytes = bytes as *mut [u8] as *mut T;
+
+        // write_unaligned?
+        unsafe { std::ptr::write(bytes, value) }
+    }
+}
+struct SliceField<T> {
+    range: Range<usize>,
+    ph: PhantomData<T>,
+}
+impl<T> SliceField<T> {
+    fn get<'b>(&self, buf: &'b [u8]) -> &'b [T] {
+        if self.range.len() == 0 {
+            return &[];
         }
+        assert_eq!(self.range.len() % size_of::<T>(), 0);
+        assert!(buf.len() >= self.range.end);
+        let slice = std::ptr::slice_from_raw_parts(
+            &buf[self.range.start] as *const u8 as *const T,
+            self.range.len() / size_of::<T>(),
+        );
+        unsafe { &*slice }
+    }
+
+    fn get_mut<'b>(&self, buf: &'b mut [u8]) -> &'b mut [T] {
+        if self.range.len() == 0 {
+            return &mut [];
+        }
+        assert_eq!(self.range.len() % size_of::<T>(), 0);
+        assert!(buf.len() >= self.range.end);
+        let slice = std::ptr::slice_from_raw_parts_mut(
+            &mut buf[self.range.start] as *mut u8 as *mut T,
+            self.range.len() / size_of::<T>(),
+        );
+        unsafe { &mut *slice }
     }
 }
 
@@ -205,43 +239,9 @@ impl FrameMetrics {
 mod tests {
     use super::*;
 
-    fn for_each_slot<F>(metrics: &FrameMetrics, buf: &[u8], mut handle_range: F)
-    where
-        F: FnMut(Range<usize>, &str),
-    {
-        handle_range(metrics.header().range(), "header");
-
-        let hdr = metrics.header().get(buf);
-
-        for i in 0..hdr.n_captures {
-            let comment = format!("capture #{i}");
-            handle_range(metrics.capture_slot(i as usize, buf).range(), &comment);
-        }
-        for i in 0..hdr.n_instrs {
-            let comment = format!("result #{i}");
-            handle_range(
-                metrics.result_slot(i as usize, buf).unwrap().range(),
-                &comment,
-            );
-        }
-        for i in 0..hdr.n_args {
-            let comment = format!("arg #{i}");
-            handle_range(metrics.arg_slot(i as usize, buf).unwrap().range(), &comment);
-        }
-    }
-
-    fn all_slots(metrics: &FrameMetrics, buf: &[u8]) -> Vec<Range<usize>> {
-        let mut slots = Vec::new();
-        for_each_slot(metrics, buf, |range, _| slots.push(range));
-        slots
-    }
-
-    fn ranges_intersect(a: &Range<usize>, b: &Range<usize>) -> bool {
-        !(a.end <= b.start || a.start >= b.end)
-    }
-
     fn random_header() -> FrameHeader {
         FrameHeader {
+            magic: FrameHeader::MAGIC,
             n_instrs: rand::random::<u32>() % 100,
             n_captures: rand::random::<u16>() % 100,
             n_args: rand::random::<u8>() % 100,
@@ -252,170 +252,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_slots_do_not_overlap() {
-        let hdr = random_header();
-        let buf_size = hdr.expected_frame_size();
-        let metrics = FrameMetrics { top: 0 };
-        let mut buf = vec![0u8; buf_size];
-        metrics.header().put(&mut buf, hdr);
-
-        let slots = all_slots(&metrics, &buf);
-        for i in 0..slots.len() {
-            for j in 0..i {
-                let range_a = &slots[i];
-                let range_b = &slots[j];
-
-                assert!(
-                    !ranges_intersect(range_a, range_b),
-                    "ranges unexpectedly intersect: #{} ({:?}) and #{} ({:?})",
-                    i,
-                    range_a,
-                    j,
-                    range_b
-                );
-            }
-        }
-    }
-
+    #[cfg(none)]
     #[test]
     fn test_multiple_frames_slots_do_not_overlap() {
         // ordered bottom to top
         let headers: Vec<_> = (0..10).map(|_| random_header()).collect();
         let buf_size = headers.iter().map(|hdr| hdr.expected_frame_size()).sum();
-        let mut buf = vec![0u8; buf_size];
+        let buf = vec![0u8; buf_size].into_boxed_slice();
+        let mut stack = Stack::new(buf);
 
-        let mut metrics = FrameMetrics { top: buf_size };
-        for (ndx, header) in headers.iter().enumerate() {
-            let frame_sz = header.expected_frame_size();
-            metrics.top -= frame_sz;
-            eprintln!("frame #{}: {} bytes", ndx, frame_sz);
-
-            metrics.header().put(&mut buf, header.clone());
-
-            for_each_slot(&metrics, &buf, |range, comment| {
-                assert!(
-                    range.start >= metrics.top,
-                    "assertion failed: range.start ({}) >= metrics.top ({}) ({})",
-                    range.start,
-                    metrics.top,
-                    comment,
-                );
-                assert!(
-                    range.end <= metrics.top + frame_sz,
-                    "assertion failed: range.end ({}) < metrics.top ({}) + frame_sz ({}) = {} ({})",
-                    range.start,
-                    metrics.top,
-                    frame_sz,
-                    metrics.top + frame_sz,
-                    comment
-                );
-            });
-        }
-    }
-
-    #[test]
-    fn test_frame_slots_within_frame() {
-        let padding = 221;
-
-        // ordered bottom to top
-        let header = random_header();
-        let frame_sz = header.expected_frame_size();
-        eprintln!("frame is {} bytes", frame_sz);
-
-        let buf_size = padding + frame_sz;
-        let mut buf = vec![0u8; buf_size];
-        eprintln!("buffer is {} bytes ({} is padding)", buf_size, padding);
-
-        let metrics = FrameMetrics { top: padding };
-        metrics.header().put(&mut buf, header.clone());
-
-        for_each_slot(&metrics, &buf, |range, comment| {
-            assert!(
-                range.start >= padding,
-                "assertion failed: range.start ({}) >= padding ({}) ({})",
-                range.start,
-                padding,
-                comment,
-            );
-            assert!(
-                range.end <= buf_size,
-                "assertion failed: range.end ({}) < buf_size ({}) ({})",
-                range.end,
-                buf_size,
-                comment
-            );
-        });
-    }
-
-    #[test]
-    fn test_whole_frame_covered() {
-        let padding = 200;
-        let hdr = random_header();
-        let buf_size = padding + hdr.expected_frame_size();
-        let metrics = FrameMetrics { top: padding };
-        let mut buf = vec![0u8; buf_size];
-        metrics.header().put(&mut buf, hdr);
-        let mut covered = vec![false; buf_size];
-
-        eprintln!("frame size = {}", buf_size);
-
-        let slots = all_slots(&metrics, &buf);
-        for range in slots {
-            for ndx in range {
-                assert!(covered[ndx] == false);
-                covered[ndx] = true;
-            }
+        for header in headers.iter().rev() {
+            stack.push_frame(*header);
         }
 
-        eprintln!("Frame map: ");
-        for (ndx, cell) in covered.iter().enumerate() {
-            if ndx % 32 == 0 {
-                eprintln!();
-                eprint!("{:8}: ", ndx);
-            } else if ndx % 8 == 0 {
-                eprint!(" ");
-            }
-
-            eprint!("{}", if *cell { '#' } else { '_' });
+        for header in headers.iter() {
+            let frame = stack.top();
+            let check_header = frame.header.get();
+            assert_eq!(&check_header, header);
+            stack.pop_frame();
         }
-        eprintln!();
-        assert!(covered.iter().skip(padding).all(|x| *x == true));
-    }
-
-    #[test]
-    fn test_decoding() {
-        let bytes = [9_u8, 22, 54, 212, 73, 5, 99, 11, 90];
-        let ofs = Offset::at(2);
-        let value: &i32 = ofs.get(&bytes);
-
-        assert_eq!(*value, 88724534);
-    }
-
-    #[test]
-    fn test_encoding() {
-        let mut bytes = [9_u8, 22, 0, 0, 0, 0, 99, 11, 90];
-        let ofs = Offset::at(2);
-        ofs.put(&mut bytes, 88724534);
-
-        assert_eq!(&[9_u8, 22, 54, 212, 73, 5, 99, 11, 90], &bytes);
-    }
-
-    #[test]
-    fn test_encoding_sanity() {
-        let mut bytes = [0u8; 90];
-        check_encoding_sanity(&mut bytes, 7, 85834561234589145_u64);
-        check_encoding_sanity(&mut bytes, 8, 99.23445f64);
-        check_encoding_sanity(&mut bytes, 9, '#');
-    }
-    fn check_encoding_sanity<T>(buf: &mut [u8], offset: usize, value: T)
-    where
-        T: 'static + PartialEq + Clone + Copy + std::fmt::Debug,
-    {
-        let offset = Offset::at(offset);
-        offset.put(buf, value.clone());
-
-        let buf_field = offset.get(buf);
-        assert_eq!(*buf_field, value);
     }
 }

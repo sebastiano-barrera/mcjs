@@ -19,6 +19,9 @@ impl ObjectHeap {
     pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectId {
         self.objects.insert(Object::new_function(closure))
     }
+    pub(crate) fn new_string(&mut self, string: String) -> ObjectId {
+        self.objects.insert(Object::new_string(string))
+    }
 
     pub(crate) fn is_instance_of(&self, oid: ObjectId, sup_oid: ObjectId) -> bool {
         let mut cur_oid = Some(oid);
@@ -132,7 +135,10 @@ impl ObjectHeap {
             .into_iter()
             .map(|key| match key {
                 ObjectKey::ArrayIndex(ndx) => Value::Number(ndx as f64),
-                ObjectKey::Property(PropertyKey::String(name)) => Value::String(name.into()),
+                ObjectKey::Property(PropertyKey::String(name)) => {
+                    let oid = self.new_string(name.clone());
+                    Value::Object(oid)
+                }
             })
             .collect();
 
@@ -153,9 +159,26 @@ impl ObjectHeap {
         let obj = self.objects.get_mut(oid).unwrap();
         obj.array_items.push(value);
     }
+
+    pub(crate) fn get_typeof(&self, oid: ObjectId) -> Typeof {
+        let obj = self.objects.get(oid).unwrap();
+        obj.type_of()
+    }
+
+    pub(crate) fn get_string(&self, oid: ObjectId) -> Option<&str> {
+        let obj = self.objects.get(oid).unwrap();
+        obj.as_str()
+    }
 }
 
 slotmap::new_key_type! { pub struct ObjectId; }
+
+#[derive(Clone, Copy)]
+pub enum Typeof {
+    Object,
+    Function,
+    String,
+}
 
 #[derive(Debug, Clone)]
 struct Object {
@@ -163,6 +186,7 @@ struct Object {
     properties: HashMap<PropertyKey, Value>,
     array_items: Vec<Value>,
     closure: Option<Closure>,
+    string_payload: Option<String>,
 }
 
 impl Object {
@@ -172,6 +196,7 @@ impl Object {
             properties: HashMap::new(),
             array_items: Vec::new(),
             closure: None,
+            string_payload: None,
         }
     }
 
@@ -181,13 +206,37 @@ impl Object {
             properties: HashMap::new(),
             array_items: Vec::new(),
             closure: Some(closure),
+            string_payload: None,
         }
+    }
+
+    fn new_string(string: String) -> Object {
+        Object {
+            proto_id: None,
+            properties: HashMap::new(),
+            array_items: Vec::new(),
+            closure: None,
+            string_payload: Some(string),
+        }
+    }
+
+    fn type_of(&self) -> Typeof {
+        if self.string_payload.is_some() {
+            Typeof::String
+        } else if self.closure.is_some() {
+            Typeof::Function
+        } else {
+            Typeof::Object
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        self.string_payload.as_ref().map(|s| s.as_str())
     }
 
     fn get_property(&self, key: &PropertyKey) -> Option<&Value> {
         self.properties.get(key)
     }
-
     fn set_property(&mut self, key: PropertyKey, value: Value) {
         self.properties.insert(key, value);
     }
@@ -198,7 +247,6 @@ impl Object {
         }
         self.array_items[ndx] = value;
     }
-
     fn get_arr_element(&self, ndx: usize) -> Option<&Value> {
         self.array_items.get(ndx)
     }
@@ -236,26 +284,6 @@ pub(crate) enum ObjectKey {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub(crate) enum PropertyKey {
     String(String),
-}
-impl ObjectKey {
-    pub(crate) fn from_value(value: &Value) -> Option<ObjectKey> {
-        match value {
-            Value::Number(n) if *n >= 0.0 => {
-                let n_trunc = n.trunc();
-                if *n == n_trunc {
-                    let ndx = n_trunc as usize;
-                    Some(ObjectKey::ArrayIndex(ndx))
-                } else {
-                    None
-                }
-            }
-            Value::String(s) => {
-                let pkey = PropertyKey::String(s.to_string());
-                Some(ObjectKey::Property(pkey))
-            }
-            _ => None,
-        }
-    }
 }
 impl From<String> for ObjectKey {
     fn from(value: String) -> Self {

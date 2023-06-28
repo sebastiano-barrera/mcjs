@@ -1,6 +1,6 @@
 extern crate mcjs;
 
-use mcjs::InterpreterValue;
+use mcjs::Literal;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -47,11 +47,11 @@ fn test_integration_script(filename: String) {
             assert_eq!(
                 &sink,
                 &[
-                    InterpreterValue::String("null".into()),
-                    InterpreterValue::String("123".into()),
-                    InterpreterValue::String("456.78".into()),
-                    InterpreterValue::String("true".into()),
-                    InterpreterValue::String("false".into()),
+                    Some(Literal::String("null".into())),
+                    Some(Literal::String("123".into())),
+                    Some(Literal::String("456.78".into())),
+                    Some(Literal::String("true".into())),
+                    Some(Literal::String("false".into())),
                 ]
             );
         }
