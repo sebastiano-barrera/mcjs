@@ -24,7 +24,9 @@ fn test_integration_script(filename: String) {
         manifest_dir.join("test-resources/modules/json5/dist"),
         manifest_dir.join("test-resources/test-scripts/json5/"),
     ];
-    let file_loader = Box::new(mcjs_vm::FileLoader::new(include_paths.clone()));
+    let file_loader = Box::new(mcjs_vm::FileLoader::new(
+        include_paths.iter().map(|pb| pb.as_path()),
+    ));
     let mut builder = mcjs_vm::BuilderParams {
         loader: file_loader,
     }

@@ -261,7 +261,7 @@ impl Codebase {
         self.rootfn_of_module.get(&module_id).copied()
     }
 
-    pub fn all_functions(&self) -> impl Iterator<Item = (FnId, &Function)> {
+    pub fn all_functions(&self) -> impl ExactSizeIterator<Item = (FnId, &Function)> {
         self.fns.iter().map(|(fnid, func_ref)| (*fnid, func_ref))
     }
 

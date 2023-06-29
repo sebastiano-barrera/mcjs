@@ -18,7 +18,7 @@ pub use bytecode_compiler::{BuilderParams, Loader};
 pub use fs::{FileLoader, MockLoader, CombinedLoader};
 pub use interpreter::{Interpreter, Value as InterpreterValue};
 #[cfg(feature = "inspection")]
-pub use interpreter::{InspectorStep, InspectorAction};
+pub use interpreter::{InspectorStep, InspectorAction, CoreDump};
 
 mod stack_access;
 

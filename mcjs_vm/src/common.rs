@@ -139,6 +139,16 @@ impl Error {
 
         buf
     }
+
+    pub fn messages<'a>(&'a self) -> impl 'a + Iterator<Item = String> {
+        std::iter::once(&self.head)
+            .chain(self.chain.iter())
+            .map(|item| {
+                let mut buf = String::new();
+                item.message(&mut buf, self.source_map.as_deref(), 0);
+                buf
+            })
+    }
 }
 
 pub trait Context<Err> {

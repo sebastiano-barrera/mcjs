@@ -14,9 +14,8 @@ pub struct FileLoader {
 }
 
 impl FileLoader {
-    pub fn new(module_paths: Vec<PathBuf>) -> Self {
+    pub fn new<'a>(module_paths: impl 'a + Iterator<Item = &'a Path>) -> Self {
         let module_paths = module_paths
-            .into_iter()
             .map(|p| p.canonicalize().expect("could not canonicalize path"))
             .collect();
         FileLoader {

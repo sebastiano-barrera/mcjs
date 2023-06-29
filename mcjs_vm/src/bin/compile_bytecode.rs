@@ -8,7 +8,7 @@ fn main() {
         .expect("usage: compile_bytecode <filename.js>");
 
     let cwd = std::env::current_dir().unwrap();
-    let loader = FileLoader::new(vec![cwd]);
+    let loader = FileLoader::new(std::iter::once(cwd.as_path()));
 
     let mut native_fns = HashMap::new();
     let words = [

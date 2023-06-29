@@ -70,11 +70,11 @@ impl Value {
 
 #[derive(Clone)]
 pub enum Closure {
-    Native(&'static NativeFunction),
+    Native(NativeFunction),
     JS(JSClosure),
 }
 
-type NativeFunction = dyn Fn(&mut Interpreter, &Value, &[Value]) -> Result<Value>;
+type NativeFunction = fn(&mut Interpreter, &Value, &[Value]) -> Result<Value>;
 
 #[derive(Clone, PartialEq)]
 pub struct JSClosure {
@@ -1112,13 +1112,13 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
     let global = heap.new_object();
 
     {
-        let array_cons = heap.new_function(Closure::Native(&nf_Array));
+        let array_cons = heap.new_function(Closure::Native(nf_Array));
         heap.set_property(
             global,
             "Array".to_string().into(),
             Value::Object(array_cons),
         );
-        let Array_isArray = heap.new_function(Closure::Native(&nf_Array_isArray));
+        let Array_isArray = heap.new_function(Closure::Native(nf_Array_isArray));
         heap.set_property(
             array_cons,
             "isArray".to_string().into(),
@@ -1132,14 +1132,14 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
             Value::Object(array_proto),
         );
 
-        let Array_push = heap.new_function(Closure::Native(&nf_Array_push));
+        let Array_push = heap.new_function(Closure::Native(nf_Array_push));
         heap.set_property(
             array_proto,
             "push".to_string().into(),
             Value::Object(Array_push),
         );
 
-        let Array_pop = heap.new_function(Closure::Native(&nf_Array_pop));
+        let Array_pop = heap.new_function(Closure::Native(nf_Array_pop));
         heap.set_property(
             array_proto,
             "pop".to_string().into(),
@@ -1147,16 +1147,16 @@ fn init_builtins(heap: &mut heap::ObjectHeap) -> heap::ObjectId {
         );
     }
 
-    let RegExp = heap.new_function(Closure::Native(&nf_RegExp));
+    let RegExp = heap.new_function(Closure::Native(nf_RegExp));
     heap.set_property(global, "RegExp".to_string().into(), Value::Object(RegExp));
 
-    let Number = heap.new_function(Closure::Native(&nf_Number));
+    let Number = heap.new_function(Closure::Native(nf_Number));
     heap.set_property(global, "Number".to_string().into(), Value::Object(Number));
 
-    let String = heap.new_function(Closure::Native(&nf_String));
+    let String = heap.new_function(Closure::Native(nf_String));
     heap.set_property(global, "String".to_string().into(), Value::Object(String));
 
-    let Boolean = heap.new_function(Closure::Native(&nf_Boolean));
+    let Boolean = heap.new_function(Closure::Native(nf_Boolean));
     heap.set_property(global, "Boolean".to_string().into(), Value::Object(Boolean));
 
     // builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
@@ -1292,7 +1292,7 @@ mod tests {
 
         codebase.dump();
 
-        let mut vm = Interpreter::new(&codebase);
+        let vm = Interpreter::new(&codebase);
         vm.run_module(module_id).unwrap()
     }
 
