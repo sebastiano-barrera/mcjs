@@ -1,4 +1,6 @@
 
+- The code is currently in *dire* need of clean up (clippy?)
+
 - Inspector
 	= a tool for visualizing the interpreter's execution,
 	in order to speed up the initial part of debugging:

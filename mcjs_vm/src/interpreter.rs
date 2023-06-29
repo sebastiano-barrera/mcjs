@@ -521,11 +521,11 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 } => {
                     let oid = self
                         .get_operand_object(*callee)
-                        .expect("invalid function (not an object)");
+                        .ok_or_else(|| error!("invalid function (not an object)"))?;
                     let closure: &Closure = self
                         .heap
                         .get_closure(oid)
-                        .expect("invalid function (object is not callable)");
+                        .ok_or_else(|| error!("invalid function (object is not callable)"))?;
 
                     // The arguments have to be "read" before adding the stack frame;
                     // they will no longer be accessible
@@ -541,7 +541,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         })
                         .map(|vreg| self.get_operand(vreg))
                         .collect();
-                    let n_args_u16 = TryInto::<u16>::try_into(arg_vals.len()).unwrap();
+                    let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
                     let return_to_iid = IID(self.iid.0 + n_args_u16 + 1);
 
                     match closure {
@@ -791,7 +791,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         let root_fnid = self
                             .codebase
                             .get_module_root_fn(*module_id)
-                            .expect("no such module ID");
+                            .ok_or_else(|| error!("no such module ID"))?;
                         let root_fn = self.codebase.get_function(root_fnid).unwrap();
                         let n_instrs = root_fn.instrs().len().try_into().unwrap();
 
@@ -827,14 +827,14 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     let val = self
                         .get_operand(*src)
                         .expect_num()
-                        .expect("bytecode bug: ArithInc on non-number");
+                        .map_err(|_| error!("bytecode bug: ArithInc on non-number"))?;
                     self.data.set_result(*dest, Value::Number(val + 1.0));
                 }
                 Instr::ArithDec(dest, src) => {
                     let val = self
                         .get_operand(*src)
                         .expect_num()
-                        .expect("bytecode bug: ArithDec on non-number");
+                        .map_err(|_| error!("bytecode bug: ArithDec on non-number"))?;
                     self.data.set_result(*dest, Value::Number(val - 1.0));
                 }
                 Instr::IsInstanceOf(dest, obj, sup) => {
@@ -859,10 +859,10 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 }
                 Instr::StrAppend(buf_reg, tail) => {
                     // TODO Make this at least *decently* efficient!
-                    let buf = self.get_operand_string(*buf_reg);
+                    let buf = self.get_operand_string(*buf_reg)?;
                     let mut buf: String = buf.to_owned();
 
-                    let tail: &str = self.get_operand_string(*tail);
+                    let tail: &str = self.get_operand_string(*tail)?;
 
                     buf.push_str(tail);
                     let value = literal_to_value(bytecode::Literal::String(buf), &mut self.heap);
@@ -993,22 +993,22 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         }
     }
 
-    fn get_operand_function(&self, operand: VReg) -> &Closure {
+    fn get_operand_function(&self, operand: VReg) -> Result<&Closure> {
         let oid = self
             .get_operand_object(operand)
-            .expect("invalid function (not an object)");
+            .ok_or_else(|| error!("invalid function (not an object)"))?;
         self.heap
             .get_closure(oid)
-            .expect("invalid function (object is not callable)")
+            .ok_or_else(|| error!("invalid function (object is not callable)"))
     }
 
-    fn get_operand_string(&self, operand: VReg) -> &str {
+    fn get_operand_string(&self, operand: VReg) -> Result<&str> {
         let oid = self
             .get_operand_object(operand)
-            .expect("invalid string (not an object)");
+            .ok_or_else(|| error!("invalid string (not an object)"))?;
         self.heap
             .get_string(oid)
-            .expect("invalid string (object is not a string)")
+            .ok_or_else(|| error!("invalid string (object is not a string)"))
     }
 
     fn print_indent(&self) {
