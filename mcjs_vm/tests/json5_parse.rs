@@ -1,6 +1,6 @@
-extern crate mcjs;
+extern crate mcjs_vm;
 
-use mcjs::Literal;
+use mcjs_vm::Literal;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -24,8 +24,8 @@ fn test_integration_script(filename: String) {
         manifest_dir.join("test-resources/modules/json5/dist"),
         manifest_dir.join("test-resources/test-scripts/json5/"),
     ];
-    let file_loader = Box::new(mcjs::FileLoader::new(include_paths.clone()));
-    let mut builder = mcjs::BuilderParams {
+    let file_loader = Box::new(mcjs_vm::FileLoader::new(include_paths.clone()));
+    let mut builder = mcjs_vm::BuilderParams {
         loader: file_loader,
     }
     .to_builder();
@@ -35,11 +35,10 @@ fn test_integration_script(filename: String) {
     let codebase = builder.build();
 
     let res = std::panic::catch_unwind(|| {
-        let mut vm = mcjs::Interpreter::new(&codebase);
-        vm.run_module(test_mod_id)
+        let output = mcjs_vm::Interpreter::new(&codebase)
+            .run_module(test_mod_id)
             .unwrap_or_else(|err| panic!("runtime error: {:?}", err));
-        let sink = vm.take_sink();
-        sink
+        output.sink
     });
 
     match res {
@@ -56,7 +55,7 @@ fn test_integration_script(filename: String) {
             );
         }
 
-        Err(err) => {
+        Err(_) => {
             let case_file_path = {
                 let mut counter = 0;
                 loop {
@@ -68,9 +67,9 @@ fn test_integration_script(filename: String) {
                 }
             };
 
-            let case = mcjs::inspector_case::Case {
+            let case = mcjs_vm::inspector_case::Case {
                 include_paths,
-                root: mcjs::inspector_case::Root::ModuleImport(filename.clone()),
+                root: mcjs_vm::inspector_case::Root::ModuleImport(filename.clone()),
             };
 
             let mut f = std::fs::File::create(&case_file_path).expect("could not create case file");

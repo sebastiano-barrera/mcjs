@@ -3,7 +3,7 @@
 #![allow(unreachable_code)]
 #![allow(unused_imports)]
 
-mod bytecode;
+pub mod bytecode;
 mod fs;
 mod bytecode_compiler;
 mod common;
@@ -13,10 +13,12 @@ mod stack;
 mod heap;
 mod util;
 
-pub use bytecode::{Codebase, ModuleId, Literal};
+pub use bytecode::{Codebase, ModuleId, Literal, IID, FnId, GlobalIID};
 pub use bytecode_compiler::{BuilderParams, Loader};
 pub use fs::{FileLoader, MockLoader, CombinedLoader};
 pub use interpreter::{Interpreter, Value as InterpreterValue};
+#[cfg(feature = "inspection")]
+pub use interpreter::{InspectorStep, InspectorAction};
 
 mod stack_access;
 

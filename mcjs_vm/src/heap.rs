@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::interpreter::{Closure, Value};
 
-pub(crate) struct ObjectHeap {
+pub struct ObjectHeap {
     objects: slotmap::SlotMap<ObjectId, Object>,
 }
 
@@ -23,7 +23,7 @@ impl ObjectHeap {
         self.objects.insert(Object::new_string(string))
     }
 
-    pub(crate) fn is_instance_of(&self, oid: ObjectId, sup_oid: ObjectId) -> bool {
+    pub fn is_instance_of(&self, oid: ObjectId, sup_oid: ObjectId) -> bool {
         let mut cur_oid = Some(oid);
         while let Some(oid) = cur_oid {
             let proto_id = self.objects.get(oid).unwrap().proto_id;
@@ -36,12 +36,12 @@ impl ObjectHeap {
         false
     }
 
-    pub(crate) fn is_array(&self, oid: ObjectId) -> Option<bool> {
+    pub fn is_array(&self, oid: ObjectId) -> Option<bool> {
         let obj = self.objects.get(oid)?;
         Some(!obj.array_items.is_empty())
     }
 
-    pub(crate) fn get_closure(&self, oid: ObjectId) -> Option<&Closure> {
+    pub fn get_closure(&self, oid: ObjectId) -> Option<&Closure> {
         let obj = self.objects.get(oid).unwrap();
         obj.closure.as_ref()
     }
@@ -70,7 +70,7 @@ impl ObjectHeap {
         }
     }
 
-    pub(crate) fn get_property(&self, oid: ObjectId, key: &ObjectKey) -> Option<Value> {
+    pub fn get_property(&self, oid: ObjectId, key: &ObjectKey) -> Option<Value> {
         let obj = self.objects.get(oid).unwrap();
 
         let value = match key {
@@ -145,12 +145,12 @@ impl ObjectHeap {
         self.objects.insert(ret)
     }
 
-    pub(crate) fn array_len(&self, oid: ObjectId) -> usize {
+    pub fn array_len(&self, oid: ObjectId) -> usize {
         let obj = self.objects.get(oid).unwrap();
         obj.array_items.len()
     }
 
-    pub(crate) fn array_nth(&self, oid: ObjectId, ndx: usize) -> Option<Value> {
+    pub fn array_nth(&self, oid: ObjectId, ndx: usize) -> Option<Value> {
         let obj = self.objects.get(oid).unwrap();
         obj.array_items.get(ndx).cloned()
     }
@@ -160,12 +160,12 @@ impl ObjectHeap {
         obj.array_items.push(value);
     }
 
-    pub(crate) fn get_typeof(&self, oid: ObjectId) -> Typeof {
+    pub fn get_typeof(&self, oid: ObjectId) -> Typeof {
         let obj = self.objects.get(oid).unwrap();
         obj.type_of()
     }
 
-    pub(crate) fn get_string(&self, oid: ObjectId) -> Option<&str> {
+    pub fn get_string(&self, oid: ObjectId) -> Option<&str> {
         let obj = self.objects.get(oid).unwrap();
         obj.as_str()
     }
@@ -277,12 +277,12 @@ impl Object {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub(crate) enum ObjectKey {
+pub enum ObjectKey {
     ArrayIndex(usize),
     Property(PropertyKey),
 }
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub(crate) enum PropertyKey {
+pub enum PropertyKey {
     String(String),
 }
 impl From<String> for ObjectKey {

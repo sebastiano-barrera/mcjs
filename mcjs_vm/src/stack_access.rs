@@ -17,16 +17,16 @@ pub(crate) enum Slot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct FrameHeader {
+pub struct FrameHeader {
     #[cfg(test)]
-    pub(crate) magic: [u8; 8],
-    pub(crate) n_instrs: u32,
-    pub(crate) n_args: u8,
-    pub(crate) n_captures: u16,
-    pub(crate) this: Value,
-    pub(crate) return_value_vreg: Option<VReg>,
-    pub(crate) return_to_iid: Option<IID>,
-    pub(crate) fn_id: FnId,
+    pub magic: [u8; 8],
+    pub n_instrs: u32,
+    pub n_args: u8,
+    pub n_captures: u16,
+    pub this: Value,
+    pub return_value_vreg: Option<VReg>,
+    pub return_to_iid: Option<IID>,
+    pub fn_id: FnId,
 }
 
 #[cfg(test)]

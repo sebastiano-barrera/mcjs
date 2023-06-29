@@ -9,7 +9,7 @@ type Heap = slotmap::SlotMap<UpvalueId, Value>;
 /// The interpreter's stack.
 ///
 /// Mostly stores local variables.
-pub(crate) struct InterpreterData {
+pub struct InterpreterData {
     upv_alloc: Heap,
     stack: Stack,
     n_frames: usize,
@@ -40,7 +40,7 @@ impl InterpreterData {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.n_frames
     }
 
@@ -71,11 +71,11 @@ impl InterpreterData {
         self.n_frames -= 1;
     }
 
-    pub(crate) fn header(&self) -> &stack_access::FrameHeader {
+    pub fn header(&self) -> &stack_access::FrameHeader {
         self.stack.top_header()
     }
 
-    pub(crate) fn get_result(&self, vreg: bytecode::VReg) -> Value {
+    pub fn get_result(&self, vreg: bytecode::VReg) -> Value {
         let slot = &self.stack.vars()[vreg.0 as usize];
         slot_value(slot, &self.upv_alloc)
     }
@@ -84,7 +84,7 @@ impl InterpreterData {
         set_slot_value(slot, value, &mut self.upv_alloc);
     }
 
-    pub(crate) fn get_arg(&self, argndx: bytecode::ArgIndex) -> Option<Value> {
+    pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Option<Value> {
         self.stack
             .args()
             .get(argndx.0 as usize)
@@ -121,7 +121,7 @@ impl InterpreterData {
     pub(crate) fn set_capture(&mut self, capture_ndx: bytecode::CaptureIndex, capture: UpvalueId) {
         self.stack.captures_mut()[capture_ndx.0 as usize] = stack_access::Slot::Upvalue(capture);
     }
-    pub(crate) fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
+    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
         let slot = &self.stack.captures()[capture_ndx.0 as usize];
         match slot {
             stack_access::Slot::Inline(_) => unreachable!(),

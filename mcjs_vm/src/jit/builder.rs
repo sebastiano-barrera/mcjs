@@ -1216,28 +1216,6 @@ fn print_indent(stack_depth: usize) {
     }
 }
 
-// TODO(performance) monomorphize get_operand?
-pub struct InterpreterStep<'a> {
-    pub(crate) fnid: bytecode::FnId,
-    pub(crate) func: &'a bytecode::Function,
-    pub(crate) iid: bytecode::IID,
-    pub(crate) next_iid: bytecode::IID,
-    pub(crate) get_operand: &'a dyn Fn(bytecode::IID) -> BoxedValue,
-}
-
-impl<'a> InterpreterStep<'a> {
-    fn cur_instr(&self) -> &bytecode::Instr {
-        &self.func.instrs()[self.iid.0 as usize]
-    }
-
-    fn global_iid(&self) -> bytecode::GlobalIID {
-        bytecode::GlobalIID {
-            fnid: self.fnid,
-            iid: self.iid,
-        }
-    }
-}
-
 // TODO(cleanup) Move to jit/mod.rs
 #[derive(PartialEq, Debug)]
 pub(super) enum Instr {

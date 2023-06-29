@@ -131,13 +131,16 @@ impl std::fmt::Debug for NotADirectoryError {
     }
 }
 
-pub struct Interpreter<'a> {
+pub struct Interpreter<'a, 'b> {
     iid: bytecode::IID,
     data: stack::InterpreterData,
     heap: heap::ObjectHeap,
 
     #[cfg(enable_jit)]
     jitting: Option<Jitting>,
+
+    #[cfg(feature = "inspection")]
+    step_handler: Option<&'b mut StepHandler<'b>>,
 
     modules: HashMap<bytecode::ModuleId, heap::ObjectId>,
     global_obj: heap::ObjectId,
@@ -148,6 +151,93 @@ pub struct Interpreter<'a> {
     opts: Options,
 }
 
+// TODO Probably going to be changed or even replaced once I resume working on the JIT.
+// TODO(performance) monomorphize get_operand?
+#[cfg(enable_jit)]
+pub struct InterpreterStep<'a> {
+    pub fnid: bytecode::FnId,
+    pub func: &'a bytecode::Function,
+    pub iid: bytecode::IID,
+    pub next_iid: bytecode::IID,
+    pub get_operand: &'a dyn Fn(bytecode::VReg) -> Value,
+}
+
+#[cfg(enable_jit)]
+impl<'a> InterpreterStep<'a> {
+    fn cur_instr(&self) -> &bytecode::Instr {
+        &self.func.instrs()[self.iid.0 as usize]
+    }
+}
+
+#[cfg(feature = "inspection")]
+type StepHandler<'a> = dyn 'a + FnMut(&InspectorStep) -> InspectorAction;
+
+#[cfg(feature = "inspection")]
+pub struct InspectorStep {
+    pub giid: bytecode::GlobalIID,
+}
+
+#[cfg(feature = "inspection")]
+pub enum InspectorAction {
+    Continue,
+    Fail,
+}
+
+pub type InterpreterResult = std::result::Result<Output, InterpreterError>;
+
+pub struct Output {
+    pub sink: Vec<Option<bytecode::Literal>>,
+}
+
+pub struct InterpreterError {
+    pub error: Error,
+    pub core_dump: Option<CoreDump>,
+}
+impl InterpreterError {
+    fn with_core_dump(self, dump: CoreDump) -> Self {
+        InterpreterError {
+            core_dump: Some(dump),
+            ..self
+        }
+    }
+}
+impl From<Error> for InterpreterError {
+    fn from(error: Error) -> Self {
+        InterpreterError {
+            error,
+            core_dump: None,
+        }
+    }
+}
+impl std::fmt::Debug for InterpreterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "InterpreterError (core dump {}included): {:?}",
+            if self.core_dump.is_some() { "" } else { "NOT " },
+            self.error,
+        )
+    }
+}
+
+pub struct CoreDump {
+    pub data: stack::InterpreterData,
+    pub heap: heap::ObjectHeap,
+    pub global_obj: heap::ObjectId,
+    pub sink: Vec<Option<bytecode::Literal>>,
+}
+impl CoreDump {
+    fn new(interpreter: Interpreter) -> Self {
+        let sink = try_values_to_literals(&interpreter.sink, &interpreter.heap);
+        CoreDump {
+            data: interpreter.data,
+            heap: interpreter.heap,
+            global_obj: interpreter.global_obj,
+            sink,
+        }
+    }
+}
+
 #[cfg(enable_jit)]
 struct Jitting {
     fnid: FnId,
@@ -156,7 +246,7 @@ struct Jitting {
     builder: jit::TraceBuilder,
 }
 
-impl<'a> Interpreter<'a> {
+impl<'a> Interpreter<'a, 'a> {
     pub fn new(codebase: &'a bytecode::Codebase) -> Self {
         let mut heap = heap::ObjectHeap::new();
         let global_obj = init_builtins(&mut heap);
@@ -166,11 +256,22 @@ impl<'a> Interpreter<'a> {
             heap,
             #[cfg(enable_jit)]
             jitting: None,
+            step_handler: None,
             modules: HashMap::new(),
             global_obj,
             codebase,
             sink: Vec::new(),
             opts: Default::default(),
+        }
+    }
+}
+
+impl<'a, 'b> Interpreter<'a, 'b> {
+    #[cfg(feature = "inspection")]
+    pub fn with_step_handler<'c>(self, handler: &'c mut StepHandler<'c>) -> Interpreter<'a, 'c> {
+        Interpreter {
+            step_handler: Some(handler),
+            ..self
         }
     }
 
@@ -184,7 +285,7 @@ impl<'a> Interpreter<'a> {
 
         values
             .into_iter()
-            .map(|val| self.try_value_to_literal(val))
+            .map(|val| try_value_to_literal(val, &self.heap))
             .collect()
     }
 
@@ -203,7 +304,13 @@ impl<'a> Interpreter<'a> {
         self.traces.keys()
     }
 
-    pub fn run_module(&mut self, module_id: bytecode::ModuleId) -> Result<()> {
+    /// Run the specified module.
+    ///
+    /// This is the only entry point into the interpreter.
+    ///
+    /// This function returns when the intepreter has finished its execution, successfully or due
+    /// to a failure
+    pub fn run_module(mut self, module_id: bytecode::ModuleId) -> InterpreterResult {
         let fnid = self
             .codebase
             .get_module_root_fn(module_id)
@@ -222,7 +329,10 @@ impl<'a> Interpreter<'a> {
             return_to_iid: None,
         });
 
-        self.run_until_done()?;
+        let output = self.run_until_done().map_err(|err| {
+            let dump = CoreDump::new(self);
+            InterpreterError::from(err).with_core_dump(dump)
+        })?;
 
         #[cfg(enable_jit)]
         if let Some(jitting) = intrp.jitting {
@@ -239,10 +349,10 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        Ok(())
+        Ok(output)
     }
 
-    fn run_until_done(&mut self) -> Result<()> {
+    fn run_until_done(&mut self) -> Result<Output> {
         while self.data.len() != 0 {
             let fnid = self.data.header().fn_id;
             let func = self.get_function(fnid);
@@ -258,7 +368,7 @@ impl<'a> Interpreter<'a> {
                     self.iid = return_to_iid;
                     continue;
                 } else {
-                    return Ok(());
+                    return Ok(self.dump_output());
                 }
             }
 
@@ -319,7 +429,7 @@ impl<'a> Interpreter<'a> {
             match instr {
                 Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
                     let literal = func.consts()[*const_ndx as usize].clone();
-                    let value = self.literal_to_value(literal);
+                    let value = literal_to_value(literal, &mut self.heap);
                     self.data.set_result(*dest, value);
                 }
 
@@ -359,7 +469,9 @@ impl<'a> Interpreter<'a> {
                             next_ndx = dest.0;
                         }
                         Value::Bool(false) => {} // Just go to the next instruction
-                        other => panic!("invalid if condition (not boolean): {:?}", other),
+                        other => {
+                            return Err(error!(" invalid if condition (not boolean): {:?}", other))
+                        }
                     }
                 }
 
@@ -384,7 +496,9 @@ impl<'a> Interpreter<'a> {
                         Value::Undefined => Value::Bool(true),
                         Value::SelfFunction => Value::Bool(false),
                         Value::Internal(_) => {
-                            panic!("bytecode compiler bug: internal value should be unreachable")
+                            return Err(error!(
+                                "bytecode compiler bug: internal value should be unreachable"
+                            ))
                         }
                     };
                     self.data.set_result(*dest, value);
@@ -397,7 +511,7 @@ impl<'a> Interpreter<'a> {
                         self.iid = return_to_iid;
                         continue;
                     } else {
-                        return Ok(());
+                        return Ok(self.dump_output());
                     }
                 }
                 Instr::Call {
@@ -528,7 +642,7 @@ impl<'a> Interpreter<'a> {
                     let oid = self
                         .get_operand_object(*obj)
                         // TODO(big feat) use TypeError exception here
-                        .unwrap_or_else(|| panic!("ObjSet: cannot set properties of: {:?}", obj));
+                        .ok_or_else(|| error!("ObjSet: cannot set properties of: {:?}", obj))?;
                     let key = self.get_operand(*key);
                     let key = self
                         .value_to_object_key(&key)
@@ -541,7 +655,7 @@ impl<'a> Interpreter<'a> {
                     let oid = self
                         .get_operand_object(*obj)
                         // TODO(big feat) use TypeError exception here
-                        .unwrap_or_else(|| panic!("ObjGet: cannot read properties of: {:?}", obj));
+                        .ok_or_else(|| error!("ObjGet: cannot read properties of: {:?}", obj))?;
                     let key = self.get_operand(*key);
                     let key = self
                         .value_to_object_key(&key)
@@ -554,9 +668,9 @@ impl<'a> Interpreter<'a> {
                     self.data.set_result(*dest, value.clone());
                 }
                 Instr::ObjGetKeys { dest, obj } => {
-                    let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
-                        panic!("ObjGetKeys: can't get keys of non-object: {:?}", obj)
-                    });
+                    let oid = self.get_operand_object(*obj).ok_or_else(|| {
+                        error!("ObjGetKeys: can't get keys of non-object: {:?}", obj)
+                    })?;
                     let keys = self.heap.get_keys_as_array(oid);
                     self.data.set_result(*dest, Value::Object(keys));
                 }
@@ -564,9 +678,9 @@ impl<'a> Interpreter<'a> {
                     // TODO Adjust return value: true for all cases except when the property is an
                     // own non-configurable property, in which case false is returned in non-strict
                     // mode. (Source: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/delete)
-                    let oid = self.get_operand_object(*obj).unwrap_or_else(|| {
-                        panic!("ObjGetKeys: can't delete property of non-object: {:?}", obj)
-                    });
+                    let oid = self.get_operand_object(*obj).ok_or_else(|| {
+                        error!("ObjGetKeys: can't delete property of non-object: {:?}", obj)
+                    })?;
                     let key = self.get_operand(*key);
                     let key = self
                         .value_to_object_key(&key)
@@ -577,16 +691,16 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::ArrayPush { arr, value } => {
-                    let oid = self.get_operand_object(*arr).unwrap_or_else(|| {
-                        panic!("ArrayPush: can't get element of non-array: {:?}", arr)
-                    });
+                    let oid = self.get_operand_object(*arr).ok_or_else(|| {
+                        error!("ArrayPush: can't get element of non-array: {:?}", arr)
+                    })?;
                     let value = self.get_operand(*value);
                     self.heap.array_push(oid, value);
                 }
                 Instr::ArrayNth { dest, arr, index } => {
-                    let oid = self.get_operand_object(*arr).unwrap_or_else(|| {
-                        panic!("ArrayNth: can't get element of non-array: {:?}", arr)
-                    });
+                    let oid = self.get_operand_object(*arr).ok_or_else(|| {
+                        error!("ArrayNth: can't get element of non-array: {:?}", arr)
+                    })?;
 
                     let num = self.get_operand(*index).expect_num()?;
                     let num_trunc = num.trunc();
@@ -601,9 +715,9 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
                 Instr::ArrayLen { dest, arr } => {
-                    let oid = self.get_operand_object(*arr).unwrap_or_else(|| {
-                        panic!("ArrayLen: can't get length of non-object/array: {:?}", arr)
-                    });
+                    let oid = self.get_operand_object(*arr).ok_or_else(|| {
+                        error!("ArrayLen: can't get length of non-object/array: {:?}", arr)
+                    })?;
                     let len: usize = self.heap.array_len(oid);
                     self.data.set_result(*dest, Value::Number(len as f64));
                 }
@@ -751,7 +865,7 @@ impl<'a> Interpreter<'a> {
                     let tail: &str = self.get_operand_string(*tail);
 
                     buf.push_str(tail);
-                    let value = self.literal_to_value(bytecode::Literal::String(buf));
+                    let value = literal_to_value(bytecode::Literal::String(buf), &mut self.heap);
                     self.data.set_result(*buf_reg, value);
                 }
 
@@ -781,11 +895,25 @@ impl<'a> Interpreter<'a> {
                     get_operand: &|iid| self.data.get_result(iid).clone(),
                 });
             }
+            if let Some(handler) = &mut self.step_handler {
+                let action = handler(&InspectorStep {
+                    giid: bytecode::GlobalIID(fnid, self.iid),
+                });
 
+                match action {
+                    InspectorAction::Continue => {}
+                    InspectorAction::Fail => return Err(error!("interrupted by inspector")),
+                }
+            }
             self.iid.0 = next_ndx;
         }
 
-        Ok(())
+        Ok(self.dump_output())
+    }
+
+    fn dump_output(&mut self) -> Output {
+        let sink = try_values_to_literals(&self.sink, &self.heap);
+        Output { sink }
     }
 
     fn get_function(&mut self, fnid: FnId) -> &'a bytecode::Function {
@@ -826,13 +954,7 @@ impl<'a> Interpreter<'a> {
         self.data.set_result(dest, Value::Number(op(a, b)));
     }
 
-    fn compare(
-        &mut self,
-        dest: VReg,
-        a: VReg,
-        b: VReg,
-        test: impl Fn(ValueOrdering) -> bool,
-    ) {
+    fn compare(&mut self, dest: VReg, a: VReg, b: VReg, test: impl Fn(ValueOrdering) -> bool) {
         let a = self.get_operand(a);
         let b = self.get_operand(b);
 
@@ -925,40 +1047,7 @@ impl<'a> Interpreter<'a> {
             Value::Internal(_) => panic!("internal value has no typeof!"),
         };
 
-        self.literal_to_value(bytecode::Literal::String(ty_s.to_string()))
-    }
-
-    /// Create a Value based on the given Literal.\
-    ///
-    /// It may allocate an object in the GC-managed heap.
-    fn literal_to_value(&mut self, lit: bytecode::Literal) -> Value {
-        match lit {
-            bytecode::Literal::Number(nu) => Value::Number(nu),
-            bytecode::Literal::String(st) => {
-                // TODO(performance) avoid this allocation
-                let oid = self.heap.new_string(st.clone());
-                Value::Object(oid)
-            }
-            bytecode::Literal::Bool(bo) => Value::Bool(bo),
-            bytecode::Literal::Null => Value::Null,
-            bytecode::Literal::Undefined => Value::Undefined,
-            bytecode::Literal::SelfFunction => todo!(),
-        }
-    }
-
-    fn try_value_to_literal(&self, value: Value) -> Option<bytecode::Literal> {
-        match value {
-            Value::Number(num) => Some(bytecode::Literal::Number(num)),
-            Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
-            Value::Object(oid) => match self.heap.get_string(oid) {
-                Some(s) => Some(bytecode::Literal::String(s.to_owned())),
-                None => None,
-            },
-            Value::Null => Some(bytecode::Literal::Null),
-            Value::Undefined => Some(bytecode::Literal::Undefined),
-            Value::SelfFunction => None,
-            Value::Internal(_) => None,
-        }
+        literal_to_value(bytecode::Literal::String(ty_s.to_string()), &mut self.heap)
     }
 
     fn value_to_object_key(&self, value: &Value) -> Option<heap::ObjectKey> {
@@ -975,6 +1064,45 @@ impl<'a> Interpreter<'a> {
             Value::Object(oid) => self.heap.get_string(*oid).map(|s| s.to_owned().into()),
             _ => None,
         }
+    }
+}
+
+fn try_values_to_literals(vec: &[Value], heap: &ObjectHeap) -> Vec<Option<bytecode::Literal>> {
+    vec.iter()
+        .map(|value| try_value_to_literal(*value, &heap))
+        .collect()
+}
+
+/// Create a Value based on the given Literal.
+///
+/// It may allocate an object in the GC-managed heap.
+fn literal_to_value(lit: bytecode::Literal, heap: &mut ObjectHeap) -> Value {
+    match lit {
+        bytecode::Literal::Number(nu) => Value::Number(nu),
+        bytecode::Literal::String(st) => {
+            // TODO(performance) avoid this allocation
+            let oid = heap.new_string(st.clone());
+            Value::Object(oid)
+        }
+        bytecode::Literal::Bool(bo) => Value::Bool(bo),
+        bytecode::Literal::Null => Value::Null,
+        bytecode::Literal::Undefined => Value::Undefined,
+        bytecode::Literal::SelfFunction => todo!(),
+    }
+}
+
+fn try_value_to_literal(value: Value, heap: &ObjectHeap) -> Option<bytecode::Literal> {
+    match value {
+        Value::Number(num) => Some(bytecode::Literal::Number(num)),
+        Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
+        Value::Object(oid) => match heap.get_string(oid) {
+            Some(s) => Some(bytecode::Literal::String(s.to_owned())),
+            None => None,
+        },
+        Value::Null => Some(bytecode::Literal::Null),
+        Value::Undefined => Some(bytecode::Literal::Undefined),
+        Value::SelfFunction => None,
+        Value::Internal(_) => None,
     }
 }
 
@@ -1091,15 +1219,15 @@ fn nf_Number(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Val
 }
 
 #[allow(non_snake_case)]
-fn nf_String(_intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
+fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
     let value_str = match args.get(0) {
         Some(Value::Number(num)) => num.to_string(),
         Some(Value::Bool(true)) => "true".into(),
         Some(Value::Bool(false)) => "false".into(),
-        Some(Value::Object(oid)) => match _intrp.heap.get_typeof(*oid) {
+        Some(Value::Object(oid)) => match intrp.heap.get_typeof(*oid) {
             heap::Typeof::Object => "<object>".to_owned(),
             heap::Typeof::Function => "<function>".to_owned(),
-            heap::Typeof::String => _intrp.heap.get_string(*oid).unwrap().to_owned(),
+            heap::Typeof::String => intrp.heap.get_string(*oid).unwrap().to_owned(),
         },
         Some(Value::Null) => "null".into(),
         Some(Value::Undefined) => "undefined".into(),
@@ -1108,7 +1236,10 @@ fn nf_String(_intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<
         None => "".into(),
     };
 
-    Ok(_intrp.literal_to_value(bytecode::Literal::String(value_str)))
+    Ok(literal_to_value(
+        bytecode::Literal::String(value_str),
+        &mut intrp.heap,
+    ))
 }
 
 #[allow(non_snake_case)]
@@ -1138,13 +1269,11 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 mod tests {
     use super::*;
 
-    struct Output {
-        sink: Vec<Option<Literal>>,
-    }
+    use super::Output;
 
     use crate::{bytecode::Literal, fs::MockLoader};
 
-    fn quick_run(code: &str) -> Result<Output> {
+    fn quick_run(code: &str) -> Output {
         let module_id = bytecode::ModuleId(123);
 
         let mut mock_loader = Box::new(MockLoader::new());
@@ -1164,22 +1293,18 @@ mod tests {
         codebase.dump();
 
         let mut vm = Interpreter::new(&codebase);
-        vm.run_module(module_id)?;
-        Ok(Output {
-            sink: vm.take_sink(),
-        })
+        vm.run_module(module_id).unwrap()
     }
 
     #[test]
     fn test_simple_call() {
-        let output = quick_run("/* Here is some simple code: */ sink(1 + 4 + 99); ").unwrap();
+        let output = quick_run("/* Here is some simple code: */ sink(1 + 4 + 99); ");
         assert_eq!(&[Some(Literal::Number(104.0))], &output.sink[..]);
     }
 
     #[test]
     fn test_multiple_calls() {
-        let output =
-            quick_run("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ").unwrap();
+        let output = quick_run("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ");
         assert_eq!(
             &[
                 Some(Literal::Number(12. * 5.)),
@@ -1200,8 +1325,7 @@ mod tests {
             }
             sink(y);
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(&[Some(Literal::String("b".to_owned()))], &output.sink[..]);
     }
@@ -1213,8 +1337,7 @@ mod tests {
             function foo(a, b) { return a + b; }
             sink(foo(1, 2));
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(&[Some(Literal::Number(3.0))], &output.sink[..]);
     }
@@ -1234,8 +1357,7 @@ mod tests {
 
             sink(foo('product', 9, 8));
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(&[Some(Literal::Number(9.0 * 8.0))], &output.sink[..]);
     }
@@ -1256,14 +1378,13 @@ mod tests {
 
             sink(sum_range(4));
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(&[Some(Literal::Number(10.0))], &output.sink[..]);
     }
 
     fn try_casting_bool(code: &str, expected_value: bool) {
-        let output = quick_run(code).unwrap();
+        let output = quick_run(code);
         assert_eq!(&[Some(Literal::Bool(expected_value))], &output.sink[..]);
     }
     #[test]
@@ -1327,8 +1448,7 @@ mod tests {
             counter -= 5;
             sink(counter);
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             &[
@@ -1358,8 +1478,7 @@ mod tests {
             sink(obj.anotherObject.y)
             sink(obj.aFunction())
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(5, output.sink.len());
         assert_eq!(&Some(Literal::String("asdlol123".into())), &output.sink[0]);
@@ -1396,8 +1515,7 @@ mod tests {
 
             sink(typeof (function() {}))
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             &output.sink[..],
@@ -1435,8 +1553,7 @@ mod tests {
             sink(pt.x)
             sink(pt.y)
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(4, output.sink.len());
         assert_eq!(&Some(Literal::Number(123.0)), &output.sink[0]);
@@ -1463,8 +1580,7 @@ mod tests {
             b.name = 'another name yet'
             sink(c.name)
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             &output.sink[..],
@@ -1492,8 +1608,7 @@ mod tests {
 
             for (const name in obj) sink(name);
             ",
-        )
-        .unwrap();
+        );
 
         let mut sink: Vec<_> = output
             .sink
@@ -1514,8 +1629,7 @@ mod tests {
             sink(Array.isArray([1, 2, 3]));
             sink(Array.isArray('not an array'));
             ",
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             &output.sink,
@@ -1556,8 +1670,7 @@ mod tests {
             obj5.getThisViaArrowFunc = getThisViaArrowFunc;
             sink(obj5.getThisViaArrowFunc().name);
             "#,
-        )
-        .unwrap();
+        );
         assert_eq!(
             &output.sink,
             &[

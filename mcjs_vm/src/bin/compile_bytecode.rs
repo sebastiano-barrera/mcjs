@@ -1,4 +1,4 @@
-use mcjs::FileLoader;
+use mcjs_vm::FileLoader;
 use std::collections::HashMap;
 use swc_atoms::JsWord;
 
@@ -24,7 +24,7 @@ fn main() {
     for word in words {
         native_fns.insert(JsWord::from(word), 123);
     }
-    let mut builder = mcjs::BuilderParams {
+    let mut builder = mcjs_vm::BuilderParams {
         loader: Box::new(loader),
     }
     .to_builder();

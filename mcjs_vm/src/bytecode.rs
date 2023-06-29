@@ -15,22 +15,24 @@ impl std::fmt::Display for IID {
         write!(f, "i{}", self.0)
     }
 }
-
-#[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
-pub struct FnId(pub u32);
-
-/// NOTE cross-module function calls are unsupported yet
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GlobalIID {
-    pub fnid: FnId,
-    pub iid: IID,
-}
-
 impl std::fmt::Debug for IID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "i{}", self.0)
     }
 }
+
+#[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
+pub struct FnId(pub u32);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GlobalIID(pub FnId, pub IID);
+
+impl std::fmt::Debug for GlobalIID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "f{}:i{}", self.0.0, self.1.0)
+    }
+}
+
 
 #[derive(Clone, Copy)]
 pub struct ConstIndex(pub u16);

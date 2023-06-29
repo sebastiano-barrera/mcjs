@@ -1,0 +1,13 @@
+[package]
+name = "mcjs_inspector"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+mcjs_vm = { path = "../mcjs_vm", features = ["inspection"] }
+
+rmp-serde = "1.1"
+
+

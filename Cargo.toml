@@ -1,6 +1,7 @@
 [workspace]
 members = [
 	"mcjs_vm",
+	"mcjs_inspector",
 ]
 
 
