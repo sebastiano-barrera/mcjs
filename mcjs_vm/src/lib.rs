@@ -9,9 +9,18 @@ mod bytecode_compiler;
 mod common;
 mod interpreter;
 // mod jit;
-mod stack;
 mod heap;
 mod util;
+
+#[cfg(not(feature = "inspection"))]
+mod stack_access;
+#[cfg(feature = "inspection")]
+pub mod stack_access;
+
+#[cfg(not(feature = "inspection"))]
+mod stack;
+#[cfg(feature = "inspection")]
+pub mod stack;
 
 pub use bytecode::{Codebase, ModuleId, Literal, IID, FnId, GlobalIID};
 pub use bytecode_compiler::{BuilderParams, Loader};
@@ -19,8 +28,6 @@ pub use fs::{FileLoader, MockLoader, CombinedLoader};
 pub use interpreter::{Interpreter, Value as InterpreterValue};
 #[cfg(feature = "inspection")]
 pub use interpreter::{InspectorStep, InspectorAction, CoreDump};
-
-mod stack_access;
 
 // TODO Compile this module and build/link serde only for test builds
 pub mod inspector_case;

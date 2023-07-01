@@ -9,6 +9,7 @@ edition = "2021"
 mcjs_vm = { path = "../mcjs_vm", features = ["inspection"] }
 
 egui = "0.22"
+egui_extras = "0.22"
 eframe = "0.22"
 
 anyhow = "1.0"

@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex}, marker::PhantomData,
 };
 
 use crate::{
@@ -141,6 +141,8 @@ pub struct Interpreter<'a, 'b> {
 
     #[cfg(feature = "inspection")]
     step_handler: Option<&'b mut StepHandler<'b>>,
+    #[cfg(not(feature = "inspection"))]
+    _ph: PhantomData<&'b ()>,
 
     modules: HashMap<bytecode::ModuleId, heap::ObjectId>,
     global_obj: heap::ObjectId,
@@ -256,7 +258,10 @@ impl<'a> Interpreter<'a, 'a> {
             heap,
             #[cfg(enable_jit)]
             jitting: None,
+            #[cfg(feature = "inspection")]
             step_handler: None,
+            #[cfg(not(feature = "inspection"))]
+            _ph: PhantomData,
             modules: HashMap::new(),
             global_obj,
             codebase,
@@ -895,6 +900,8 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     get_operand: &|iid| self.data.get_result(iid).clone(),
                 });
             }
+
+            #[cfg(feature = "inspection")]
             if let Some(handler) = &mut self.step_handler {
                 let action = handler(&InspectorStep {
                     giid: bytecode::GlobalIID(fnid, self.iid),

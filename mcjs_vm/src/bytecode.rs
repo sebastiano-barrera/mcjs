@@ -74,7 +74,7 @@ impl std::fmt::Debug for VReg {
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ModuleId(pub u16);
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Instr {
     Nop,
     /// Load constant in accu
@@ -333,29 +333,29 @@ impl Function {
         }
     }
 
-    pub(crate) fn instrs(&self) -> &[Instr] {
+    pub fn instrs(&self) -> &[Instr] {
         self.instrs.as_ref()
     }
 
-    pub(crate) fn consts(&self) -> &[Literal] {
+    pub fn consts(&self) -> &[Literal] {
         self.consts.as_ref()
     }
 
-    pub(crate) fn is_loop_head(&self, iid: IID) -> bool {
+    pub fn is_loop_head(&self, iid: IID) -> bool {
         self.loop_heads.contains_key(&iid)
     }
 
-    pub(crate) fn get_trace_anchor(&self, iid: IID) -> Option<&TraceAnchor> {
+    pub fn get_trace_anchor(&self, iid: IID) -> Option<&TraceAnchor> {
         self.trace_anchors.get(&iid)
     }
 
-    pub(crate) fn trace_start_id(&self, iid: IID) -> Option<&str> {
+    pub fn trace_start_id(&self, iid: IID) -> Option<&str> {
         self.trace_anchors
             .get(&iid)
             .map(|tanch| tanch.trace_id.as_str())
     }
 
-    pub(crate) fn n_params(&self) -> ArgIndex {
+    pub fn n_params(&self) -> ArgIndex {
         self.n_params
     }
 }
