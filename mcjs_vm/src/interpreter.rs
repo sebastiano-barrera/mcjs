@@ -6,9 +6,10 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
+    marker::PhantomData,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Mutex}, marker::PhantomData,
+    sync::{Arc, Mutex},
 };
 
 use crate::{
@@ -175,8 +176,9 @@ impl<'a> InterpreterStep<'a> {
 type StepHandler<'a> = dyn 'a + FnMut(&InspectorStep) -> InspectorAction;
 
 #[cfg(feature = "inspection")]
-pub struct InspectorStep {
+pub struct InspectorStep<'a> {
     pub giid: bytecode::GlobalIID,
+    pub intrp_data: &'a stack::InterpreterData,
 }
 
 #[cfg(feature = "inspection")]
@@ -359,7 +361,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
     fn run_until_done(&mut self) -> Result<Output> {
         while self.data.len() != 0 {
-            let fnid = self.data.header().fn_id;
+            let fnid = self.data.top().header().fn_id;
             let func = self.get_function(fnid);
 
             assert!(
@@ -435,7 +437,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
                     let literal = func.consts()[*const_ndx as usize].clone();
                     let value = literal_to_value(literal, &mut self.heap);
-                    self.data.set_result(*dest, value);
+                    self.data.top_mut().set_result(*dest, value);
                 }
 
                 Instr::ArithAdd(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x + y),
@@ -482,7 +484,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
                 Instr::Copy { dst, src } => {
                     let value = self.get_operand(*src);
-                    self.data.set_result(*dst, value);
+                    self.data.top_mut().set_result(*dst, value);
                 }
                 Instr::LoadCapture(dest, cap_ndx) => {
                     self.data.capture_to_var(*cap_ndx, *dest);
@@ -506,7 +508,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                             ))
                         }
                     };
-                    self.data.set_result(*dest, value);
+                    self.data.top_mut().set_result(*dest, value);
                 }
                 Instr::Jmp(IID(dest_ndx)) => {
                     next_ndx = *dest_ndx;
@@ -605,11 +607,11 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                                 );
                                 self.print_indent();
                                 eprintln!("    capture[{}] = {:?}", capndx.0, capture);
-                                self.data.set_capture(capndx, *capture);
-                                assert_eq!(self.data.get_capture(capndx), *capture);
+                                self.data.top_mut().set_capture(capndx, *capture);
+                                assert_eq!(self.data.top().get_capture(capndx), *capture);
                             }
                             for (i, arg) in arg_vals.into_iter().enumerate() {
-                                self.data.set_arg(bytecode::ArgIndex(i as _), arg);
+                                self.data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
                             }
                             self.iid = IID(0u16);
 
@@ -622,7 +624,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         Closure::Native(nf) => {
                             let this = self.get_operand(*this);
                             let ret_val = (*nf)(self, &this, &arg_vals)?;
-                            self.data.set_result(*return_value, ret_val);
+                            self.data.top_mut().set_result(*return_value, ret_val);
                             next_ndx = return_to_iid.0;
                         }
                     }
@@ -634,14 +636,18 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 Instr::LoadArg(dest, arg_ndx) => {
                     // TODO extra copy?
                     // TODO usize is a bit too wide
-                    let value = self.data.get_arg(*arg_ndx).unwrap_or(Value::Undefined);
+                    let value = self
+                        .data
+                        .top()
+                        .get_arg(*arg_ndx)
+                        .unwrap_or(Value::Undefined);
                     eprint!("-> {:?}", value);
-                    self.data.set_result(*dest, value);
+                    self.data.top_mut().set_result(*dest, value);
                 }
 
                 Instr::ObjCreateEmpty(dest) => {
                     let oid = self.heap.new_object();
-                    self.data.set_result(*dest, Value::Object(oid));
+                    self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 Instr::ObjSet { obj, key, value } => {
                     let oid = self
@@ -670,14 +676,14 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         .get_property(oid, &key)
                         .unwrap_or(Value::Undefined);
                     eprint!("  -> {:?}", value);
-                    self.data.set_result(*dest, value.clone());
+                    self.data.top_mut().set_result(*dest, value.clone());
                 }
                 Instr::ObjGetKeys { dest, obj } => {
                     let oid = self.get_operand_object(*obj).ok_or_else(|| {
                         error!("ObjGetKeys: can't get keys of non-object: {:?}", obj)
                     })?;
                     let keys = self.heap.get_keys_as_array(oid);
-                    self.data.set_result(*dest, Value::Object(keys));
+                    self.data.top_mut().set_result(*dest, Value::Object(keys));
                 }
                 Instr::ObjDelete { dest, obj, key } => {
                     // TODO Adjust return value: true for all cases except when the property is an
@@ -692,7 +698,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
 
                     self.heap.delete_property(oid, &key);
-                    self.data.set_result(*dest, Value::Bool(true));
+                    self.data.top_mut().set_result(*dest, Value::Bool(true));
                 }
 
                 Instr::ArrayPush { arr, value } => {
@@ -716,7 +722,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         Value::Undefined
                     };
 
-                    self.data.set_result(*dest, value);
+                    self.data.top_mut().set_result(*dest, value);
                 }
                 Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
                 Instr::ArrayLen { dest, arr } => {
@@ -724,27 +730,29 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         error!("ArrayLen: can't get length of non-object/array: {:?}", arr)
                     })?;
                     let len: usize = self.heap.array_len(oid);
-                    self.data.set_result(*dest, Value::Number(len as f64));
+                    self.data
+                        .top_mut()
+                        .set_result(*dest, Value::Number(len as f64));
                 }
 
                 Instr::TypeOf { dest, arg: value } => {
                     let value = self.get_operand(*value);
                     let result = self.js_typeof(&value);
                     eprint!("-> {:?}", result);
-                    self.data.set_result(*dest, result);
+                    self.data.top_mut().set_result(*dest, result);
                 }
 
                 Instr::BoolOpAnd(dest, a, b) => {
                     let a: bool = self.get_operand(*a).expect_bool()?;
                     let b: bool = self.get_operand(*b).expect_bool()?;
                     let res = a && b;
-                    self.data.set_result(*dest, Value::Bool(res));
+                    self.data.top_mut().set_result(*dest, Value::Bool(res));
                 }
                 Instr::BoolOpOr(dest, a, b) => {
                     let a: bool = self.get_operand(*a).expect_bool()?;
                     let b: bool = self.get_operand(*b).expect_bool()?;
                     let res = a || b;
-                    self.data.set_result(*dest, Value::Bool(res));
+                    self.data.top_mut().set_result(*dest, Value::Bool(res));
                 }
 
                 Instr::ClosureNew {
@@ -754,7 +762,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 } => {
                     let mut upvalues = Vec::new();
                     while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
-                        let upv_id = self.data.ensure_in_upvalue(cap);
+                        let upv_id = self.data.top_mut().ensure_in_upvalue(cap);
                         #[cfg(test)]
                         {
                             self.print_indent();
@@ -774,7 +782,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     });
 
                     let oid = self.heap.new_function(closure);
-                    self.data.set_result(*dest, Value::Object(oid));
+                    self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 // This is always handled in the code for ClosureNew
                 Instr::ClosureAddCapture(_) => {
@@ -785,12 +793,16 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
                 Instr::UnaryMinus { dest, arg } => {
                     let arg_val: f64 = self.get_operand(*arg).expect_num()?;
-                    self.data.set_result(*dest, Value::Number(-arg_val));
+                    self.data
+                        .top_mut()
+                        .set_result(*dest, Value::Number(-arg_val));
                 }
 
                 Instr::GetModule(dest, module_id) => {
                     if let Some(module_oid) = self.modules.get(module_id) {
-                        self.data.set_result(*dest, Value::Object(*module_oid));
+                        self.data
+                            .top_mut()
+                            .set_result(*dest, Value::Object(*module_oid));
                     } else {
                         // TODO Refactor with other implementations of Call?
                         let root_fnid = self
@@ -820,27 +832,32 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 }
 
                 Instr::LoadNull(dest) => {
-                    self.data.set_result(*dest, Value::Null);
+                    self.data.top_mut().set_result(*dest, Value::Null);
                 }
                 Instr::LoadUndefined(dest) => {
-                    self.data.set_result(*dest, Value::Undefined);
+                    self.data.top_mut().set_result(*dest, Value::Undefined);
                 }
                 Instr::LoadThis(dest) => {
-                    self.data.set_result(*dest, self.data.header().this);
+                    let value = self.data.top().header().this;
+                    self.data.top_mut().set_result(*dest, value);
                 }
                 Instr::ArithInc(dest, src) => {
                     let val = self
                         .get_operand(*src)
                         .expect_num()
                         .map_err(|_| error!("bytecode bug: ArithInc on non-number"))?;
-                    self.data.set_result(*dest, Value::Number(val + 1.0));
+                    self.data
+                        .top_mut()
+                        .set_result(*dest, Value::Number(val + 1.0));
                 }
                 Instr::ArithDec(dest, src) => {
                     let val = self
                         .get_operand(*src)
                         .expect_num()
                         .map_err(|_| error!("bytecode bug: ArithDec on non-number"))?;
-                    self.data.set_result(*dest, Value::Number(val - 1.0));
+                    self.data
+                        .top_mut()
+                        .set_result(*dest, Value::Number(val - 1.0));
                 }
                 Instr::IsInstanceOf(dest, obj, sup) => {
                     let result = if let Some(obj_oid) = self.get_operand_object(*obj) {
@@ -849,7 +866,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     } else {
                         false
                     };
-                    self.data.set_result(*dest, Value::Bool(result));
+                    self.data.top_mut().set_result(*dest, Value::Bool(result));
                 }
                 Instr::NewIterator { dest: _, obj: _ } => todo!(),
                 Instr::IteratorGetCurrent { dest: _, iter: _ } => todo!(),
@@ -860,7 +877,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
                 Instr::StrCreateEmpty(dest) => {
                     let oid = self.heap.new_string(String::new());
-                    self.data.set_result(*dest, Value::Object(oid));
+                    self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 Instr::StrAppend(buf_reg, tail) => {
                     // TODO Make this at least *decently* efficient!
@@ -871,7 +888,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
                     buf.push_str(tail);
                     let value = literal_to_value(bytecode::Literal::String(buf), &mut self.heap);
-                    self.data.set_result(*buf_reg, value);
+                    self.data.top_mut().set_result(*buf_reg, value);
                 }
 
                 Instr::GetGlobal { dest, key } => {
@@ -884,7 +901,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         .heap
                         .get_property(self.global_obj, &key)
                         .unwrap_or(Value::Undefined);
-                    self.data.set_result(*dest, value);
+                    self.data.top_mut().set_result(*dest, value);
                 }
             }
 
@@ -905,6 +922,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             if let Some(handler) = &mut self.step_handler {
                 let action = handler(&InspectorStep {
                     giid: bytecode::GlobalIID(fnid, self.iid),
+                    intrp_data: &self.data,
                 });
 
                 match action {
@@ -932,7 +950,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         let return_value = callee_retval_reg
             .map(|vreg| self.get_operand(vreg))
             .unwrap_or(Value::Undefined);
-        let header = self.data.header();
+        let header = self.data.top().header();
         let caller_retval_reg = header.return_value_vreg;
         let return_to_iid = header.return_to_iid;
         self.data.pop();
@@ -941,7 +959,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         // first!
 
         if let Some(vreg) = caller_retval_reg {
-            self.data.set_result(vreg, return_value);
+            self.data.top_mut().set_result(vreg, return_value);
         }
 
         #[cfg(enable_jit)]
@@ -958,7 +976,9 @@ impl<'a, 'b> Interpreter<'a, 'b> {
     {
         let a = self.get_operand(a).expect_num().unwrap();
         let b = self.get_operand(b).expect_num().unwrap();
-        self.data.set_result(dest, Value::Number(op(a, b)));
+        self.data
+            .top_mut()
+            .set_result(dest, Value::Number(op(a, b)));
     }
 
     fn compare(&mut self, dest: VReg, a: VReg, b: VReg, test: impl Fn(ValueOrdering) -> bool) {
@@ -988,7 +1008,9 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             _ => ValueOrdering::Incomparable,
         };
 
-        self.data.set_result(dest, Value::Bool(test(ordering)));
+        self.data
+            .top_mut()
+            .set_result(dest, Value::Bool(test(ordering)));
     }
 
     fn get_operand_object(&self, operand: VReg) -> Option<heap::ObjectId> {
@@ -1026,7 +1048,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
     // TODO(cleanup) inline this function? It now adds nothing
     fn get_operand(&self, vreg: bytecode::VReg) -> Value {
-        let value = self.data.get_result(vreg);
+        let value = self.data.top().get_result(vreg);
         //  TODO(cleanup) Move to a global logger. This is just for debugging!
         #[cfg(test)]
         {

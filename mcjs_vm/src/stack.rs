@@ -71,33 +71,92 @@ impl InterpreterData {
         self.n_frames -= 1;
     }
 
-    pub fn header(&self) -> &stack_access::FrameHeader {
-        self.stack.top_header()
+    pub fn top(&self) -> Frame {
+        Frame {
+            inner: self.stack.top_frame(),
+            upv_alloc: &self.upv_alloc,
+        }
+    }
+
+    pub fn top_mut(&mut self) -> FrameMut {
+        FrameMut {
+            inner: self.stack.top_frame_mut(),
+            upv_alloc: &mut self.upv_alloc,
+        }
+    }
+
+    // TODO Turn this into an iterator? (Along with self.stack.frames())
+    #[cfg(feature = "inspection")]
+    pub fn frames(&self) -> Vec<Frame> {
+        self.stack
+            .frames()
+            .into_iter()
+            .map(|frame_view| Frame {
+                inner: frame_view,
+                upv_alloc: &self.upv_alloc,
+            })
+            .collect()
+    }
+
+    pub(crate) fn capture_to_var(
+        &mut self,
+        capture_ndx: bytecode::CaptureIndex,
+        vreg: bytecode::VReg,
+    ) {
+        let upv_id = self.top().get_capture(capture_ndx);
+        self.top_mut().inner.vars_mut()[vreg.0 as usize] = stack_access::Slot::Upvalue(upv_id);
+    }
+}
+
+pub struct Frame<'a> {
+    inner: stack_access::FrameView<'a>,
+    upv_alloc: &'a Heap,
+}
+pub struct FrameMut<'a> {
+    inner: stack_access::FrameViewMut<'a>,
+    upv_alloc: &'a mut Heap,
+}
+
+impl<'a> Frame<'a> {
+    pub fn header(&self) -> &'a stack_access::FrameHeader {
+        self.inner.header()
     }
 
     pub fn get_result(&self, vreg: bytecode::VReg) -> Value {
-        let slot = &self.stack.vars()[vreg.0 as usize];
+        let slot = &self.inner.vars()[vreg.0 as usize];
         slot_value(slot, &self.upv_alloc)
-    }
-    pub(crate) fn set_result(&mut self, vreg: bytecode::VReg, value: Value) {
-        let slot = &mut self.stack.vars_mut()[vreg.0 as usize];
-        set_slot_value(slot, value, &mut self.upv_alloc);
     }
 
     pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Option<Value> {
-        self.stack
+        self.inner
             .args()
             .get(argndx.0 as usize)
             .map(|slot| slot_value(slot, &self.upv_alloc))
     }
-    pub(crate) fn set_arg(&mut self, argndx: bytecode::ArgIndex, value: Value) {
-        let slot = &mut self.stack.args_mut()[argndx.0 as usize];
+
+    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
+        let slot = &self.inner.captures()[capture_ndx.0 as usize];
+        match slot {
+            stack_access::Slot::Inline(_) => unreachable!(),
+            stack_access::Slot::Upvalue(upv_id) => *upv_id,
+        }
+    }
+}
+
+impl<'a> FrameMut<'a> {
+    pub(crate) fn set_result(mut self, vreg: bytecode::VReg, value: Value) {
+        let slot = &mut self.inner.vars_mut()[vreg.0 as usize];
         set_slot_value(slot, value, &mut self.upv_alloc);
     }
 
-    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {
+    pub(crate) fn set_arg(mut self, argndx: bytecode::ArgIndex, value: Value) {
+        let slot = &mut self.inner.args_mut()[argndx.0 as usize];
+        set_slot_value(slot, value, &mut self.upv_alloc);
+    }
+
+    pub(crate) fn ensure_in_upvalue(self, var: bytecode::VReg) -> UpvalueId {
         let varndx = var.0 as usize;
-        let slot = &mut self.stack.vars_mut()[varndx as usize];
+        let slot = &mut self.inner.vars_mut()[varndx as usize];
 
         match slot {
             stack_access::Slot::Inline(value) => {
@@ -109,24 +168,8 @@ impl InterpreterData {
         }
     }
 
-    pub(crate) fn capture_to_var(
-        &mut self,
-        capture_ndx: bytecode::CaptureIndex,
-        vreg: bytecode::VReg,
-    ) {
-        let slot = self.stack.captures()[capture_ndx.0 as usize];
-        self.stack.vars_mut()[vreg.0 as usize] = slot;
-    }
-
-    pub(crate) fn set_capture(&mut self, capture_ndx: bytecode::CaptureIndex, capture: UpvalueId) {
-        self.stack.captures_mut()[capture_ndx.0 as usize] = stack_access::Slot::Upvalue(capture);
-    }
-    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
-        let slot = &self.stack.captures()[capture_ndx.0 as usize];
-        match slot {
-            stack_access::Slot::Inline(_) => unreachable!(),
-            stack_access::Slot::Upvalue(upv_id) => *upv_id,
-        }
+    pub(crate) fn set_capture(self, capture_ndx: bytecode::CaptureIndex, capture: UpvalueId) {
+        self.inner.captures_mut()[capture_ndx.0 as usize] = stack_access::Slot::Upvalue(capture);
     }
 }
 

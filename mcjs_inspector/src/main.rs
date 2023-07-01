@@ -54,16 +54,6 @@ enum VMState {
     },
 }
 
-struct StackViewItem {
-    label_opt: Option<&'static str>,
-    val_ndx: String,
-    val_str: String,
-}
-struct InstrView {
-    iid: String,
-    instr: bytecode::Instr,
-}
-
 impl InspectorApp {
     fn new(case: inspector_case::Case) -> Self {
         let include_paths = case.include_paths.iter().map(|pb| pb.as_path());
@@ -180,7 +170,8 @@ impl InspectorApp {
                         .striped(true)
                         .body(|body| {
                             body.rows(20.0, vm_result.instr_history.len(), |row_ndx, mut row| {
-                                let GlobalIID(fn_id, iid) = &vm_result.instr_history[row_ndx];
+                                let step = &vm_result.instr_history[row_ndx];
+                                let GlobalIID(fn_id, iid) = &step.giid;
 
                                 let func =
                                     vm_result.run_params.codebase.get_function(*fn_id).unwrap();
@@ -190,12 +181,13 @@ impl InspectorApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.label(iid.0.to_string());
+                                            ui.label(format!("f{}/{}", fn_id.0, iid.0));
                                         },
                                     );
                                 });
                                 row.col(|ui| {
                                     ui.horizontal(|ui| {
+                                        ui.add_space(10.0 * step.stack_depth as f32);
                                         render_instruction(ui, instr, func);
                                     });
                                 });
@@ -214,54 +206,66 @@ impl InspectorApp {
                 }
 
                 ui.heading("Stack");
-                let header = core_dump.data.header();
+                assert_eq!(vm_result.stack_view.len(), core_dump.data.len());
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (frame_ndx, frame_view) in vm_result.stack_view.iter().enumerate() {
+                        let header = &frame_view.header;
 
-                egui::Grid::new("frame_header").show(ui, |ui| {
-                    ui.label("fn ID =");
-                    ui.label(format!("{}", header.fn_id.0));
-                    ui.end_row();
+                        let grid_id = format!("frame_header__{}", frame_ndx);
+                        egui::Grid::new(grid_id).show(ui, |ui| {
+                            let layout = egui::Layout::right_to_left(egui::Align::Min);
 
-                    ui.label("this =");
-                    ui.label(format!("{:?}", header.this));
-                    ui.end_row();
+                            ui.with_layout(layout, |ui| ui.label("fn ID ="));
+                            ui.label(format!("{}", header.fn_id.0));
+                            ui.end_row();
 
-                    ui.label("return value to =");
-                    ui.label(format!(
-                        "{:?} / {:?}",
-                        header.return_value_vreg, header.return_to_iid
-                    ));
-                    ui.end_row();
-                });
+                            ui.with_layout(layout, |ui| ui.label("this ="));
+                            ui.label(format!("{:?}", header.this));
+                            ui.end_row();
 
-                use egui_extras::{Column, TableBuilder};
-                ui.push_id("table__stack_view", |ui| {
-                    TableBuilder::new(ui)
-                        .column(Column::exact(30.0))
-                        .column(Column::exact(20.0))
-                        .column(Column::remainder())
-                        .striped(true)
-                        .body(|body| {
-                            let items = &vm_result.stack_view;
-
-                            body.rows(20.0, items.len(), |row_ndx, mut row| {
-                                let StackViewItem {
-                                    label_opt,
-                                    val_ndx,
-                                    val_str,
-                                } = &items[row_ndx];
-                                row.col(|ui| {
-                                    if let Some(label) = label_opt {
-                                        ui.label(*label);
-                                    }
-                                });
-                                row.col(|ui| {
-                                    ui.label(format!("{}", val_ndx));
-                                });
-                                row.col(|ui| {
-                                    ui.label(val_str);
-                                });
-                            });
+                            ui.with_layout(layout, |ui| ui.label("return value to ="));
+                            ui.label(format!(
+                                "{:?} / {:?}",
+                                header.return_value_vreg, header.return_to_iid
+                            ));
+                            ui.end_row();
                         });
+
+                        use egui_extras::{Column, TableBuilder};
+                        let table_id = format!("stack_frame__{}", frame_ndx);
+                        ui.push_id(table_id, |ui| {
+                            TableBuilder::new(ui)
+                                .column(Column::exact(30.0))
+                                .column(Column::exact(20.0))
+                                .column(Column::remainder())
+                                .vscroll(false)
+                                .striped(true)
+                                .body(|body| {
+                                    let items = &frame_view.items;
+
+                                    body.rows(20.0, items.len(), |row_ndx, mut row| {
+                                        let StackSlotView {
+                                            label_opt,
+                                            val_ndx,
+                                            val_str,
+                                        } = &items[row_ndx];
+                                        row.col(|ui| {
+                                            if let Some(label) = label_opt {
+                                                ui.label(*label);
+                                            }
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(format!("{}", val_ndx));
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(val_str);
+                                        });
+                                    });
+                                });
+                        });
+
+                        ui.separator();
+                    }
                 });
             });
         } else {
@@ -277,48 +281,6 @@ impl InspectorApp {
             }
         }
     }
-}
-
-fn make_stack_view(intrp_data: &mcjs_vm::stack::InterpreterData) -> Vec<StackViewItem> {
-    let mut items = Vec::new();
-
-    let header = intrp_data.header();
-
-    for ndx in 0..header.n_instrs as usize {
-        let label_opt = if ndx == 0 { Some("Vars") } else { None };
-        let val_ndx = format!("{}", ndx);
-        let vreg = bytecode::VReg(ndx.try_into().unwrap());
-        let val_str = format!("{:?}", intrp_data.get_result(vreg));
-        items.push(StackViewItem {
-            label_opt,
-            val_ndx,
-            val_str,
-        });
-    }
-    for ndx in 0..header.n_args as usize {
-        let label_opt = if ndx == 0 { Some("Args") } else { None };
-        let argndx = bytecode::ArgIndex(ndx.try_into().unwrap());
-        let val_ndx = format!("{}", ndx);
-        let val_str = format!("{:?}", intrp_data.get_arg(argndx).unwrap());
-        items.push(StackViewItem {
-            label_opt,
-            val_ndx,
-            val_str,
-        });
-    }
-    for ndx in 0..header.n_captures as usize {
-        let label_opt = if ndx == 0 { Some("Caps") } else { None };
-        let capndx = bytecode::CaptureIndex(ndx.try_into().unwrap());
-        let val_ndx = format!("{}", ndx);
-        let val_str = format!("{:?}", intrp_data.get_capture(capndx));
-        items.push(StackViewItem {
-            label_opt,
-            val_ndx,
-            val_str,
-        });
-    }
-
-    items
 }
 
 fn render_instruction(ui: &mut egui::Ui, instr: &bytecode::Instr, func: &bytecode::Function) {
@@ -495,7 +457,8 @@ impl eframe::App for InspectorApp {
 
         egui::CentralPanel::default().show(ctx, |ui| match &self.state {
             VMState::Initial => {
-                if self.ui_initial(ui) {
+                // TODO The || true is because I'm tired of clicking start. Remove it later.
+                if self.ui_initial(ui) || true {
                     let vm_thread = self.release_the_kraken();
                     self.state = VMState::Running {
                         vm_thread: Some(vm_thread),
@@ -518,20 +481,61 @@ struct RunParams {
     root_mod_id: mcjs_vm::ModuleId,
 }
 struct VMResult {
-    instr_history: Vec<GlobalIID>,
+    instr_history: Vec<HistoryItem>,
     error_messages: Vec<String>,
     core_dump: Option<CoreDump>,
-    stack_view: Vec<StackViewItem>,
+    stack_view: Vec<StackFrameView>,
     run_params: RunParams,
+}
+
+struct HistoryItem {
+    call_id: CallID,
+    stack_depth: usize,
+    giid: GlobalIID,
+}
+
+struct StackFrameView {
+    call_id: CallID,
+    header: mcjs_vm::stack_access::FrameHeader,
+    items: Vec<StackSlotView>,
+}
+struct StackSlotView {
+    label_opt: Option<&'static str>,
+    val_ndx: String,
+    val_str: String,
 }
 
 #[derive(Clone)]
 struct Breakpoint(GlobalIID);
 
+#[derive(Clone, Copy)]
+struct CallID(u32);
+
 fn run_vm(run_params: RunParams) -> VMResult {
     let mut instr_history = Vec::new();
+
+    let mut call_id_stack = Vec::new();
+    let mut call_id = CallID(0);
+    let mut next_call_id = move || {
+        call_id.0 += 1;
+        call_id
+    };
+
     let mut on_step = |step: &mcjs_vm::InspectorStep| {
-        instr_history.push(step.giid);
+        let stack_depth = step.intrp_data.len();
+        while call_id_stack.len() < stack_depth {
+            call_id_stack.push(next_call_id());
+        }
+        call_id_stack.truncate(stack_depth);
+
+        assert_eq!(call_id_stack.len(), stack_depth);
+
+        instr_history.push(HistoryItem {
+            giid: step.giid,
+            call_id: *call_id_stack.last().unwrap(),
+            stack_depth,
+        });
+
         if run_params.breakpoints.iter().any(|bp| bp.0 == step.giid) {
             InspectorAction::Fail
         } else {
@@ -557,7 +561,7 @@ fn run_vm(run_params: RunParams) -> VMResult {
             // that does not include the SourceMap.  We use the SoureMap during this
             // conversion to retain as much useful info as we can.
             let stack_view = if let Some(core_dump) = &intrp_err.core_dump {
-                make_stack_view(&core_dump.data)
+                make_stack_view(call_id_stack, &core_dump.data)
             } else {
                 Vec::new()
             };
@@ -570,4 +574,60 @@ fn run_vm(run_params: RunParams) -> VMResult {
             }
         }
     }
+}
+
+fn make_stack_view(
+    call_ids: Vec<CallID>,
+    intrp_data: &mcjs_vm::stack::InterpreterData,
+) -> Vec<StackFrameView> {
+    let mut frame_views = Vec::new();
+
+    assert_eq!(call_ids.len(), intrp_data.len());
+
+    for (frame, call_id) in intrp_data.frames().iter().zip(call_ids.iter()) {
+        let header = frame.header();
+
+        let mut items = Vec::new();
+        for ndx in 0..header.n_instrs as usize {
+            let label_opt = if ndx == 0 { Some("Vars") } else { None };
+            let val_ndx = format!("{}", ndx);
+            let vreg = bytecode::VReg(ndx.try_into().unwrap());
+            let val_str = format!("{:?}", frame.get_result(vreg));
+            items.push(StackSlotView {
+                label_opt,
+                val_ndx,
+                val_str,
+            });
+        }
+        for ndx in 0..header.n_args as usize {
+            let label_opt = if ndx == 0 { Some("Args") } else { None };
+            let argndx = bytecode::ArgIndex(ndx.try_into().unwrap());
+            let val_ndx = format!("{}", ndx);
+            let val_str = format!("{:?}", frame.get_arg(argndx).unwrap());
+            items.push(StackSlotView {
+                label_opt,
+                val_ndx,
+                val_str,
+            });
+        }
+        for ndx in 0..header.n_captures as usize {
+            let label_opt = if ndx == 0 { Some("Caps") } else { None };
+            let capndx = bytecode::CaptureIndex(ndx.try_into().unwrap());
+            let val_ndx = format!("{}", ndx);
+            let val_str = format!("{:?}", frame.get_capture(capndx));
+            items.push(StackSlotView {
+                label_opt,
+                val_ndx,
+                val_str,
+            });
+        }
+
+        frame_views.push(StackFrameView {
+            call_id: *call_id,
+            header: header.clone(),
+            items,
+        });
+    }
+
+    frame_views
 }

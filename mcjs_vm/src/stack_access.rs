@@ -71,47 +71,82 @@ impl Stack {
     }
 
     pub(crate) fn pop_frame(&mut self) {
-        let layout = self.cur_layout();
+        let layout = self.top_frame().layout;
         assert!(self.top_offset + layout.size <= self.store.len());
         self.top_offset += layout.size;
     }
 
-    fn cur_layout(&self) -> FrameLayout {
-        // TODO TODO cache this layout and return a & instead
-        FrameLayout::measure(self.top_header())
+    pub fn top_frame(&self) -> FrameView {
+        view(&self.store[self.top_offset..])
+    }
+    pub fn top_frame_mut(&mut self) -> FrameViewMut {
+        view_mut(&mut self.store[self.top_offset..])
     }
 
-    fn stack(&self) -> &[u8] {
-        &self.store[self.top_offset..]
+    #[cfg(feature = "inspection")]
+    pub fn frames(&self) -> Vec<FrameView> {
+        let mut frames = Vec::new();
+        let mut store_area = &self.store[self.top_offset..];
+        while store_area.len() > 0 {
+            let frame = view(store_area);
+            store_area = &store_area[frame.layout.size..];
+            frames.push(frame);
+        }
+        frames
     }
-    fn stack_mut(&mut self) -> &mut [u8] {
-        &mut self.store[self.top_offset..]
-    }
+}
 
-    pub(crate) fn top_header(&self) -> &FrameHeader {
-        let header_field = Field::just();
-        header_field.get(&self.store[self.top_offset..])
-    }
+fn view(store: &[u8]) -> FrameView {
+    let header_field = Field::just();
+    let header = header_field.get(store);
+    let layout = FrameLayout::measure(header);
+    let raw_data = &store[0..layout.size];
+    FrameView { layout, raw_data }
+}
+fn view_mut(store: &mut [u8]) -> FrameViewMut {
+    let header_field = Field::just();
+    let header = header_field.get_mut(store);
+    let layout = FrameLayout::measure(header);
+    let raw_data = &mut store[..layout.size];
+    FrameViewMut { layout, raw_data }
+}
 
-    pub(crate) fn args(&self) -> &[Slot] {
-        self.cur_layout().args.get(self.stack())
-    }
-    pub(crate) fn args_mut(&mut self) -> &mut [Slot] {
-        self.cur_layout().args.get_mut(self.stack_mut())
-    }
+pub(crate) struct FrameView<'a> {
+    layout: FrameLayout,
+    raw_data: &'a [u8],
+}
+pub(crate) struct FrameViewMut<'a> {
+    layout: FrameLayout,
+    raw_data: &'a mut [u8],
+}
 
-    pub(crate) fn vars(&self) -> &[Slot] {
-        self.cur_layout().vars.get(self.stack())
+impl<'a> FrameView<'a> {
+    pub(crate) fn header(&self) -> &'a FrameHeader {
+        Field::just().get(self.raw_data)
     }
-    pub(crate) fn vars_mut(&mut self) -> &mut [Slot] {
-        self.cur_layout().vars.get_mut(self.stack_mut())
+    pub(crate) fn args(&self) -> &'a [Slot] {
+        self.layout.args.get(self.raw_data)
     }
+    pub(crate) fn vars(&self) -> &'a [Slot] {
+        self.layout.vars.get(self.raw_data)
+    }
+    pub(crate) fn captures(&self) -> &'a [Slot] {
+        self.layout.captures.get(self.raw_data)
+    }
+}
 
-    pub(crate) fn captures(&self) -> &[Slot] {
-        self.cur_layout().captures.get(self.stack())
+impl<'a> FrameViewMut<'a> {
+    pub(crate) fn header(self) -> &'a mut FrameHeader {
+        Field::just().get_mut(self.raw_data)
     }
-    pub(crate) fn captures_mut(&mut self) -> &mut [Slot] {
-        self.cur_layout().captures.get_mut(self.stack_mut())
+    pub(crate) fn args_mut(self) -> &'a mut [Slot] {
+        self.layout.args.get_mut(self.raw_data)
+    }
+    pub(crate) fn vars_mut(self) -> &'a mut [Slot] {
+        self.layout.vars.get_mut(self.raw_data)
+    }
+    pub(crate) fn captures_mut(self) -> &'a mut [Slot] {
+        self.layout.captures.get_mut(self.raw_data)
     }
 }
 
