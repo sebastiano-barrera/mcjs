@@ -24,7 +24,8 @@ fn main() -> eframe::Result<()> {
 
     let case = open_case(&case_file_path).expect("could not open case file");
 
-    let options = eframe::NativeOptions::default();
+    let mut options = eframe::NativeOptions::default();
+    options.default_theme = eframe::Theme::Light;
     eframe::run_native(
         "mcjs Inspector",
         options,
@@ -168,6 +169,7 @@ impl InspectorApp {
                         .column(Column::exact(60.0))
                         .column(Column::exact(300.0))
                         .striped(true)
+                        .stick_to_bottom(true)
                         .body(|body| {
                             body.rows(20.0, vm_result.instr_history.len(), |row_ndx, mut row| {
                                 let step = &vm_result.instr_history[row_ndx];
