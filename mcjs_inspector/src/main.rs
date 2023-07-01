@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -33,14 +34,24 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+const SELECTION_MARK: &'static str = "✱";
+
 struct InspectorApp {
     state: VMState,
 
+    codebase: Arc<mcjs_vm::Codebase>,
+    selection: Cell<Selection>,
+    breakpoints: Vec<Breakpoint>,
+
     case: inspector_case::Case,
     root_mod_id: mcjs_vm::ModuleId,
-    codebase: Arc<mcjs_vm::Codebase>,
+}
 
-    breakpoints: Vec<Breakpoint>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Selection {
+    None,
+    VReg(EternalVReg),
+    IID(EternalIID),
 }
 
 enum VMState {
@@ -75,10 +86,11 @@ impl InspectorApp {
 
         InspectorApp {
             state: VMState::Initial,
+            codebase,
+            selection: Cell::new(Selection::None),
+            breakpoints: vec![Breakpoint(GlobalIID(FnId(70), IID(6)))],
             case,
             root_mod_id,
-            codebase,
-            breakpoints: vec![Breakpoint(GlobalIID(FnId(70), IID(6)))],
         }
     }
 
@@ -164,6 +176,7 @@ impl InspectorApp {
                 ));
 
                 use egui_extras::{Column, TableBuilder};
+                self.selection.set(Selection::None);
                 ui.push_id("table__instr_history", |ui| {
                     TableBuilder::new(ui)
                         .column(Column::exact(60.0))
@@ -173,7 +186,7 @@ impl InspectorApp {
                         .body(|body| {
                             body.rows(20.0, vm_result.instr_history.len(), |row_ndx, mut row| {
                                 let step = &vm_result.instr_history[row_ndx];
-                                let GlobalIID(fn_id, iid) = &step.giid;
+                                let EternalIID(call_id, GlobalIID(fn_id, iid)) = &step.eiid;
 
                                 let func =
                                     vm_result.run_params.codebase.get_function(*fn_id).unwrap();
@@ -190,7 +203,12 @@ impl InspectorApp {
                                 row.col(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.add_space(10.0 * step.stack_depth as f32);
-                                        render_instruction(ui, instr, func);
+                                        if let Some(sel_vreg) = render_instruction(ui, instr, func)
+                                        {
+                                            self.selection.set(Selection::VReg(EternalVReg(
+                                                *call_id, sel_vreg,
+                                            )));
+                                        }
                                     });
                                 });
                             });
@@ -207,10 +225,13 @@ impl InspectorApp {
                     ui.label(msg);
                 }
 
+                ui.heading("Selection");
+                ui.label(format!("{:?}", self.selection.get()));
+
                 ui.heading("Stack");
                 assert_eq!(vm_result.stack_view.len(), core_dump.data.len());
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (frame_ndx, frame_view) in vm_result.stack_view.iter().enumerate() {
+                    for (frame_ndx, frame_view) in vm_result.stack_view.iter().rev().enumerate() {
                         let header = &frame_view.header;
 
                         let grid_id = format!("frame_header__{}", frame_ndx);
@@ -231,9 +252,28 @@ impl InspectorApp {
                                 header.return_value_vreg, header.return_to_iid
                             ));
                             ui.end_row();
+
+                            ui.with_layout(layout, |ui| ui.label("debugger call ID = "));
+                            ui.label(format!("{}", frame_view.call_id.0));
+                            ui.end_row();
+
+                            ui.with_layout(layout, |ui| ui.label("num slots ="));
+                            ui.label(format!(
+                                "{}/{}/{}",
+                                header.n_instrs, header.n_args, header.n_captures
+                            ));
+                            ui.end_row();
+
+                            assert_eq!(
+                                header.n_instrs as usize
+                                    + header.n_args as usize
+                                    + header.n_captures as usize,
+                                frame_view.items.len()
+                            );
                         });
 
                         use egui_extras::{Column, TableBuilder};
+                        let selection = self.selection.get();
                         let table_id = format!("stack_frame__{}", frame_ndx);
                         ui.push_id(table_id, |ui| {
                             TableBuilder::new(ui)
@@ -242,6 +282,7 @@ impl InspectorApp {
                                 .column(Column::remainder())
                                 .vscroll(false)
                                 .striped(true)
+                                .cell_layout(egui::Layout::right_to_left(egui::Align::Min))
                                 .body(|body| {
                                     let items = &frame_view.items;
 
@@ -250,6 +291,7 @@ impl InspectorApp {
                                             label_opt,
                                             val_ndx,
                                             val_str,
+                                            slot_selection,
                                         } = &items[row_ndx];
                                         row.col(|ui| {
                                             if let Some(label) = label_opt {
@@ -261,6 +303,9 @@ impl InspectorApp {
                                         });
                                         row.col(|ui| {
                                             ui.label(val_str);
+                                            if slot_selection == &Some(selection) {
+                                                ui.label(SELECTION_MARK);
+                                            }
                                         });
                                     });
                                 });
@@ -285,38 +330,49 @@ impl InspectorApp {
     }
 }
 
-fn render_instruction(ui: &mut egui::Ui, instr: &bytecode::Instr, func: &bytecode::Function) {
-    use mcjs_vm::bytecode::{Instr, VReg};
+fn render_instruction(
+    ui: &mut egui::Ui,
+    instr: &bytecode::Instr,
+    func: &bytecode::Function,
+) -> Option<bytecode::VReg> {
+    use bytecode::{Instr, VReg};
+
+    let sel = Cell::new(None);
+    let check_sel = |new_sel: Option<VReg>| {
+        if new_sel.is_some() {
+            sel.set(new_sel)
+        }
+    };
 
     let read1 = |ui: &mut egui::Ui, name: &str, arg: VReg| {
         ui.label(name);
-        render_vreg_read(ui, arg);
+        check_sel(render_vreg_read(ui, arg));
     };
     let read2 = |ui: &mut egui::Ui, name: &str, arg0: VReg, arg1: VReg| {
         ui.label(name);
-        render_vreg_read(ui, arg0);
-        render_vreg_read(ui, arg1);
+        check_sel(render_vreg_read(ui, arg0));
+        check_sel(render_vreg_read(ui, arg1));
     };
     let read3 = |ui: &mut egui::Ui, name: &str, arg0: VReg, arg1: VReg, arg2: VReg| {
         ui.label(name);
-        render_vreg_read(ui, arg0);
-        render_vreg_read(ui, arg1);
-        render_vreg_read(ui, arg2);
+        check_sel(render_vreg_read(ui, arg0));
+        check_sel(render_vreg_read(ui, arg1));
+        check_sel(render_vreg_read(ui, arg2));
     };
     let simple0 = |ui: &mut egui::Ui, name: &str, dest: VReg| {
         ui.label(name);
-        render_vreg_write(ui, dest);
+        check_sel(render_vreg_write(ui, dest));
     };
     let simple1 = |ui: &mut egui::Ui, name: &str, dest: VReg, a: VReg| {
         ui.label(name);
-        render_vreg_write(ui, dest);
-        render_vreg_read(ui, a);
+        check_sel(render_vreg_write(ui, dest));
+        check_sel(render_vreg_read(ui, a));
     };
     let simple2 = |ui: &mut egui::Ui, name: &str, dest: VReg, a: VReg, b: VReg| {
         ui.label(name);
-        render_vreg_write(ui, dest);
-        render_vreg_read(ui, a);
-        render_vreg_read(ui, b);
+        check_sel(render_vreg_write(ui, dest));
+        check_sel(render_vreg_read(ui, a));
+        check_sel(render_vreg_read(ui, b));
     };
 
     match instr {
@@ -325,7 +381,7 @@ fn render_instruction(ui: &mut egui::Ui, instr: &bytecode::Instr, func: &bytecod
         }
         Instr::LoadConst(dest, constndx) => {
             ui.label("LoadConst");
-            render_vreg_write(ui, *dest);
+            check_sel(render_vreg_write(ui, *dest));
 
             let const_value = &func.consts()[constndx.0 as usize];
             let mut text = format!("{:?}", const_value);
@@ -339,12 +395,12 @@ fn render_instruction(ui: &mut egui::Ui, instr: &bytecode::Instr, func: &bytecod
         Instr::LoadUndefined(dest) => simple0(ui, "LoadUndefined", *dest),
         Instr::LoadCapture(dest, capndx) => {
             ui.label("LoadCapture");
-            render_vreg_write(ui, *dest);
+            check_sel(render_vreg_write(ui, *dest));
             ui.label(format!("{:?}", capndx));
         }
         Instr::LoadArg(dest, argndx) => {
             ui.label("LoadArg");
-            render_vreg_write(ui, *dest);
+            check_sel(render_vreg_write(ui, *dest));
             ui.label(format!("{:?}", argndx));
         }
         Instr::LoadThis(dest) => simple0(ui, "LoadThis", *dest),
@@ -392,7 +448,7 @@ fn render_instruction(ui: &mut egui::Ui, instr: &bytecode::Instr, func: &bytecod
             forced_this,
         } => {
             ui.label("ClosureNew");
-            render_vreg_write(ui, *dest);
+            check_sel(render_vreg_write(ui, *dest));
             render_fnid(ui, *fnid);
             if let Some(forced_this) = forced_this {
                 ui.label("this=");
@@ -422,11 +478,13 @@ fn render_instruction(ui: &mut egui::Ui, instr: &bytecode::Instr, func: &bytecod
         Instr::TypeOf { dest, arg } => simple1(ui, "TypeOf", *dest, *arg),
         Instr::GetModule(dest, module_id) => {
             ui.label("GetModule");
-            render_vreg_write(ui, *dest);
+            check_sel(render_vreg_write(ui, *dest));
             ui.label(format!("module:{}", module_id.0));
         }
         Instr::Throw(arg) => read1(ui, "Throw", *arg),
     }
+
+    sel.get()
 }
 
 fn render_fnid(ui: &mut egui::Ui, fnid: FnId) {
@@ -437,12 +495,20 @@ fn render_iid(ui: &mut egui::Ui, dest: IID) {
     ui.button(format!("i{}", dest.0));
 }
 
-fn render_vreg_write(ui: &mut egui::Ui, dest: bytecode::VReg) {
-    ui.button(format!(">v{}", dest.0));
+fn render_vreg_write(ui: &mut egui::Ui, dest: bytecode::VReg) -> Option<bytecode::VReg> {
+    if ui.button(format!(">v{}", dest.0)).hovered() {
+        Some(dest)
+    } else {
+        None
+    }
 }
 
-fn render_vreg_read(ui: &mut egui::Ui, dest: bytecode::VReg) {
-    ui.button(format!("<v{}", dest.0));
+fn render_vreg_read(ui: &mut egui::Ui, dest: bytecode::VReg) -> Option<bytecode::VReg> {
+    if ui.button(format!("<v{}", dest.0)).hovered() {
+        Some(dest)
+    } else {
+        None
+    }
 }
 
 impl eframe::App for InspectorApp {
@@ -491,9 +557,8 @@ struct VMResult {
 }
 
 struct HistoryItem {
-    call_id: CallID,
     stack_depth: usize,
-    giid: GlobalIID,
+    eiid: EternalIID,
 }
 
 struct StackFrameView {
@@ -505,13 +570,20 @@ struct StackSlotView {
     label_opt: Option<&'static str>,
     val_ndx: String,
     val_str: String,
+    slot_selection: Option<Selection>,
 }
 
 #[derive(Clone)]
 struct Breakpoint(GlobalIID);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CallID(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EternalVReg(CallID, bytecode::VReg);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EternalIID(CallID, GlobalIID);
 
 fn run_vm(run_params: RunParams) -> VMResult {
     let mut instr_history = Vec::new();
@@ -532,9 +604,9 @@ fn run_vm(run_params: RunParams) -> VMResult {
 
         assert_eq!(call_id_stack.len(), stack_depth);
 
+        let call_id = *call_id_stack.last().unwrap();
         instr_history.push(HistoryItem {
-            giid: step.giid,
-            call_id: *call_id_stack.last().unwrap(),
+            eiid: EternalIID(call_id, step.giid),
             stack_depth,
         });
 
@@ -585,8 +657,9 @@ fn make_stack_view(
     let mut frame_views = Vec::new();
 
     assert_eq!(call_ids.len(), intrp_data.len());
+    assert_eq!(intrp_data.frames().len(), intrp_data.len());
 
-    for (frame, call_id) in intrp_data.frames().iter().zip(call_ids.iter()) {
+    for (frame, call_id) in intrp_data.frames().iter().rev().zip(call_ids.iter()) {
         let header = frame.header();
 
         let mut items = Vec::new();
@@ -599,6 +672,7 @@ fn make_stack_view(
                 label_opt,
                 val_ndx,
                 val_str,
+                slot_selection: Some(Selection::VReg(EternalVReg(*call_id, vreg))),
             });
         }
         for ndx in 0..header.n_args as usize {
@@ -610,6 +684,7 @@ fn make_stack_view(
                 label_opt,
                 val_ndx,
                 val_str,
+                slot_selection: None,
             });
         }
         for ndx in 0..header.n_captures as usize {
@@ -621,6 +696,7 @@ fn make_stack_view(
                 label_opt,
                 val_ndx,
                 val_str,
+                slot_selection: None,
             });
         }
 
