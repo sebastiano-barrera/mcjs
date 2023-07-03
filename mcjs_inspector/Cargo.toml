@@ -8,9 +8,7 @@ edition = "2021"
 [dependencies]
 mcjs_vm = { path = "../mcjs_vm", features = ["inspection"] }
 
-egui = "0.22"
-egui_extras = "0.22"
-eframe = "0.22"
+relm4 = "0.6"
 
 anyhow = "1.0"
 rmp-serde = "1.1"
