@@ -72,9 +72,6 @@ struct RootState {
 
     // TODO Move to a different state struct?
     breakpoints: Vec<Breakpoint>,
-
-    component_initial: relm4::Controller<CaseDetailsModel>,
-    component_suspended: relm4::Controller<SuspendedModel>,
 }
 
 enum VMState {
@@ -132,14 +129,30 @@ impl relm4::SimpleComponent for RootState {
                 set_orientation: gtk::Orientation::Vertical,
 
                 gtk::Label {
-                    set_label: &format!("code has {:?} functions", model.case.codebase.all_functions().len()),
+                    set_xalign: 0.0,
+                    set_markup: &format!("<big>VM is {}</big>", match &model.state {
+                        VMState::Initial => "ready to start",
+                        VMState::Running{..} => "running...",
+                        VMState::Suspended{..} => "suspended.",
+                    }),
                 },
 
-                gtk::Button::with_label("Quit") {
-                    connect_clicked[sender] => move |_| {
-                        println!("quit clicked!");
-                    }
+                match model.state {
+                    VMState::Initial => {
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+
+                            gtk::Label::new("Case details:"),
+
+                            gtk::Grid {
+                                attach[0, 0, 1, 1] = &gtk::Label::new("Include paths:"),
+                            },
+                        }
+                    },
+                    VMState::Running => { gtk::Label::new(None) },
+                    VMState::Suspended => { gtk::Label::new(None) },
                 },
+
             },
         }
     }
@@ -159,31 +172,6 @@ enum Selection {
 }
 
 struct CaseDetailsModel<'a>(PhantomData<&'a CaseData>);
-
-#[relm4::component]
-impl<'a> relm4::SimpleComponent for CaseDetailsModel<'a> {
-    type Input = ();
-    type Output = ();
-    type Init = CaseData;
-
-    fn init(
-        init: Self::Init,
-        root: &Self::Root,
-        sender: relm4::ComponentSender<Self>,
-    ) -> relm4::ComponentParts<Self> {
-        let widgets = view_output!();
-        relm4::ComponentParts {
-            widgets,
-            model: CaseDetailsModel(PhantomData),
-        }
-    }
-
-    view! {
-        gtk::Label::new(Some("case details"))
-    }
-
-    fn update(&mut self, msg: (), _sender: relm4::ComponentSender<Self>) {}
-}
 
 // impl InspectorApp {
 //     fn new(case: inspector_case::Case) -> Self {
