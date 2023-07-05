@@ -8,9 +8,12 @@ edition = "2021"
 [dependencies]
 mcjs_vm = { path = "../mcjs_vm", features = ["inspection"] }
 
-relm4 = "0.6"
-
 anyhow = "1.0"
 rmp-serde = "1.1"
+
+slint = "1.1.0"
+
+[build-dependencies]
+slint-build = "1.1.0"
 
 
