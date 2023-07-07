@@ -2,35 +2,20 @@ use std::{
     cell::Cell,
     collections::HashMap,
     marker::PhantomData,
-    net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
+use actix_web::{http::header::ContentType, web, App, HttpResponse, Responder};
 use anyhow::{Context, Result};
+use maud::{html, Markup};
+use serde::Deserialize;
 
 use mcjs_vm::{bytecode, inspector_case, CoreDump, FnId, GlobalIID, InspectorAction, IID};
-use serde::{ser::SerializeTuple, Deserialize, Serialize};
-use tracing::{event, Level};
 
-use axum::{
-    extract::{Path, State},
-    http::{Request, StatusCode},
-    response::{Html, IntoResponse},
-};
-use tower_http::services::ServeDir;
-use tera::Tera;
-
-#[tokio::main]
-async fn main() {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::filter::LevelFilter::INFO)
-        .init();
-
-    let tmpl = Tera::new("data/templates/**/*").unwrap();
-    TEMPLATES.set(RwLock::new(tmpl)).unwrap();
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    env_logger::init();
 
     let case_file_path = {
         let mut args = std::env::args().skip(1);
@@ -41,45 +26,76 @@ async fn main() {
     let case_data = CaseData::load(case);
     let state = Arc::new(Mutex::new(RootState::new(case_data)));
 
-    use axum::{
-        routing::{get, post},
-        Router,
-    };
+    use actix_web::middleware::Logger;
+    use actix_web::HttpServer;
 
-    let serve_dir = ServeDir::new("data/assets");
+    // TODO Automatic template reloading?
 
-    let app = Router::new()
-        .route("/", get(handle_root_page))
-        .route("/start", post(handle_start))
-        .route("/sessions/:sid/core_dump", get(handle_get_core_dump))
-        .nest_service("/assets/", serve_dir)
-        .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
-            reload_templates,
-        ))
-        .with_state(state);
-
-    let addr: &SocketAddr = &"127.0.0.1:10001".parse().unwrap();
-    eprintln!(" -- Server listening on: http://{}/", addr.to_string());
-    axum::Server::bind(addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    HttpServer::new(move || {
+        let serve_dir = actix_files::Files::new("/assets", "data/assets");
+        App::new()
+            .service(handle_get_core_dump)
+            .service(handle_start)
+            .service(handle_root_page)
+            .service(serve_dir)
+            .app_data(web::Data::new(Arc::clone(&state)))
+            .wrap(Logger::default())
+    })
+    .bind(("127.0.0.1", 10001))?
+    .run()
+    .await
 }
 
 type StateHandle = Arc<Mutex<RootState>>;
-type Response = Result<Html<String>, AppError>;
 
-#[axum::debug_handler]
-async fn handle_root_page(state: State<StateHandle>) -> Response {
+#[actix_web::get("/")]
+async fn handle_root_page(state: web::Data<StateHandle>) -> impl Responder {
+    use mcjs_vm::inspector_case::Root;
+
     let state = state.lock().unwrap();
-    let mut context = tera::Context::new();
-    context.insert("case", &state.case.case);
-    render_template("index.html", &context)
+    let body = html! {
+        div class="ring-1 ring-slate-600 bg-slate-700 max-w-lg m-auto p-4 rounded-2xl shadow-lg shadow-slate-700 mt-4 space-y-4" {
+            p { "mcjs Inspector ready to go." }
+
+            div {
+                h1.text-lg.font-bold { "The case:" }
+                p { "Include paths:" }
+                ul.list-disc.text-sm."px-4" {
+                    // {% for path in case.include_paths %}
+                    // <li>{{ path }}</li>
+                    // {% endfor %}
+                }
+
+                @match &state.case.case.root {
+                    Root::ModuleImport(mod_path) => {
+                        p {
+                            "Start by importing module:"
+                            code { (mod_path) }
+                        }
+                    }
+                    other => {
+                        p { "Execution root:" ( format!("{:?}", other) ) }
+                    }
+                }
+            }
+
+            div {
+                form method="POST" action="/start" {
+                    input type="submit"
+                          class="block bg-slate-500 rounded-full px-4 py-2 w-1/2 m-auto text-center cursor-pointer hover:bg-slate-600"
+                          value="Start";
+                }
+            }
+        }
+    };
+
+    HttpResponse::Ok()
+        .content_type(ContentType::html())
+        .body(page(body).into_string())
 }
 
-#[axum::debug_handler]
-async fn handle_start(state: State<StateHandle>) -> impl IntoResponse {
+#[actix_web::post("/start")]
+async fn handle_start(state: web::Data<StateHandle>) -> impl Responder {
     let state = Arc::clone(&state);
     let sid = tokio::task::spawn_blocking(move || {
         let state = state.lock().unwrap();
@@ -89,101 +105,77 @@ async fn handle_start(state: State<StateHandle>) -> impl IntoResponse {
     .await
     .unwrap();
 
-    axum::response::Redirect::to(&format!("/sessions/{}/core_dump", sid.0))
+    web::Redirect::to(format!("/sessions/{}/core_dump", sid.0)).see_other()
 }
 
-#[axum::debug_handler]
-async fn handle_get_core_dump(state: State<StateHandle>, Path(sid): Path<SessionID>) -> Response {
+#[actix_web::get("/sessions/{sid}/core_dump")]
+async fn handle_get_core_dump(
+    state: web::Data<StateHandle>,
+    path: web::Path<SessionID>,
+) -> actix_web::Result<HttpResponse> {
+    let sid = path.into_inner();
+
     let state = state.lock().unwrap();
 
     let sessions = state.sessions();
     let vm_result = sessions.get(sid)?;
 
-    #[derive(Serialize)]
     struct HistoryItemView {
-        stack_depth: usize,
+        left_padding: String,
         instr: String,
     }
-    let instr_history: Vec<_> = vm_result
-        .instr_history
-        .iter()
-        .map(|item| {
-            let EternalIID(_, GlobalIID(fnid, iid)) = item.eiid;
-            let func = state.codebase.get_function(fnid).unwrap();
-            let instr = &func.instrs()[iid.0 as usize];
-            HistoryItemView {
-                stack_depth: item.stack_depth,
-                instr: format!("{:?}", instr),
+    let instr_history = vm_result.instr_history.iter().map(|item| {
+        let EternalIID(_, GlobalIID(fnid, iid)) = item.eiid;
+        let func = state.codebase.get_function(fnid).unwrap();
+        let instr = &func.instrs()[iid.0 as usize];
+        HistoryItemView {
+            left_padding: format!("{}cm", item.stack_depth),
+            instr: format!("{:?}", instr),
+        }
+    });
+
+    if let Some(core_dump) = &vm_result.core_dump {}
+
+    let body = html! {
+        div.grid."grid-cols-2"."inset-0".w-full.h-full {
+            div.overflow-y-scroll."inset-0" {
+                table.w-full {
+                    @for item in instr_history {
+                        tr.border-solid."border-b-2"."border-b-slate-700"."hover:bg-slate-800" {
+                            td { "-" }
+                            td style={"padding-left: " (item.left_padding) } { (item.instr) }
+                        }
+                    }
+                }
             }
-        })
-        .collect();
 
-    if let Some(core_dump) = &vm_result.core_dump {
-        core_dump.data
-    }
+            div."p-4" {
+                "(Coming later: stack details.)"
+            }
+        }
+    };
 
-    let mut context = tera::Context::new();
-    context.insert("instr_history", &instr_history);
-    render_template("core_dump.html", &context)
+    Ok(HttpResponse::Ok()
+        .content_type(ContentType::html())
+        .body(page(body).into_string()))
 }
 
-async fn reload_templates<B>(
-    req: Request<B>,
-    next: axum::middleware::Next<B>,
-) -> impl IntoResponse {
-    {
-        let mut tmpl = TEMPLATES.get().unwrap().write().unwrap();
-        if let Err(err) = tmpl.full_reload() {
-            event!(Level::ERROR, "Could not reload templates: {:?}", err);
+fn page(body: Markup) -> Markup {
+    html! {
+        (maud::DOCTYPE)
+        html.w-full.h-full {
+            head {
+                title { "mcjs Inspector" }
+                meta charset="UTF-8";
+                meta name="viewport" content="width=device-width, initial-scale=1.0";
+                script src="/assets/tailwind-cdn.js" {}
+            }
+
+            body."bg-slate-900".text-white.w-full.h-full {
+                (body)
+            }
         }
     }
-
-    next.run(req).await
-}
-
-#[derive(Debug)]
-struct AppError {
-    status_code: axum::http::StatusCode,
-    message: String,
-}
-
-impl AppError {
-    fn new(message: String) -> Self {
-        let status_code = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
-        AppError {
-            message,
-            status_code,
-        }
-    }
-    fn with_status_code(mut self, status_code: StatusCode) -> Self {
-        self.status_code = status_code;
-        self
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        let html = {
-            let mut context = tera::Context::new();
-            context.insert("message", &self.message);
-            render_template("error.html", &context).expect("could not render error template")
-        };
-
-        (self.status_code, html).into_response()
-    }
-}
-
-static TEMPLATES: OnceLock<RwLock<Tera>> = OnceLock::new();
-fn render_template(template_name: &str, context: &tera::Context) -> Result<Html<String>, AppError> {
-    let html = TEMPLATES
-        .get()
-        .unwrap()
-        .read()
-        .unwrap()
-        .render(template_name, &context)
-        .map_err(|err| AppError::new(format!("error while rendering template: {:?}", err)))?;
-    let html = Html(html);
-    Ok(html)
 }
 
 fn open_case(case_file_path: &std::path::Path) -> Result<inspector_case::Case> {
@@ -304,10 +296,11 @@ impl SessionMgr {
         sid
     }
 
-    fn get(&self, sid: SessionID) -> Result<&VMResult, AppError> {
+    fn get(&self, sid: SessionID) -> actix_web::Result<&VMResult> {
         self.sessions.get(&sid).ok_or_else(|| {
-            AppError::new(format!("no such session with ID: {}", sid.0))
-                .with_status_code(axum::http::StatusCode::NOT_FOUND)
+            let err: Box<dyn std::error::Error + 'static> =
+                anyhow::anyhow!("no such session with ID: {}", sid.0).into();
+            err.into()
         })
     }
 }
@@ -333,7 +326,6 @@ struct VMResult {
     run_params: RunParams,
 }
 
-#[derive(Serialize)]
 struct HistoryItem {
     stack_depth: usize,
     eiid: EternalIID,
@@ -362,20 +354,6 @@ struct EternalVReg(CallID, bytecode::VReg);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EternalIID(CallID, GlobalIID);
-
-impl Serialize for EternalIID {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let EternalIID(CallID(call_id), GlobalIID(FnId(fn_id), IID(iid))) = self;
-        let mut tuple = serializer.serialize_tuple(3)?;
-        tuple.serialize_element(call_id)?;
-        tuple.serialize_element(fn_id)?;
-        tuple.serialize_element(iid)?;
-        tuple.end()
-    }
-}
 
 fn run_vm(run_params: RunParams) -> VMResult {
     let mut instr_history = Vec::new();
