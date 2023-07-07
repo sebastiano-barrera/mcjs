@@ -1,0 +1,28 @@
+<!doctype html>
+<html class='w-full h-full'>
+<head>
+	<title>mcjs Inspector</title>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<script src="/assets/tailwind-cdn.js"></script>
+</head>
+
+<body class="bg-slate-800 text-white w-full h-full">
+	<div class='grid grid-cols-2 inset-0 w-full h-full'>
+		<div class='overflow-y-scroll inset-0'>
+			<table class='w-full'>
+				{% for item in instr_history %}
+				<tr class='border-solid border-b-2 border-b-slate-700'>
+					<td>{{ item.stack_depth }}</td>
+					<td>{{ item.instr }}</td>
+				</tr>
+				{% endfor %}
+			</table>
+		</div>
+
+		<div class='p-4'>
+			(Coming later: stack details.)
+		</div>
+	</div>
+</body>
+
