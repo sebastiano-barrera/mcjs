@@ -8,14 +8,23 @@ use std::{
 
 use actix_web::{http::header::ContentType, web, App, HttpResponse, Responder};
 use anyhow::{Context, Result};
-use maud::{html, Markup};
+use askama::Template;
 use serde::Deserialize;
 
 use mcjs_vm::{bytecode, inspector_case, CoreDump, FnId, GlobalIID, InspectorAction, IID};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    use listenfd::ListenFd;
+
     env_logger::init();
+
+    let mut listenfd = ListenFd::from_env();
+    let listener = if let Some(listener) = listenfd.take_tcp_listener(0)? {
+        listener
+    } else {
+        std::net::TcpListener::bind(("127.0.0.1", 10001)).unwrap()
+    };
 
     let case_file_path = {
         let mut args = std::env::args().skip(1);
@@ -58,7 +67,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Arc::clone(&state)))
             .wrap(Logger::default())
     })
-    .bind(("127.0.0.1", 10001))?
+    .listen(listener)
+    .unwrap()
     .run()
     .await
 }
@@ -67,48 +77,17 @@ type StateHandle = Arc<Mutex<RootState>>;
 
 #[actix_web::get("/")]
 async fn handle_root_page(state: web::Data<StateHandle>) -> impl Responder {
-    use mcjs_vm::inspector_case::Root;
+    #[derive(Template)]
+    #[template(path = "index.html")]
+    struct RootTemplate<'a> {
+        case: &'a mcjs_vm::inspector_case::Case,
+    }
 
     let state = state.lock().unwrap();
-    let body = html! {
-        div class="ring-1 ring-slate-600 bg-slate-700 max-w-lg m-auto p-4 rounded-2xl shadow-lg shadow-slate-700 mt-4 space-y-4" {
-            p { "mcjs Inspector ready to go." }
-
-            div {
-                h1.text-lg.font-bold { "The case:" }
-                p { "Include paths:" }
-                ul.list-disc.text-sm."px-4" {
-                    // {% for path in case.include_paths %}
-                    // <li>{{ path }}</li>
-                    // {% endfor %}
-                }
-
-                @match &state.case.case.root {
-                    Root::ModuleImport(mod_path) => {
-                        p {
-                            "Start by importing module:"
-                            code { (mod_path) }
-                        }
-                    }
-                    other => {
-                        p { "Execution root:" ( format!("{:?}", other) ) }
-                    }
-                }
-            }
-
-            div {
-                form method="POST" action="/start" {
-                    input type="submit"
-                          class="block bg-slate-500 rounded-full px-4 py-2 w-1/2 m-auto text-center cursor-pointer hover:bg-slate-600"
-                          value="Start";
-                }
-            }
-        }
-    };
-
+    let case = &state.case.case;
     HttpResponse::Ok()
         .content_type(ContentType::html())
-        .body(page(body).into_string())
+        .body(RootTemplate { case }.render().unwrap())
 }
 
 #[actix_web::post("/start")]
@@ -133,103 +112,47 @@ async fn handle_get_core_dump(
     let sid = path.into_inner();
 
     let state = state.lock().unwrap();
-
     let sessions = state.sessions();
     let vm_result = sessions.get(sid)?;
+    let case = &state.case.case;
 
     struct HistoryItemView {
         left_padding: String,
         instr: String,
     }
-    let instr_history = vm_result.instr_history.iter().map(|item| {
-        let EternalIID(_, GlobalIID(fnid, iid)) = item.eiid;
-        let func = state.codebase.get_function(fnid).unwrap();
-        let instr = &func.instrs()[iid.0 as usize];
-        HistoryItemView {
-            left_padding: format!("{}cm", item.stack_depth),
-            instr: format!("{:?}", instr),
-        }
-    });
-
-    let body = html! {
-        div.grid."grid-cols-2"."inset-0".w-full.h-full {
-            div.overflow-y-scroll."inset-0" {
-                table.w-full.text-sm {
-                    tbody.divide-y.bg-white."text-slate-800"."dark:bg-slate-800"."dark:text-white" {
-                        @for item in instr_history {
-                            tr."hover:bg-slate-100"."hover:dark:bg-slate-800" {
-                                td { "-" }
-                                td style={"padding-left: " (item.left_padding) } { (item.instr) }
-                            }
-                        }
-                    }
-                }
+    let instr_history = vm_result
+        .instr_history
+        .iter()
+        .map(|item| {
+            let EternalIID(_, GlobalIID(fnid, iid)) = item.eiid;
+            let func = state.codebase.get_function(fnid).unwrap();
+            let instr = &func.instrs()[iid.0 as usize];
+            HistoryItemView {
+                left_padding: format!("{}cm", item.stack_depth),
+                instr: format!("{:?}", instr),
             }
+        })
+        .collect();
 
-            div."p-4" {
-                @match &vm_result.core_dump {
-                    Some(core_dump) => {
-                        div.bg-white.text-black.rounded-md."ring-1"."ring-gray-300".shadow-md.divide-y."space-y-4" {
-                            @for frame in &core_dump.data.frames() {
-                                @let hdr = frame.header();
-                                div.grid."grid-cols-2" {
-                                    div { "function" }
-                                    div { (hdr.fn_id.0) }
-                                    div { "this = " }
-                                    div { (format!("{:?}", hdr.this)) }
-                                    div.col-span-full.text-center {
-                                        (format!("Return to {:?} @ {:?}", hdr.return_value_vreg, hdr.return_to_iid))
-                                    }
-                                    div.col-span-full.flex.place-content-center {
-                                        div {
-                                            (hdr.n_instrs) " instrs"
-                                        }
-                                        div {
-                                            (hdr.n_args) " args"
-                                        }
-                                        div {
-                                            (hdr.n_captures) " captures"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+    #[derive(Template)]
+    #[template(path = "core_dump.html")]
+    struct CoreDumpTemplate<'a> {
+        case: &'a mcjs_vm::inspector_case::Case,
+        vm_result: &'a VMResult,
+        instr_history: Vec<HistoryItemView>,
+    }
 
-                    None => {
-                        div.bg-white.rounded-md."p-4"."bg-rose-50"."ring-1"."ring-rose-400"."text-rose-900" {
-                            "No core dump available in this session!"
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    if let Some(core_dump) = &vm_result.core_dump {}
+    let html = CoreDumpTemplate {
+        case,
+        vm_result,
+        instr_history,
+    }
+    .render()
+    .unwrap();
 
     Ok(HttpResponse::Ok()
         .content_type(ContentType::html())
-        .body(page(body).into_string()))
-}
-
-fn page(body: Markup) -> Markup {
-    html! {
-        (maud::DOCTYPE)
-        html.w-full.h-full.bg-my-grid {
-            head {
-                title { "mcjs Inspector" }
-                meta charset="UTF-8";
-                meta name="viewport" content="width=device-width, initial-scale=1.0";
-                link rel="stylesheet" type="text/css" href="/assets/style.css";
-                script src="/assets/tailwind-cdn.js" {}
-            }
-
-            body."dark:bg-slate-900".text-white.w-full.h-full {
-                (body)
-            }
-        }
-    }
+        .body(html))
 }
 
 fn open_case(case_file_path: &std::path::Path) -> Result<inspector_case::Case> {

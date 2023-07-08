@@ -1,0 +1,70 @@
+{% extends "index.html" %}
+
+{% block content %} 
+        <div class="grid grid-cols-2 inset-0 w-full h-full">
+		<div class="overflow-y-scroll inset-0">
+			<table class="w-full text-sm">
+				<tbody class=" divide-y bg-white text-slate-800 dark:bg-slate-800 dark:text-white">
+					{% for item in instr_history %}
+					<tr "hover:bg-slate-100 hover:dark:bg-slate-800"> 
+						<td>-</td>
+						<td style="padding-left: {{ item.left_padding }}">{{ item.instr }}</td>
+					</tr>
+					{% endfor %}
+				</tbody>
+			</table>
+
+		</div>
+
+            <div class="p-4 h-full overflow-y-scroll"> 
+		{% match vm_result.core_dump %}
+		{% when Some with (core_dump) %}
+                        <div class="bg-white text-black rounded-md ring-1 ring-gray-300 shadow-md divide-y px-4 py-2">
+				<div class="text-lg">Stack</div>
+				{% for frame in core_dump.data.frames() %}
+					{% let hdr = frame.header() %}
+					<div class="grid grid-cols-2 gap-x-2 text-sm my-2">
+						<div class='text-right'>Function:</div>
+						<div>{{ hdr.fn_id.0 }}</div>
+						<div class='text-right'>This:</div>
+						<div>{{ "{:?}"|format(hdr.this) }}</div>
+						<div class='text-right'>Return to:</div>
+						<div>
+							{{ "{:?}"|format(hdr.return_value_vreg) }} 
+							@
+							{{ "{:?}"|format(hdr.return_to_iid) }}
+						</div>
+						<div class="col-span-full flex place-content-center text-xs text-gray-500 space-x-4">
+							<div>{{hdr.n_instrs}} instrs </div>
+							<div>{{hdr.n_args}} args</div>
+							<div>{{hdr.n_captures}} captures</div>
+						</div>
+
+						{% for item in frame.args() %}
+						<div class="text-xs text-right">Arg <span class="font-mono">{{loop.index0}}</span></div>
+						<div class="text-xs">{{ "{:?}"|format(item) }}</div>
+						{% endfor %}
+
+						{% for item in frame.results() %}
+						<div class="text-xs text-right">Result <span class="font-mono">{{loop.index0}}</span></div>
+						<div class="text-xs">{{ "{:?}"|format(item) }}</div>
+						{% endfor %}
+
+						{% for item in frame.captures() %}
+						<div class="text-xs text-right">Capture <span class="font-mono">{{loop.index0}}</span></div>
+						<div class="text-xs">{{ "{:?}"|format(item) }}</div>
+						{% endfor %}
+
+					</div>
+				{% endfor %}
+			</div>
+			
+		{% when None %}
+		<div class="bg-white rounded-md  p-4   bg-rose-50   ring-1   ring-rose-400   text-rose-900">
+			No core dump available in this session!
+		</div>
+		{% endmatch %}
+	</div>
+
+{% endblock %}
+

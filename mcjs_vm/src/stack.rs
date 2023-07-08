@@ -127,12 +127,24 @@ impl<'a> Frame<'a> {
         let slot = &self.inner.vars()[vreg.0 as usize];
         slot_value(slot, &self.upv_alloc)
     }
+    pub fn results<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = Value> {
+        (0..self.header().n_instrs).map(|i| {
+            let vreg = bytecode::VReg(i.try_into().unwrap());
+            self.get_result(vreg)
+        })
+    }
 
     pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Option<Value> {
         self.inner
             .args()
             .get(argndx.0 as usize)
             .map(|slot| slot_value(slot, &self.upv_alloc))
+    }
+    pub fn args<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = Option<Value>> {
+        (0..self.header().n_args).map(|i| {
+            let argndx = bytecode::ArgIndex(i.try_into().unwrap());
+            self.get_arg(argndx)
+        })
     }
 
     pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
@@ -141,6 +153,12 @@ impl<'a> Frame<'a> {
             stack_access::Slot::Inline(_) => unreachable!(),
             stack_access::Slot::Upvalue(upv_id) => *upv_id,
         }
+    }
+    pub fn captures<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = UpvalueId> {
+        (0..self.header().n_captures).map(|i| {
+            let capndx = bytecode::CaptureIndex(i.try_into().unwrap());
+            self.get_capture(capndx)
+        })
     }
 }
 

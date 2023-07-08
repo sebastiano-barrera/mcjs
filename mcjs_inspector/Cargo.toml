@@ -10,10 +10,12 @@ mcjs_vm = { path = "../mcjs_vm", features = ["inspection"] }
 
 anyhow = "1.0"
 rmp-serde = "1.1"
-maud = "0.25.0"
+
 actix-web = "4.3.1"
 actix-files = "0.6.2"
 tokio = "1.29.1"
-serde = "1.0.167"
 env_logger = "0.10.0"
+askama = "0.12.0"
+serde = "1.0"   # { version = "1.0", features = ["derive"] }
+listenfd = "1.0.1"
 

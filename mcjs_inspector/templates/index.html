@@ -1,13 +1,6 @@
-<!doctype html>
-<html>
-<head>
-	<title>mcjs Inspector</title>
-	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<script src="/assets/tailwind-cdn.js"></script>
-</head>
+{% extends "page.html" %}
 
-<body class="bg-slate-800 text-white">
+{% block content %}
 	<div class="ring-1 ring-slate-600 bg-slate-700 max-w-lg m-auto p-4 rounded-2xl shadow-lg shadow-slate-700 mt-4 space-y-4">
 		<p>mcjs Inspector ready to go.</p>
 
@@ -16,15 +9,16 @@
 			<p>Include paths:</p>
 			<ul class="list-disc px-4 text-sm">
 				{% for path in case.include_paths %}
-				<li>{{ path }}</li>
+				<li>{{ "{:?}"|format(path) }}</li>
 				{% endfor %}
 			</ul>
 			<p>
-				{% if case.root.ModuleImport %}
-					Start by importing module: <code>{{case.root.ModuleImport}}</code>
+				{% match case.root %}
+				{% when mcjs_vm::inspector_case::Root::ModuleImport with (mod_path) %}
+					Start by importing module: <code>{{mod_path}}</code>
 				{% else %}
-					Execution root: {{ case.root | json_encode }}
-				{% endif %}
+					Execution root: {{ "{:?}"|format(case.root) }}
+				{% endmatch %}
 
 			</p>
 		</div>
@@ -37,4 +31,5 @@
 			</form>
 		</div>
 	</div>
-</body>
+{% endblock %}
+
