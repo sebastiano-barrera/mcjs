@@ -29,7 +29,24 @@ async fn main() -> std::io::Result<()> {
     use actix_web::middleware::Logger;
     use actix_web::HttpServer;
 
-    // TODO Automatic template reloading?
+    // TODO Remove once this inspector is 'ready'
+    if true {
+        // Start the session once, so we don't have to click on "start" every time we
+        // recompile/restart the program
+        let state = Arc::clone(&state);
+        let sid = tokio::task::spawn_blocking(move || {
+            let state = state.lock().unwrap();
+            let sid = state.start_new_session();
+            println!();
+            sid
+        })
+        .await
+        .unwrap();
+        println!(
+            " -- initial session created: http://127.0.0.1:10001/sessions/{}/core_dump",
+            sid.0
+        );
+    }
 
     HttpServer::new(move || {
         let serve_dir = actix_files::Files::new("/assets", "data/assets");
@@ -134,26 +151,62 @@ async fn handle_get_core_dump(
         }
     });
 
-    if let Some(core_dump) = &vm_result.core_dump {}
-
     let body = html! {
         div.grid."grid-cols-2"."inset-0".w-full.h-full {
             div.overflow-y-scroll."inset-0" {
-                table.w-full {
-                    @for item in instr_history {
-                        tr.border-solid."border-b-2"."border-b-slate-700"."hover:bg-slate-800" {
-                            td { "-" }
-                            td style={"padding-left: " (item.left_padding) } { (item.instr) }
+                table.w-full.text-sm {
+                    tbody.divide-y.bg-white."text-slate-800"."dark:bg-slate-800"."dark:text-white" {
+                        @for item in instr_history {
+                            tr."hover:bg-slate-100"."hover:dark:bg-slate-800" {
+                                td { "-" }
+                                td style={"padding-left: " (item.left_padding) } { (item.instr) }
+                            }
                         }
                     }
                 }
             }
 
             div."p-4" {
-                "(Coming later: stack details.)"
+                @match &vm_result.core_dump {
+                    Some(core_dump) => {
+                        div.bg-white.text-black.rounded-md."ring-1"."ring-gray-300".shadow-md.divide-y."space-y-4" {
+                            @for frame in &core_dump.data.frames() {
+                                @let hdr = frame.header();
+                                div.grid."grid-cols-2" {
+                                    div { "function" }
+                                    div { (hdr.fn_id.0) }
+                                    div { "this = " }
+                                    div { (format!("{:?}", hdr.this)) }
+                                    div.col-span-full.text-center {
+                                        (format!("Return to {:?} @ {:?}", hdr.return_value_vreg, hdr.return_to_iid))
+                                    }
+                                    div.col-span-full.flex.place-content-center {
+                                        div {
+                                            (hdr.n_instrs) " instrs"
+                                        }
+                                        div {
+                                            (hdr.n_args) " args"
+                                        }
+                                        div {
+                                            (hdr.n_captures) " captures"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    None => {
+                        div.bg-white.rounded-md."p-4"."bg-rose-50"."ring-1"."ring-rose-400"."text-rose-900" {
+                            "No core dump available in this session!"
+                        }
+                    }
+                }
             }
         }
     };
+
+    if let Some(core_dump) = &vm_result.core_dump {}
 
     Ok(HttpResponse::Ok()
         .content_type(ContentType::html())
@@ -163,15 +216,16 @@ async fn handle_get_core_dump(
 fn page(body: Markup) -> Markup {
     html! {
         (maud::DOCTYPE)
-        html.w-full.h-full {
+        html.w-full.h-full.bg-my-grid {
             head {
                 title { "mcjs Inspector" }
                 meta charset="UTF-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
+                link rel="stylesheet" type="text/css" href="/assets/style.css";
                 script src="/assets/tailwind-cdn.js" {}
             }
 
-            body."bg-slate-900".text-white.w-full.h-full {
+            body."dark:bg-slate-900".text-white.w-full.h-full {
                 (body)
             }
         }

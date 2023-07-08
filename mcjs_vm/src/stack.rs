@@ -85,6 +85,7 @@ impl InterpreterData {
         }
     }
 
+    /// Returns a Vec of "views" into each stack frame, ordered top to bottom.
     // TODO Turn this into an iterator? (Along with self.stack.frames())
     #[cfg(feature = "inspection")]
     pub fn frames(&self) -> Vec<Frame> {

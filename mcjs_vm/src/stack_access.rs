@@ -83,6 +83,7 @@ impl Stack {
         view_mut(&mut self.store[self.top_offset..])
     }
 
+    /// Returns a Vec of "views" into each stack frame, ordered top to bottom.
     #[cfg(feature = "inspection")]
     pub fn frames(&self) -> Vec<FrameView> {
         let mut frames = Vec::new();
