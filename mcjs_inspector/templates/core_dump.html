@@ -1,10 +1,10 @@
 {% extends "index.html" %}
 
 {% block content %} 
-        <div class="grid grid-cols-2 inset-0 w-full h-full">
+        <div class="grid grid-cols-3 inset-0 w-full h-full">
 		<div class="overflow-y-scroll inset-0">
 			<table class="w-full text-sm">
-				<tbody class=" divide-y bg-white text-slate-800 dark:bg-slate-800 dark:text-white">
+				<tbody class="divide-y dark:divide-slate-600 bg-white text-slate-800 dark:bg-transparent dark:text-white">
 					{% for item in instr_history %}
 					<tr "hover:bg-slate-100 hover:dark:bg-slate-800"> 
 						<td>-</td>
@@ -16,10 +16,30 @@
 
 		</div>
 
-            <div class="p-4 h-full overflow-y-scroll"> 
-		{% match vm_result.core_dump %}
-		{% when Some with (core_dump) %}
-                        <div class="bg-white text-black rounded-md ring-1 ring-gray-300 shadow-md divide-y px-4 py-2">
+	{% match vm_result.core_dump %}
+	{% when Some with (core_dump) %}
+		<div class="p-4 h-full overflow-y-scroll"> 
+			{#
+				--- Values
+			#}
+                        <div class="bg-white text-black dark:bg-slate-700 dark:text-white rounded-md ring-1 ring-gray-300 shadow-md divide-y px-4 py-2">
+				<div class="text-lg">Values</div>
+
+				<div>
+					<p class="text-gray-500 italic text-xs m-4">
+						  No values watched yet. Click on values in the
+						  instruction or stack window (e.g. "v123",
+						  "ObjectId(456)") to get more details.
+					</p>
+				</div>
+			</div>
+		</div>
+			
+		<div class="p-4 h-full overflow-y-scroll"> 
+			{#
+				--- Stack
+			#}
+                        <div class="bg-white text-black dark:bg-slate-700 dark:text-white rounded-md ring-1 ring-gray-300 shadow-md divide-y px-4 py-2">
 				<div class="text-lg">Stack</div>
 				{% for frame in core_dump.data.frames() %}
 					{% let hdr = frame.header() %}
@@ -58,12 +78,15 @@
 					</div>
 				{% endfor %}
 			</div>
-			
-		{% when None %}
-		<div class="bg-white rounded-md  p-4   bg-rose-50   ring-1   ring-rose-400   text-rose-900">
-			No core dump available in this session!
 		</div>
-		{% endmatch %}
+
+	{% when None %}
+		<div class="p-4 h-full overflow-y-scroll"> 
+			<div class="bg-white rounded-md  p-4   bg-rose-50   ring-1   ring-rose-400   text-rose-900">
+				No core dump available in this session!
+			</div>
+		</div>
+	{% endmatch %}
 	</div>
 
 {% endblock %}
