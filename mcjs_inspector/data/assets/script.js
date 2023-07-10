@@ -22,9 +22,11 @@ addEventListener('DOMContentLoaded', (event) => {
         },
 
         unlockScroll() {
-            if (this.restoreScroll.timeoutId !== null)
-                clearTimeout(this.restoreScroll.timeoutId);
-
+            if (this.restoreScroll.timeoutId !== null) {
+                clearTimeout(this.restoreScroll.timeoutId)
+                this.restoreScroll.timeoutId = null
+            }
+            
             this.restoreScroll.timeoutId = setTimeout(() => {
                 stack.scrollArea.scrollTo({
                     top: stack.restoreScrollTop,

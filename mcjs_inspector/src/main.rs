@@ -61,6 +61,7 @@ async fn main() -> std::io::Result<()> {
         let serve_dir = actix_files::Files::new("/assets", "data/assets");
         App::new()
             .service(handle_get_core_dump)
+            .service(handle_patch_core_dump)
             .service(handle_start)
             .service(handle_root_page)
             .service(serve_dir)
@@ -138,7 +139,6 @@ async fn handle_get_core_dump(
         }
 
         fn write_vreg(&mut self, vreg: bytecode::VReg) {
-            
             self.0.push(InstrPartView::Write(vreg))
         }
 
@@ -170,7 +170,7 @@ async fn handle_get_core_dump(
             self.0.push(InstrPartView::Other("this".to_owned()))
         }
 
-        fn end(&mut self, _instr: &bytecode::Instr) { }
+        fn end(&mut self, _instr: &bytecode::Instr) {}
     }
 
     let instr_history = vm_result
@@ -198,12 +198,14 @@ async fn handle_get_core_dump(
         case: &'a mcjs_vm::inspector_case::Case,
         vm_result: &'a VMResult,
         instr_history: Vec<HistoryItemView>,
+        watches: &'a Vec<Watch>,
     }
 
     let html = CoreDumpTemplate {
         case,
         vm_result,
         instr_history,
+        watches: &state.watches,
     }
     .render()
     .unwrap();
@@ -211,6 +213,32 @@ async fn handle_get_core_dump(
     Ok(HttpResponse::Ok()
         .content_type(ContentType::html())
         .body(html))
+}
+
+#[derive(Deserialize, Debug)]
+struct AddVRegWatchPayload {
+    call_id: CallID,
+    vreg: u8,
+}
+
+#[actix_web::post("/sessions/{sid}/core_dump/add-watch")]
+async fn handle_patch_core_dump(
+    state: web::Data<StateHandle>,
+    path: web::Path<SessionID>,
+    form: web::Form<AddVRegWatchPayload>,
+) -> actix_web::Result<HttpResponse> {
+    let sid = path.into_inner();
+    let patch = form.into_inner();
+
+    {
+        let mut state = state.lock().unwrap();
+        let evreg = EternalVReg(patch.call_id, bytecode::VReg(patch.vreg));
+        state.watches.push(Watch::VReg(evreg));
+    }
+
+    Ok(HttpResponse::SeeOther()
+        .append_header(("Location", format!("/sessions/{}/core_dump", sid.0)))
+        .finish())
 }
 
 fn open_case(case_file_path: &std::path::Path) -> Result<inspector_case::Case> {
@@ -258,11 +286,16 @@ struct RootState {
 
     // TODO Move to a different state struct?
     breakpoints: Vec<Breakpoint>,
+    watches: Vec<Watch>,
     codebase: Arc<mcjs_vm::Codebase>,
     selection: Cell<Selection>,
     root_mod_id: mcjs_vm::ModuleId,
 
     session_mgr: Mutex<SessionMgr>,
+}
+
+enum Watch {
+    VReg(EternalVReg),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
@@ -289,6 +322,7 @@ impl RootState {
         RootState {
             codebase,
             selection: Cell::new(Selection::None),
+            watches: Vec::new(),
             breakpoints: vec![Breakpoint(GlobalIID(FnId(70), IID(6)))],
             case,
             root_mod_id,
@@ -382,11 +416,18 @@ struct StackSlotView {
 #[derive(Clone)]
 struct Breakpoint(GlobalIID);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 struct CallID(u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EternalVReg(CallID, bytecode::VReg);
+
+// Helper to deserialize EternalVReg
+#[derive(Debug, Deserialize)]
+struct EternalVRegMsg {
+    call_id: CallID,
+    vreg: u8,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EternalIID(CallID, GlobalIID);

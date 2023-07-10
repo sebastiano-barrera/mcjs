@@ -28,10 +28,15 @@
 							<span>{{name}}</span>
 
 							{% when InstrPartView::Read with (vreg) %}
-							<div class='ring-1 inline-block cursor-pointer value read' data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'>
-								r{{vreg.0}}
-							</div>
-
+							<form method="POST" action="core_dump/add-watch">
+								<input type="hidden" name="call_id" value="{{instr.call_id.0}}">
+								<input type="hidden" name="vreg" value="{{vreg.0}}">
+								<button class='ring-1 inline-block cursor-pointer value read' 
+										data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'
+										hx-post="core_dump/add-watch" hx-target="body"> 
+									r{{vreg.0}}
+								</button>
+							</form>
 							{% when InstrPartView::Write with (vreg) %}
 							<div class='ring-1 inline-block cursor-pointer value write' data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'>
 								w{{vreg.0}}
@@ -54,11 +59,22 @@
 
 		<div class="overflow-y-scroll inset-0">
 			<div class="bg-white text-black dark:bg-slate-700 dark:text-white rounded-md ring-1 ring-gray-300 shadow-md">
-				<p class="text-gray-500 italic text-xs m-4">
-					  No values watched yet. Click on values in the
-					  instruction or stack window (e.g. "v123",
-					  "ObjectId(456)") to get more details.
-				</p>
+				{% if watches.len() == 0 %}
+					<p class="text-gray-500 italic text-xs m-4">
+						No values watched yet. Click on values in the
+						instruction or stack window (e.g. "v123",
+						"ObjectId(456)") to get more details.
+					</p>
+				{% else %}
+					<ul>
+						{% for watch in watches %}
+							{% match watch %}
+							{% when Watch::VReg with (evreg) %}
+								<li>call{{evreg.0.0}} v{{evreg.1.0}}</li>
+							{% endmatch %}
+						{% endfor %}
+					</ul>
+				{% endif %}
 			</div>
 		</div>
 
@@ -67,7 +83,7 @@
 				{# Frames are visited top-to-bottom by this loop, whereas vm_result.call_id_stack is bottom-to-top #}
 				{% let call_id = vm_result.call_id_stack[vm_result.call_id_stack.len() - loop.index] %}
 				{% let hdr = frame.header() %}
-				<div class="grid grid-cols-2 gap-x-2 text-sm my-2">
+				<div class="grid grid-cols-[2cm_1fr] gap-x-2 text-sm my-2">
 					<div class='text-right'>Call ID:</div>
 					<div>{{ call_id.0 }}</div>
 
