@@ -118,8 +118,60 @@ async fn handle_get_core_dump(
 
     struct HistoryItemView {
         left_padding: String,
-        instr: String,
+        parts: Vec<InstrPartView>,
     }
+    enum InstrPartView {
+        Opcode(&'static str),
+        Read(bytecode::VReg),
+        Write(bytecode::VReg),
+        Other(String),
+    }
+    struct InstrPartCollector(Vec<InstrPartView>);
+    impl bytecode::InstrAnalyzer for InstrPartCollector {
+        fn start(&mut self, opcode_name: &'static str) {
+            self.0.push(InstrPartView::Opcode(opcode_name))
+        }
+
+        fn read_vreg(&mut self, vreg: bytecode::VReg) {
+            self.0.push(InstrPartView::Read(vreg))
+        }
+
+        fn write_vreg(&mut self, vreg: bytecode::VReg) {
+            
+            self.0.push(InstrPartView::Write(vreg))
+        }
+
+        fn jump_target(&mut self, iid: IID) {
+            self.0.push(InstrPartView::Other(format!("j{}", iid.0)))
+        }
+
+        fn load_const(&mut self, item: bytecode::ConstIndex) {
+            self.0.push(InstrPartView::Other(format!("{:?}", item)))
+        }
+
+        fn load_null(&mut self) {
+            self.0.push(InstrPartView::Other("null".to_owned()))
+        }
+
+        fn load_undefined(&mut self) {
+            self.0.push(InstrPartView::Other("undefined".to_owned()))
+        }
+
+        fn load_capture(&mut self, item: bytecode::CaptureIndex) {
+            self.0.push(InstrPartView::Other(format!("{:?}", item)))
+        }
+
+        fn load_arg(&mut self, item: bytecode::ArgIndex) {
+            self.0.push(InstrPartView::Other(format!("{:?}", item)))
+        }
+
+        fn load_this(&mut self) {
+            self.0.push(InstrPartView::Other("this".to_owned()))
+        }
+
+        fn end(&mut self, _instr: &bytecode::Instr) { }
+    }
+
     let instr_history = vm_result
         .instr_history
         .iter()
@@ -127,9 +179,13 @@ async fn handle_get_core_dump(
             let EternalIID(_, GlobalIID(fnid, iid)) = item.eiid;
             let func = state.codebase.get_function(fnid).unwrap();
             let instr = &func.instrs()[iid.0 as usize];
+
+            let mut collector = InstrPartCollector(Vec::new());
+            instr.analyze(&mut collector);
+
             HistoryItemView {
                 left_padding: format!("{}cm", item.stack_depth),
-                instr: format!("{:?}", instr),
+                parts: collector.0,
             }
         })
         .collect();

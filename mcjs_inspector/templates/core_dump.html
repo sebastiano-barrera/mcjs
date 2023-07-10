@@ -16,11 +16,33 @@
 
 		<div class="overflow-y-scroll overflow-x-scroll text-sm">
 			<table>
-				<tbody class="divide-y dark:divide-slate-600 bg-white text-slate-800 dark:bg-transparent dark:text-white">
-					{% for item in instr_history %}
-					<tr "hover:bg-slate-100 hover:dark:bg-slate-800"> 
+				<tbody class="divide-y dark:divide-slate-600 bg-white text-slate-800 dark:bg-transparent dark:text-white cursor-default">
+					{% for instr in instr_history %}
+					<tr class="hover:bg-slate-100 hover:dark:bg-slate-800"> 
 						<td>-</td>
-						<td style="padding-left: {{ item.left_padding }}">{{ item.instr }}</td>
+						<td style="padding-left: {{ instr.left_padding }}">
+
+							{% for part in instr.parts %}
+							{% match part %}
+							{% when InstrPartView::Opcode with (name) %}
+							<span>{{name}}</span>
+
+							{% when InstrPartView::Read with (vreg) %}
+							<div class='ring-1 inline-block cursor-pointer value read' data-mcjs-value='v{{vreg.0}}'>
+								r{{vreg.0}}
+							</div>
+
+							{% when InstrPartView::Write with (vreg) %}
+							<div class='ring-1 inline-block cursor-pointer value write' data-mcjs-value='v{{vreg.0}}'>
+								w{{vreg.0}}
+							</div>
+
+							{% when InstrPartView::Other with (str) %}
+							<span>{{str}}</span>
+							{% endmatch %}
+							{% endfor %}
+
+						</td>
 					</tr>
 					{% endfor %}
 				</tbody>

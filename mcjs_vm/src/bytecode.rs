@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+use strum::IntoStaticStr;
 use swc_atoms::JsWord;
 
 // Instruction ID. Can identify an instruction, or its result.
@@ -29,10 +30,9 @@ pub struct GlobalIID(pub FnId, pub IID);
 
 impl std::fmt::Debug for GlobalIID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "f{}:i{}", self.0.0, self.1.0)
+        write!(f, "f{}:i{}", self.0 .0, self.1 .0)
     }
 }
-
 
 #[derive(Clone, Copy)]
 pub struct ConstIndex(pub u16);
@@ -74,7 +74,7 @@ impl std::fmt::Debug for VReg {
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ModuleId(pub u16);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, IntoStaticStr)]
 pub enum Instr {
     Nop,
     /// Load constant in accu
@@ -137,7 +137,11 @@ pub enum Instr {
     },
     CallArg(VReg),
 
-    ClosureNew{ dest: VReg, fnid: FnId, forced_this: Option<VReg> },
+    ClosureNew {
+        dest: VReg,
+        fnid: FnId,
+        forced_this: Option<VReg>,
+    },
     ClosureAddCapture(VReg),
 
     ObjCreateEmpty(VReg),
@@ -217,6 +221,95 @@ impl Instr {
 }
 
 type Operands = crate::util::LimVec<{ Instr::MAX_OPERANDS }, VReg>;
+
+pub trait InstrAnalyzer {
+    fn start(&mut self, opcode_name: &'static str);
+    fn read_vreg(&mut self, vreg: VReg);
+    fn write_vreg(&mut self, vreg: VReg);
+    fn jump_target(&mut self, iid: IID);
+    fn load_const(&mut self, item: ConstIndex);
+    fn load_null(&mut self);
+    fn load_undefined(&mut self);
+    fn load_capture(&mut self, item: CaptureIndex);
+    fn load_arg(&mut self, item: ArgIndex);
+    fn load_this(&mut self);
+    fn end(&mut self, instr: &Instr);
+}
+
+impl Instr {
+    pub fn analyze<A: InstrAnalyzer>(&self, an: &mut A) {
+        use std::convert::AsRef;
+
+        let opcode: &'static str = self.into();
+        an.start(opcode);
+
+        #[rustfmt::skip]
+        match self {
+            Instr::Nop => {}
+            Instr::LoadConst(dest, constndx) => { an.write_vreg(*dest); an.load_const(*constndx); }
+            Instr::LoadNull(dest) => { an.write_vreg(*dest); an.load_null(); }
+            Instr::LoadUndefined(dest) => { an.write_vreg(*dest); an.load_undefined(); }
+            Instr::LoadCapture(dest, capndx) => { an.write_vreg(*dest); an.load_capture(*capndx); },
+            Instr::LoadArg(dest, argndx) => { an.write_vreg(*dest); an.load_arg(*argndx); },
+            Instr::LoadThis(dest) => { an.write_vreg(*dest); an.load_this(); },
+            Instr::Copy { dst, src } => { an.write_vreg(*dst); an.read_vreg(*src); },
+            Instr::GetGlobal { dest, key } => { an.write_vreg(*dest); an.read_vreg(*key); },
+            Instr::BoolNot { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
+            Instr::UnaryMinus { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
+            Instr::ArithAdd(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::ArithSub(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::ArithMul(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::ArithDiv(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::ArithInc(dest, arg) => { an.write_vreg(*dest); an.read_vreg(*arg); },
+            Instr::ArithDec(dest, arg) => { an.write_vreg(*dest); an.read_vreg(*arg); },
+            Instr::CmpGE(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::CmpGT(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::CmpLT(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::CmpLE(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::CmpEQ(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::CmpNE(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::BoolOpAnd(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::BoolOpOr(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::IsInstanceOf(dst, obj, super_) => { an.write_vreg(*dst); an.read_vreg(*obj); an.read_vreg(*super_); },
+            Instr::JmpIf { cond, dest } => { an.read_vreg(*cond); an.jump_target(*dest); },
+            Instr::Jmp(dest) => { an.jump_target(*dest); }
+            Instr::PushToSink(arg) => { an.read_vreg(*arg); },
+            Instr::Return(arg) => { an.read_vreg(*arg); },
+            Instr::Call {
+                return_value,
+                this,
+                callee,
+            } => { an.write_vreg(*return_value); an.read_vreg(*this); an.read_vreg(*callee); }
+            Instr::CallArg(arg) => { an.read_vreg(*arg); },
+            Instr::ClosureNew {
+                dest,
+                fnid,
+                forced_this,
+            } => { an.write_vreg(*dest);  },
+            Instr::ClosureAddCapture(arg) => { an.read_vreg(*arg); },
+            Instr::ObjCreateEmpty(dest) => { an.write_vreg(*dest); },
+            Instr::ObjSet { obj, key, value } => { an.read_vreg(*obj); an.read_vreg(*key); an.read_vreg(*value); }
+            Instr::ObjGet { dest, obj, key } => { an.write_vreg(*dest); an.read_vreg(*obj); an.read_vreg(*key); }
+            Instr::ObjGetKeys { dest, obj } => { an.write_vreg(*dest); an.read_vreg(*obj); }
+            Instr::ObjDelete { dest, obj, key } => { an.write_vreg(*dest); an.read_vreg(*obj); an.read_vreg(*key); }
+            Instr::ArrayPush { arr, value } => { an.read_vreg(*arr); an.read_vreg(*value); }
+            Instr::ArrayNth { dest, arr, index } => { an.write_vreg(*dest); an.read_vreg(*arr); an.read_vreg(*index); }
+            Instr::ArraySetNth { arr, index, value } => { an.read_vreg(*arr); an.read_vreg(*index); an.read_vreg(*value); }
+            Instr::ArrayLen { dest, arr } => { an.write_vreg(*dest); an.read_vreg(*arr); }
+            Instr::StrCreateEmpty(dest) => { an.write_vreg(*dest); }
+            Instr::StrAppend(recipient, src) => { an.read_vreg(*recipient); an.read_vreg(*src); }
+            Instr::NewIterator { dest, obj } => { an.write_vreg(*dest); an.read_vreg(*obj); }
+            Instr::IteratorGetCurrent { dest, iter } => { an.write_vreg(*dest); an.read_vreg(*iter); }
+            Instr::IteratorAdvance { iter } => { an.read_vreg(*iter); },
+            Instr::JmpIfIteratorFinished { iter, dest } => { an.read_vreg(*iter); an.jump_target(*dest); }
+            Instr::TypeOf { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); }
+            Instr::GetModule(dest, _) => { an.write_vreg(*dest); }
+            Instr::Throw(arg) => { an.read_vreg(*arg); }
+        };
+
+        an.end(self)
+    }
+}
 
 /// A value literal that is allowed to appear in the bytecode.
 #[derive(Debug, PartialEq, Clone)]
