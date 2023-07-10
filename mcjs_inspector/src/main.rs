@@ -118,6 +118,7 @@ async fn handle_get_core_dump(
 
     struct HistoryItemView {
         left_padding: String,
+        call_id: CallID,
         parts: Vec<InstrPartView>,
     }
     enum InstrPartView {
@@ -176,7 +177,7 @@ async fn handle_get_core_dump(
         .instr_history
         .iter()
         .map(|item| {
-            let EternalIID(_, GlobalIID(fnid, iid)) = item.eiid;
+            let EternalIID(call_id, GlobalIID(fnid, iid)) = item.eiid;
             let func = state.codebase.get_function(fnid).unwrap();
             let instr = &func.instrs()[iid.0 as usize];
 
@@ -185,6 +186,7 @@ async fn handle_get_core_dump(
 
             HistoryItemView {
                 left_padding: format!("{}cm", item.stack_depth),
+                call_id,
                 parts: collector.0,
             }
         })
@@ -354,6 +356,7 @@ struct RunParams {
 }
 struct VMResult {
     instr_history: Vec<HistoryItem>,
+    call_id_stack: Vec<CallID>,
     error_messages: Vec<String>,
     core_dump: Option<CoreDump>,
     run_params: RunParams,
@@ -427,6 +430,7 @@ fn run_vm(run_params: RunParams) -> VMResult {
         Ok(_) => VMResult {
             instr_history: Vec::new(),
             error_messages: Vec::new(),
+            call_id_stack: Vec::new(),
             core_dump: None,
             run_params,
         },
@@ -438,6 +442,7 @@ fn run_vm(run_params: RunParams) -> VMResult {
             // conversion to retain as much useful info as we can.
             VMResult {
                 instr_history,
+                call_id_stack,
                 error_messages: intrp_err.error.messages().collect(),
                 core_dump: intrp_err.core_dump,
                 run_params,
