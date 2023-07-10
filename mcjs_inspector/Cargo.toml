@@ -19,3 +19,5 @@ askama = "0.12.0"
 serde = "1.0"   # { version = "1.0", features = ["derive"] }
 listenfd = "1.0.1"
 
+[profile.dev.package.askama_derive]
+opt-level = 3
