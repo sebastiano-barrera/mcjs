@@ -61,7 +61,7 @@ async fn main() -> std::io::Result<()> {
         let serve_dir = actix_files::Files::new("/assets", "data/assets");
         App::new()
             .service(handle_get_core_dump)
-            .service(handle_patch_core_dump)
+            .service(handle_add_vreg_watch)
             .service(handle_start)
             .service(handle_root_page)
             .service(serve_dir)
@@ -117,95 +117,27 @@ async fn handle_get_core_dump(
     let vm_result = sessions.get(sid)?;
     let case = &state.case.case;
 
-    struct HistoryItemView {
-        left_padding: String,
-        call_id: CallID,
-        parts: Vec<InstrPartView>,
-    }
-    enum InstrPartView {
-        Opcode(&'static str),
-        Read(bytecode::VReg),
-        Write(bytecode::VReg),
-        Other(String),
-    }
-    struct InstrPartCollector(Vec<InstrPartView>);
-    impl bytecode::InstrAnalyzer for InstrPartCollector {
-        fn start(&mut self, opcode_name: &'static str) {
-            self.0.push(InstrPartView::Opcode(opcode_name))
-        }
-
-        fn read_vreg(&mut self, vreg: bytecode::VReg) {
-            self.0.push(InstrPartView::Read(vreg))
-        }
-
-        fn write_vreg(&mut self, vreg: bytecode::VReg) {
-            self.0.push(InstrPartView::Write(vreg))
-        }
-
-        fn jump_target(&mut self, iid: IID) {
-            self.0.push(InstrPartView::Other(format!("j{}", iid.0)))
-        }
-
-        fn load_const(&mut self, item: bytecode::ConstIndex) {
-            self.0.push(InstrPartView::Other(format!("{:?}", item)))
-        }
-
-        fn load_null(&mut self) {
-            self.0.push(InstrPartView::Other("null".to_owned()))
-        }
-
-        fn load_undefined(&mut self) {
-            self.0.push(InstrPartView::Other("undefined".to_owned()))
-        }
-
-        fn load_capture(&mut self, item: bytecode::CaptureIndex) {
-            self.0.push(InstrPartView::Other(format!("{:?}", item)))
-        }
-
-        fn load_arg(&mut self, item: bytecode::ArgIndex) {
-            self.0.push(InstrPartView::Other(format!("{:?}", item)))
-        }
-
-        fn load_this(&mut self) {
-            self.0.push(InstrPartView::Other("this".to_owned()))
-        }
-
-        fn end(&mut self, _instr: &bytecode::Instr) {}
-    }
-
-    let instr_history = vm_result
-        .instr_history
-        .iter()
-        .map(|item| {
-            let EternalIID(call_id, GlobalIID(fnid, iid)) = item.eiid;
-            let func = state.codebase.get_function(fnid).unwrap();
-            let instr = &func.instrs()[iid.0 as usize];
-
-            let mut collector = InstrPartCollector(Vec::new());
-            instr.analyze(&mut collector);
-
-            HistoryItemView {
-                left_padding: format!("{}cm", item.stack_depth),
-                call_id,
-                parts: collector.0,
-            }
-        })
-        .collect();
+    use view_model::InstrPartView;
 
     #[derive(Template)]
     #[template(path = "core_dump.html")]
     struct CoreDumpTemplate<'a> {
         case: &'a mcjs_vm::inspector_case::Case,
         vm_result: &'a VMResult,
-        instr_history: Vec<HistoryItemView>,
+        instr_history: Vec<view_model::HistoryItemView>,
         watches: &'a Vec<Watch>,
+        watch_values: Vec<view_model::ValueView>,
     }
 
     let html = CoreDumpTemplate {
         case,
         vm_result,
-        instr_history,
+        instr_history: view_model::translate_instr_history(
+            &vm_result.instr_history,
+            &state.codebase,
+        ),
         watches: &state.watches,
+        watch_values: view_model::translate_watch_values(&vm_result, &state.watches),
     }
     .render()
     .unwrap();
@@ -221,8 +153,8 @@ struct AddVRegWatchPayload {
     vreg: u8,
 }
 
-#[actix_web::post("/sessions/{sid}/core_dump/add-watch")]
-async fn handle_patch_core_dump(
+#[actix_web::post("/sessions/{sid}/core_dump/add-vreg-watch")]
+async fn handle_add_vreg_watch(
     state: web::Data<StateHandle>,
     path: web::Path<SessionID>,
     form: web::Form<AddVRegWatchPayload>,
@@ -247,6 +179,176 @@ fn open_case(case_file_path: &std::path::Path) -> Result<inspector_case::Case> {
     let case: inspector_case::Case = rmp_serde::from_read(&mut f)
         .with_context(|| format!("decoding case file: {}", case_file_path.display()))?;
     Ok(case)
+}
+
+mod view_model {
+    use std::collections::HashMap;
+
+    use crate::EternalIID;
+    use crate::VMResult;
+
+    use super::CallID;
+    use super::EternalVReg;
+    use mcjs_vm::bytecode;
+    use mcjs_vm::GlobalIID;
+    use mcjs_vm::IID;
+
+    pub(crate) struct HistoryItemView {
+        pub(crate) left_padding: String,
+        pub(crate) call_id: CallID,
+        pub(crate) parts: Vec<InstrPartView>,
+    }
+
+    pub(crate) enum InstrPartView {
+        Opcode(&'static str),
+        Read(bytecode::VReg),
+        Write(bytecode::VReg),
+        Other(String),
+    }
+
+    pub(crate) fn translate_instr_history(
+        instr_history: &[crate::HistoryItem],
+        codebase: &mcjs_vm::Codebase,
+    ) -> Vec<HistoryItemView> {
+        struct InstrPartCollector(Vec<InstrPartView>);
+
+        impl bytecode::InstrAnalyzer for InstrPartCollector {
+            fn start(&mut self, opcode_name: &'static str) {
+                self.0.push(InstrPartView::Opcode(opcode_name))
+            }
+            fn read_vreg(&mut self, vreg: bytecode::VReg) {
+                self.0.push(InstrPartView::Read(vreg))
+            }
+            fn write_vreg(&mut self, vreg: bytecode::VReg) {
+                self.0.push(InstrPartView::Write(vreg))
+            }
+            fn jump_target(&mut self, iid: IID) {
+                self.0.push(InstrPartView::Other(format!("j{}", iid.0)))
+            }
+            fn load_const(&mut self, item: bytecode::ConstIndex) {
+                self.0.push(InstrPartView::Other(format!("{:?}", item)))
+            }
+            fn load_null(&mut self) {
+                self.0.push(InstrPartView::Other("null".to_owned()))
+            }
+            fn load_undefined(&mut self) {
+                self.0.push(InstrPartView::Other("undefined".to_owned()))
+            }
+            fn load_capture(&mut self, item: bytecode::CaptureIndex) {
+                self.0.push(InstrPartView::Other(format!("{:?}", item)))
+            }
+            fn load_arg(&mut self, item: bytecode::ArgIndex) {
+                self.0.push(InstrPartView::Other(format!("{:?}", item)))
+            }
+            fn load_this(&mut self) {
+                self.0.push(InstrPartView::Other("this".to_owned()))
+            }
+            fn end(&mut self, _instr: &bytecode::Instr) {}
+        }
+
+        instr_history
+            .iter()
+            .map(|item| {
+                let EternalIID(call_id, GlobalIID(fnid, iid)) = item.eiid;
+                let func = codebase.get_function(fnid).unwrap();
+                let instr = &func.instrs()[iid.0 as usize];
+
+                let mut collector = InstrPartCollector(Vec::new());
+                instr.analyze(&mut collector);
+
+                HistoryItemView {
+                    left_padding: format!("{}cm", item.stack_depth),
+                    call_id,
+                    parts: collector.0,
+                }
+            })
+            .collect()
+    }
+
+    #[derive(Debug)]
+    pub(crate) enum ValueView {
+        Literal(bytecode::Literal),
+        Object(HashMap<String, Box<ValueView>>),
+        String(String),
+        Closure(bytecode::FnId),
+        Past,
+    }
+
+    pub(crate) fn translate_watch_values(
+        vm_result: &VMResult,
+        watches: &[super::Watch],
+    ) -> Vec<ValueView> {
+        let mut value_views = Vec::new();
+
+        let core_dump = vm_result.core_dump.as_ref().unwrap();
+        let stack_frames = core_dump.data.frames();
+        let heap = &core_dump.heap;
+
+        for watch in watches {
+            match watch {
+                crate::Watch::VReg(EternalVReg(call_id, vreg)) => {
+                    let frame_ndx = vm_result
+                        .call_id_stack
+                        .iter()
+                        .rev()
+                        .enumerate()
+                        .find_map(|(ndx, x)| if x == call_id { Some(ndx) } else { None });
+
+                    let view = if let Some(frame_ndx) = frame_ndx {
+                        let value = stack_frames[frame_ndx].get_result(*vreg);
+                        view_value(value, heap)
+                    } else {
+                        ValueView::Past
+                    };
+
+                    value_views.push(view);
+                }
+            }
+        }
+
+        value_views
+    }
+
+    fn view_value(value: mcjs_vm::InterpreterValue, heap: &mcjs_vm::heap::ObjectHeap) -> ValueView {
+        use mcjs_vm::InterpreterValue;
+        match value {
+            InterpreterValue::Number(n) => ValueView::Literal(bytecode::Literal::Number(n)),
+            InterpreterValue::Bool(b) => ValueView::Literal(bytecode::Literal::Bool(b)),
+            InterpreterValue::Null => ValueView::Literal(bytecode::Literal::Null),
+            InterpreterValue::Undefined => ValueView::Literal(bytecode::Literal::Undefined),
+            InterpreterValue::SelfFunction => ValueView::Literal(bytecode::Literal::SelfFunction),
+
+            InterpreterValue::Object(obj_id) => {
+                if let Some(string) = heap.get_string(obj_id) {
+                    ValueView::String(string.to_owned())
+                } else {
+                    let mut obj_view = HashMap::new();
+
+                    for arr_ndx in 0..heap.array_len(obj_id) {
+                        let value = heap.array_nth(obj_id, arr_ndx).unwrap();
+                        let view = view_value(value, heap);
+                        obj_view.insert(format!("[{}]", arr_ndx), Box::new(view));
+                    }
+
+                    use mcjs_vm::heap::{ObjectKey, PropertyKey};
+                    for PropertyKey::String(pkstr) in heap.get_properties(obj_id) {
+                        // TODO This .clone() shouldn't be there, but the change is more complex than I
+                        // have patience for right now
+                        let key = ObjectKey::Property(PropertyKey::String(pkstr.clone()));
+                        let value = heap.get_property(obj_id, &key).unwrap();
+                        let view = view_value(value, heap);
+                        obj_view.insert(pkstr.clone(), Box::new(view));
+                    }
+
+                    ValueView::Object(obj_view)
+                }
+            }
+
+            InterpreterValue::Internal(_) => {
+                unreachable!("goddamit, when ever are you going to remove this enum variant")
+            }
+        }
+    }
 }
 
 struct CaseData {
@@ -288,7 +390,6 @@ struct RootState {
     breakpoints: Vec<Breakpoint>,
     watches: Vec<Watch>,
     codebase: Arc<mcjs_vm::Codebase>,
-    selection: Cell<Selection>,
     root_mod_id: mcjs_vm::ModuleId,
 
     session_mgr: Mutex<SessionMgr>,
@@ -321,7 +422,6 @@ impl RootState {
 
         RootState {
             codebase,
-            selection: Cell::new(Selection::None),
             watches: Vec::new(),
             breakpoints: vec![Breakpoint(GlobalIID(FnId(70), IID(6)))],
             case,
@@ -374,13 +474,6 @@ impl SessionMgr {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Selection {
-    None,
-    VReg(EternalVReg),
-    IID(EternalIID),
-}
-
 struct CaseDetailsModel<'a>(PhantomData<&'a CaseData>);
 
 struct RunParams {
@@ -399,18 +492,6 @@ struct VMResult {
 struct HistoryItem {
     stack_depth: usize,
     eiid: EternalIID,
-}
-
-struct StackFrameView {
-    call_id: CallID,
-    header: mcjs_vm::stack_access::FrameHeader,
-    items: Vec<StackSlotView>,
-}
-struct StackSlotView {
-    label_opt: Option<&'static str>,
-    val_ndx: String,
-    val_str: String,
-    slot_selection: Option<Selection>,
 }
 
 #[derive(Clone)]

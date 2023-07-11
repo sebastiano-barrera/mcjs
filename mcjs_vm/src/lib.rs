@@ -9,9 +9,9 @@ mod bytecode_compiler;
 mod common;
 mod interpreter;
 // mod jit;
-mod heap;
 mod util;
 
+// TODO is there a better way to set visibility based on the presence of a feature? 
 #[cfg(not(feature = "inspection"))]
 mod stack_access;
 #[cfg(feature = "inspection")]
@@ -21,6 +21,11 @@ pub mod stack_access;
 mod stack;
 #[cfg(feature = "inspection")]
 pub mod stack;
+
+#[cfg(not(feature = "inspection"))]
+mod heap;
+#[cfg(feature = "inspection")]
+pub mod heap;
 
 pub use bytecode::{Codebase, ModuleId, Literal, IID, FnId, GlobalIID};
 pub use bytecode_compiler::{BuilderParams, Loader};

@@ -126,23 +126,28 @@ impl ObjectHeap {
     //
     // There has to be a better way, but it probably involves writing my own HashMap, and I'm
     // not about that right now
-    pub(crate) fn get_keys_as_array(&mut self, oid: ObjectId) -> ObjectId {
+    pub fn get_keys_as_array(&mut self, oid: ObjectId) -> ObjectId {
         let obj = self.objects.get(oid).unwrap();
 
         let mut ret = Object::new();
         ret.array_items = obj
-            .get_keys()
+            .keys()
             .into_iter()
             .map(|key| match key {
                 ObjectKey::ArrayIndex(ndx) => Value::Number(ndx as f64),
                 ObjectKey::Property(PropertyKey::String(name)) => {
-                    let oid = self.new_string(name.clone());
+                    let oid = self.new_string(name);
                     Value::Object(oid)
                 }
             })
             .collect();
 
         self.objects.insert(ret)
+    }
+
+    pub fn get_properties(&self, oid: ObjectId) -> impl ExactSizeIterator<Item = &PropertyKey> {
+        let obj = self.objects.get(oid).unwrap();
+        obj.properties()
     }
 
     pub fn array_len(&self, oid: ObjectId) -> usize {
@@ -251,16 +256,20 @@ impl Object {
         self.array_items.get(ndx)
     }
 
-    fn get_keys(&self) -> Vec<ObjectKey> {
-        (0..self.array_items.len())
-            .into_iter()
+    fn keys(&self) -> Vec<ObjectKey> {
+        self.indices()
             .map(|ndx| ObjectKey::ArrayIndex(ndx))
             .chain(
-                self.properties
-                    .keys()
+                self.properties()
                     .map(|pkey| ObjectKey::Property(pkey.clone())),
             )
             .collect()
+    }
+    fn indices(&self) -> impl ExactSizeIterator<Item = usize> {
+        (0..self.array_items.len()).into_iter()
+    }
+    fn properties(&self) -> impl ExactSizeIterator<Item = &PropertyKey> {
+        self.properties.keys()
     }
 
     fn delete_arr_element(&mut self, ndx: usize) -> Option<Value> {

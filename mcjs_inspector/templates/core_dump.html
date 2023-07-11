@@ -27,14 +27,14 @@
 									<span>{{name}}</span>
 
 								{% when InstrPartView::Read with (vreg) %}
-									<form method="POST" action="core_dump/add-watch" class="inline">
+									<form method="POST" action="core_dump/add-vreg-watch" class="inline">
 										<input type="hidden" name="call_id" value="{{instr.call_id.0}}">
 										<input type="hidden" name="vreg" value="{{vreg.0}}">
 										<button class='group inline-block px-1 cursor-pointer value
 													[&.highlighted]:bg-sky-500
 													[&.highlighted]:text-white' 
 												data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'
-												hx-post="core_dump/add-watch" 
+												hx-post="core_dump/add-vreg-watch" 
 												hx-target="#watches"
 												hx-select="#watches"
 												hx-swap="outerHTML"
@@ -80,7 +80,7 @@
 							{% for watch in watches %}
 								{% match watch %}
 								{% when Watch::VReg with (evreg) %}
-									<li>call{{evreg.0.0}} v{{evreg.1.0}}</li>
+									<li>call{{evreg.0.0}} v{{evreg.1.0}} = {{ "{:?}"|format(watch_values[loop.index0]) }}</li>
 								{% endmatch %}
 							{% endfor %}
 						</ul>
