@@ -1,44 +1,54 @@
 
+class ScrollIntoViewInteraction {
+    constructor(scrollArea) {
+        this.scrollArea = scrollArea
+        this.savedTop = null
+        this.timeout = null
+    }
+
+    scrollTo(child) {
+        if (this.savedTop === null) {
+            this.savedTop = this.scrollArea.scrollTop
+        }
+        if (this.timeout !== null) {
+            clearTimeout(this.timeout)
+            this.timeout = null
+        }
+
+        child.scrollIntoView({
+            block: 'center',
+            behavior: 'smooth',
+        })
+    }
+
+    resetLater() {
+        if (this.timeout !== null)
+            clearTimeout(this.timeout)
+
+        this.timeout = setTimeout(() => {
+            this.scrollArea.scrollTo({
+                top: this.savedTop,
+                behavior: 'smooth',
+            })
+            this.timeout = null
+            this.savedTop = null
+        }, 1000)
+    }
+}
+
 document.body.addEventListener('htmx:load', (evt) => {
     const valueElements = document.getElementsByClassName('value')
 
     const stack = {
         scrollArea: document.getElementById('stack-scroll-area'),
         elementOfValue: new Map(),
-        restoreScroll: {
-            top: null,
-            timeoutId: null,
-        },
-
-        scrollTo(child) {
-            if (this.restoreScroll.timeoutId !== null)
-                clearTimeout(this.restoreScroll.timeoutId);
-            this.restoreScroll.top = this.scrollArea.scrollTop
-            child.scrollIntoView({
-                block: 'center',
-                behavior: 'smooth'
-            })
-        },
-
-        unlockScroll() {
-            if (this.restoreScroll.timeoutId !== null) {
-                clearTimeout(this.restoreScroll.timeoutId)
-                this.restoreScroll.timeoutId = null
-            }
-
-            this.restoreScroll.timeoutId = setTimeout(() => {
-                stack.scrollArea.scrollTo({
-                    top: stack.restoreScrollTop,
-                    behavior: 'smooth'
-                })
-                stack.restoreScrollTop = null
-            }, 1000)
-        },
     }
     for (const elm of stack.scrollArea.getElementsByClassName('value')) {
         const valueId = elm.dataset.mcjsValue
         stack.elementOfValue.set(valueId, elm)
     }
+
+    const scrollIntoView = new ScrollIntoViewInteraction(stack.scrollArea)
 
     function setHighlighted(valueId) {
         if (typeof valueId === 'string') {
@@ -63,12 +73,12 @@ document.body.addEventListener('htmx:load', (evt) => {
             if (!stack.scrollArea.contains(event.target)) {
                 const stackElement = stack.elementOfValue.get(valueId)
                 if (stackElement !== undefined)
-                    stack.scrollTo(stackElement)
+                    scrollIntoView.scrollTo(stackElement)
             }
         }
         element.onmouseleave = () => {
             setHighlighted(null)
-            stack.unlockScroll()
+            scrollIntoView.resetLater()
         }
     }
 

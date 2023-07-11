@@ -120,8 +120,10 @@
 						{% endfor %}
 
 						{% for item in frame.results() %}
-						<div class="text-xs text-right value read" data-mcjs-value="call{{ call_id.0 }}-v{{ loop.index0 }}">
-							Result <span class="font-mono">{{loop.index0}}</span>
+						<div
+								class="text-xs text-right value read [&.highlighted]:bg-sky-500"
+								data-mcjs-value="call{{ call_id.0 }}-v{{ loop.index0 }}">
+							⬥Result <span class="font-mono">{{loop.index0}}</span>
 						</div>
 						<div class="text-xs">{{ "{:?}"|format(item) }}</div>
 						{% endfor %}
