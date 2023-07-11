@@ -1,6 +1,5 @@
 
-
-addEventListener('DOMContentLoaded', (event) => {
+document.body.addEventListener('htmx:load', (evt) => {
     const valueElements = document.getElementsByClassName('value')
 
     const stack = {
@@ -26,7 +25,7 @@ addEventListener('DOMContentLoaded', (event) => {
                 clearTimeout(this.restoreScroll.timeoutId)
                 this.restoreScroll.timeoutId = null
             }
-            
+
             this.restoreScroll.timeoutId = setTimeout(() => {
                 stack.scrollArea.scrollTo({
                     top: stack.restoreScrollTop,
