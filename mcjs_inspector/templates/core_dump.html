@@ -88,12 +88,40 @@
 				</div>
 			</div>
 
-			<div id="stack-scroll-area" class="overflow-x-scroll divide-y px-4 py-2">
+			<div id="stack-scroll-area" class="relative overflow-y-scroll px-4 py-2">
+
+				{#  -- Warning toast for calls that have already returned #}
+				<div id='toast-past-call' class="fixed hidden">
+					<div class="m-auto px-4 bg-black ring-1 ring-zinc-700 rounded-full">
+						<span class="text-amber-400">❖</span>
+						This call has already returned.
+						<span class="text-rose-500">⸺</span>
+					</div>
+
+				</div>
+
+				{#  -- Frame visibility indicators #}
+				<div class="fixed right-0 m-2">
+					{% for frame in core_dump.data.frames() %}
+						<div
+							class="m-1 px-2 rounded-xs bg-zinc-500 text-white cursor-pointer 
+								script/visibility-indicator [&.target-visible]:bg-teal-500"
+							data-visibility-target="stack-frame-{{loop.index0}}"
+						>
+							F{{loop.index0}}
+						</div>
+					{% endfor %}
+				</div>
+
+
 				{% for frame in core_dump.data.frames() %}
 					{# Frames are visited top-to-bottom by this loop, whereas vm_result.call_id_stack is bottom-to-top #}
 					{% let call_id = vm_result.call_id_stack[vm_result.call_id_stack.len() - loop.index] %}
 					{% let hdr = frame.header() %}
-					<div class="grid grid-cols-[2cm_1fr] gap-x-2 text-sm my-2">
+					<div
+						id="stack-frame-{{loop.index0}}" 
+						class="grid grid-cols-[2cm_1fr] gap-x-2 text-sm my-2 border-b"
+					>
 						<div class='text-right'>Call ID:</div>
 						<div>{{ call_id.0 }}</div>
 

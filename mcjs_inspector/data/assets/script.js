@@ -1,4 +1,11 @@
 
+function isElementVisible(elm) {
+    // Liberally inspired by https://stackoverflow.com/a/5354536
+    const rect = elm.getBoundingClientRect();
+    const viewHeight = Math.max(document.documentElement.clientHeight, window.innerHeight);
+    return !(rect.bottom < 0 || rect.top >= viewHeight);
+}
+
 class ScrollIntoViewInteraction {
     constructor(scrollArea) {
         this.scrollArea = scrollArea
@@ -22,6 +29,8 @@ class ScrollIntoViewInteraction {
     }
 
     resetLater() {
+        if (this.savedTop === null)
+            return;
         if (this.timeout !== null)
             clearTimeout(this.timeout)
 
@@ -32,7 +41,35 @@ class ScrollIntoViewInteraction {
             })
             this.timeout = null
             this.savedTop = null
-        }, 1000)
+        }, 250)
+    }
+}
+
+class VisibilityIndicator {
+    constructor(element) {
+        this.element = element
+    }
+
+    init() {
+        this.element.addEventListener('click', () => {
+            this.target.scrollIntoView({ behavior: 'smooth' })
+        })
+        this.update()
+    }
+
+    get target() {
+        const targetId = this.element.dataset.visibilityTarget
+        return document.getElementById(targetId)
+    }
+
+    update() {
+        const target = this.target
+        if (typeof target === 'object') {
+            if (isElementVisible(target))
+                this.element.classList.add('target-visible');
+            else
+                this.element.classList.remove('target-visible');
+        }
     }
 }
 
@@ -48,16 +85,41 @@ document.body.addEventListener('htmx:load', (evt) => {
         stack.elementOfValue.set(valueId, elm)
     }
 
+    const indicators = []
+    for (const elm of document.getElementsByClassName('script/visibility-indicator')) {
+        const visind = new VisibilityIndicator(elm)
+        visind.init()
+        indicators.push(visind)
+    }
+
+    stack.scrollArea.onscroll = () => {
+        for (const visind of indicators)
+            visind.update()
+    }
+
     const scrollIntoView = new ScrollIntoViewInteraction(stack.scrollArea)
 
     function setHighlighted(valueId) {
+        const toast = document.getElementById('toast-past-call')
+        toast.classList.add('hidden')
+
         if (typeof valueId === 'string') {
-            for (const elm of valueElements)
-                if (elm.dataset.mcjsValue === valueId)
+            let valuePresent = false
+            for (const elm of valueElements) {
+                if (elm.dataset.mcjsValue === valueId) {
                     elm.classList.add('highlighted')
+                    if (stack.scrollArea.contains(elm))
+                        valuePresent = true
+                }
+            }
+
+            if (!valuePresent) {
+                toast.classList.remove('hidden')
+            }
         } else {
-            for (const elm of valueElements)
+            for (const elm of valueElements) {
                 elm.classList.remove('highlighted')
+            }
         }
     }
 
