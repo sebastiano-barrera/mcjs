@@ -194,7 +194,7 @@ mod view_model {
     use mcjs_vm::IID;
 
     pub(crate) struct HistoryItemView {
-        pub(crate) left_padding: String,
+        pub(crate) stack_depth: usize,
         pub(crate) call_id: CallID,
         pub(crate) parts: Vec<InstrPartView>,
     }
@@ -257,7 +257,7 @@ mod view_model {
                 instr.analyze(&mut collector);
 
                 HistoryItemView {
-                    left_padding: format!("{}cm", item.stack_depth),
+                    stack_depth: item.stack_depth,
                     call_id,
                     parts: collector.0,
                 }

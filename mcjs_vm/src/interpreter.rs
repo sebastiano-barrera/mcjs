@@ -392,6 +392,19 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             let mut next_ndx = self.iid.0 + 1;
             drop(func);
 
+            #[cfg(feature = "inspection")]
+            if let Some(handler) = &mut self.step_handler {
+                let action = handler(&InspectorStep {
+                    giid: bytecode::GlobalIID(fnid, self.iid),
+                    intrp_data: &self.data,
+                });
+
+                match action {
+                    InspectorAction::Continue => {}
+                    InspectorAction::Fail => return Err(error!("interrupted by inspector")),
+                }
+            }
+
             #[cfg(enable_jit)]
             if let Some(tanch) = func.get_trace_anchor(self.iid) {
                 match self.flags.jit_mode {
@@ -918,18 +931,6 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 });
             }
 
-            #[cfg(feature = "inspection")]
-            if let Some(handler) = &mut self.step_handler {
-                let action = handler(&InspectorStep {
-                    giid: bytecode::GlobalIID(fnid, self.iid),
-                    intrp_data: &self.data,
-                });
-
-                match action {
-                    InspectorAction::Continue => {}
-                    InspectorAction::Fail => return Err(error!("interrupted by inspector")),
-                }
-            }
             self.iid.0 = next_ndx;
         }
 

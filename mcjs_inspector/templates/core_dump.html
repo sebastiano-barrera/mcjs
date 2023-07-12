@@ -26,7 +26,7 @@
 					C{{instr.call_id.0}}
 				</div>
 
-			        <div style="padding-left: {{ instr.left_padding }}">
+			        <div style="padding-left: calc({{ instr.stack_depth }} * 0.5cm)">
 
 			       	 {% for part in instr.parts %}
 			       		 {% match part %}
@@ -81,22 +81,24 @@
 		{% when Some with (core_dump) %}
 
 			<div id="watches" class="overflow-y-scroll scrollbar-thin inset-0">
-				<div class="">
+				<div class="grid grid-cols-[2cm_1fr] text-sm">
 					{% if watches.len() == 0 %}
-						<p class="text-zinc-500 text-xs m-4 lowercase font-normal">
+						<p class="col-span-2 text-zinc-500 text-xs m-4 lowercase font-normal">
 							No values watched yet. Click on values in the
 							instruction or stack window (e.g. "v123",
 							"ObjectId(456)") to get more details.
 						</p>
 					{% else %}
-						<ul>
-							{% for watch in watches %}
-								{% match watch %}
-								{% when Watch::VReg with (evreg) %}
-									<li>call{{evreg.0.0}} v{{evreg.1.0}} = {{ "{:?}"|format(watch_values[loop.index0]) }}</li>
-								{% endmatch %}
-							{% endfor %}
-						</ul>
+						{% for watch in watches %}
+							{% match watch %}
+							{% when Watch::VReg with (evreg) %}
+								<div class='group value cursor-default' data-mcjs-value='call{{evreg.0.0}}-v{{evreg.1.0}}'>
+									<div class='inline-block px-1 group-[&.highlighted]:bg-teal-500'>C{{evreg.0.0}}</div>
+									<div class='inline-block px-1 group-[&.highlighted]:bg-sky-800'>v{{evreg.1.0}}</div>
+								</div>
+								<div>= {{ "{:?}"|format(watch_values[loop.index0]) }}</div>
+							{% endmatch %}
+						{% endfor %}
 					{% endif %}
 				</div>
 			</div>
