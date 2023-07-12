@@ -1,76 +1,89 @@
 {% extends "index.html" %}
 
 {% macro column_header(text) %}
-	<div class="text-xl lowercase sticky px-4 py-2">
-		<span class="text-white px-1">{{text}}</span>
+	<div class="text-xl text-white lowercase sticky px-4 py-2 flex">
+		{{text}}
 	</div>
 {% endmacro %}
 
 {% block content %} 
-	<div id="content" class="grid grid-rows-[1cm_1fr] grid-cols-3 gap-x-2 inset-0 w-full h-full">
+		<div id="content" class="grid grid-rows-[1cm_1fr] grid-cols-3 gap-x-2 inset-0 w-full h-full">
 
-		{% call column_header("Code") %}
-		{% call column_header("Values") %}
-		{% call column_header("Stack") %}
+		<div class="text-xl text-white lowercase sticky px-4 py-2 flex">
+			Code
+		</div>
+		<div class="text-xl text-white lowercase sticky px-4 py-2 flex">
+			Values
+		</div>
+		<div class="text-xl text-white lowercase sticky px-4 py-2 flex">
+			Stack
+		</div>
 
-		<div class="overflow-y-scroll text-sm">
-			<table class="w-full">
-				<tbody class="divide-y dark:divide-slate-600 bg-white text-slate-800 dark:bg-transparent dark:text-white cursor-default">
-					{% for instr in instr_history %}
-					<tr class="hover:bg-slate-100 hover:dark:bg-slate-800"> 
-						<td>-</td>
-						<td style="padding-left: {{ instr.left_padding }}">
+		<div id='code' class="overflow-y-scroll scrollbar-thin text-sm divide-y dark:divide-zinc-600 cursor-default">
+			{% for instr in instr_history %}
+			<div class="hover:bg-zinc-100 hover:dark:bg-zinc-700 flex"> 
+				<div class="text-xs text-zinc-400 w-10">
+					C{{instr.call_id.0}}
+				</div>
 
-							{% for part in instr.parts %}
-								{% match part %}
-								{% when InstrPartView::Opcode with (name) %}
-									<span>{{name}}</span>
+			        <div style="padding-left: {{ instr.left_padding }}">
 
-								{% when InstrPartView::Read with (vreg) %}
-									<form method="POST" action="core_dump/add-vreg-watch" class="inline">
-										<input type="hidden" name="call_id" value="{{instr.call_id.0}}">
-										<input type="hidden" name="vreg" value="{{vreg.0}}">
-										<button class='group inline-block px-1 cursor-pointer value
-													[&.highlighted]:bg-sky-500
-													[&.highlighted]:text-white' 
-												data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'
-												hx-post="core_dump/add-vreg-watch" 
-												hx-target="#watches"
-												hx-select="#watches"
-												hx-swap="outerHTML"
-												> 
-											r{{vreg.0}}⬥
-										</button>
-									</form>
+			       	 {% for part in instr.parts %}
+			       		 {% match part %}
+			       		 {% when InstrPartView::Opcode with (name) %}
+			       			 <span>{{name}}</span>
 
-								{% when InstrPartView::Write with (vreg) %}
-									<div
-										class='group inline-block px-1 cursor-pointer value write
-											[&.highlighted]:bg-rose-800
-											[&.highlighted]:text-white'
-										data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'>
-										w{{vreg.0}}⬥
-									</div>
+			       		 {% when InstrPartView::Read with (vreg) %}
+			       			 <form method="POST" action="core_dump/add-vreg-watch" class="inline">
+			       				 <input type="hidden" name="call_id" value="{{instr.call_id.0}}">
+			       				 <input type="hidden" name="vreg" value="{{vreg.0}}">
+			       				 <button class='group inline-block px-1 cursor-pointer value
+			       							 [&.highlighted]:bg-sky-800
+			       							 [&.highlighted]:text-white' 
+			       						 data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'
+			       						 hx-post="core_dump/add-vreg-watch" 
+			       						 hx-target="#watches"
+			       						 hx-select="#watches"
+			       						 hx-swap="outerHTML"
+			       						 > 
+			       					 r{{vreg.0}}⬥
+			       				 </button>
+			       			 </form>
 
-								{% when InstrPartView::Other with (str) %}
-									<span>{{str}}</span>
-								{% endmatch %}
-							{% endfor %}
+			       		 {% when InstrPartView::Write with (vreg) %}
+			       			 <form method="POST" action="core_dump/add-vreg-watch" class="inline">
+			       				 <input type="hidden" name="call_id" value="{{instr.call_id.0}}">
+			       				 <input type="hidden" name="vreg" value="{{vreg.0}}">
+			       				 <button class='group inline-block px-1 cursor-pointer value
+			       							 [&.highlighted]:bg-rose-800
+			       							 [&.highlighted]:text-white' 
+			       						 data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'
+			       						 hx-post="core_dump/add-vreg-watch" 
+			       						 hx-target="#watches"
+			       						 hx-select="#watches"
+			       						 hx-swap="outerHTML"
+			       						 > 
+			       					 w{{vreg.0}}⬥
+			       				 </button>
+			       			 </form>
 
-						</td>
-					</tr>
-					{% endfor %}
-				</tbody>
-			</table>
+			       		 {% when InstrPartView::Other with (str) %}
+			       			 <span>{{str}}</span>
+			       		 {% endmatch %}
+			       	 {% endfor %}
+
+			        </div>
+			</div>
+			{% endfor %}
 		</div>
 
 		{% match vm_result.core_dump %}
 		{% when Some with (core_dump) %}
 
-			<div id="watches" class="overflow-y-scroll inset-0">
+			<div id="watches" class="overflow-y-scroll scrollbar-thin inset-0">
 				<div class="">
 					{% if watches.len() == 0 %}
-						<p class="text-gray-500 text-xs m-4 lowercase font-normal">
+						<p class="text-zinc-500 text-xs m-4 lowercase font-normal">
 							No values watched yet. Click on values in the
 							instruction or stack window (e.g. "v123",
 							"ObjectId(456)") to get more details.
@@ -88,7 +101,7 @@
 				</div>
 			</div>
 
-			<div id="stack-scroll-area" class="relative overflow-y-scroll px-4 py-2">
+			<div id="stack-scroll-area" class="relative overflow-y-scroll scrollbar-thin px-4 py-2">
 
 				{#  -- Warning toast for calls that have already returned #}
 				<div id='toast-past-call' class="fixed hidden">
@@ -101,14 +114,15 @@
 				</div>
 
 				{#  -- Frame visibility indicators #}
-				<div class="fixed right-0 m-2">
+				<div class="fixed right-0 mx-4">
 					{% for frame in core_dump.data.frames() %}
 						<div
 							class="m-1 px-2 rounded-xs bg-zinc-500 text-white cursor-pointer 
 								script/visibility-indicator [&.target-visible]:bg-teal-500"
 							data-visibility-target="stack-frame-{{loop.index0}}"
 						>
-							F{{loop.index0}}
+							{% let call_id = vm_result.call_id_stack[vm_result.call_id_stack.len() - loop.index] %}
+							C{{call_id.0}}
 						</div>
 					{% endfor %}
 				</div>
@@ -136,7 +150,7 @@
 							@
 							{{ "{:?}"|format(hdr.return_to_iid) }}
 						</div>
-						<div class="col-span-full flex place-content-center text-xs text-gray-500 space-x-4">
+						<div class="col-span-full flex place-content-center text-xs text-zinc-500 space-x-4">
 							<div>{{hdr.n_instrs}} instrs </div>
 							<div>{{hdr.n_args}} args</div>
 							<div>{{hdr.n_captures}} captures</div>
@@ -166,7 +180,7 @@
 			</div>
 
 		{% when None %}
-			<div class="p-4 h-full overflow-y-scroll col-span-2"> 
+			<div class="p-4 h-full overflow-y-scroll scrollbar-thin col-span-2"> 
 				<div class="bg-white rounded-md  p-4   bg-rose-50   ring-1   ring-rose-400   text-rose-900">
 					No core dump available in this session!
 				</div>

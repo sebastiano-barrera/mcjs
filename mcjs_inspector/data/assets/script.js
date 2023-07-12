@@ -7,6 +7,8 @@ function isElementVisible(elm) {
 }
 
 class ScrollIntoViewInteraction {
+    DELAY_BEFORE_SCROLLING_BACK = 400
+
     constructor(scrollArea) {
         this.scrollArea = scrollArea
         this.savedTop = null
@@ -41,7 +43,7 @@ class ScrollIntoViewInteraction {
             })
             this.timeout = null
             this.savedTop = null
-        }, 250)
+        }, this.DELAY_BEFORE_SCROLLING_BACK)
     }
 }
 
@@ -83,6 +85,11 @@ document.body.addEventListener('htmx:load', (evt) => {
     for (const elm of stack.scrollArea.getElementsByClassName('value')) {
         const valueId = elm.dataset.mcjsValue
         stack.elementOfValue.set(valueId, elm)
+    }
+    {
+        // Scroll to the bottom at startup
+        const elm = document.getElementById('code')
+        elm.scrollTo({ top: elm.scrollHeight })
     }
 
     const indicators = []
