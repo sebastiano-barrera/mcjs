@@ -1,5 +1,4 @@
 use std::{
-    cell::Cell,
     collections::HashMap,
     marker::PhantomData,
     path::PathBuf,
@@ -122,7 +121,6 @@ async fn handle_get_core_dump(
     #[derive(Template)]
     #[template(path = "core_dump.html")]
     struct CoreDumpTemplate<'a> {
-        case: &'a mcjs_vm::inspector_case::Case,
         vm_result: &'a VMResult,
         instr_history: Vec<view_model::HistoryItemView>,
         watches: &'a Vec<Watch>,
@@ -130,7 +128,6 @@ async fn handle_get_core_dump(
     }
 
     let html = CoreDumpTemplate {
-        case,
         vm_result,
         instr_history: view_model::translate_instr_history(
             &vm_result.instr_history,

@@ -7,7 +7,7 @@
 {% endmacro %}
 
 {% block content %} 
-		<div id="content" class="grid grid-rows-[1cm_1fr] grid-cols-3 gap-x-2 inset-0 w-full h-full">
+		<div id="content" class="grid grid-rows-[1cm_1fr_1cm] grid-cols-3 gap-x-2 inset-0 w-full h-full">
 
 		<div class="text-xl text-white lowercase sticky px-4 py-2 flex">
 			Code
@@ -75,6 +75,22 @@
 			        </div>
 			</div>
 			{% endfor %}
+
+			{% if vm_result.error_messages.len() > 0 %}
+				<div class='text-sm'>
+					<span class='italic'><span class='text-rose-500'>⸺</span> VM error:</span>
+					<ul class='list-disc'>
+						{% for msg in vm_result.error_messages %}
+							<li>{{ msg }}</li>
+						{% endfor %}
+					</ul>
+				</div>
+
+			{% else %}
+				<div class='text-xs m-6 text-zinc-600'>
+					The VM finished successfully.
+				</div>
+			{% endif %}
 		</div>
 
 		{% match vm_result.core_dump %}
@@ -136,7 +152,7 @@
 					{% let hdr = frame.header() %}
 					<div
 						id="stack-frame-{{loop.index0}}" 
-						class="grid grid-cols-[2cm_1fr] gap-x-2 text-sm my-2 border-b"
+						class="grid grid-cols-[2cm_1fr] gap-x-2 text-sm py-2 border-b border-zinc-600"
 					>
 						<div class='text-right'>Call ID:</div>
 						<div>{{ call_id.0 }}</div>
@@ -179,6 +195,13 @@
 
 					</div>
 				{% endfor %}
+			</div>
+
+			<div class='col-span-full flex space-x-6 lowercase cursor-default'>
+				<div class='ml-8 h-full'>mcjs</div>
+				<div class='block h-full hover:underline decoration-amber-400 decoration-2 cursor-pointer'>
+					Case info
+				</div>
 			</div>
 
 		{% when None %}
