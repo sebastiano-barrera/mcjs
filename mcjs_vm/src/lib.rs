@@ -11,7 +11,7 @@ mod interpreter;
 // mod jit;
 mod util;
 
-// TODO is there a better way to set visibility based on the presence of a feature? 
+// TODO is there a better way to set visibility based on the presence of a feature?
 #[cfg(not(feature = "inspection"))]
 mod stack_access;
 #[cfg(feature = "inspection")]

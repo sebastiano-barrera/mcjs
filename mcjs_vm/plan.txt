@@ -1,0 +1,73 @@
+
+- Support exotic objects
+
+	- CANCELED Def: non-object: data that isn't strictly a HashMap<String, Value>
+	  object (e.g.: strings, booleans, arrays).  (I think ES202 calls these
+	  "exotic objects").
+
+	- NEW def: non-object: data that is compact enough to be stored inline in a Value (numbers, bools).
+
+	- Goal: Make it possible to call methods on non-objects.
+		- These will all have properties: 
+			- Number,
+			- Bool,
+			- Object,
+			- String,
+			- Closure,
+			- SelfFunction
+
+		- ALTHOUGH it won't be possible to *set* properties on them (it silently does nothing in Node.js)
+
+		- No properties on these:
+			- Null,
+			- Undefined,
+
+	- Constraint: exotic objects can have ordinary objects as prototypes.  It must
+      be possible to do something like:
+
+	  > String.prototype.deez = function() { return this + ' deez nuts' }
+	  > 'eat'.deez()
+	  'eat deez nuts'
+
+	  > Number.prototype.doubled = function() { return this * 2 }
+	  > (123).doubled()
+	  246
+
+	- Plan:
+		- Assumption:
+			- It is possible to avoid storing non-objects in
+			  ObjectHeap.   Rather, non-objects can be wrapped in
+			  an impl Object wrapper 'on demand', strictly for the
+			  time needed to complete an object operation.
+
+				- CANCELED This requires a separate heap for strings and another for closures.
+					- Otherwise I'd have to store both in Value,
+					  which would cause Value to become "heavier"
+					  and lose Copy.
+
+					- Canceled because I will store strings and closures in ObjectHeap.
+					  No advantage in doing it any differently, and there is a complexity cost.
+
+				- CANCELED An alternative design would be for the old Object struct to store a
+				  string or a closure other than a regular key-value dictionary.  Not sure how I
+				  would work with Numbers and Booleans though.
+
+				- Update: this *can* be done (I was almost done), but it's not advantageous
+                  for stuff that's stored on the heap (strings, functions, ordobjects).  It's
+                  better to expose a unified "Object" interface for all of those, and do any
+                  'optimization' behind the curtain of the 'heap' module.
+
+		- Separate ordinary objects from types implementing an object-like interface.
+
+		- DONE Refactor ObjectHeap and Object; make it so:
+			- Object becomes OrdObject ("ordinary object")
+			- Object is the name of the trait for object-like things
+			- impl Object for OrdObject
+			- ObjectHeap stores OrdObjects only
+			- Add explicit variants in Value for String and Closure
+			- Create StringHeap for strings 
+				- Create StringId
+			- Create ClosureHeap for closures 
+				- Create ClosureId
+
+

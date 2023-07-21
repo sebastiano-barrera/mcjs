@@ -399,6 +399,7 @@ impl Builder {
         self.cur_fnb().next_vreg()
     }
 
+    #[allow(unused_variables)]
     fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
         let fnid = FnId(self.next_fnid);
         self.next_fnid += 1;
@@ -1892,7 +1893,7 @@ mod tests {
         const THE_MODULE_ID: bytecode::ModuleId = bytecode::ModuleId(1);
     }
     impl Loader for NullLoader {
-        fn get_module_id(&mut self, filename: &str) -> Option<bytecode::ModuleId> {
+        fn get_module_id(&mut self, _filename: &str) -> Option<bytecode::ModuleId> {
             Some(Self::THE_MODULE_ID)
         }
 

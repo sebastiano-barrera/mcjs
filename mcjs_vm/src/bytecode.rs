@@ -283,8 +283,8 @@ impl Instr {
             Instr::CallArg(arg) => { an.read_vreg(*arg); },
             Instr::ClosureNew {
                 dest,
-                fnid,
-                forced_this,
+                fnid: _,
+                forced_this: _,
             } => { an.write_vreg(*dest);  },
             Instr::ClosureAddCapture(arg) => { an.read_vreg(*arg); },
             Instr::ObjCreateEmpty(dest) => { an.write_vreg(*dest); },

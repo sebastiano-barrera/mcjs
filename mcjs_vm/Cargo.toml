@@ -18,6 +18,7 @@ swc_ecma_parser = "~0.136.0"
 serde = "1.0"
 rmp-serde = "1.1"
 strum = { version = "0.25.0", features = ["derive"] }
+enum_dispatch = { path = "/home/sebastiano/src/enum_dispatch" }
 
 [dev-dependencies]
 iced-x86 = "~1.18.0"

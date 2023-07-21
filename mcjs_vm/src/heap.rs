@@ -1,182 +1,90 @@
-use std::collections::HashMap;
+#![allow(unused_variables)]
+
+use std::{
+    borrow::{Borrow, Cow},
+    cell::{Ref, RefCell, RefMut},
+    collections::HashMap,
+    ops::{Deref, DerefMut},
+};
+
+use enum_dispatch::enum_dispatch;
 
 use crate::interpreter::{Closure, Value};
 
-pub struct ObjectHeap {
-    objects: slotmap::SlotMap<ObjectId, Object>,
+/// Common interface implemented by types that are sufficently "object-like" to be exposed
+/// as objects in JavaScript code.
+///
+/// This is used to wrap non-object data (e.g. strings, arrays, numbers, booleans, ...) in
+/// an object-like shell.
+///
+/// JS objects behave as if they had a 'dict-like' part and an 'array' part.  While still
+/// maintaining comparable behavior from the caller's point of view, Arrays and Objects
+/// may store data in different internal structures.
+#[enum_dispatch]
+pub trait Object {
+    fn get_property(&self, key: &str) -> Option<Value>;
+    fn set_property(&mut self, key: String, value: Value);
+    fn delete_property(&mut self, key: &str);
+
+    fn properties<'a>(&'a self) -> ObjectProperties<'a>;
+
+    fn len(&self) -> usize;
+    fn get_element(&self, index: usize) -> Option<Value>;
+    fn set_element(&mut self, index: usize, value: Value);
+    fn delete_element(&mut self, index: usize);
+
+    fn type_of(&self) -> Typeof;
+
+    fn proto(&self) -> Option<ObjectId>;
 }
 
-impl ObjectHeap {
-    pub(crate) fn new() -> ObjectHeap {
-        ObjectHeap {
-            objects: slotmap::SlotMap::with_key(),
+pub trait ObjectExt {
+    fn get_element_or_property<S: Deref<Target = str>>(
+        &self,
+        index_or_key: IndexOrKey<S>,
+    ) -> Option<Value>;
+    fn set_element_or_property<S: Deref<Target = str>>(
+        &mut self,
+        index_or_key: IndexOrKey<S>,
+        value: Value,
+    );
+    fn delete_element_or_property<S: Deref<Target = str>>(&mut self, index_or_key: IndexOrKey<S>);
+}
+
+impl<O: ?Sized + Object> ObjectExt for O {
+    fn get_element_or_property<S: Deref<Target = str>>(
+        &self,
+        index_or_key: IndexOrKey<S>,
+    ) -> Option<Value> {
+        match index_or_key {
+            IndexOrKey::Index(ndx) => self.get_element(ndx),
+            IndexOrKey::Key(key) => self.get_property(key.as_ref()),
         }
     }
-
-    pub(crate) fn new_object(&mut self) -> ObjectId {
-        self.objects.insert(Object::new())
-    }
-    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectId {
-        self.objects.insert(Object::new_function(closure))
-    }
-    pub(crate) fn new_string(&mut self, string: String) -> ObjectId {
-        self.objects.insert(Object::new_string(string))
-    }
-
-    pub fn is_instance_of(&self, oid: ObjectId, sup_oid: ObjectId) -> bool {
-        let mut cur_oid = Some(oid);
-        while let Some(oid) = cur_oid {
-            let proto_id = self.objects.get(oid).unwrap().proto_id;
-            if proto_id == Some(sup_oid) {
-                return true;
-            }
-            cur_oid = proto_id;
-        }
-
-        false
-    }
-
-    pub fn is_array(&self, oid: ObjectId) -> Option<bool> {
-        let obj = self.objects.get(oid)?;
-        Some(!obj.array_items.is_empty())
-    }
-
-    pub fn get_closure(&self, oid: ObjectId) -> Option<&Closure> {
-        let obj = self.objects.get(oid).unwrap();
-        obj.closure.as_ref()
-    }
-
-    pub(crate) fn set_property(&mut self, oid: ObjectId, key: ObjectKey, value: Value) {
-        let obj = self.objects.get_mut(oid).unwrap();
-
-        match key {
-            ObjectKey::ArrayIndex(ndx) => {
-                obj.set_arr_element(ndx, value);
-            }
-            ObjectKey::Property(pkey) => {
-                let PropertyKey::String(key_str) = &pkey;
-                if key_str == "__proto__" {
-                    if let Value::Object(new_proto_id) = value {
-                        obj.proto_id = Some(new_proto_id);
-                    } else {
-                        // Apparently this is simply a nop in V8?
-                    }
-
-                    return;
-                }
-
-                obj.set_property(pkey, value);
-            }
+    fn set_element_or_property<S: Deref<Target = str>>(
+        &mut self,
+        index_or_key: IndexOrKey<S>,
+        value: Value,
+    ) {
+        match index_or_key {
+            IndexOrKey::Index(ndx) => self.set_element(ndx, value),
+            IndexOrKey::Key(key) => self.set_property(key.to_owned(), value),
         }
     }
-
-    pub fn get_property(&self, oid: ObjectId, key: &ObjectKey) -> Option<Value> {
-        let obj = self.objects.get(oid).unwrap();
-
-        let value = match key {
-            // TODO(performance) Right now this .cloned() is inefficient due to the fact that
-            // we may be copying a whole string.
-            ObjectKey::ArrayIndex(ndx) => obj.get_arr_element(*ndx).cloned(),
-            ObjectKey::Property(pkey) => {
-                let PropertyKey::String(key_str) = &pkey;
-                if key_str == "__proto__" {
-                    return obj.proto_id.map(Value::Object);
-                }
-
-                // TODO(performance) Right now this .cloned() is inefficient due to the fact that
-                // we may be copying a whole string.
-                obj.get_property(pkey).cloned()
-            }
-        };
-
-        if value.is_some() {
-            value
-        } else if let Some(proto_id) = obj.proto_id {
-            self.get_property(proto_id, key)
-        } else {
-            None
+    fn delete_element_or_property<S: Deref<Target = str>>(&mut self, index_or_key: IndexOrKey<S>) {
+        match index_or_key {
+            IndexOrKey::Index(ndx) => self.delete_element(ndx),
+            IndexOrKey::Key(key) => self.delete_property(&key),
         }
-    }
-
-    pub(crate) fn delete_property(&mut self, oid: ObjectId, key: &ObjectKey) -> Option<Value> {
-        let obj = self.objects.get_mut(oid).unwrap();
-
-        match key {
-            // TODO(performance) Right now this .cloned() is inefficient due to the fact that
-            // we may be copying a whole string.
-            ObjectKey::ArrayIndex(ndx) => obj.delete_arr_element(*ndx),
-            ObjectKey::Property(pkey) => {
-                let PropertyKey::String(key_str) = &pkey;
-                if key_str == "__proto__" {
-                    return None;
-                }
-                obj.delete_property(pkey)
-            }
-        }
-    }
-
-    // TODO(performance) This stuff works, but is terribly inefficient.
-    //
-    // - Allocating a whole ass object just to use its array part puts pressure on the garbage
-    // collector
-    // - Object keys have to be boxed in order to be put in the array
-    // - Object keys then have to be *unboxed* (!) in order to be used after getting them out
-    //   of
-    // the array
-    //
-    // There has to be a better way, but it probably involves writing my own HashMap, and I'm
-    // not about that right now
-    pub fn get_keys_as_array(&mut self, oid: ObjectId) -> ObjectId {
-        let obj = self.objects.get(oid).unwrap();
-
-        let mut ret = Object::new();
-        ret.array_items = obj
-            .keys()
-            .into_iter()
-            .map(|key| match key {
-                ObjectKey::ArrayIndex(ndx) => Value::Number(ndx as f64),
-                ObjectKey::Property(PropertyKey::String(name)) => {
-                    let oid = self.new_string(name);
-                    Value::Object(oid)
-                }
-            })
-            .collect();
-
-        self.objects.insert(ret)
-    }
-
-    pub fn get_properties(&self, oid: ObjectId) -> impl ExactSizeIterator<Item = &PropertyKey> {
-        let obj = self.objects.get(oid).unwrap();
-        obj.properties()
-    }
-
-    pub fn array_len(&self, oid: ObjectId) -> usize {
-        let obj = self.objects.get(oid).unwrap();
-        obj.array_items.len()
-    }
-
-    pub fn array_nth(&self, oid: ObjectId, ndx: usize) -> Option<Value> {
-        let obj = self.objects.get(oid).unwrap();
-        obj.array_items.get(ndx).cloned()
-    }
-
-    pub(crate) fn array_push(&mut self, oid: ObjectId, value: Value) {
-        let obj = self.objects.get_mut(oid).unwrap();
-        obj.array_items.push(value);
-    }
-
-    pub fn get_typeof(&self, oid: ObjectId) -> Typeof {
-        let obj = self.objects.get(oid).unwrap();
-        obj.type_of()
-    }
-
-    pub fn get_string(&self, oid: ObjectId) -> Option<&str> {
-        let obj = self.objects.get(oid).unwrap();
-        obj.as_str()
     }
 }
 
-slotmap::new_key_type! { pub struct ObjectId; }
+type ObjectProperties<'a> = Box<dyn 'a + ExactSizeIterator<Item = &'a str>>;
+
+pub enum IndexOrKey<S: Deref<Target = str>> {
+    Index(usize),
+    Key(S),
+}
 
 #[derive(Clone, Copy)]
 pub enum Typeof {
@@ -185,117 +93,455 @@ pub enum Typeof {
     String,
 }
 
-#[derive(Debug, Clone)]
-struct Object {
-    proto_id: Option<ObjectId>,
-    properties: HashMap<PropertyKey, Value>,
-    array_items: Vec<Value>,
-    closure: Option<Closure>,
-    string_payload: Option<String>,
+//
+// Ordinary objects
+//
+
+slotmap::new_key_type! { pub struct ObjectId; }
+
+pub struct Heap {
+    objects: slotmap::SlotMap<ObjectId, RefCell<HeapObject>>,
+
+    number_proto: ObjectId,
+    string_proto: ObjectId,
+    func_proto: ObjectId,
 }
 
-impl Object {
-    fn new() -> Self {
-        Object {
-            proto_id: None,
-            properties: HashMap::new(),
-            array_items: Vec::new(),
-            closure: None,
-            string_payload: None,
+impl Heap {
+    pub(crate) fn new() -> Heap {
+        let mut objects = slotmap::SlotMap::with_key();
+        let number_proto = objects.insert(RefCell::new(OrdObject::new(HashMap::new()).into()));
+        let string_proto = objects.insert(RefCell::new(OrdObject::new(HashMap::new()).into()));
+        let func_proto = objects.insert(RefCell::new(OrdObject::new(HashMap::new()).into()));
+
+        Heap {
+            objects,
+            number_proto,
+            string_proto,
+            func_proto,
         }
     }
 
-    fn new_function(closure: Closure) -> Self {
-        Object {
-            proto_id: None,
-            properties: HashMap::new(),
-            array_items: Vec::new(),
-            closure: Some(closure),
-            string_payload: None,
+    pub(crate) fn new_ordinary_object(&mut self, properties: HashMap<String, Value>) -> ObjectId {
+        // TODO .into() should work here.  Why doesn't it?
+        self.objects
+            .insert(RefCell::new(OrdObject::new(properties).into()))
+    }
+    pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectId {
+        self.objects
+            .insert(RefCell::new(OrdObject::new_array(elements).into()))
+    }
+    pub(crate) fn new_function(
+        &mut self,
+        closure: Closure,
+        properties: HashMap<String, Value>,
+    ) -> ObjectId {
+        let cobj = ClosureObject {
+            closure,
+            properties,
+        };
+        self.objects.insert(RefCell::new(cobj.into()))
+    }
+    pub(crate) fn new_string(&mut self, string: String) -> ObjectId {
+        self.objects
+            .insert(RefCell::new(StringObject(string).into()))
+    }
+
+    pub fn is_instance_of<O: ?Sized + Object>(&self, obj: &O, sup_oid: ObjectId) -> bool {
+        let mut cur_proto = match obj.proto() {
+            Some(proto_id) if proto_id == sup_oid => return true,
+            Some(proto_id) => self.get(proto_id),
+            None => return false,
+        };
+
+        while let Some(proto) = cur_proto {
+            match obj.proto() {
+                Some(proto_id) if proto_id == sup_oid => return true,
+                Some(proto_id) => {
+                    cur_proto = self.get(proto_id);
+                }
+                None => return false,
+            };
         }
+
+        false
     }
 
-    fn new_string(string: String) -> Object {
-        Object {
-            proto_id: None,
-            properties: HashMap::new(),
-            array_items: Vec::new(),
-            closure: None,
-            string_payload: Some(string),
-        }
+    pub fn get(&self, oid: ObjectId) -> Option<Ref<HeapObject>> {
+        self.objects.get(oid).map(|refcell| refcell.borrow())
+    }
+    pub fn get_mut(&self, oid: ObjectId) -> Option<RefMut<HeapObject>> {
+        self.objects.get(oid).map(|refcell| refcell.borrow_mut())
     }
 
-    fn type_of(&self) -> Typeof {
-        if self.string_payload.is_some() {
-            Typeof::String
-        } else if self.closure.is_some() {
-            Typeof::Function
-        } else {
-            Typeof::Object
-        }
-    }
+    pub fn get_property_chained(&self, oid: ObjectId, key: &str) -> Option<Value> {
+        let obj = self.objects.get(oid).unwrap().borrow();
+        let value = obj.get_property(key);
 
-    fn as_str(&self) -> Option<&str> {
-        self.string_payload.as_ref().map(|s| s.as_str())
-    }
-
-    fn get_property(&self, key: &PropertyKey) -> Option<&Value> {
-        self.properties.get(key)
-    }
-    fn set_property(&mut self, key: PropertyKey, value: Value) {
-        self.properties.insert(key, value);
-    }
-
-    fn set_arr_element(&mut self, ndx: usize, value: Value) {
-        if ndx >= self.array_items.len() {
-            self.array_items.resize(ndx + 1, Value::Undefined)
-        }
-        self.array_items[ndx] = value;
-    }
-    fn get_arr_element(&self, ndx: usize) -> Option<&Value> {
-        self.array_items.get(ndx)
-    }
-
-    fn keys(&self) -> Vec<ObjectKey> {
-        self.indices()
-            .map(|ndx| ObjectKey::ArrayIndex(ndx))
-            .chain(
-                self.properties()
-                    .map(|pkey| ObjectKey::Property(pkey.clone())),
-            )
-            .collect()
-    }
-    fn indices(&self) -> impl ExactSizeIterator<Item = usize> {
-        (0..self.array_items.len()).into_iter()
-    }
-    fn properties(&self) -> impl ExactSizeIterator<Item = &PropertyKey> {
-        self.properties.keys()
-    }
-
-    fn delete_arr_element(&mut self, ndx: usize) -> Option<Value> {
-        if ndx < self.array_items.len() {
-            Some(self.array_items.remove(ndx))
+        if value.is_some() {
+            value
+        } else if let Some(proto_id) = obj.proto() {
+            self.get_property_chained(proto_id, key)
         } else {
             None
         }
     }
+}
 
-    fn delete_property(&mut self, pkey: &PropertyKey) -> Option<Value> {
-        self.properties.remove(pkey)
+#[enum_dispatch(Object)]
+pub enum HeapObject {
+    OrdObject,
+    StringObject,
+    ClosureObject,
+}
+
+/// An ordinary object, i.e. one that you can create in JavaScript with the `{a: 1, b: 2}`
+/// syntax.
+///
+/// It stores key-value pairs where keys ("properties") are strings, and any JS value can
+/// be stored as value.
+#[derive(Debug, Clone)]
+pub struct OrdObject {
+    proto_id: Option<ObjectId>,
+    properties: HashMap<String, Value>,
+
+    // I just didn't want to make a whole ArrayHeap, ArrayId, etc.
+    // Important: OrdObjects are either created with or without an array part.  They MUST NOT gain
+    // or lose one during their lifecycle.
+    array_part: Option<Vec<Value>>,
+}
+
+impl OrdObject {
+    fn new(properties: HashMap<String, Value>) -> Self {
+        OrdObject {
+            proto_id: None,
+            properties,
+            array_part: None,
+        }
+    }
+
+    fn new_array(elements: Vec<Value>) -> Self {
+        OrdObject {
+            proto_id: None,
+            properties: HashMap::new(),
+            array_part: Some(elements),
+        }
+    }
+
+    pub(crate) fn is_array(&self) -> bool {
+        self.array_part.is_some()
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub enum ObjectKey {
-    ArrayIndex(usize),
-    Property(PropertyKey),
+impl Object for OrdObject {
+    fn type_of(&self) -> Typeof {
+        Typeof::Object
+    }
+
+    fn get_property(&self, key: &str) -> Option<Value> {
+        if key == "__proto__" {
+            return self.proto_id.map(Value::Object);
+        }
+        self.properties.get(key).copied()
+    }
+    fn set_property(&mut self, key: String, value: Value) {
+        if key == "__proto__" {
+            if let Value::Object(new_proto_id) = value {
+                self.proto_id = Some(new_proto_id);
+            } else {
+                // Apparently this is simply a nop in V8?
+            }
+        } else {
+            self.properties.insert(key, value);
+        }
+    }
+    fn delete_property(&mut self, key: &str) {
+        self.properties.remove(key);
+    }
+    fn properties(&self) -> ObjectProperties {
+        Box::new(self.properties.keys().map(|s| s.as_str()))
+    }
+
+    fn set_element(&mut self, ndx: usize, value: Value) {
+        match &mut self.array_part {
+            Some(arrp) => {
+                if arrp.len() < ndx + 1 {
+                    arrp.resize(ndx + 1, Value::Undefined);
+                }
+                arrp[ndx] = value;
+            }
+            None => {
+                let ndx_str = format!("{}", ndx);
+                self.set_property(ndx_str, value)
+            }
+        }
+    }
+    fn get_element(&self, ndx: usize) -> Option<Value> {
+        match &self.array_part {
+            Some(arrp) => arrp.get(ndx).cloned(),
+            None => {
+                let ndx_str = format!("{}", ndx);
+                self.get_property(&ndx_str)
+            }
+        }
+    }
+    fn delete_element(&mut self, ndx: usize) {
+        match &mut self.array_part {
+            Some(arrp) => {
+                // TODO Shorten the array if the tail is all Undefined's?
+                arrp[ndx] = Value::Undefined;
+            }
+            None => {
+                let ndx_str = ndx.to_string();
+                self.set_property(ndx_str, Value::Undefined);
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.array_part.as_ref().map(|arrp| arrp.len()).unwrap_or(0)
+    }
+
+    fn proto(&self) -> Option<ObjectId> {
+        self.proto_id
+    }
 }
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub enum PropertyKey {
-    String(String),
+
+//
+// Closures
+//
+
+pub struct ClosureObject {
+    closure: Closure,
+    properties: HashMap<String, Value>,
 }
-impl From<String> for ObjectKey {
-    fn from(value: String) -> Self {
-        ObjectKey::Property(PropertyKey::String(value))
+
+impl ClosureObject {
+    pub fn closure(&self) -> &Closure {
+        &self.closure
+    }
+}
+
+impl Object for ClosureObject {
+    fn get_property(&self, key: &str) -> Option<Value> {
+        None
+    }
+
+    fn set_property(&mut self, key: String, value: Value) {}
+
+    fn delete_property(&mut self, key: &str) {}
+
+    fn properties<'a>(&'a self) -> ObjectProperties<'a> {
+        Box::new(std::iter::empty())
+    }
+
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn get_element(&self, index: usize) -> Option<Value> {
+        None
+    }
+
+    fn set_element(&mut self, index: usize, value: Value) {}
+
+    fn delete_element(&mut self, index: usize) {}
+
+    fn type_of(&self) -> Typeof {
+        Typeof::Object
+    }
+
+    fn proto(&self) -> Option<ObjectId> {
+        todo!()
+    }
+}
+
+pub struct StringObject(String);
+impl StringObject {
+    pub fn string(&self) -> &String {
+        &self.0
+    }
+    pub fn string_mut(&mut self) -> &mut String {
+        &mut self.0
+    }
+}
+impl Object for StringObject {
+    fn get_property(&self, key: &str) -> Option<Value> {
+        todo!()
+    }
+
+    fn set_property(&mut self, key: String, value: Value) {
+        todo!()
+    }
+
+    fn delete_property(&mut self, key: &str) {
+        todo!()
+    }
+
+    fn properties<'s>(&'s self) -> ObjectProperties<'s> {
+        todo!()
+    }
+
+    fn len(&self) -> usize {
+        todo!()
+    }
+
+    fn get_element(&self, index: usize) -> Option<Value> {
+        todo!()
+    }
+
+    fn set_element(&mut self, index: usize, value: Value) {
+        todo!()
+    }
+
+    fn delete_element(&mut self, index: usize) {
+        todo!()
+    }
+
+    fn type_of(&self) -> Typeof {
+        todo!()
+    }
+
+    fn proto(&self) -> Option<ObjectId> {
+        todo!()
+    }
+}
+
+pub struct NumberObject(pub f64);
+impl Object for NumberObject {
+    fn get_property(&self, key: &str) -> Option<Value> {
+        todo!()
+    }
+
+    fn set_property(&mut self, key: String, value: Value) {
+        todo!()
+    }
+
+    fn delete_property(&mut self, key: &str) {
+        todo!()
+    }
+
+    fn properties<'a>(&'a self) -> ObjectProperties<'a> {
+        todo!()
+    }
+
+    fn len(&self) -> usize {
+        todo!()
+    }
+
+    fn get_element(&self, index: usize) -> Option<Value> {
+        todo!()
+    }
+
+    fn set_element(&mut self, index: usize, value: Value) {
+        todo!()
+    }
+
+    fn delete_element(&mut self, index: usize) {
+        todo!()
+    }
+
+    fn type_of(&self) -> Typeof {
+        todo!()
+    }
+
+    fn proto(&self) -> Option<ObjectId> {
+        todo!()
+    }
+}
+
+pub struct BoolObject(pub bool);
+impl Object for BoolObject {
+    fn get_property(&self, key: &str) -> Option<Value> {
+        todo!()
+    }
+
+    fn set_property(&mut self, key: String, value: Value) {
+        todo!()
+    }
+
+    fn delete_property(&mut self, key: &str) {
+        todo!()
+    }
+
+    fn properties<'a>(&'a self) -> ObjectProperties<'a> {
+        todo!()
+    }
+
+    fn len(&self) -> usize {
+        todo!()
+    }
+
+    fn get_element(&self, index: usize) -> Option<Value> {
+        todo!()
+    }
+
+    fn set_element(&mut self, index: usize, value: Value) {
+        todo!()
+    }
+
+    fn delete_element(&mut self, index: usize) {
+        todo!()
+    }
+
+    fn type_of(&self) -> Typeof {
+        todo!()
+    }
+
+    fn proto(&self) -> Option<ObjectId> {
+        todo!()
+    }
+}
+
+//
+// ValueObject
+//
+
+/// A representation of a generic Value as an Object.
+pub enum ValueObjectRef<'p> {
+    NumberObject(NumberObject),
+    BoolObject(BoolObject),
+    HeapObject(Ref<'p, HeapObject>),
+}
+
+impl<'p> ValueObjectRef<'p> {
+    pub fn as_object(&self) -> &dyn Object {
+        match self {
+            ValueObjectRef::NumberObject(no) => no as &dyn Object,
+            ValueObjectRef::BoolObject(bo) => bo as &dyn Object,
+            ValueObjectRef::HeapObject(ho) => ho.deref(),
+        }
+    }
+
+    pub fn as_string(self) -> Option<Ref<'p, String>> {
+        match self {
+            ValueObjectRef::HeapObject(ho) => string_of_object(ho),
+            _ => None,
+        }
+    }
+}
+
+pub fn string_of_object(ho: Ref<HeapObject>) -> Option<Ref<String>> {
+    Ref::filter_map(ho, |ho| match ho {
+        HeapObject::StringObject(sobj) => Some(sobj.string()),
+        _ => None,
+    })
+    .ok()
+}
+
+/// Mutable variant of ValueObjectRef
+pub enum ValueObjectMut<'p> {
+    NumberObject(NumberObject),
+    BoolObject(BoolObject),
+    HeapObject(RefMut<'p, HeapObject>),
+}
+
+impl<'p> ValueObjectMut<'p> {
+    pub fn as_object_mut(&mut self) -> &mut dyn Object {
+        match self {
+            ValueObjectMut::NumberObject(no) => no as &mut dyn Object,
+            ValueObjectMut::BoolObject(bo) => bo as &mut dyn Object,
+            ValueObjectMut::HeapObject(ho) => ho.deref_mut(),
+        }
     }
 }
