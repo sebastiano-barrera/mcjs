@@ -292,7 +292,7 @@ mod view_model {
 
                     let view = if let Some(frame_ndx) = frame_ndx {
                         let value = stack_frames[frame_ndx].get_result(*vreg);
-                        view_value(value, &core_dump.heap, &core_dump.strings_heap)
+                        view_value(value, &core_dump.heap)
                     } else {
                         ValueView::Past
                     };
@@ -305,11 +305,7 @@ mod view_model {
         value_views
     }
 
-    fn view_value(
-        value: mcjs_vm::InterpreterValue,
-        heap: &mcjs_vm::heap::Heap,
-        str_heap: &mcjs_vm::heap::StringHeap,
-    ) -> ValueView {
+    fn view_value(value: mcjs_vm::InterpreterValue, heap: &mcjs_vm::heap::Heap) -> ValueView {
         use mcjs_vm::InterpreterValue;
         match value {
             InterpreterValue::Number(n) => ValueView::Literal(bytecode::Literal::Number(n)),
@@ -318,34 +314,35 @@ mod view_model {
             InterpreterValue::Undefined => ValueView::Literal(bytecode::Literal::Undefined),
             InterpreterValue::SelfFunction => ValueView::Literal(bytecode::Literal::SelfFunction),
 
-            InterpreterValue::String(str_id) => {
-                let string = str_heap.get(str_id).unwrap();
-                ValueView::String(string.clone())
-            }
             InterpreterValue::Object(obj_id) => {
-                let mut obj_view = HashMap::new();
-
                 let obj = heap.get(obj_id).unwrap();
 
-                for arr_ndx in 0..obj.len() {
-                    let value = obj.get_element(arr_ndx).unwrap();
-                    let view = view_value(value, heap, str_heap);
-                    obj_view.insert(format!("[{}]", arr_ndx), Box::new(view));
+                if matches!(&*obj, mcjs_vm::heap::HeapObject::ClosureObject(_)) {
+                    // TODO Add more details
+                    return ValueView::String("<function>".to_string());
                 }
+                match mcjs_vm::heap::string_of_object(obj) {
+                    Ok(str_ref) => ValueView::String(str_ref.to_owned()),
+                    Err(obj) => {
+                        let mut obj_view = HashMap::new();
 
-                for key in obj.properties() {
-                    // TODO This .clone() shouldn't be there, but the change is more complex than I
-                    // have patience for right now
-                    let value = heap.get_property_chained(obj_id, &key).unwrap();
-                    let view = view_value(value, heap, str_heap);
-                    obj_view.insert(key.clone(), Box::new(view));
+                        for arr_ndx in 0..obj.len() {
+                            let value = obj.get_element(arr_ndx).unwrap();
+                            let view = view_value(value, heap);
+                            obj_view.insert(format!("[{}]", arr_ndx), Box::new(view));
+                        }
+
+                        for key in obj.properties() {
+                            // TODO This .clone() shouldn't be there, but the change is more complex
+                            // than I have patience for right now
+                            let value = heap.get_property_chained(obj_id, &key).unwrap();
+                            let view = view_value(value, heap);
+                            obj_view.insert(key.to_owned(), Box::new(view));
+                        }
+
+                        ValueView::Object(obj_view)
+                    }
                 }
-
-                ValueView::Object(obj_view)
-            }
-            InterpreterValue::Closure(_) => {
-                // TODO Add more details
-                ValueView::String("<function>".to_string())
             }
 
             InterpreterValue::Internal(_) => {

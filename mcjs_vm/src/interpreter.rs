@@ -1090,10 +1090,12 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             }
             Value::Object(oid) => {
                 let obj = heap.get(*oid)?;
-                heap::string_of_object(obj).map(|str_ref| {
-                    let str_ref = Ref::map(str_ref, |s| s.as_str());
-                    heap::IndexOrKey::Key(str_ref)
-                })
+                heap::string_of_object(obj)
+                    .map(|str_ref| {
+                        let str_ref = Ref::map(str_ref, |s| s.as_str());
+                        heap::IndexOrKey::Key(str_ref)
+                    })
+                    .ok()
             }
             _ => None,
         }
@@ -1208,7 +1210,9 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let RegExp = heap.new_function(Closure::Native(nf_RegExp), HashMap::new());
     global.insert("RegExp".to_string(), Value::Object(RegExp));
 
-    let Number = heap.new_function(Closure::Native(nf_Number), HashMap::new());
+    let mut number_props = HashMap::new();
+    number_props.insert("prototype".to_string(), Value::Object(heap.number_proto()));
+    let Number = heap.new_function(Closure::Native(nf_Number), number_props);
     global.insert("Number".to_string(), Value::Object(Number));
 
     let String = heap.new_function(Closure::Native(nf_String), HashMap::new());
@@ -1274,7 +1278,7 @@ fn nf_RegExp(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Valu
 #[allow(non_snake_case)]
 fn nf_Array(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     // TODO
-    let oid = intrp.heap.new_ordinary_object(HashMap::new());
+    let oid = intrp.heap.new_array(Vec::new());
     Ok(Value::Object(oid))
 }
 
@@ -1357,8 +1361,18 @@ mod tests {
 
         codebase.dump();
 
-        let vm = Interpreter::new(&codebase);
-        vm.run_module(module_id).unwrap()
+        let res = std::panic::catch_unwind(|| {
+            let vm = Interpreter::new(&codebase);
+            vm.run_module(module_id).unwrap()
+        });
+        if res.is_err() {
+            let include_paths = Vec::new();
+            crate::inspector_case::export_inspector_case(
+                include_paths,
+                crate::inspector_case::Root::InlineScript(code.to_owned()),
+            );
+        }
+        res.unwrap()
     }
 
     #[test]

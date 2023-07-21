@@ -122,6 +122,16 @@ impl Heap {
         }
     }
 
+    pub fn number_proto(&self) -> ObjectId {
+        self.number_proto
+    }
+    pub fn string_proto(&self) -> ObjectId {
+        self.string_proto
+    }
+    pub fn func_proto(&self) -> ObjectId {
+        self.func_proto
+    }
+
     pub(crate) fn new_ordinary_object(&mut self, properties: HashMap<String, Value>) -> ObjectId {
         // TODO .into() should work here.  Why doesn't it?
         self.objects
@@ -324,12 +334,16 @@ impl ClosureObject {
 
 impl Object for ClosureObject {
     fn get_property(&self, key: &str) -> Option<Value> {
-        None
+        self.properties.get(key).copied()
     }
 
-    fn set_property(&mut self, key: String, value: Value) {}
+    fn set_property(&mut self, key: String, value: Value) {
+        self.properties.insert(key, value);
+    }
 
-    fn delete_property(&mut self, key: &str) {}
+    fn delete_property(&mut self, key: &str) {
+        self.properties.remove(key);
+    }
 
     fn properties<'a>(&'a self) -> ObjectProperties<'a> {
         Box::new(std::iter::empty())
@@ -515,18 +529,17 @@ impl<'p> ValueObjectRef<'p> {
 
     pub fn as_string(self) -> Option<Ref<'p, String>> {
         match self {
-            ValueObjectRef::HeapObject(ho) => string_of_object(ho),
+            ValueObjectRef::HeapObject(ho) => string_of_object(ho).ok(),
             _ => None,
         }
     }
 }
 
-pub fn string_of_object(ho: Ref<HeapObject>) -> Option<Ref<String>> {
+pub fn string_of_object(ho: Ref<HeapObject>) -> Result<Ref<String>, Ref<HeapObject>> {
     Ref::filter_map(ho, |ho| match ho {
         HeapObject::StringObject(sobj) => Some(sobj.string()),
         _ => None,
     })
-    .ok()
 }
 
 /// Mutable variant of ValueObjectRef

@@ -16,8 +16,8 @@ fn test_load_json5_parse() {
 }
 
 fn test_integration_script(filename: String) {
-    // TODO Refactor the inspector case file export logic, so that it can be reused across all test
-    // cases
+    // TODO Refactor the inspector case file export logic, so that it can be reused across all
+    // test cases
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let include_paths = vec![
@@ -58,31 +58,9 @@ fn test_integration_script(filename: String) {
         }
 
         Err(_) => {
-            let case_file_path = {
-                let mut counter = 0;
-                loop {
-                    let path = PathBuf::from(format!("/tmp/mcjs-inspector-{}.case", counter));
-                    if !path.exists() {
-                        break path;
-                    }
-                    counter += 1;
-                }
-            };
-
-            let case = mcjs_vm::inspector_case::Case {
-                include_paths,
-                root: mcjs_vm::inspector_case::Root::ModuleImport(filename.clone()),
-            };
-
-            let mut f = std::fs::File::create(&case_file_path).expect("could not create case file");
-            let mut serializer = rmp_serde::Serializer::new(&mut f).with_binary();
-            case.serialize(&mut serializer)
-                .expect("could not serialize");
-
-            panic!(
-                "Test failed.   Inspector case file exported: {}",
-                case_file_path.display()
-            );
+            let root = mcjs_vm::inspector_case::Root::ModuleImport(filename);
+            mcjs_vm::inspector_case::export_inspector_case(include_paths, root);
+            panic!("Test failed.");
         }
     }
 }
