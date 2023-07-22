@@ -224,8 +224,14 @@ type Operands = crate::util::LimVec<{ Instr::MAX_OPERANDS }, VReg>;
 
 pub trait InstrAnalyzer {
     fn start(&mut self, opcode_name: &'static str);
-    fn read_vreg(&mut self, vreg: VReg);
-    fn write_vreg(&mut self, vreg: VReg);
+    fn read_vreg_labeled(&mut self, vreg: VReg, description: Option<String>);
+    fn write_vreg_labeled(&mut self, vreg: VReg, description: Option<String>);
+    fn read_vreg(&mut self, vreg: VReg) {
+        self.read_vreg_labeled(vreg, None)
+    }
+    fn write_vreg(&mut self, vreg: VReg) {
+        self.write_vreg_labeled(vreg, None)
+    }
     fn jump_target(&mut self, iid: IID);
     fn load_const(&mut self, item: ConstIndex);
     fn load_null(&mut self);
@@ -279,7 +285,11 @@ impl Instr {
                 return_value,
                 this,
                 callee,
-            } => { an.write_vreg(*return_value); an.read_vreg(*this); an.read_vreg(*callee); }
+            } => { 
+                an.write_vreg(*return_value);
+                an.read_vreg_labeled(*this, Some("this".to_owned()));
+                an.read_vreg_labeled(*callee, Some("callee".to_owned()));
+            }
             Instr::CallArg(arg) => { an.read_vreg(*arg); },
             Instr::ClosureNew {
                 dest,

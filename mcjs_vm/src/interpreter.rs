@@ -451,7 +451,14 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     self.data.top_mut().set_result(*dest, value);
                 }
 
-                Instr::ArithAdd(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x + y),
+                Instr::ArithAdd(dest, a, b) => match self.get_operand(*a) {
+                    Value::Number(_) => self.with_numbers(*dest, *a, *b, |x, y| x + y),
+                    Value::Object(_) => {
+                        let value = self.str_append(a, b)?;
+                        self.data.top_mut().set_result(*dest, value);
+                    }
+                    other => return Err(error!("unsupported operator '+' for: {:?}", other)),
+                },
                 Instr::ArithSub(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x - y),
                 Instr::ArithMul(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x * y),
                 Instr::ArithDiv(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x / y),
@@ -661,17 +668,22 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = self.get_operand(*value);
 
-                    obj.as_object_mut().set_element_or_property(key, value);
+                    obj.as_object_mut().set_own_element_or_property(key, value);
                 }
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = self.get_operand_object(*obj)?;
                     let key = self.get_operand(*key);
                     let key = Self::value_to_index_or_key(&self.heap, &key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = obj
-                        .as_object()
-                        .get_element_or_property(key)
-                        .unwrap_or(Value::Undefined);
+
+                    let value = match key {
+                        heap::IndexOrKey::Index(ndx) => obj.as_object().get_element(ndx),
+                        heap::IndexOrKey::Key(key) => {
+                            self.heap.get_property_chained(obj.as_object(), key.deref())
+                        }
+                    }
+                    .unwrap_or(Value::Undefined);
+
                     eprint!("  -> {:?}", value);
                     drop(obj);
                     self.data.top_mut().set_result(*dest, value.clone());
@@ -680,7 +692,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     // TODO Something more efficient?
                     let keys: Vec<String> = {
                         let obj = self.get_operand_object(*obj)?;
-                        obj.as_object().properties().map(|s| s.to_owned()).collect()
+                        obj.as_object().own_properties()
                     };
                     let keys = keys
                         .into_iter()
@@ -701,7 +713,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         let key = self.get_operand(*key);
                         let key = Self::value_to_index_or_key(&self.heap, &key)
                             .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                        obj.as_object_mut().delete_element_or_property(key);
+                        obj.as_object_mut().delete_own_element_or_property(key);
                     }
 
                     self.data.top_mut().set_result(*dest, Value::Bool(true));
@@ -882,15 +894,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 Instr::StrAppend(buf_reg, tail) => {
-                    // TODO Make this at least *decently* efficient!
-                    let mut buf = self.get_operand_string(*buf_reg)?.to_owned();
-                    {
-                        let tail_ref = self.get_operand_string(*tail)?;
-                        let tail = tail_ref.deref();
-                        buf.push_str(tail);
-                    }
-
-                    let value = literal_to_value(bytecode::Literal::String(buf), &mut self.heap);
+                    let value = self.str_append(buf_reg, tail)?;
                     self.data.top_mut().set_result(*buf_reg, value);
                 }
 
@@ -902,7 +906,8 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     let gobj = self.heap.get(self.global_obj).unwrap();
 
                     let value = gobj
-                        .get_element_or_property(key)
+                        .as_object()
+                        .get_own_element_or_property(key)
                         .unwrap_or(Value::Undefined);
                     self.data.top_mut().set_result(*dest, value);
                 }
@@ -927,6 +932,18 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         Ok(self.dump_output())
     }
 
+    fn str_append(&mut self, a: &VReg, b: &VReg) -> Result<Value> {
+        // TODO Make this at least *decently* efficient!
+        let mut buf = self.get_operand_string(*a)?.to_owned();
+        {
+            let tail_ref = self.get_operand_string(*b)?;
+            let tail = tail_ref.deref();
+            buf.push_str(tail);
+        }
+        let value = literal_to_value(bytecode::Literal::String(buf), &mut self.heap);
+        Ok(value)
+    }
+
     fn is_instance_of(&mut self, obj: VReg, sup: VReg) -> bool {
         let sup_oid = match self.get_operand(sup) {
             Value::Object(oid) => oid,
@@ -940,10 +957,11 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         self.heap.is_instance_of(obj.as_object(), sup_oid)
     }
 
-    fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<String>> {
-        self.get_operand_object(vreg)?
-            .as_string()
-            .ok_or_else(|| error!("can't string-concatenate on a non-string"))
+    fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<str>> {
+        let operand = self.get_operand_object(vreg)?;
+        operand
+            .as_str()
+            .map_err(|_| error!("can't string-concatenate on a non-string"))
     }
 
     fn dump_output(&mut self) -> Output {
@@ -1058,10 +1076,12 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         let ty_s = match value {
             Value::Number(_) => "number",
             Value::Bool(_) => "boolean",
-            Value::Object(oid) => match self.heap.get(*oid).unwrap().type_of() {
+            Value::Object(oid) => match self.heap.get(*oid).unwrap().as_object().type_of() {
                 heap::Typeof::Object => "object",
                 heap::Typeof::Function => "function",
                 heap::Typeof::String => "string",
+                heap::Typeof::Number => "number",
+                heap::Typeof::Boolean => "boolean",
             },
             // TODO(cleanup) This is actually an error in our type system.  null is really a value
             // of the 'object' type
@@ -1090,11 +1110,8 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             }
             Value::Object(oid) => {
                 let obj = heap.get(*oid)?;
-                heap::string_of_object(obj)
-                    .map(|str_ref| {
-                        let str_ref = Ref::map(str_ref, |s| s.as_str());
-                        heap::IndexOrKey::Key(str_ref)
-                    })
+                Ref::filter_map(obj, |hobj| hobj.as_str())
+                    .map(|s| heap::IndexOrKey::Key(s))
                     .ok()
             }
             _ => None,
@@ -1125,18 +1142,18 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
 fn as_object_ref<'h>(value: Value, heap: &'h heap::Heap) -> Option<heap::ValueObjectRef<'h>> {
     match value {
-        Value::Object(oid) => heap.get(oid).map(heap::ValueObjectRef::HeapObject),
-        Value::Number(num) => Some(heap::ValueObjectRef::NumberObject(heap::NumberObject(num))),
-        Value::Bool(bool) => Some(heap::ValueObjectRef::BoolObject(heap::BoolObject(bool))),
+        Value::Object(oid) => heap.get(oid).map(Into::into),
+        Value::Number(num) => Some(heap::NumberObject(num).into()),
+        Value::Bool(bool) => Some(heap::BoolObject(bool).into()),
         _ => None,
     }
 }
 
 fn as_object_mut<'h>(value: Value, heap: &'h heap::Heap) -> Option<heap::ValueObjectMut<'h>> {
     match value {
-        Value::Object(oid) => heap.get_mut(oid).map(heap::ValueObjectMut::HeapObject),
-        Value::Number(num) => Some(heap::ValueObjectMut::NumberObject(heap::NumberObject(num))),
-        Value::Bool(bool) => Some(heap::ValueObjectMut::BoolObject(heap::BoolObject(bool))),
+        Value::Object(oid) => heap.get_mut(oid).map(Into::into),
+        Value::Number(num) => Some(heap::NumberObject(num).into()),
+        Value::Bool(bool) => Some(heap::BoolObject(bool).into()),
         _ => None,
     }
 }
@@ -1210,9 +1227,21 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let RegExp = heap.new_function(Closure::Native(nf_RegExp), HashMap::new());
     global.insert("RegExp".to_string(), Value::Object(RegExp));
 
-    let mut number_props = HashMap::new();
-    number_props.insert("prototype".to_string(), Value::Object(heap.number_proto()));
-    let Number = heap.new_function(Closure::Native(nf_Number), number_props);
+    let mut number_cons_props = HashMap::new();
+    number_cons_props.insert("prototype".to_string(), Value::Object(heap.number_proto()));
+    {
+        let Number_prototype_toString = heap.new_function(
+            Closure::Native(nf_Number_prototype_toString),
+            HashMap::new(),
+        );
+        let oid = heap.number_proto();
+        let mut number_proto = heap.get_mut(oid).unwrap();
+        number_proto.as_object_mut().set_own_property(
+            "toString".to_string(),
+            Value::Object(Number_prototype_toString),
+        )
+    }
+    let Number = heap.new_function(Closure::Native(nf_Number), number_cons_props);
     global.insert("Number".to_string(), Value::Object(Number));
 
     let String = heap.new_function(Closure::Native(nf_String), HashMap::new());
@@ -1257,9 +1286,9 @@ fn nf_Array_push(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Resul
     // TODO Proper error handling, instead of these unwrap
     let oid = this.expect_obj().unwrap();
     let mut arr = intrp.heap.get_mut(oid).unwrap();
-    let len = arr.len();
+    let len = arr.as_object().len();
     let value = args.get(0).unwrap().clone();
-    arr.deref_mut().set_element(len, value);
+    arr.as_object_mut().set_element(len, value);
     Ok(Value::Undefined)
 }
 
@@ -1288,6 +1317,23 @@ fn nf_Number(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Val
 }
 
 #[allow(non_snake_case)]
+fn nf_Number_prototype_toString(
+    intrp: &mut Interpreter,
+    this: &Value,
+    _: &[Value],
+) -> Result<Value> {
+    let num_value = match this {
+        Value::Number(num_value) => num_value,
+        _ => return Err(error!("Not a number value!")),
+    };
+
+    let num_str = num_value.to_string();
+    let oid = intrp.heap.new_string(num_str);
+    Ok(Value::Object(oid))
+}
+
+#[allow(non_snake_case)]
+
 fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
     let value_str = match args.get(0) {
         Some(Value::Number(num)) => num.to_string(),

@@ -9,13 +9,13 @@
 {% block content %} 
 		<div id="content" class="grid grid-rows-[1cm_1fr_1cm] grid-cols-3 gap-x-2 inset-0 w-full h-full">
 
-		<div class="text-xl text-white lowercase sticky px-4 py-2 flex">
+		<div class="text-xl dark:text-white lowercase sticky px-4 py-2 flex">
 			Code
 		</div>
-		<div class="text-xl text-white lowercase sticky px-4 py-2 flex">
+		<div class="text-xl dark:text-white lowercase sticky px-4 py-2 flex">
 			Values
 		</div>
-		<div class="text-xl text-white lowercase sticky px-4 py-2 flex">
+		<div class="text-xl dark:text-white lowercase sticky px-4 py-2 flex">
 			Stack
 		</div>
 
@@ -33,10 +33,15 @@
 			       		 {% when InstrPartView::Opcode with (name) %}
 			       			 <span>{{name}}</span>
 
-			       		 {% when InstrPartView::Read with (vreg) %}
+			       		 {% when InstrPartView::Read with (vreg, description_opt) %}
 			       			 <form method="POST" action="core_dump/add-vreg-watch" class="inline">
 			       				 <input type="hidden" name="call_id" value="{{instr.call_id.0}}">
 			       				 <input type="hidden" name="vreg" value="{{vreg.0}}">
+										 {% match description_opt %}
+										 {% when Some with (description) %}
+										   <div class='text-xs inline-block'>{{description}}⏵</div>
+										 {% else %}
+										 {% endmatch %}
 			       				 <button class='group inline-block px-1 cursor-pointer value
 			       							 [&.highlighted]:bg-sky-800
 			       							 [&.highlighted]:text-white' 
@@ -50,7 +55,7 @@
 			       				 </button>
 			       			 </form>
 
-			       		 {% when InstrPartView::Write with (vreg) %}
+			       		 {% when InstrPartView::Write with (vreg, description_opt) %}
 			       			 <form method="POST" action="core_dump/add-vreg-watch" class="inline">
 			       				 <input type="hidden" name="call_id" value="{{instr.call_id.0}}">
 			       				 <input type="hidden" name="vreg" value="{{vreg.0}}">

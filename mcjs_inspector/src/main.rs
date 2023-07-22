@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    marker::PhantomData,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -114,7 +113,6 @@ async fn handle_get_core_dump(
     let state = state.lock().unwrap();
     let sessions = state.sessions();
     let vm_result = sessions.get(sid)?;
-    let case = &state.case.case;
 
     use view_model::InstrPartView;
 
@@ -131,7 +129,7 @@ async fn handle_get_core_dump(
         vm_result,
         instr_history: view_model::translate_instr_history(
             &vm_result.instr_history,
-            &state.codebase,
+            &state.case.codebase,
         ),
         watches: &state.watches,
         watch_values: view_model::translate_watch_values(&vm_result, &state.watches),
@@ -187,7 +185,6 @@ mod view_model {
     use super::CallID;
     use super::EternalVReg;
     use mcjs_vm::bytecode;
-    use mcjs_vm::heap::Object;
     use mcjs_vm::GlobalIID;
     use mcjs_vm::IID;
 
@@ -199,8 +196,8 @@ mod view_model {
 
     pub(crate) enum InstrPartView {
         Opcode(&'static str),
-        Read(bytecode::VReg),
-        Write(bytecode::VReg),
+        Read(bytecode::VReg, Option<String>),
+        Write(bytecode::VReg, Option<String>),
         Other(String),
     }
 
@@ -214,11 +211,11 @@ mod view_model {
             fn start(&mut self, opcode_name: &'static str) {
                 self.0.push(InstrPartView::Opcode(opcode_name))
             }
-            fn read_vreg(&mut self, vreg: bytecode::VReg) {
-                self.0.push(InstrPartView::Read(vreg))
+            fn read_vreg_labeled(&mut self, vreg: bytecode::VReg, description: Option<String>) {
+                self.0.push(InstrPartView::Read(vreg, description))
             }
-            fn write_vreg(&mut self, vreg: bytecode::VReg) {
-                self.0.push(InstrPartView::Write(vreg))
+            fn write_vreg_labeled(&mut self, vreg: bytecode::VReg, description: Option<String>) {
+                self.0.push(InstrPartView::Write(vreg, description))
             }
             fn jump_target(&mut self, iid: IID) {
                 self.0.push(InstrPartView::Other(format!("j{}", iid.0)))
@@ -264,9 +261,15 @@ mod view_model {
     }
 
     #[derive(Debug)]
+    pub(crate) struct ObjectView {
+        props: HashMap<String, Box<ValueView>>,
+        proto: Option<Box<ObjectView>>,
+    }
+
+    #[derive(Debug)]
     pub(crate) enum ValueView {
         Literal(bytecode::Literal),
-        Object(HashMap<String, Box<ValueView>>),
+        Object(ObjectView),
         String(String),
         Closure(bytecode::FnId),
         Past,
@@ -321,26 +324,12 @@ mod view_model {
                     // TODO Add more details
                     return ValueView::String("<function>".to_string());
                 }
-                match mcjs_vm::heap::string_of_object(obj) {
-                    Ok(str_ref) => ValueView::String(str_ref.to_owned()),
-                    Err(obj) => {
-                        let mut obj_view = HashMap::new();
-
-                        for arr_ndx in 0..obj.len() {
-                            let value = obj.get_element(arr_ndx).unwrap();
-                            let view = view_value(value, heap);
-                            obj_view.insert(format!("[{}]", arr_ndx), Box::new(view));
-                        }
-
-                        for key in obj.properties() {
-                            // TODO This .clone() shouldn't be there, but the change is more complex
-                            // than I have patience for right now
-                            let value = heap.get_property_chained(obj_id, &key).unwrap();
-                            let view = view_value(value, heap);
-                            obj_view.insert(key.to_owned(), Box::new(view));
-                        }
-
-                        ValueView::Object(obj_view)
+                match obj.as_str() {
+                    Some(str_ref) => ValueView::String(str_ref.to_owned()),
+                    None => {
+                        let obj = obj.as_object();
+                        let object_view = view_object(obj, heap);
+                        ValueView::Object(object_view)
                     }
                 }
             }
@@ -349,6 +338,33 @@ mod view_model {
                 unreachable!("goddamit, when ever are you going to remove this enum variant")
             }
         }
+    }
+
+    fn view_object(obj: &dyn mcjs_vm::heap::Object, heap: &mcjs_vm::heap::Heap) -> ObjectView {
+        let mut own_props = HashMap::new();
+        for arr_ndx in 0..obj.len() {
+            let value = obj.get_element(arr_ndx).unwrap();
+            let view = view_value(value, heap);
+            own_props.insert(format!("[{}]", arr_ndx), Box::new(view));
+        }
+        for key in obj.own_properties() {
+            // TODO This .clone() shouldn't be there, but the change is more complex
+            // than I have patience for right now
+            let value = heap.get_property_chained(obj, &key).unwrap();
+            let view = view_value(value, heap);
+            own_props.insert(key.to_owned(), Box::new(view));
+        }
+
+        let proto = obj
+            .proto(heap)
+            .and_then(|proto_id| heap.get(proto_id))
+            .map(|proto| Box::new(view_object(proto.as_object(), heap)));
+
+        let object_view = ObjectView {
+            props: own_props,
+            proto,
+        };
+        object_view
     }
 }
 
@@ -360,20 +376,35 @@ struct CaseData {
 
 impl CaseData {
     fn load(case: inspector_case::Case) -> Self {
-        let include_paths = case.include_paths.iter().map(|pb| pb.as_path());
-        let builder_params = mcjs_vm::BuilderParams {
-            loader: Box::new(mcjs_vm::FileLoader::new(include_paths)),
-        };
-        let mut builder = builder_params.to_builder();
+        use mcjs_vm::{CombinedLoader, MockLoader};
 
-        let root_mod_id = match &case.root {
-            inspector_case::Root::ModuleImport(path) => builder
-                .compile_file(path.clone())
-                .unwrap_or_else(|err| panic!("compile error: {:?}", err)),
-            inspector_case::Root::InlineScript(_) => {
-                todo!("sorry, Root::InlineScript is not supported yet")
+        const INLINE_FILENAME: &'static str = "__INLINE__.js";
+
+        let include_paths = case.include_paths.iter().map(|pb| pb.as_path());
+        let file_loader = Box::new(mcjs_vm::FileLoader::new(include_paths));
+
+        let mut mock_loader = Box::new(MockLoader::new());
+
+        let filename = match &case.root {
+            inspector_case::Root::ModuleImport(path) => path.clone(),
+            inspector_case::Root::InlineScript(script_code) => {
+                mock_loader.add_module(
+                    INLINE_FILENAME.to_owned(),
+                    bytecode::ModuleId(1),
+                    script_code.clone(),
+                );
+                INLINE_FILENAME.to_owned()
             }
         };
+
+        let loader = Box::new(CombinedLoader::new(vec![mock_loader, file_loader]));
+
+        let builder_params = mcjs_vm::BuilderParams { loader };
+        let mut builder = builder_params.to_builder();
+
+        let root_mod_id = builder
+            .compile_file(filename)
+            .unwrap_or_else(|err| panic!("compile error: {:?}", err));
         let codebase = Arc::new(builder.build());
 
         CaseData {
@@ -390,8 +421,6 @@ struct RootState {
     // TODO Move to a different state struct?
     breakpoints: Vec<Breakpoint>,
     watches: Vec<Watch>,
-    codebase: Arc<mcjs_vm::Codebase>,
-    root_mod_id: mcjs_vm::ModuleId,
 
     session_mgr: Mutex<SessionMgr>,
 }
@@ -405,28 +434,10 @@ struct SessionID(u32);
 
 impl RootState {
     fn new(case: CaseData) -> Self {
-        let include_paths = case.case.include_paths.iter().map(|pb| pb.as_path());
-        let builder_params = mcjs_vm::BuilderParams {
-            loader: Box::new(mcjs_vm::FileLoader::new(include_paths)),
-        };
-        let mut builder = builder_params.to_builder();
-
-        let root_mod_id = match &case.case.root {
-            inspector_case::Root::ModuleImport(path) => builder
-                .compile_file(path.clone())
-                .unwrap_or_else(|err| panic!("compile error: {:?}", err)),
-            inspector_case::Root::InlineScript(_) => {
-                todo!("sorry, Root::InlineScript is not supported yet")
-            }
-        };
-        let codebase = Arc::new(builder.build());
-
         RootState {
-            codebase,
             watches: Vec::new(),
-            breakpoints: vec![Breakpoint(GlobalIID(FnId(70), IID(6)))],
+            breakpoints: Vec::new(),
             case,
-            root_mod_id,
             session_mgr: Mutex::new(SessionMgr::new()),
         }
     }
@@ -434,8 +445,8 @@ impl RootState {
     fn start_new_session(&self) -> SessionID {
         let run_params = RunParams {
             breakpoints: self.breakpoints.clone(),
-            codebase: Arc::clone(&self.codebase),
-            root_mod_id: self.root_mod_id,
+            codebase: Arc::clone(&self.case.codebase),
+            root_mod_id: self.case.root_mod_id,
         };
         let vm_result = run_vm(run_params);
         self.session_mgr.lock().unwrap().put(vm_result)
@@ -474,8 +485,6 @@ impl SessionMgr {
         })
     }
 }
-
-struct CaseDetailsModel<'a>(PhantomData<&'a CaseData>);
 
 struct RunParams {
     breakpoints: Vec<Breakpoint>,
