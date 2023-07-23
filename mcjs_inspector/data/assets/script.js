@@ -47,82 +47,28 @@ class ScrollIntoViewInteraction {
     }
 }
 
-class VisibilityIndicator {
-    constructor(element) {
-        this.element = element
-    }
 
-    init() {
-        this.element.addEventListener('click', () => {
-            this.target.scrollIntoView({ behavior: 'smooth' })
-        })
-        this.update()
-    }
-
-    get target() {
-        const targetId = this.element.dataset.visibilityTarget
-        return document.getElementById(targetId)
-    }
-
-    update() {
-        const target = this.target
-        if (typeof target === 'object') {
-            if (isElementVisible(target))
-                this.element.classList.add('target-visible');
-            else
-                this.element.classList.remove('target-visible');
-        }
-    }
-}
 
 document.body.addEventListener('htmx:load', (evt) => {
     const valueElements = document.getElementsByClassName('value')
 
-    const stack = {
-        scrollArea: document.getElementById('stack-scroll-area'),
-        elementOfValue: new Map(),
-    }
-    for (const elm of stack.scrollArea.getElementsByClassName('value')) {
-        const valueId = elm.dataset.mcjsValue
-        stack.elementOfValue.set(valueId, elm)
-    }
+    // Scroll to the bottom at startup
     {
-        // Scroll to the bottom at startup
-        const elm = document.getElementById('code')
+        const elm = document.getElementById('stack-view')
         elm.scrollTo({ top: elm.scrollHeight })
     }
 
-    const indicators = []
-    for (const elm of document.getElementsByClassName('script/visibility-indicator')) {
-        const visind = new VisibilityIndicator(elm)
-        visind.init()
-        indicators.push(visind)
-    }
-
-    stack.scrollArea.onscroll = () => {
-        for (const visind of indicators)
-            visind.update()
-    }
-
-    const scrollIntoView = new ScrollIntoViewInteraction(stack.scrollArea)
+    // const scrollIntoView = new ScrollIntoViewInteraction(stack.scrollArea)
 
     function setHighlighted(valueId) {
-        const toast = document.getElementById('toast-past-call')
-        toast.classList.add('hidden')
-
+        const valueElements = document.getElementsByClassName('script--value')
         if (typeof valueId === 'string') {
-            let valuePresent = false
             for (const elm of valueElements) {
                 if (elm.dataset.mcjsValue === valueId) {
                     elm.classList.add('highlighted')
-                    if (stack.scrollArea.contains(elm))
-                        valuePresent = true
                 }
             }
 
-            if (!valuePresent) {
-                toast.classList.remove('hidden')
-            }
         } else {
             for (const elm of valueElements) {
                 elm.classList.remove('highlighted')
@@ -130,25 +76,15 @@ document.body.addEventListener('htmx:load', (evt) => {
         }
     }
 
-    for (const element of valueElements) {
+    for (const element of document.getElementsByClassName('script--value')) {
         const valueId = element.dataset.mcjsValue;
         if (! /^[-\w\d]+$/.test(valueId)) {
             console.warn(`${element}: invalid valueId: ${valueId}`)
             continue
         }
 
-        element.onmouseenter = (event) => {
-            setHighlighted(valueId)
-            if (!stack.scrollArea.contains(event.target)) {
-                const stackElement = stack.elementOfValue.get(valueId)
-                if (stackElement !== undefined)
-                    scrollIntoView.scrollTo(stackElement)
-            }
-        }
-        element.onmouseleave = () => {
-            setHighlighted(null)
-            scrollIntoView.resetLater()
-        }
+        element.onmouseenter = (event) => { setHighlighted(valueId) }
+        element.onmouseleave = () => { setHighlighted(null) }
     }
 
 

@@ -120,17 +120,44 @@ async fn handle_get_core_dump(
     #[template(path = "core_dump.html")]
     struct CoreDumpTemplate<'a> {
         vm_result: &'a VMResult,
-        instr_history: Vec<view_model::HistoryItemView>,
+        functions: HashMap<FnId, view_model::FunctionView>,
+        call_instr_ndxs: Vec<Option<usize>>,
         watches: &'a Vec<Watch>,
         watch_values: Vec<view_model::ValueView>,
+    }
+    impl<'a> CoreDumpTemplate<'a> {
+        // Workaround: the template in askama does not support the `&` operator, so I can't do
+        // functions[&hdr.fn_id].   This function works around it by taking a value, not a
+        // reference.
+        pub(crate) fn get_function(&self, fn_id: &FnId) -> &view_model::FunctionView {
+            self.functions.get(fn_id).unwrap()
+        }
+    }
+
+    let mut functions = HashMap::new();
+    let mut call_instr_ndxs = Vec::new();
+    if let Some(core_dump) = vm_result.core_dump.as_ref() {
+        let frames = core_dump.data.frames();
+        for frame in frames.iter() {
+            let fn_id = frame.header().fn_id;
+
+            functions.entry(fn_id).or_insert_with(|| {
+                let func = vm_result.run_params.codebase.get_function(fn_id).unwrap();
+                view_model::translate_function(func)
+            });
+        }
+
+        for frame in frames.iter().rev().skip(1) {
+            call_instr_ndxs.push(Some(frame.header().return_to_iid.unwrap().0 as usize));
+        }
+        call_instr_ndxs.push(None);
+        assert_eq!(call_instr_ndxs.len(), frames.len());
     }
 
     let html = CoreDumpTemplate {
         vm_result,
-        instr_history: view_model::translate_instr_history(
-            &vm_result.instr_history,
-            &state.case.codebase,
-        ),
+        functions,
+        call_instr_ndxs,
         watches: &state.watches,
         watch_values: view_model::translate_watch_values(&vm_result, &state.watches),
     }
@@ -188,9 +215,11 @@ mod view_model {
     use mcjs_vm::GlobalIID;
     use mcjs_vm::IID;
 
-    pub(crate) struct HistoryItemView {
-        pub(crate) stack_depth: usize,
-        pub(crate) call_id: CallID,
+    pub(crate) struct FunctionView {
+        pub(crate) instrs: Vec<InstrView>,
+    }
+
+    pub(crate) struct InstrView {
         pub(crate) parts: Vec<InstrPartView>,
     }
 
@@ -201,10 +230,7 @@ mod view_model {
         Other(String),
     }
 
-    pub(crate) fn translate_instr_history(
-        instr_history: &[crate::HistoryItem],
-        codebase: &mcjs_vm::Codebase,
-    ) -> Vec<HistoryItemView> {
+    pub(crate) fn translate_function(func: &bytecode::Function) -> FunctionView {
         struct InstrPartCollector(Vec<InstrPartView>);
 
         impl bytecode::InstrAnalyzer for InstrPartCollector {
@@ -241,23 +267,21 @@ mod view_model {
             fn end(&mut self, _instr: &bytecode::Instr) {}
         }
 
-        instr_history
+        let instrs_view = func
+            .instrs()
             .iter()
-            .map(|item| {
-                let EternalIID(call_id, GlobalIID(fnid, iid)) = item.eiid;
-                let func = codebase.get_function(fnid).unwrap();
-                let instr = &func.instrs()[iid.0 as usize];
-
+            .map(|instr| {
                 let mut collector = InstrPartCollector(Vec::new());
                 instr.analyze(&mut collector);
+                let parts = collector.0;
 
-                HistoryItemView {
-                    stack_depth: item.stack_depth,
-                    call_id,
-                    parts: collector.0,
-                }
+                InstrView { parts }
             })
-            .collect()
+            .collect();
+
+        FunctionView {
+            instrs: instrs_view,
+        }
     }
 
     #[derive(Debug)]
@@ -492,7 +516,6 @@ struct RunParams {
     root_mod_id: mcjs_vm::ModuleId,
 }
 struct VMResult {
-    instr_history: Vec<HistoryItem>,
     call_id_stack: Vec<CallID>,
     error_messages: Vec<String>,
     core_dump: Option<CoreDump>,
@@ -524,8 +547,6 @@ struct EternalVRegMsg {
 struct EternalIID(CallID, GlobalIID);
 
 fn run_vm(run_params: RunParams) -> VMResult {
-    let mut instr_history = Vec::new();
-
     let mut call_id_stack = Vec::new();
     let mut call_id = CallID(0);
     let mut next_call_id = move || {
@@ -542,12 +563,6 @@ fn run_vm(run_params: RunParams) -> VMResult {
 
         assert_eq!(call_id_stack.len(), stack_depth);
 
-        let call_id = *call_id_stack.last().unwrap();
-        instr_history.push(HistoryItem {
-            eiid: EternalIID(call_id, step.giid),
-            stack_depth,
-        });
-
         if run_params.breakpoints.iter().any(|bp| bp.0 == step.giid) {
             InspectorAction::Fail
         } else {
@@ -558,27 +573,15 @@ fn run_vm(run_params: RunParams) -> VMResult {
     let vm = mcjs_vm::Interpreter::new(&run_params.codebase).with_step_handler(&mut on_step);
     let result = vm.run_module(run_params.root_mod_id);
 
-    match result {
-        Ok(_) => VMResult {
-            instr_history: Vec::new(),
-            error_messages: Vec::new(),
-            call_id_stack: Vec::new(),
-            core_dump: None,
-            run_params,
-        },
+    let (core_dump, error_messages) = match result {
+        Ok(_) => (None, Vec::new()),
+        Err(intrp_err) => (intrp_err.core_dump, intrp_err.error.messages().collect()),
+    };
 
-        Err(intrp_err) => {
-            // mcjs_vm::common::Error is not Send due to SourceMap being a forest of Rc<_>.
-            // To avoid the problem, we convert the Error chain to another "flatter" type
-            // that does not include the SourceMap.  We use the SoureMap during this
-            // conversion to retain as much useful info as we can.
-            VMResult {
-                instr_history,
-                call_id_stack,
-                error_messages: intrp_err.error.messages().collect(),
-                core_dump: intrp_err.core_dump,
-                run_params,
-            }
-        }
+    VMResult {
+        call_id_stack,
+        error_messages,
+        core_dump,
+        run_params,
     }
 }

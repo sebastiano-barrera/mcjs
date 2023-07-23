@@ -7,113 +7,174 @@
 {% endmacro %}
 
 {% block content %} 
-		<div id="content" class="grid grid-rows-[1cm_1fr_1cm] grid-cols-3 gap-x-2 inset-0 w-full h-full">
+	<div id="content" class="grid grid-rows-[1fr_5cm_1cm] grid-cols-[1cm_1fr] inset-0 w-full h-full">
 
-		<div class="text-xl dark:text-white lowercase sticky px-4 py-2 flex">
-			Code
-		</div>
-		<div class="text-xl dark:text-white lowercase sticky px-4 py-2 flex">
-			Values
-		</div>
-		<div class="text-xl dark:text-white lowercase sticky px-4 py-2 flex">
-			Stack
-		</div>
-
-		<div id='code' class="overflow-y-scroll scrollbar-thin text-sm divide-y dark:divide-zinc-600 cursor-default">
-			{% for instr in instr_history %}
-			<div class="hover:bg-zinc-100 hover:dark:bg-zinc-700 flex"> 
-				<div class="text-xs text-zinc-400 w-10">
-					C{{instr.call_id.0}}
-				</div>
-
-			        <div style="padding-left: calc({{ instr.stack_depth }} * 0.5cm)">
-
-			       	 {% for part in instr.parts %}
-			       		 {% match part %}
-			       		 {% when InstrPartView::Opcode with (name) %}
-			       			 <span>{{name}}</span>
-
-			       		 {% when InstrPartView::Read with (vreg, description_opt) %}
-			       			 <form method="POST" action="core_dump/add-vreg-watch" class="inline">
-			       				 <input type="hidden" name="call_id" value="{{instr.call_id.0}}">
-			       				 <input type="hidden" name="vreg" value="{{vreg.0}}">
-										 {% match description_opt %}
-										 {% when Some with (description) %}
-										   <div class='text-xs inline-block'>{{description}}⏵</div>
-										 {% else %}
-										 {% endmatch %}
-			       				 <button class='group inline-block px-1 cursor-pointer value
-			       							 [&.highlighted]:bg-sky-800
-			       							 [&.highlighted]:text-white' 
-			       						 data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'
-			       						 hx-post="core_dump/add-vreg-watch" 
-			       						 hx-target="#watches"
-			       						 hx-select="#watches"
-			       						 hx-swap="outerHTML"
-			       						 > 
-			       					 r{{vreg.0}}⬥
-			       				 </button>
-			       			 </form>
-
-			       		 {% when InstrPartView::Write with (vreg, description_opt) %}
-			       			 <form method="POST" action="core_dump/add-vreg-watch" class="inline">
-			       				 <input type="hidden" name="call_id" value="{{instr.call_id.0}}">
-			       				 <input type="hidden" name="vreg" value="{{vreg.0}}">
-			       				 <button class='group inline-block px-1 cursor-pointer value
-			       							 [&.highlighted]:bg-rose-800
-			       							 [&.highlighted]:text-white' 
-			       						 data-mcjs-value='call{{instr.call_id.0}}-v{{vreg.0}}'
-			       						 hx-post="core_dump/add-vreg-watch" 
-			       						 hx-target="#watches"
-			       						 hx-select="#watches"
-			       						 hx-swap="outerHTML"
-			       						 > 
-			       					 w{{vreg.0}}⬥
-			       				 </button>
-			       			 </form>
-
-			       		 {% when InstrPartView::Other with (str) %}
-			       			 <span>{{str}}</span>
-			       		 {% endmatch %}
-			       	 {% endfor %}
-
-			        </div>
-			</div>
-			{% endfor %}
-
-			{% if vm_result.error_messages.len() > 0 %}
-				<div class='text-sm'>
-					<span class='italic'><span class='text-rose-500'>⸺</span> VM error:</span>
-					<ul class='list-disc'>
-						{% for msg in vm_result.error_messages %}
-							<li>{{ msg }}</li>
-						{% endfor %}
-					</ul>
-				</div>
-
-			{% else %}
-				<div class='text-xs m-6 text-zinc-600'>
-					The VM finished successfully.
-				</div>
-			{% endif %}
-		</div>
 
 		{% match vm_result.core_dump %}
 		{% when Some with (core_dump) %}
 
-			<div id="watches" class="overflow-y-scroll scrollbar-thin inset-0">
+			<div class="text-xl text-vertical dark:text-white lowercase sticky py-2 ml-auto mr-auto flex">
+				Stack + Code
+			</div>
+
+			<div id="stack-view" class="flex space-4 overflow-x-scroll py-4">
+				{% let frames = core_dump.data.frames() %}
+				{# Frames are visited top-to-bottom by this loop, whereas vm_result.call_id_stack is bottom-to-top #}
+				{% for frame in frames.iter().rev() %}
+					<div 
+						id="stack-frame-{{loop.index0}}" 
+						class="
+							flex min-w-fit mx-4 p-2 space-x-2 h-full 
+							border-t-2 border-zinc-400 rounded-lg text-xs"
+					>
+						{% let call_id = vm_result.call_id_stack[vm_result.call_id_stack.len() - loop.index] %}
+						{% let hdr = frame.header() %}
+						<div class='flex flex-col overflow-y-scroll space-y-2'>
+							<div class="grid grid-cols-[2cm_1fr]">
+								<div class='text-right'>Call ID:</div>
+								<div>{{ call_id.0 }}</div>
+
+								<div class='text-right'>Function:</div>
+								<div>{{ hdr.fn_id.0 }}</div>
+						
+								<div class='text-right'>This:</div>
+								<div>{{ "{:?}"|format(hdr.this) }}</div>
+								<div class='text-right'>Return to:</div>
+								<div>
+									{{ "{:?}"|format(hdr.return_value_vreg) }} 
+									@
+									{{ "{:?}"|format(hdr.return_to_iid) }}
+								</div>
+							</div>
+
+							<div class='grid grid-cols-[2cm_1fr] gap-x-1'>
+								<div class='text-zinc-500'>Arguments</div>
+								<div></div>
+								{% for item in frame.args() %}
+								<div class="text-right">arg <span class="font-mono">{{loop.index0}}</span></div>
+								<div>{{ "{:?}"|format(item) }}</div>
+								{% endfor %}
+							</div>
+
+							<div class='grid grid-cols-[2cm_1fr] gap-x-1'>
+								<div class='text-zinc-500'>Captures</div>
+								<div></div>
+								{% for item in frame.captures() %}
+								<div class="text-right">cap <span class="font-mono">{{loop.index0}}</span></div>
+								<div>{{ "{:?}"|format(item) }}</div>
+								{% endfor %}
+							</div>
+						</div>
+
+						<div
+							class='
+								grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start overflow-y-scroll
+								script--highlight-mcjs-values
+							'
+						>
+							{% for item in frame.results() %}
+							<div
+									class="text-right script--value read [&.highlighted]:bg-sky-800 [&.highlighted]:text-white"
+									data-mcjs-value="call{{ call_id.0 }}-v{{ loop.index0 }}">
+								⬥<span class="font-mono">r{{loop.index0}}</span>
+							</div>
+							<div>{{ "{:?}"|format(item) }}</div>
+							{% endfor %}
+							<div></div>
+						</div>
+
+						<div class='overflow-y-scroll'>
+							{# Code #}
+							{% let func = self.get_function(hdr.fn_id) %}
+							{% let call_instr_ndx = call_instr_ndxs[loop.index0] %}
+
+							{% for instr in func.instrs %}
+								<div class='flex pr-2 space-x-2'>
+									<div class='text-zinc-500 text-right font-mono min-w-[1cm]'>i{{loop.index0}}</div>
+
+									{% for part in instr.parts %}
+										{% match part %}
+										{% when view_model::InstrPartView::Opcode with (opcode) %}
+											<div>{{opcode}}</div>
+
+                    {% when InstrPartView::Read with (vreg, description_opt) %}
+											<form method="POST" action="core_dump/add-vreg-watch" class="inline">
+												<input type="hidden" name="call_id" value="{{call_id.0}}">
+												<input type="hidden" name="vreg" value="{{vreg.0}}">
+												{% match description_opt %}
+												{% when Some with (description) %}
+													<div class='text-xs inline-block'>{{description}}⏵</div>
+												{% else %}
+												{% endmatch %}
+												<button class='group inline-block px-1 cursor-pointer script--value
+															[&.highlighted]:bg-sky-800
+															[&.highlighted]:text-white' 
+														data-mcjs-value='call{{call_id.0}}-v{{vreg.0}}'
+														hx-post="core_dump/add-vreg-watch" 
+														hx-target="#watches"
+														hx-select="#watches"
+														hx-swap="outerHTML"
+														> 
+													r{{vreg.0}}⬥
+												</button>
+											</form>
+
+			              {% when InstrPartView::Write with (vreg, description_opt) %}
+											<form method="POST" action="core_dump/add-vreg-watch" class="inline">
+												<input type="hidden" name="call_id" value="{{call_id.0}}">
+												<input type="hidden" name="vreg" value="{{vreg.0}}">
+												<button class='group inline-block px-1 cursor-pointer script--value
+															[&.highlighted]:bg-rose-800
+															[&.highlighted]:text-white' 
+														data-mcjs-value='call{{call_id.0}}-v{{vreg.0}}'
+														hx-post="core_dump/add-vreg-watch" 
+														hx-target="#watches"
+														hx-select="#watches"
+														hx-swap="outerHTML"
+														> 
+													w{{vreg.0}}⬥
+												</button>
+											</form>
+
+			              {% when InstrPartView::Other with (str) %}
+											<span>{{str}}</span>
+										{% endmatch %}
+									{% endfor %}
+
+									{% match call_instr_ndx %}
+									{% when Some with (ndx) %}
+										{% if ndx.eq(loop.index0) %}
+											<svg height="5mm" viewBox="0 0 30 6" class='text-teal-500'>
+												<use href="/assets/arrow.svg#layer1" />
+											</svg>
+										{% endif %}
+									{% else %}
+									{% endmatch %}
+								</div>
+							{% endfor %}
+
+						</div>
+					</div>
+				{% endfor %}
+			</div>
+
+			<div class="text-xl text-vertical dark:text-white lowercase sticky py-2 ml-auto mr-auto flex">
+				Values
+			</div>
+
+			<div id="watches" class=" scrollbar-thin inset-0">
 				<div class="grid grid-cols-[2cm_1fr] text-sm">
 					{% if watches.len() == 0 %}
 						<p class="col-span-2 text-zinc-500 text-xs m-4 lowercase font-normal">
 							No values watched yet. Click on values in the
-							instruction or stack window (e.g. "v123",
+							instruction or  overflow-y-scrollstack window (e.g. "v123",
 							"ObjectId(456)") to get more details.
 						</p>
 					{% else %}
 						{% for watch in watches %}
 							{% match watch %}
 							{% when Watch::VReg with (evreg) %}
-								<div class='group value cursor-default' data-mcjs-value='call{{evreg.0.0}}-v{{evreg.1.0}}'>
+								<div class='group script--value cursor-default' data-mcjs-value='call{{evreg.0.0}}-v{{evreg.1.0}}'>
 									<div class='inline-block px-1 group-[&.highlighted]:bg-teal-500'>C{{evreg.0.0}}</div>
 									<div class='inline-block px-1 group-[&.highlighted]:bg-sky-800'>v{{evreg.1.0}}</div>
 								</div>
@@ -122,84 +183,6 @@
 						{% endfor %}
 					{% endif %}
 				</div>
-			</div>
-
-			<div id="stack-scroll-area" class="relative overflow-y-scroll scrollbar-thin px-4 py-2">
-
-				{#  -- Warning toast for calls that have already returned #}
-				<div id='toast-past-call' class="fixed hidden">
-					<div class="m-auto px-4 bg-black ring-1 ring-zinc-700 rounded-full">
-						<span class="text-amber-400">❖</span>
-						This call has already returned.
-						<span class="text-rose-500">⸺</span>
-					</div>
-
-				</div>
-
-				{#  -- Frame visibility indicators #}
-				<div class="fixed right-0 mx-4">
-					{% for frame in core_dump.data.frames() %}
-						<div
-							class="m-1 px-2 rounded-xs bg-zinc-500 text-white cursor-pointer 
-								script/visibility-indicator [&.target-visible]:bg-teal-500"
-							data-visibility-target="stack-frame-{{loop.index0}}"
-						>
-							{% let call_id = vm_result.call_id_stack[vm_result.call_id_stack.len() - loop.index] %}
-							C{{call_id.0}}
-						</div>
-					{% endfor %}
-				</div>
-
-
-				{% for frame in core_dump.data.frames() %}
-					{# Frames are visited top-to-bottom by this loop, whereas vm_result.call_id_stack is bottom-to-top #}
-					{% let call_id = vm_result.call_id_stack[vm_result.call_id_stack.len() - loop.index] %}
-					{% let hdr = frame.header() %}
-					<div
-						id="stack-frame-{{loop.index0}}" 
-						class="grid grid-cols-[2cm_1fr] gap-x-2 text-sm py-2 border-b border-zinc-600"
-					>
-						<div class='text-right'>Call ID:</div>
-						<div>{{ call_id.0 }}</div>
-
-						<div class='text-right'>Function:</div>
-						<div>{{ hdr.fn_id.0 }}</div>
-						
-						<div class='text-right'>This:</div>
-						<div>{{ "{:?}"|format(hdr.this) }}</div>
-						<div class='text-right'>Return to:</div>
-						<div>
-							{{ "{:?}"|format(hdr.return_value_vreg) }} 
-							@
-							{{ "{:?}"|format(hdr.return_to_iid) }}
-						</div>
-						<div class="col-span-full flex place-content-center text-xs text-zinc-500 space-x-4">
-							<div>{{hdr.n_instrs}} instrs </div>
-							<div>{{hdr.n_args}} args</div>
-							<div>{{hdr.n_captures}} captures</div>
-						</div>
-
-						{% for item in frame.args() %}
-						<div class="text-xs text-right">Arg <span class="font-mono">{{loop.index0}}</span></div>
-						<div class="text-xs">{{ "{:?}"|format(item) }}</div>
-						{% endfor %}
-
-						{% for item in frame.results() %}
-						<div
-								class="text-xs text-right value read [&.highlighted]:bg-sky-500"
-								data-mcjs-value="call{{ call_id.0 }}-v{{ loop.index0 }}">
-							⬥Result <span class="font-mono">{{loop.index0}}</span>
-						</div>
-						<div class="text-xs">{{ "{:?}"|format(item) }}</div>
-						{% endfor %}
-
-						{% for item in frame.captures() %}
-						<div class="text-xs text-right">Capture <span class="font-mono">{{loop.index0}}</span></div>
-						<div class="text-xs">{{ "{:?}"|format(item) }}</div>
-						{% endfor %}
-
-					</div>
-				{% endfor %}
 			</div>
 
 			<div class='col-span-full flex space-x-6 lowercase cursor-default'>

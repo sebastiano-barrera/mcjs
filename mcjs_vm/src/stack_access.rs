@@ -287,25 +287,4 @@ mod tests {
             fn_id: FnId(rand::random::<u32>()),
         }
     }
-
-    #[cfg(none)]
-    #[test]
-    fn test_multiple_frames_slots_do_not_overlap() {
-        // ordered bottom to top
-        let headers: Vec<_> = (0..10).map(|_| random_header()).collect();
-        let buf_size = headers.iter().map(|hdr| hdr.expected_frame_size()).sum();
-        let buf = vec![0u8; buf_size].into_boxed_slice();
-        let mut stack = Stack::new(buf);
-
-        for header in headers.iter().rev() {
-            stack.push_frame(*header);
-        }
-
-        for header in headers.iter() {
-            let frame = stack.top();
-            let check_header = frame.header.get();
-            assert_eq!(&check_header, header);
-            stack.pop_frame();
-        }
-    }
 }

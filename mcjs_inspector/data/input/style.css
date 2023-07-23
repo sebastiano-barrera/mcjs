@@ -16,6 +16,9 @@ html {
 	background: gray;
 }
 
-
+.text-vertical {
+	writing-mode: sideways-lr;
+	text-orientation: sideways;
+}
 
 
