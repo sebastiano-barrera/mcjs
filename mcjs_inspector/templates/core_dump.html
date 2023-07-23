@@ -17,7 +17,7 @@
 				Stack + Code
 			</div>
 
-			<div id="stack-view" class="flex space-4 overflow-x-scroll py-4">
+			<div id="stack-view" class="flex space-4 overflow-x-scroll py-4 cursor-default">
 				{% let frames = core_dump.data.frames() %}
 				{% for frame in frames.iter().rev() %}
 					<div 
@@ -29,16 +29,16 @@
 						{% let call_id = vm_result.call_id_stack[loop.index0] %}
 						{% let hdr = frame.header() %}
 						<div class='flex flex-col overflow-y-scroll space-y-2'>
-							<div class="grid grid-cols-[2cm_1fr]">
-								<div class='text-right'>Call ID:</div>
+							<div class="grid gap-x-1 grid-cols-[2cm_1fr]">
+								<div class='text-right'>Call ID =</div>
 								<div>{{ call_id.0 }}</div>
 
-								<div class='text-right'>Function:</div>
+								<div class='text-right'>Function =</div>
 								<div>{{ hdr.fn_id.0 }}</div>
 						
-								<div class='text-right'>This:</div>
+								<div class='text-right'>This =</div>
 								<div>{{ "{:?}"|format(hdr.this) }}</div>
-								<div class='text-right'>Return to:</div>
+								<div class='text-right'>Return to =</div>
 								<div>
 									{{ "{:?}"|format(hdr.return_value_vreg) }} 
 									@
@@ -50,7 +50,16 @@
 								<div class='text-zinc-500'>Arguments</div>
 								<div></div>
 								{% for item in frame.args() %}
-								<div class="text-right">arg <span class="font-mono">{{loop.index0}}</span></div>
+								<div 
+									class="
+										text-right script--value px-1
+										[&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
+										[&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
+									"
+									data-mcjs-value='call{{call_id.0}}-arg{{loop.index0}}'
+								>
+									arg <span class="font-mono">{{loop.index0}}</span>
+								</div>
 								<div>{{ "{:?}"|format(item) }}</div>
 								{% endfor %}
 							</div>
@@ -59,7 +68,16 @@
 								<div class='text-zinc-500'>Captures</div>
 								<div></div>
 								{% for item in frame.captures() %}
-								<div class="text-right">cap <span class="font-mono">{{loop.index0}}</span></div>
+								<div 
+									class="
+										text-right script--value px-1
+										[&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
+										[&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
+									"
+									data-mcjs-value='call{{call_id.0}}-cap{{loop.index0}}'
+								>
+									cap <span class="font-mono">{{loop.index0}}</span>
+								</div>
 								<div>{{ "{:?}"|format(item) }}</div>
 								{% endfor %}
 							</div>
@@ -92,9 +110,16 @@
 								<div
 									class='
 										flex pr-2 space-x-2
-										{% if is_last_frame && loop.index0 > vm_result.last_iid %}
-											opacity-40
-										{% endif %}
+										{% match call_instr_ndx %}
+										{% when Some with (ndx) %}
+											{% if ndx.lt(loop.index0) %}
+												opacity-40
+											{% endif %}
+										{% else %}
+											{% if is_last_frame && loop.index0 > vm_result.last_iid %}
+												opacity-40
+											{% endif %}
+										{% endmatch %}
 									'
 								>
 									<div class='text-zinc-500 text-right font-mono min-w-[1cm]'>i{{loop.index0}}</div>
@@ -142,6 +167,30 @@
 													w{{vreg.0}}⬥
 												</button>
 											</form>
+
+										{% when InstrPartView::Capture with (capndx) %}
+											<div
+													class="
+														script--value px-1 
+														[&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
+														[&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
+													" 
+													data-mcjs-value='call{{call_id.0}}-cap{{capndx}}'
+												>
+												capture[{{capndx}}]
+											</div>
+
+										{% when InstrPartView::Arg with (argndx) %}
+											<div
+												class="
+													script--value px-1 
+													[&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
+													[&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
+												"
+												data-mcjs-value='call{{call_id.0}}-arg{{argndx}}'
+											>
+												arg[{{argndx}}]
+											</div>
 
 			              {% when InstrPartView::Other with (str) %}
 											<span>{{str}}</span>

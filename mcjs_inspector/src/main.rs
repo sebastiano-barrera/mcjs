@@ -227,6 +227,8 @@ mod view_model {
         Opcode(&'static str),
         Read(bytecode::VReg, Option<String>),
         Write(bytecode::VReg, Option<String>),
+        Capture(usize),
+        Arg(usize),
         Other(String),
     }
 
@@ -256,10 +258,10 @@ mod view_model {
                 self.0.push(InstrPartView::Other("undefined".to_owned()))
             }
             fn load_capture(&mut self, item: bytecode::CaptureIndex) {
-                self.0.push(InstrPartView::Other(format!("{:?}", item)))
+                self.0.push(InstrPartView::Capture(item.0 as usize))
             }
             fn load_arg(&mut self, item: bytecode::ArgIndex) {
-                self.0.push(InstrPartView::Other(format!("{:?}", item)))
+                self.0.push(InstrPartView::Arg(item.0 as usize))
             }
             fn load_this(&mut self) {
                 self.0.push(InstrPartView::Other("this".to_owned()))

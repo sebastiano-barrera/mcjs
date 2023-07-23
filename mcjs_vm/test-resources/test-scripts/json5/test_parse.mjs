@@ -6,7 +6,7 @@
 ///
 /// [1] https://github.com/json5/json5/blob/main/test/parse.js
 
-import * as JSON5 from 'index.mjs';
+import JSON5 from 'index.mjs';
 
 // Instead of requiring 'tap', we're providing an implementation of its interface.
 // *Just* enough to run this module, and nothing more.

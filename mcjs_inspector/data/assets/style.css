@@ -661,6 +661,11 @@ video {
        column-gap: 0.25rem;
 }
 
+.gap-x-2 {
+  -moz-column-gap: 0.5rem;
+       column-gap: 0.5rem;
+}
+
 .space-x-2 > :not([hidden]) ~ :not([hidden]) {
   --tw-space-x-reverse: 0;
   margin-right: calc(0.5rem * var(--tw-space-x-reverse));
@@ -966,9 +971,36 @@ html {
   background-color: rgb(7 89 133 / var(--tw-bg-opacity));
 }
 
+.\[\&\.highlighted\]\:bg-cyan-400.highlighted {
+  --tw-bg-opacity: 1;
+  background-color: rgb(34 211 238 / var(--tw-bg-opacity));
+}
+
+.\[\&\.highlighted\]\:bg-cyan-200.highlighted {
+  --tw-bg-opacity: 1;
+  background-color: rgb(165 243 252 / var(--tw-bg-opacity));
+}
+
 .\[\&\.highlighted\]\:text-white.highlighted {
   --tw-text-opacity: 1;
   color: rgb(255 255 255 / var(--tw-text-opacity));
+}
+
+.\[\&\.highlighted\]\:text-cyan-900.highlighted {
+  --tw-text-opacity: 1;
+  color: rgb(22 78 99 / var(--tw-text-opacity));
+}
+
+@media (prefers-color-scheme: dark) {
+  .\[\&\.highlighted\]\:dark\:bg-cyan-900.highlighted {
+    --tw-bg-opacity: 1;
+    background-color: rgb(22 78 99 / var(--tw-bg-opacity));
+  }
+
+  .\[\&\.highlighted\]\:dark\:text-cyan-200.highlighted {
+    --tw-text-opacity: 1;
+    color: rgb(165 243 252 / var(--tw-text-opacity));
+  }
 }
 
 
