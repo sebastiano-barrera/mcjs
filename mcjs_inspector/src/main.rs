@@ -520,6 +520,7 @@ struct VMResult {
     error_messages: Vec<String>,
     core_dump: Option<CoreDump>,
     run_params: RunParams,
+    last_iid: usize,
 }
 
 struct HistoryItem {
@@ -554,14 +555,17 @@ fn run_vm(run_params: RunParams) -> VMResult {
         call_id
     };
 
+    let mut last_iid = bytecode::IID(0);
+
     let mut on_step = |step: &mcjs_vm::InspectorStep| {
         let stack_depth = step.intrp_data.len();
         while call_id_stack.len() < stack_depth {
             call_id_stack.push(next_call_id());
         }
         call_id_stack.truncate(stack_depth);
-
         assert_eq!(call_id_stack.len(), stack_depth);
+
+        last_iid = step.giid.1;
 
         if run_params.breakpoints.iter().any(|bp| bp.0 == step.giid) {
             InspectorAction::Fail
@@ -582,6 +586,7 @@ fn run_vm(run_params: RunParams) -> VMResult {
         call_id_stack,
         error_messages,
         core_dump,
+        last_iid: last_iid.0 as usize,
         run_params,
     }
 }

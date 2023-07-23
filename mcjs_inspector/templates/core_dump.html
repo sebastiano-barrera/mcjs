@@ -19,7 +19,6 @@
 
 			<div id="stack-view" class="flex space-4 overflow-x-scroll py-4">
 				{% let frames = core_dump.data.frames() %}
-				{# Frames are visited top-to-bottom by this loop, whereas vm_result.call_id_stack is bottom-to-top #}
 				{% for frame in frames.iter().rev() %}
 					<div 
 						id="stack-frame-{{loop.index0}}" 
@@ -27,7 +26,7 @@
 							flex min-w-fit mx-4 p-2 space-x-2 h-full 
 							border-t-2 border-zinc-400 rounded-lg text-xs"
 					>
-						{% let call_id = vm_result.call_id_stack[vm_result.call_id_stack.len() - loop.index] %}
+						{% let call_id = vm_result.call_id_stack[loop.index0] %}
 						{% let hdr = frame.header() %}
 						<div class='flex flex-col overflow-y-scroll space-y-2'>
 							<div class="grid grid-cols-[2cm_1fr]">
@@ -87,9 +86,17 @@
 							{# Code #}
 							{% let func = self.get_function(hdr.fn_id) %}
 							{% let call_instr_ndx = call_instr_ndxs[loop.index0] %}
+							{% let is_last_frame = loop.last %}
 
 							{% for instr in func.instrs %}
-								<div class='flex pr-2 space-x-2'>
+								<div
+									class='
+										flex pr-2 space-x-2
+										{% if is_last_frame && loop.index0 > vm_result.last_iid %}
+											opacity-40
+										{% endif %}
+									'
+								>
 									<div class='text-zinc-500 text-right font-mono min-w-[1cm]'>i{{loop.index0}}</div>
 
 									{% for part in instr.parts %}
@@ -151,6 +158,19 @@
 									{% else %}
 									{% endmatch %}
 								</div>
+
+								{% if is_last_frame && loop.index0 == vm_result.last_iid %}
+								<div class='py-4 space-y-2'>
+									<div class='text-red-500'>
+										 ⸻   VM interrupted here ◉
+									</div>
+									<ul>
+										{% for msg in vm_result.error_messages %}
+											<li>{{ msg }}</li>
+										{% endfor %}
+									</ul>
+								</div>
+								{% endif %}
 							{% endfor %}
 
 						</div>
