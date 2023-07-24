@@ -767,8 +767,22 @@ video {
   padding-bottom: 1rem;
 }
 
+.px-20 {
+  padding-left: 5rem;
+  padding-right: 5rem;
+}
+
+.px-8 {
+  padding-left: 2rem;
+  padding-right: 2rem;
+}
+
 .pr-2 {
   padding-right: 0.5rem;
+}
+
+.pl-20 {
+  padding-left: 5rem;
 }
 
 .text-center {

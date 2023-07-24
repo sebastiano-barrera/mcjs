@@ -4,10 +4,9 @@
 #![allow(unused_imports)]
 
 pub mod bytecode;
-mod fs;
 mod bytecode_compiler;
 mod common;
-mod interpreter;
+mod fs;
 // mod jit;
 mod util;
 
@@ -23,16 +22,21 @@ mod stack;
 pub mod stack;
 
 #[cfg(not(feature = "inspection"))]
+mod interpreter;
+#[cfg(feature = "inspection")]
+pub mod interpreter;
+
+#[cfg(not(feature = "inspection"))]
 mod heap;
 #[cfg(feature = "inspection")]
 pub mod heap;
 
-pub use bytecode::{Codebase, ModuleId, Literal, IID, FnId, GlobalIID};
+pub use bytecode::{Codebase, FnId, GlobalIID, Literal, ModuleId, IID};
 pub use bytecode_compiler::{BuilderParams, Loader};
-pub use fs::{FileLoader, MockLoader, CombinedLoader};
-pub use interpreter::{Interpreter, Value as InterpreterValue};
+pub use fs::{CombinedLoader, FileLoader, MockLoader};
 #[cfg(feature = "inspection")]
-pub use interpreter::{InspectorStep, InspectorAction, CoreDump};
+pub use interpreter::{CoreDump, InspectorAction, InspectorStep};
+pub use interpreter::{Interpreter, Value as InterpreterValue};
 
 // TODO Compile this module and build/link serde only for test builds
 pub mod inspector_case;

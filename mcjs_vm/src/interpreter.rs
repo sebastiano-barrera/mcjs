@@ -84,6 +84,12 @@ pub struct JSClosure {
     forced_this: Option<Value>,
 }
 
+impl JSClosure {
+    #[cfg(feature = "inspection")]
+    pub fn upvalues(&self) -> &[UpvalueId] {
+        &self.upvalues
+    }
+}
 impl std::fmt::Debug for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -140,7 +146,7 @@ pub struct Interpreter<'a, 'b> {
     jitting: Option<Jitting>,
 
     #[cfg(feature = "inspection")]
-    step_handler: Option<&'b mut StepHandler<'b>>,
+    step_handler: Option<&'b mut dyn StepHandler>,
     #[cfg(not(feature = "inspection"))]
     _ph: PhantomData<&'b ()>,
 
@@ -172,12 +178,16 @@ impl<'a> InterpreterStep<'a> {
 }
 
 #[cfg(feature = "inspection")]
-type StepHandler<'a> = dyn 'a + FnMut(&InspectorStep) -> InspectorAction;
+pub trait StepHandler {
+    fn pre_instr(&mut self, step: &InspectorStep) -> InspectorAction;
+    fn post_instr(&mut self, step: &InspectorStep) -> InspectorAction;
+}
 
 #[cfg(feature = "inspection")]
 pub struct InspectorStep<'a> {
     pub giid: bytecode::GlobalIID,
     pub intrp_data: &'a stack::InterpreterData,
+    pub heap: &'a heap::Heap,
 }
 
 #[cfg(feature = "inspection")]
@@ -274,7 +284,7 @@ impl<'a> Interpreter<'a, 'a> {
 
 impl<'a, 'b> Interpreter<'a, 'b> {
     #[cfg(feature = "inspection")]
-    pub fn with_step_handler<'c>(self, handler: &'c mut StepHandler<'c>) -> Interpreter<'a, 'c> {
+    pub fn with_step_handler<'c>(self, handler: &'c mut dyn StepHandler) -> Interpreter<'a, 'c> {
         Interpreter {
             step_handler: Some(handler),
             ..self
@@ -392,11 +402,12 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
             #[cfg(feature = "inspection")]
             if let Some(handler) = &mut self.step_handler {
-                let action = handler(&InspectorStep {
+                let inspector_step = InspectorStep {
                     giid: bytecode::GlobalIID(fnid, self.iid),
                     intrp_data: &self.data,
-                });
-
+                    heap: &self.heap,
+                };
+                let action = handler.pre_instr(&inspector_step);
                 match action {
                     InspectorAction::Continue => {}
                     InspectorAction::Fail => return Err(error!("interrupted by inspector")),
@@ -914,6 +925,20 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             }
 
             eprintln!();
+
+            #[cfg(feature = "inspection")]
+            if let Some(handler) = &mut self.step_handler {
+                let inspector_step = InspectorStep {
+                    giid: bytecode::GlobalIID(fnid, self.iid),
+                    intrp_data: &self.data,
+                    heap: &self.heap,
+                };
+                let action = handler.post_instr(&inspector_step);
+                match action {
+                    InspectorAction::Continue => {}
+                    InspectorAction::Fail => return Err(error!("interrupted by inspector")),
+                }
+            }
 
             #[cfg(enable_jit)]
             if let Some(jitting) = &mut self.jitting {

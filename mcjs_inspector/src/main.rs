@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use askama::Template;
 use serde::Deserialize;
 
+use mcjs_vm::interpreter;
 use mcjs_vm::{bytecode, inspector_case, CoreDump, FnId, GlobalIID, InspectorAction, IID};
 
 #[actix_web::main]
@@ -474,7 +475,7 @@ impl RootState {
             codebase: Arc::clone(&self.case.codebase),
             root_mod_id: self.case.root_mod_id,
         };
-        let vm_result = run_vm(run_params);
+        let vm_result = Tracer::run(run_params);
         self.session_mgr.lock().unwrap().put(vm_result)
     }
 
@@ -523,6 +524,7 @@ struct VMResult {
     core_dump: Option<CoreDump>,
     run_params: RunParams,
     last_iid: usize,
+    instr_meta: HashMap<GlobalIID, Vec<InstrMeta>>,
 }
 
 struct HistoryItem {
@@ -549,46 +551,109 @@ struct EternalVRegMsg {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EternalIID(CallID, GlobalIID);
 
-fn run_vm(run_params: RunParams) -> VMResult {
-    let mut call_id_stack = Vec::new();
-    let mut call_id = CallID(0);
-    let mut next_call_id = move || {
-        call_id.0 += 1;
-        call_id
-    };
+#[derive(Debug)]
+enum InstrMeta {
+    ClosureInfo {
+        upvalues: Vec<interpreter::UpvalueId>,
+    },
+}
 
-    let mut last_iid = bytecode::IID(0);
+struct Tracer {
+    call_id_stack: Vec<CallID>,
+    call_id: CallID,
+    last_iid: bytecode::IID,
+    instr_meta: HashMap<GlobalIID, Vec<InstrMeta>>,
+    run_params: RunParams,
+}
 
-    let mut on_step = |step: &mcjs_vm::InspectorStep| {
-        let stack_depth = step.intrp_data.len();
-        while call_id_stack.len() < stack_depth {
-            call_id_stack.push(next_call_id());
+impl Tracer {
+    fn new(run_params: RunParams) -> Self {
+        Self {
+            call_id_stack: Vec::new(),
+            call_id: CallID(0),
+            last_iid: bytecode::IID(0),
+            instr_meta: HashMap::new(),
+            run_params,
         }
-        call_id_stack.truncate(stack_depth);
-        assert_eq!(call_id_stack.len(), stack_depth);
+    }
 
-        last_iid = step.giid.1;
+    fn next_call_id(&mut self) -> CallID {
+        self.call_id.0 += 1;
+        self.call_id
+    }
 
-        if run_params.breakpoints.iter().any(|bp| bp.0 == step.giid) {
+    fn run(run_params: RunParams) -> VMResult {
+        let mut tracer = Self::new(run_params);
+
+        let codebase = Arc::clone(&tracer.run_params.codebase);
+        let module_id = tracer.run_params.root_mod_id;
+
+        let vm = mcjs_vm::Interpreter::new(&*codebase).with_step_handler(&mut tracer);
+        let result = vm.run_module(module_id);
+
+        let (core_dump, error_messages) = match result {
+            Ok(_) => (None, Vec::new()),
+            Err(intrp_err) => (intrp_err.core_dump, intrp_err.error.messages().collect()),
+        };
+
+        VMResult {
+            call_id_stack: tracer.call_id_stack,
+            error_messages,
+            core_dump,
+            last_iid: tracer.last_iid.0 as usize,
+            run_params: tracer.run_params,
+            instr_meta: tracer.instr_meta,
+        }
+    }
+}
+
+impl interpreter::StepHandler for Tracer {
+    fn pre_instr(&mut self, step: &mcjs_vm::InspectorStep) -> InspectorAction {
+        let stack_depth = step.intrp_data.len();
+        while self.call_id_stack.len() < stack_depth {
+            let call_id = self.next_call_id();
+            self.call_id_stack.push(call_id);
+        }
+        self.call_id_stack.truncate(stack_depth);
+        assert_eq!(self.call_id_stack.len(), stack_depth);
+
+        self.last_iid = step.giid.1;
+
+        if self
+            .run_params
+            .breakpoints
+            .iter()
+            .any(|bp| bp.0 == step.giid)
+        {
             InspectorAction::Fail
         } else {
             InspectorAction::Continue
         }
-    };
+    }
 
-    let vm = mcjs_vm::Interpreter::new(&run_params.codebase).with_step_handler(&mut on_step);
-    let result = vm.run_module(run_params.root_mod_id);
+    fn post_instr(&mut self, step: &mcjs_vm::InspectorStep) -> InspectorAction {
+        let GlobalIID(fn_id, iid) = step.giid;
+        let func = self.run_params.codebase.get_function(fn_id).unwrap();
+        let instr = &func.instrs()[iid.0 as usize];
+        match instr {
+            bytecode::Instr::ClosureNew { dest, .. } => {
+                let dest = step.intrp_data.top().get_result(*dest);
+                if let interpreter::Value::Object(oid) = dest {
+                    let obj_ref = step.heap.get(oid).unwrap();
+                    if let Some(interpreter::Closure::JS(jsclo)) = obj_ref.as_closure() {
+                        let upvalues = jsclo.upvalues().to_owned();
+                        let meta_item = InstrMeta::ClosureInfo { upvalues };
+                        eprintln!(" -- meta: {:?} -> {:?}", step.giid, meta_item);
+                        self.instr_meta
+                            .entry(step.giid)
+                            .or_insert_with(|| Vec::new())
+                            .push(meta_item);
+                    }
+                }
+            }
+            _ => {}
+        }
 
-    let (core_dump, error_messages) = match result {
-        Ok(_) => (None, Vec::new()),
-        Err(intrp_err) => (intrp_err.core_dump, intrp_err.error.messages().collect()),
-    };
-
-    VMResult {
-        call_id_stack,
-        error_messages,
-        core_dump,
-        last_iid: last_iid.0 as usize,
-        run_params,
+        InspectorAction::Continue
     }
 }

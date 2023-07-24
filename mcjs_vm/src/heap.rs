@@ -253,6 +253,13 @@ impl HeapObject {
             _ => None,
         }
     }
+
+    pub fn as_closure(&self) -> Option<&Closure> {
+        match self {
+            HeapObject::ClosureObject(ClosureObject { closure, .. }) => Some(closure),
+            _ => None,
+        }
+    }
 }
 impl From<OrdObject> for HeapObject {
     fn from(inner: OrdObject) -> Self {

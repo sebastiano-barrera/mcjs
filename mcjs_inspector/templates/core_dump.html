@@ -9,7 +9,6 @@
 {% block content %} 
 	<div id="content" class="grid grid-rows-[1fr_5cm_1cm] grid-cols-[1cm_1fr] inset-0 w-full h-full">
 
-
 		{% match vm_result.core_dump %}
 		{% when Some with (core_dump) %}
 
@@ -209,20 +208,36 @@
 								</div>
 
 								{% if is_last_frame && loop.index0 == vm_result.last_iid %}
-								<div class='py-4 space-y-2'>
-									<div class='text-red-500'>
-										 ⸻   VM interrupted here ◉
+									<div class='py-4 space-y-2'>
+										<div class='text-red-500'>
+											 ⸻   VM interrupted here ◉
+										</div>
+										<ul>
+											{% for msg in vm_result.error_messages %}
+												<li>{{ msg }}</li>
+											{% endfor %}
+										</ul>
 									</div>
-									<ul>
-										{% for msg in vm_result.error_messages %}
-											<li>{{ msg }}</li>
-										{% endfor %}
-									</ul>
-								</div>
 								{% endif %}
-							{% endfor %}
 
+								{% let giid = GlobalIID(hdr.fn_id.clone(), IID(loop.index0.try_into().unwrap())) %}
+								{% match vm_result.instr_meta.get(giid) %}
+									{% when Some with (items) %}
+										<div class='px-8'>
+											<div>▴ meta:</div>
+											<ul class='list-disc'>
+											{% for meta_item in items %}
+												<li>
+													{{ "{:?}"|format(meta_item) }}
+												</li>
+											{% endfor %}
+											</li>
+										</div>
+									{% else %}
+								{% endmatch %}
+							{% endfor %}
 						</div>
+
 					</div>
 				{% endfor %}
 			</div>
