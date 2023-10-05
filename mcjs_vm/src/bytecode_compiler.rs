@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
-use swc_common::{sync::Lrc, SourceMap, Span};
+use swc_common::{sync::Lrc, Span};
 use swc_ecma_ast::{
     ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, ForHead, Function, Lit, Pat, UpdateOp, VarDecl,
 };
@@ -10,6 +10,10 @@ use crate::bytecode::{self, FnId, Instr, Literal, NativeFnId, VReg, IID};
 pub use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::util::Mask;
+
+
+pub use swc_common::SourceMap;
+
 
 macro_rules! unsupported_node {
     ($value:expr) => {{
@@ -34,7 +38,12 @@ pub struct Builder {
     next_fnid: u32,
     next_module_id: u16,
 
+    // TODO Merge with sourcemap_of_module in a single struct?
     rootfn_of_module: HashMap<bytecode::ModuleId, FnId>,
+    module_of_fn: HashMap<FnId, bytecode::ModuleId>,
+    sourcemap_of_module: HashMap<bytecode::ModuleId, SourceMap>,
+
+    cur_module_fns: Vec<FnId>,
 
     // --- below this line, things are valid during the compilation of a single module.  at the
     // end, these are reset
@@ -51,6 +60,10 @@ impl BuilderParams {
             next_module_id: 1,
 
             rootfn_of_module: HashMap::new(),
+            module_of_fn: HashMap::new(),
+            sourcemap_of_module: HashMap::new(),
+
+            cur_module_fns: Vec::new(),
         }
     }
 }
@@ -83,11 +96,20 @@ impl Builder {
         self.fn_stack.truncate(old_fn_stack_len);
 
         let root_fnid = res.with_context(
-            error!("while compiling module: {filename}").with_source_map(source_map),
+            error!("while compiling module: {filename}").with_source_map(Lrc::clone(&source_map)),
         )?;
 
         let prev = self.rootfn_of_module.insert(module_id, root_fnid);
         assert!(prev.is_none(), "duplicate module id");
+
+        let cur_module_fns = std::mem::replace(&mut self.cur_module_fns, Vec::new());
+        for fn_id in cur_module_fns.into_iter() {
+            let prev = self.module_of_fn.insert(fn_id, module_id);
+            assert!(prev.is_none());
+        }
+
+        let source_map = Lrc::into_inner(source_map).expect("other pointers into source map");
+        self.sourcemap_of_module.insert(module_id, source_map);
 
         Ok(module_id)
     }
@@ -102,6 +124,7 @@ struct FnBuilder {
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
     consts: Vec<Literal>,
+    span: Option<swc_common::Span>,
     trace_anchors: HashMap<IID, bytecode::TraceAnchor>,
     next_vreg: u8,
     n_params: bytecode::ArgIndex,
@@ -148,6 +171,7 @@ impl FnBuilder {
             n_params: bytecode::ArgIndex(0),
             pending_break_instrs: Vec::new(),
             pending_continue_instrs: Vec::new(),
+            span: None,
         }
     }
 
@@ -161,6 +185,7 @@ impl FnBuilder {
             self.consts.into_boxed_slice(),
             self.n_params,
             self.trace_anchors,
+            self.span,
         )
     }
 
@@ -277,8 +302,13 @@ impl FnBuilder {
     }
 }
 
+pub struct Built {
+    pub codebase: bytecode::Codebase,
+    pub sourcemap_of_module: HashMap<bytecode::ModuleId, SourceMap>,
+}
+
 impl Builder {
-    pub fn build(mut self) -> bytecode::Codebase {
+    pub fn build(mut self) -> Built {
         assert!(self.fn_stack.is_empty());
 
         let fns = self
@@ -287,7 +317,12 @@ impl Builder {
             .map(|(fn_id, fn_builder)| (fn_id, fn_builder.build()))
             .collect();
 
-        bytecode::Codebase::new(fns, self.rootfn_of_module)
+        let codebase = bytecode::Codebase::new(fns, self.rootfn_of_module, self.module_of_fn);
+
+        Built {
+            codebase,
+            sourcemap_of_module: self.sourcemap_of_module,
+        }
     }
 
     fn reserve(&mut self) -> IID {
@@ -1134,7 +1169,8 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     let stmts = &func.body.as_ref().expect("function without body?!").stmts;
     compile_block(builder, stmts)?;
 
-    let inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
+    let mut inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
+    inner_fnb.span = Some(func.span);
 
     // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
     // the ClosureNew and any associated ClosureAddCapture are adjacent
@@ -1157,6 +1193,7 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
 
+    builder.cur_module_fns.push(inner_fnb.fnid);
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
     Ok(dest)
 }
@@ -1226,6 +1263,7 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
 
+    builder.cur_module_fns.push(inner_fnb.fnid);
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
 
     Ok(dest)
@@ -1911,7 +1949,7 @@ mod tests {
 
         builder.compile_file("<input>".to_string()).unwrap();
 
-        builder.build()
+        builder.build().codebase
     }
 
     #[test]

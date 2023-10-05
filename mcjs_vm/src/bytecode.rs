@@ -1,10 +1,11 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet}, sync::{Arc, Mutex},
 };
 
 use strum::IntoStaticStr;
 use swc_atoms::JsWord;
+use swc_common::{Span, SourceMap};
 
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -345,19 +346,30 @@ type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
 
 pub struct Codebase {
     fns: HashMap<FnId, Function>,
+    // TODO Merge with sourcemap_of_module in a single struct?
     rootfn_of_module: HashMap<ModuleId, FnId>,
+    module_of_fn: HashMap<FnId, ModuleId>,
 }
 
 impl Codebase {
-    pub fn new(fns: HashMap<FnId, Function>, rootfn_of_module: HashMap<ModuleId, FnId>) -> Self {
+    pub fn new(
+        fns: HashMap<FnId, Function>,
+        rootfn_of_module: HashMap<ModuleId, FnId>,
+        module_of_fn: HashMap<FnId, ModuleId>,
+    ) -> Self {
         Codebase {
             fns,
             rootfn_of_module,
+            module_of_fn,
         }
     }
 
     pub fn get_function(&self, fnid: FnId) -> Option<&Function> {
         self.fns.get(&fnid)
+    }
+
+    pub fn module_of_fn(&self, fn_id: FnId) -> Option<ModuleId> {
+        self.module_of_fn.get(&fn_id).copied()
     }
 
     pub fn get_module_root_fn(&self, module_id: ModuleId) -> Option<FnId> {
@@ -406,6 +418,7 @@ pub struct Function {
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
     trace_anchors: HashMap<IID, TraceAnchor>,
+    span: Option<Span>,
 }
 pub struct TraceAnchor {
     pub trace_id: String,
@@ -422,6 +435,7 @@ impl Function {
         consts: Box<[Literal]>,
         n_params: ArgIndex,
         trace_anchors: HashMap<IID, TraceAnchor>,
+        span: Option<Span>,
     ) -> Function {
         #[cfg(to_be_rewritten)]
         let loop_heads = find_loop_heads(&instrs[..]);
@@ -433,6 +447,7 @@ impl Function {
             n_params,
             loop_heads,
             trace_anchors,
+            span,
         }
     }
 
@@ -446,6 +461,10 @@ impl Function {
 
     pub fn is_loop_head(&self, iid: IID) -> bool {
         self.loop_heads.contains_key(&iid)
+    }
+
+    pub fn source_span(&self) -> Option<&Span> {
+        self.span.as_ref()
     }
 
     pub fn get_trace_anchor(&self, iid: IID) -> Option<&TraceAnchor> {

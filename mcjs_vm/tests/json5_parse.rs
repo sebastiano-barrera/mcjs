@@ -34,7 +34,7 @@ fn test_integration_script(filename: String) {
     let test_mod_id = builder
         .compile_file(filename.clone())
         .unwrap_or_else(|err| panic!("compile error: {:?}", err));
-    let codebase = builder.build();
+    let codebase = builder.build().codebase;
 
     let res = std::panic::catch_unwind(|| {
         let output = mcjs_vm::Interpreter::new(&codebase)

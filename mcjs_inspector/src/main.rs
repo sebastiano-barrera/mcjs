@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use askama::Template;
 use serde::Deserialize;
 
-use mcjs_vm::interpreter;
 use mcjs_vm::{bytecode, inspector_case, CoreDump, FnId, GlobalIID, InspectorAction, IID};
+use mcjs_vm::{interpreter, ModuleId, SourceMap};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -42,14 +42,9 @@ async fn main() -> std::io::Result<()> {
         // Start the session once, so we don't have to click on "start" every time we
         // recompile/restart the program
         let state = Arc::clone(&state);
-        let sid = tokio::task::spawn_blocking(move || {
-            let state = state.lock().unwrap();
-            let sid = state.start_new_session();
-            println!();
-            sid
-        })
-        .await
-        .unwrap();
+        let state = state.lock().unwrap();
+        let sid = state.start_new_session();
+        println!();
         println!(
             " -- initial session created: http://127.0.0.1:10001/sessions/{}/core_dump",
             sid.0
@@ -121,6 +116,7 @@ async fn handle_get_core_dump(
     #[template(path = "core_dump.html")]
     struct CoreDumpTemplate<'a> {
         vm_result: &'a VMResult,
+        stack_srcs: Vec<&'a str>,
         functions: HashMap<FnId, view_model::FunctionView>,
         call_instr_ndxs: Vec<Option<usize>>,
         watches: &'a Vec<Watch>,
@@ -137,13 +133,15 @@ async fn handle_get_core_dump(
 
     let mut functions = HashMap::new();
     let mut call_instr_ndxs = Vec::new();
+    let mut stack_srcs = Vec::new();
     if let Some(core_dump) = vm_result.core_dump.as_ref() {
         let frames = core_dump.data.frames();
+        let codebase = &vm_result.run_params.codebase;
         for frame in frames.iter() {
             let fn_id = frame.header().fn_id;
 
             functions.entry(fn_id).or_insert_with(|| {
-                let func = vm_result.run_params.codebase.get_function(fn_id).unwrap();
+                let func = codebase.get_function(fn_id).unwrap();
                 view_model::translate_function(func)
             });
         }
@@ -153,10 +151,17 @@ async fn handle_get_core_dump(
         }
         call_instr_ndxs.push(None);
         assert_eq!(call_instr_ndxs.len(), frames.len());
+
+        for frame in frames.iter().rev() {
+            let fn_id = frame.header().fn_id;
+            let src = state.case.source_of_fn.get(&fn_id).map(|s| s.as_str()).unwrap_or("???");
+            stack_srcs.push(src);
+        }
     }
 
     let html = CoreDumpTemplate {
         vm_result,
+        stack_srcs,
         functions,
         call_instr_ndxs,
         watches: &state.watches,
@@ -399,6 +404,7 @@ struct CaseData {
     codebase: Arc<mcjs_vm::Codebase>,
     case: inspector_case::Case,
     root_mod_id: mcjs_vm::ModuleId,
+    source_of_fn: HashMap<FnId, String>,
 }
 
 impl CaseData {
@@ -432,10 +438,38 @@ impl CaseData {
         let root_mod_id = builder
             .compile_file(filename)
             .unwrap_or_else(|err| panic!("compile error: {:?}", err));
-        let codebase = Arc::new(builder.build());
+        let mcjs_vm::Built {
+            codebase,
+            sourcemap_of_module,
+        } = builder.build();
+        let codebase = Arc::new(codebase);
+
+        // swc SourceMaps have the lovely property that they're !Send. That
+        // means that it's a pain in the ass to use them in this multithreaded
+        // program (and actix will force us to have closures and stuff, even if
+        // we ditched multithreading) So: we transform them immediately into
+        // something less good but nicely shareable.
+
+        let mut source_of_fn = HashMap::new();
+        for (fn_id, func) in codebase.all_functions() {
+            if let Some(source_span) = func.source_span() {
+                let module_id = codebase.module_of_fn(fn_id).unwrap();
+                if let Some(sourcemap) = sourcemap_of_module.get(&module_id) {
+                    let lo = sourcemap.lookup_char_pos(source_span.lo());
+                    let src_bytes = lo.file.src.as_bytes();
+
+                    let lo = source_span.lo().0 as usize;
+                    let hi = source_span.hi().0 as usize;
+                    let fn_src = src_bytes[lo..hi].to_owned();
+                    let fn_src = String::from_utf8(fn_src).unwrap();
+                    source_of_fn.insert(fn_id, fn_src);
+                }
+            }
+        }
 
         CaseData {
             codebase,
+            source_of_fn,
             case,
             root_mod_id,
         }
@@ -588,7 +622,7 @@ impl Tracer {
         let codebase = Arc::clone(&tracer.run_params.codebase);
         let module_id = tracer.run_params.root_mod_id;
 
-        let vm = mcjs_vm::Interpreter::new(&*codebase).with_step_handler(&mut tracer);
+        let vm = mcjs_vm::Interpreter::new(&codebase).with_step_handler(&mut tracer);
         let result = vm.run_module(module_id);
 
         let (core_dump, error_messages) = match result {

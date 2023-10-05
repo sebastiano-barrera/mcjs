@@ -1419,20 +1419,20 @@ mod tests {
         let mut mock_loader = Box::new(MockLoader::new());
         mock_loader.add_module("the_script.js".to_owned(), module_id, code.to_owned());
 
-        let codebase = {
-            let bcparams = bytecode_compiler::BuilderParams {
-                loader: mock_loader,
-            };
-            let mut builder = bcparams.to_builder();
-            builder
-                .compile_file("the_script.js".to_string())
-                .expect("compile error");
-            builder.build()
-        };
-
-        codebase.dump();
-
         let res = std::panic::catch_unwind(|| {
+            let codebase = {
+                let bcparams = bytecode_compiler::BuilderParams {
+                    loader: mock_loader,
+                };
+                let mut builder = bcparams.to_builder();
+                builder
+                    .compile_file("the_script.js".to_string())
+                    .expect("compile error");
+                builder.build().codebase
+            };
+
+            codebase.dump();
+
             let vm = Interpreter::new(&codebase);
             vm.run_module(module_id).unwrap()
         });

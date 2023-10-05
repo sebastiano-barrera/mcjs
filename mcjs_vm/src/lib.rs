@@ -34,9 +34,12 @@ pub mod heap;
 pub use bytecode::{Codebase, FnId, GlobalIID, Literal, ModuleId, IID};
 pub use bytecode_compiler::{BuilderParams, Loader};
 pub use fs::{CombinedLoader, FileLoader, MockLoader};
+pub use interpreter::{Interpreter, Value as InterpreterValue};
+
 #[cfg(feature = "inspection")]
 pub use interpreter::{CoreDump, InspectorAction, InspectorStep};
-pub use interpreter::{Interpreter, Value as InterpreterValue};
+#[cfg(feature = "inspection")]
+pub use bytecode_compiler::{SourceMap, Built};
 
 // TODO Compile this module and build/link serde only for test builds
 pub mod inspector_case;

@@ -1,4 +1,9 @@
 
+- inspector: show source code provenance
+	- Sub-problem: provide source maps for modules
+		- Sub-problem: Rc<SourceMap> and SourceMap itself can't cross thread boundary
+			- Attempt: refactor the API to use Rc, such that it's possible to only access SourceMaps from the same thread that did the parsing.
+
 - Support exotic objects
 
 	- Def: (comes directly from the ES262 standard)
@@ -49,3 +54,7 @@
 			- basic representation and usage of ords, strings, arrays
 			- basic representation and usage of function (both JS closures and native)
 			- basic representation and usage of numbers, booleans
+
+
+
+			

@@ -35,7 +35,7 @@ fn main() {
         eprintln!("{}", err.message());
         eprintln!();
     } else {
-        let codebase = builder.build();
-        codebase.dump();
+        let built = builder.build();
+        built.codebase.dump();
     }
 }
