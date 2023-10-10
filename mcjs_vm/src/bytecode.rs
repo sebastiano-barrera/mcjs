@@ -78,7 +78,6 @@ pub struct ModuleId(pub u16);
 #[derive(Debug, Clone, Copy, IntoStaticStr)]
 pub enum Instr {
     Nop,
-    /// Load constant in accu
     LoadConst(VReg, ConstIndex),
     LoadNull(VReg),
     LoadUndefined(VReg),
