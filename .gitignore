@@ -3,3 +3,6 @@
 .gdb_history
 .lite_workspace.lua
 *.profraw
+
+*/node_modules/
+
