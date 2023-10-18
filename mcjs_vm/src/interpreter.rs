@@ -16,9 +16,10 @@ use std::{
 use crate::{
     bytecode::{self, FnId, GlobalIID, Instr, VReg, IID},
     bytecode_compiler,
-    common::Result,
+    common::{Context, Result},
     error,
     heap::{self, Heap, Object, ObjectExt},
+    loader,
     // jit::{self, InterpreterStep},
     stack,
     stack_access,
@@ -150,10 +151,10 @@ pub struct Interpreter<'a, 'b> {
     #[cfg(not(feature = "inspection"))]
     _ph: PhantomData<&'b ()>,
 
-    modules: HashMap<bytecode::ModuleId, heap::ObjectId>,
+    module_objs: HashMap<bytecode::ModuleId, heap::ObjectId>,
     global_obj: heap::ObjectId,
+    loader: &'a loader::Loader,
 
-    codebase: &'a bytecode::Codebase,
     sink: Vec<Value>,
     // traces: HashMap<String, (jit::Trace, jit::NativeThunk)>,
     opts: Options,
@@ -260,7 +261,7 @@ struct Jitting {
 }
 
 impl<'a> Interpreter<'a, 'a> {
-    pub fn new(codebase: &'a bytecode::Codebase) -> Self {
+    pub fn new(loader: &'a loader::Loader) -> Self {
         let mut heap = heap::Heap::new();
         let global_obj = init_builtins(&mut heap);
         Interpreter {
@@ -269,9 +270,9 @@ impl<'a> Interpreter<'a, 'a> {
             heap,
             #[cfg(feature = "inspection")]
             step_handler: None,
-            modules: HashMap::new(),
+            module_objs: HashMap::new(),
             global_obj,
-            codebase,
+            loader,
             sink: Vec::new(),
             opts: Default::default(),
             #[cfg(enable_jit)]
@@ -320,21 +321,26 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         self.traces.keys()
     }
 
-    /// Run the specified module.
+    /// Run the specified function.
     ///
     /// This is the only entry point into the interpreter.
     ///
     /// This function returns when the intepreter has finished its execution, successfully
     /// or due to a failure
-    pub fn run_module(mut self, module_id: bytecode::ModuleId) -> InterpreterResult {
-        let fnid = self
-            .codebase
-            .get_module_root_fn(module_id)
-            .ok_or_else(|| error!("no such module: {module_id:?}"))?;
-        let root_fn = self.codebase.get_function(fnid).unwrap();
+    ///
+    /// Impl. notes: This function initializes the interpreter and runs it until
+    /// completion, starting from the given function. Do not use this function
+    /// to implement a function call happening during normal code execution.
+    pub fn run_function(mut self, fnid: FnId) -> InterpreterResult {
+        let root_fn = self.loader.get_function(fnid).unwrap();
         let n_instrs = root_fn.instrs().len().try_into().unwrap();
 
         assert!(self.data.len() == 0);
+
+        // TODO Allow running a function in "script mode"
+        //   - The bottom stack frame is allowed not to have a function ID
+        //   - Module ID = the special reserved "script" module ID
+
         self.data.push(stack::CallMeta {
             fnid,
             n_instrs,
@@ -344,12 +350,10 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             return_value_reg: None,
             return_to_iid: None,
         });
-
         let output = self.run_until_done().map_err(|err| {
             let dump = CoreDump::new(self);
             InterpreterError::from(err).with_core_dump(dump)
         })?;
-
         #[cfg(enable_jit)]
         if let Some(jitting) = intrp.jitting {
             if let Some(trace) = jitting.builder.build() {
@@ -364,14 +368,15 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 assert!(prev.is_none());
             }
         }
-
         Ok(output)
     }
 
     fn run_until_done(&mut self) -> Result<Output> {
         while self.data.len() != 0 {
+            // TODO Avoid calling get_function at each instructions
             let fnid = self.data.top().header().fn_id;
-            let func = self.get_function(fnid);
+            // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
+            let func = self.loader.get_function(fnid).unwrap();
 
             assert!(
                 self.iid.0 as usize <= func.instrs().len(),
@@ -585,7 +590,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                                 );
                             }
 
-                            let callee_func = self.codebase.get_function(closure.fnid).unwrap();
+                            let callee_func = self.loader.get_function(closure.fnid).unwrap();
                             let n_params = callee_func.n_params().0;
                             arg_vals.truncate(n_params as usize);
                             arg_vals.resize(n_params as usize, Value::Undefined);
@@ -616,7 +621,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                             eprintln!();
                             self.print_indent();
                             eprintln!(
-                                "-- fn #{} [{} captures]",
+                                "-- fn {:?} [{} captures]",
                                 call_meta.fnid.0, call_meta.n_captured_upvalues
                             );
 
@@ -805,8 +810,10 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     }
 
                     let forced_this = forced_this.map(|reg| self.get_operand(reg));
+                    let module_id = self.data.top().header().fn_id.0;
+                    let fnid = bytecode::FnId(module_id, *fnid);
                     let closure = Closure::JS(JSClosure {
-                        fnid: *fnid,
+                        fnid,
                         upvalues,
                         forced_this,
                     });
@@ -828,18 +835,22 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         .set_result(*dest, Value::Number(-arg_val));
                 }
 
-                Instr::GetModule(dest, module_id) => {
-                    if let Some(module_oid) = self.modules.get(module_id) {
+                Instr::ImportModule(dest, module_path) => {
+                    let import_site: loader::ImportSite = todo!();
+                    let module_path = self.get_operand_string(*module_path)?;
+
+                    let root_fnid = self
+                        .loader
+                        .load_import(module_path.to_string(), import_site)
+                        .with_context(error!("while trying to import '{}'", module_path))?;
+
+                    if let Some(module_oid) = self.module_objs.get(&root_fnid.0) {
                         self.data
                             .top_mut()
                             .set_result(*dest, Value::Object(*module_oid));
                     } else {
                         // TODO Refactor with other implementations of Call?
-                        let root_fnid = self
-                            .codebase
-                            .get_module_root_fn(*module_id)
-                            .ok_or_else(|| error!("no such module ID"))?;
-                        let root_fn = self.codebase.get_function(root_fnid).unwrap();
+                        let root_fn = self.loader.get_function(root_fnid).unwrap();
                         let n_instrs = root_fn.instrs().len().try_into().unwrap();
 
                         let call_meta = stack::CallMeta {
@@ -853,7 +864,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         };
 
                         self.print_indent();
-                        eprintln!("-- loading module m#{}", module_id.0);
+                        eprintln!("-- loading module {:?}", root_fnid.0);
 
                         self.data.push(call_meta);
                         self.iid = IID(0u16);
@@ -992,11 +1003,6 @@ impl<'a, 'b> Interpreter<'a, 'b> {
     fn dump_output(&mut self) -> Output {
         let sink = try_values_to_literals(&self.sink, &self.heap);
         Output { sink }
-    }
-
-    fn get_function(&mut self, fnid: FnId) -> &'a bytecode::Function {
-        // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
-        self.codebase.get_function(fnid).unwrap()
     }
 
     fn exit_function(&mut self, callee_retval_reg: Option<VReg>) -> Option<IID> {
@@ -1408,34 +1414,21 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use super::Output;
-
-    use crate::{bytecode::Literal, fs::MockLoader};
+    use crate::bytecode::Literal;
 
     fn quick_run(code: &str) -> Output {
-        let module_id = bytecode::ModuleId(123);
-
-        let mut mock_loader = Box::new(MockLoader::new());
-        mock_loader.add_module("the_script.js".to_owned(), module_id, code.to_owned());
-
         let res = std::panic::catch_unwind(|| {
-            let codebase = {
-                let bcparams = bytecode_compiler::BuilderParams {
-                    loader: mock_loader,
-                };
-                let mut builder = bcparams.to_builder();
-                builder
-                    .compile_file("the_script.js".to_string())
-                    .expect("compile error");
-                builder.build().codebase
-            };
+            let filename = "<input>".to_string();
 
-            codebase.dump();
+            let mut loader = loader::Loader::new(None);
+            let chunk_fnid = loader
+                .load_script(Some(filename), code.to_string())
+                .expect("couldn't compile test script");
 
-            let vm = Interpreter::new(&codebase);
-            vm.run_module(module_id).unwrap()
+            let vm = Interpreter::new(&loader);
+            vm.run_function(chunk_fnid).unwrap()
         });
+
         if res.is_err() {
             let include_paths = Vec::new();
             crate::inspector_case::export_inspector_case(

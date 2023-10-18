@@ -284,7 +284,10 @@ mod tests {
             this: Value::Undefined,
             return_value_vreg: Some(VReg(rand::random())),
             return_to_iid: Some(IID(rand::random())),
-            fn_id: FnId(rand::random::<u32>()),
+            fn_id: FnId(
+                bytecode::ModuleId::from(rand::random::<u16>()),
+                bytecode::LocalFnId(rand::random::<u16>()),
+            ),
         }
     }
 }

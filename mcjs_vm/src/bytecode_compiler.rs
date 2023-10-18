@@ -6,14 +6,14 @@ use swc_ecma_ast::{
     ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, ForHead, Function, Lit, Pat, UpdateOp, VarDecl,
 };
 
-use crate::bytecode::{self, FnId, Instr, Literal, NativeFnId, VReg, IID};
-pub use crate::common::{Context, Error, Result};
+use crate::bytecode::{self, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
+use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::util::Mask;
 
-
 pub use swc_common::SourceMap;
 
+use std::rc::Rc;
 
 macro_rules! unsupported_node {
     ($value:expr) => {{
@@ -21,106 +21,75 @@ macro_rules! unsupported_node {
     }};
 }
 
-pub type NativeFnMap = HashMap<JsWord, NativeFnId>;
-
-pub trait Loader {
-    fn get_module_id(&mut self, filename: &str) -> Option<bytecode::ModuleId>;
-    fn read_source(&self, module_id: bytecode::ModuleId) -> String;
-}
-
-pub struct BuilderParams {
-    pub loader: Box<dyn Loader>,
-}
-
-pub struct Builder {
-    loader: Box<dyn Loader>,
-    fns: HashMap<FnId, FnBuilder>,
-    next_fnid: u32,
-    next_module_id: u16,
-
-    // TODO Merge with sourcemap_of_module in a single struct?
-    rootfn_of_module: HashMap<bytecode::ModuleId, FnId>,
-    module_of_fn: HashMap<FnId, bytecode::ModuleId>,
-    sourcemap_of_module: HashMap<bytecode::ModuleId, SourceMap>,
-
-    cur_module_fns: Vec<FnId>,
-
-    // --- below this line, things are valid during the compilation of a single module.  at the
-    // end, these are reset
+/// The state we need to track to compile a single module.  Among other things,
+/// this includes things like tracking lexical scopes (which are resolved
+/// simple, scope-independent IDs), FnId generation.
+struct Builder {
+    fns: HashMap<LocalFnId, FnBuilder>,
     fn_stack: Vec<FnBuilder>,
-}
-
-impl BuilderParams {
-    pub fn to_builder(self) -> Builder {
-        Builder {
-            loader: self.loader,
-            fns: HashMap::new(),
-            fn_stack: Vec::new(),
-            next_fnid: 1,
-            next_module_id: 1,
-
-            rootfn_of_module: HashMap::new(),
-            module_of_fn: HashMap::new(),
-            sourcemap_of_module: HashMap::new(),
-
-            cur_module_fns: Vec::new(),
-        }
-    }
+    next_fnid: u16,
 }
 
 impl Builder {
-    pub fn compile_file(&mut self, filename: String) -> Result<bytecode::ModuleId> {
-        use crate::common::Context;
-
-        // TODO(performance) Does it make sense to mmap the input file?
-        let module_id = self
-            .loader
-            .get_module_id(&filename)
-            .ok_or_else(|| error!("no such file: {}", filename))?;
-        if self.rootfn_of_module.contains_key(&module_id) {
-            // The module had already been compiled
-            return Ok(module_id);
+    fn new(min_fnid: u16) -> Self {
+        assert!(min_fnid >= 1);
+        Builder {
+            fns: HashMap::new(),
+            fn_stack: Vec::new(),
+            next_fnid: min_fnid,
         }
-
-        let content = self.loader.read_source(module_id);
-
-        let (source_map, ast_module) = parse_file(filename.clone(), content)
-            .with_context(error!("while parsing file: {filename}"))?;
-
-        let old_fn_stack_len = self.fn_stack.len();
-
-        let res = compile_module(self, &ast_module);
-        // In case of an error, fn_stack needs to be reset to allow for another compilation in
-        // the future, or to resume the previous compilation (of the importing modulue).
-        assert!(self.fn_stack.len() >= old_fn_stack_len);
-        self.fn_stack.truncate(old_fn_stack_len);
-
-        let root_fnid = res.with_context(
-            error!("while compiling module: {filename}").with_source_map(Lrc::clone(&source_map)),
-        )?;
-
-        let prev = self.rootfn_of_module.insert(module_id, root_fnid);
-        assert!(prev.is_none(), "duplicate module id");
-
-        let cur_module_fns = std::mem::replace(&mut self.cur_module_fns, Vec::new());
-        for fn_id in cur_module_fns.into_iter() {
-            let prev = self.module_of_fn.insert(fn_id, module_id);
-            assert!(prev.is_none());
-        }
-
-        let source_map = Lrc::into_inner(source_map).expect("other pointers into source map");
-        self.sourcemap_of_module.insert(module_id, source_map);
-
-        Ok(module_id)
-    }
-
-    fn ensure_imported(&mut self, path: &JsWord) -> Result<bytecode::ModuleId> {
-        self.compile_file(path.to_string())
     }
 }
 
+pub struct CompiledChunk {
+    pub root_fnid: LocalFnId,
+    pub functions: HashMap<LocalFnId, bytecode::Function>,
+    pub source_map: Rc<SourceMap>,
+}
+
+pub struct CompileFlags {
+    pub min_fnid: Option<u16>,
+}
+
+impl Default for CompileFlags {
+    fn default() -> Self {
+        CompileFlags { min_fnid: None }
+    }
+}
+
+/// Compile the given chunk of source code into executable bytecode.
+///
+/// The given `filename` is used *exclusively* for composing error messages and
+/// to initialize the returned source map with a significant identifier for the
+/// compiled file.  It does not have to reflect an existing entity in any file
+/// system.
+///
+/// See `CompiledChunk` for details on the executable bytecode's representation.
+pub fn compile_file(
+    filename: String,
+    content: String,
+    flags: &CompileFlags,
+) -> Result<CompiledChunk> {
+    use crate::common::Context;
+
+    let min_fnid = flags.min_fnid.unwrap_or(1);
+
+    let (source_map, ast_module) = parse_file(filename.clone(), content)
+        .with_context(error!("while parsing file: {filename}"))?;
+
+    let compiled_mod = compile_module(&ast_module, min_fnid).with_context(
+        error!("while compiling module: {filename}").with_source_map(Lrc::clone(&source_map)),
+    )?;
+
+    Ok(CompiledChunk {
+        root_fnid: compiled_mod.root_fnid,
+        functions: compiled_mod.functions,
+        source_map,
+    })
+}
+
 struct FnBuilder {
-    fnid: FnId,
+    fnid: LocalFnId,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
     consts: Vec<Literal>,
@@ -159,7 +128,7 @@ impl Scope {
 }
 
 impl FnBuilder {
-    fn new(id: FnId) -> Self {
+    fn new(id: LocalFnId) -> Self {
         FnBuilder {
             fnid: id,
             scopes: vec![Scope::new()],
@@ -302,29 +271,7 @@ impl FnBuilder {
     }
 }
 
-pub struct Built {
-    pub codebase: bytecode::Codebase,
-    pub sourcemap_of_module: HashMap<bytecode::ModuleId, SourceMap>,
-}
-
 impl Builder {
-    pub fn build(mut self) -> Built {
-        assert!(self.fn_stack.is_empty());
-
-        let fns = self
-            .fns
-            .drain()
-            .map(|(fn_id, fn_builder)| (fn_id, fn_builder.build()))
-            .collect();
-
-        let codebase = bytecode::Codebase::new(fns, self.rootfn_of_module, self.module_of_fn);
-
-        Built {
-            codebase,
-            sourcemap_of_module: self.sourcemap_of_module,
-        }
-    }
-
     fn reserve(&mut self) -> IID {
         self.cur_fnb().reserve()
     }
@@ -436,7 +383,7 @@ impl Builder {
 
     #[allow(unused_variables)]
     fn start_function(&mut self, name: Option<JsWord>, params: &[swc_ecma_ast::Param]) {
-        let fnid = FnId(self.next_fnid);
+        let fnid = LocalFnId(self.next_fnid);
         self.next_fnid += 1;
 
         self.fn_stack.push(FnBuilder::new(fnid));
@@ -457,7 +404,7 @@ impl Builder {
         }
     }
 
-    fn end_function(&mut self) -> FnId {
+    fn end_function(&mut self) -> LocalFnId {
         let fnb = self.fn_stack.pop().expect("no FnBuilder!");
         let fnid = fnb.fnid;
         self.fns.insert(fnid, fnb);
@@ -472,12 +419,15 @@ impl Builder {
     }
 }
 
-fn compile_module(
-    builder: &mut Builder,
-    ast_module: &swc_ecma_ast::Module,
-) -> Result<bytecode::FnId> {
+struct CompiledModule {
+    root_fnid: LocalFnId,
+    functions: HashMap<LocalFnId, bytecode::Function>,
+}
+
+fn compile_module(ast_module: &swc_ecma_ast::Module, min_fnid: u16) -> Result<CompiledModule> {
     use swc_ecma_ast::{ExportDecl, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
 
+    let mut builder = Builder::new(min_fnid);
     builder.start_function(None, &[]);
 
     let lit_named = builder.new_vreg();
@@ -503,13 +453,13 @@ fn compile_module(
             | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
                 decl: Decl::Var(var_decl),
                 ..
-            })) => compile_var_decl_namedef(builder, var_decl),
+            })) => compile_var_decl_namedef(&mut builder, var_decl),
 
             ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl)))
             | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
                 decl: Decl::Fn(fn_decl),
                 ..
-            })) => compile_fn_decl_namedef(builder, fn_decl),
+            })) => compile_fn_decl_namedef(&mut builder, fn_decl),
 
             _ => {}
         }
@@ -521,7 +471,7 @@ fn compile_module(
             | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
                 decl: Decl::Fn(fn_decl),
                 ..
-            })) => compile_fn_decl_assignment(builder, fn_decl)?,
+            })) => compile_fn_decl_assignment(&mut builder, fn_decl)?,
 
             _ => {}
         }
@@ -539,7 +489,8 @@ fn compile_module(
                         continue;
                     }
 
-                    let module_id = builder.compile_file(decl.src.value.to_string())?;
+                    let module_path = builder.new_vreg();
+                    builder.set_const(module_path, Literal::String(decl.src.value.to_string()));
 
                     for spec in &decl.specifiers {
                         match spec {
@@ -565,7 +516,7 @@ fn compile_module(
                                     );
 
                                     let local_var = builder.new_vreg();
-                                    builder.emit(Instr::GetModule(local_var, module_id));
+                                    builder.emit(Instr::ImportModule(local_var, module_path));
                                     builder.emit(Instr::ObjGet {
                                         dest: local_var,
                                         obj: local_var,
@@ -581,7 +532,7 @@ fn compile_module(
                             }
                             swc_ecma_ast::ImportSpecifier::Default(d) => {
                                 let local_var = builder.new_vreg();
-                                builder.emit(Instr::GetModule(local_var, module_id));
+                                builder.emit(Instr::ImportModule(local_var, module_path));
                                 builder.emit(Instr::ObjGet {
                                     dest: local_var,
                                     obj: local_var,
@@ -595,7 +546,7 @@ fn compile_module(
                                     .set_const(lit_named, Literal::String("__named".to_string()));
 
                                 let local_var = builder.new_vreg();
-                                builder.emit(Instr::GetModule(local_var, module_id));
+                                builder.emit(Instr::ImportModule(local_var, module_path));
                                 builder.emit(Instr::ObjGet {
                                     dest: local_var,
                                     obj: local_var,
@@ -612,7 +563,7 @@ fn compile_module(
                     Decl::Fn(_) => {}
                     // Only do assignment part
                     Decl::Var(var_decl) => {
-                        compile_var_decl_assignment(builder, &*var_decl)?;
+                        compile_var_decl_assignment(&mut builder, &*var_decl)?;
                     }
                     Decl::Class(_)
                     | Decl::TsInterface(_)
@@ -626,7 +577,7 @@ fn compile_module(
                     swc_ecma_ast::DefaultDecl::Class(_) => todo!("export default class"),
                     swc_ecma_ast::DefaultDecl::Fn(fn_expr) => {
                         let name = fn_expr.ident.as_ref().map(|ident| ident.sym.clone());
-                        let vreg = compile_function(builder, name, &*fn_expr.function)?;
+                        let vreg = compile_function(&mut builder, name, &*fn_expr.function)?;
                         mod_default_export = Some(vreg);
                     }
                     swc_ecma_ast::DefaultDecl::TsInterfaceDecl(ts_decl) => eprintln!(
@@ -635,7 +586,7 @@ fn compile_module(
                     ),
                 },
                 ModuleDecl::ExportDefaultExpr(decl) => {
-                    let vreg = compile_expr(builder, &*decl.expr)?;
+                    let vreg = compile_expr(&mut builder, &*decl.expr)?;
                     mod_default_export = Some(vreg);
                 }
                 ModuleDecl::ExportAll(_) => todo!("export all"),
@@ -648,7 +599,8 @@ fn compile_module(
                 }
             },
             ModuleItem::Stmt(stmt) => {
-                compile_stmt(builder, stmt).with_context(error!("while compiling statement"))?;
+                compile_stmt(&mut builder, stmt)
+                    .with_context(error!("while compiling statement"))?;
             }
         }
     }
@@ -696,8 +648,20 @@ fn compile_module(
     // The root function is the outermost scope, and therefore must capture
     // nothing.  Otherwise, we have a bug.
     assert!(builder.fns.get(&root_fnid).unwrap().captures.is_empty());
+    for fnid in builder.fns.keys() {
+        assert!(fnid.0 >= min_fnid);
+    }
 
-    Ok(root_fnid)
+    let functions = builder
+        .fns
+        .into_iter()
+        .map(|(fnid, fnb)| (fnid, fnb.build()))
+        .collect();
+
+    Ok(CompiledModule {
+        root_fnid,
+        functions,
+    })
 }
 
 fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> {
@@ -1193,7 +1157,6 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
 
-    builder.cur_module_fns.push(inner_fnb.fnid);
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
     Ok(dest)
 }
@@ -1263,7 +1226,6 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
 
-    builder.cur_module_fns.push(inner_fnb.fnid);
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
 
     Ok(dest)
@@ -1926,48 +1888,24 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
 mod tests {
     use super::*;
 
-    struct NullLoader(String);
-    impl NullLoader {
-        const THE_MODULE_ID: bytecode::ModuleId = bytecode::ModuleId(1);
-    }
-    impl Loader for NullLoader {
-        fn get_module_id(&mut self, _filename: &str) -> Option<bytecode::ModuleId> {
-            Some(Self::THE_MODULE_ID)
-        }
-
-        fn read_source(&self, module_id: bytecode::ModuleId) -> String {
-            assert_eq!(module_id, Self::THE_MODULE_ID);
-            self.0.clone()
-        }
-    }
-
-    fn quick_compile(code: &str) -> bytecode::Codebase {
-        let mut builder = BuilderParams {
-            loader: Box::new(NullLoader(code.to_string())),
-        }
-        .to_builder();
-
-        builder.compile_file("<input>".to_string()).unwrap();
-
-        builder.build().codebase
-    }
-
     #[test]
     #[ignore]
     fn test_bytecode_object_init() {
-        let codebase = quick_compile(
+        let compiled = compile_file(
+            "<input>".to_string(),
             "sink({
                 aString: 'asdlol123',
                 aNumber: 1239423.4518923,
                 anotherObject: { x: 123, y: 899 },
                 aFunction: function(pt) { return 42; }
-            })",
-        );
+            })"
+            .to_string(),
+            &CompileFlags::default(),
+        )
+        .unwrap();
 
-        let root_fnid = codebase
-            .get_module_root_fn(NullLoader::THE_MODULE_ID)
-            .unwrap();
-        let function = &codebase.get_function(root_fnid).unwrap();
+        let root_fnid = compiled.root_fnid;
+        let function = &compiled.functions.get(&root_fnid).unwrap();
 
         eprintln!("consts:");
         for (ndx, value) in function.consts().iter().enumerate() {
@@ -2010,10 +1948,9 @@ mod tests {
     #[test]
     #[cfg(x)]
     fn test_upvalues_caller() {
-        let module = quick_compile(CODE_UPVALUES);
-        module.dump();
+        let compiled = compile_file("<input>".to_string(), CODE_UPVALUES.to_string()).unwrap();
 
-        let root_fn = module.get_function(FnId(0)).unwrap();
+        let root_fn = compiled.functions.get(&compiled.root_fnid).unwrap();
         let captures: Vec<_> = root_fn
             .instrs()
             .iter()
@@ -2026,7 +1963,7 @@ mod tests {
         assert_eq!(captures.len(), 1);
         let cap = captures[0];
         let cap_const = match &root_fn.instrs()[cap.0 as usize] {
-            Instr::LoadConst(Literal::Number(val)) => val,
+            Instr::LoadConst(_, Literal::Number(val)) => val,
             _ => panic!(),
         };
         assert_eq!(*cap_const, 10.0);
@@ -2035,17 +1972,16 @@ mod tests {
     #[test]
     #[cfg(x)]
     fn test_upvalues_callee() {
-        let module = quick_compile(CODE_UPVALUES);
-        module.dump();
-
-        let callee = module.get_function(FnId(1)).unwrap();
+        let compiled = compile_file("<input>".to_string(), CODE_UPVALUES).unwrap();
+        let callee = compiled.functions.get(&LocalFnId(1)).unwrap();
         assert!(std::matches!(callee.instrs()[0], Instr::LoadCapture(0)));
     }
 
     #[test]
     #[cfg(x)]
     fn test_upvalues_compact_addcapinstr() {
-        let module = quick_compile(
+        let compiled = compile_file(
+            "<input>".to_string(),
             "
             let counter = 0;
 
@@ -2064,11 +2000,11 @@ mod tests {
             counter -= 5;
             sink(counter);
             ",
-        );
-        module.dump();
+        )
+        .unwrap();
 
-        let mut fnid = FnId(0);
-        while let Some(func) = module.get_function(fnid) {
+        let mut fnid = LocalFnId(0);
+        while let Some(func) = compiled.functions.get(&fnid) {
             let instrs = func.instrs();
             for (prev_instr, instr) in instrs.iter().zip(&instrs[1..]) {
                 if let Instr::ClosureAddCapture(_) = instr {
@@ -2091,7 +2027,7 @@ mod tests {
     #[test]
     #[cfg(x)]
     fn test_bindings_limited_scopes() {
-        let res = Compiler::new().compile_file(
+        let res = compile_file(
             "<input>".to_string(),
             "
             function f() {
@@ -2125,7 +2061,7 @@ mod tests {
     #[test]
     #[cfg(x)]
     fn test_bindings_cross_scope() {
-        let res = Compiler::new().compile_file(
+        let res = compile_file(
             "<input>".to_string(),
             "
             function f() {
@@ -2147,7 +2083,7 @@ mod tests {
     #[test]
     #[cfg(x)]
     fn test_bindings_unbound_symbol() {
-        let res = Compiler::new().compile_file(
+        let res = compile_file(
             "<input>".to_string(),
             "
             function f() {

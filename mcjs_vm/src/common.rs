@@ -90,7 +90,7 @@ impl std::fmt::Debug for Error {
 macro_rules! error {
     ($($args:expr),+) => {{
         let message = format!($($args),*);
-        Error::new(message, file!().to_owned(), line!())
+        crate::common::Error::new(message, file!().to_owned(), line!())
     }}
 }
 
@@ -173,3 +173,6 @@ impl<T> Context<Error> for Result<T> {
         self.map_err(|err| err.with_context(other))
     }
 }
+
+// TODO: It would be cool to allow make a 'with_context_fn' that takes a closure and
+// allows makign the Error object only in case of a Result::Err

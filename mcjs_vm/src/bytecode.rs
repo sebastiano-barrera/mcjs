@@ -23,15 +23,53 @@ impl std::fmt::Debug for IID {
     }
 }
 
-#[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
-pub struct FnId(pub u32);
+/// Global ID of a module.  Can be used, among other things, to fetch the Module object
+/// from importing modules.
+// me: "64K modules ought to be enough for anyone."
+// guy with knife: node_modules
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct ModuleId(u16);
+
+pub const SCRIPT_MODULE_ID: ModuleId = ModuleId(0);
+
+impl From<u16> for ModuleId {
+    fn from(value: u16) -> Self {
+        if value == SCRIPT_MODULE_ID.0 {
+            panic!(
+                "invalid module ID: value {} is reserved for code in script context",
+                SCRIPT_MODULE_ID.0
+            );
+        }
+        ModuleId(value)
+    }
+}
+
+/// ID of a function within a specific module. (The same ID can correspond to a
+/// different function, in the context of a different modules.)
+///
+/// Implements Ord, so it's possible to quickly and cheaply check if a set of
+/// LocalFnIds are disjoint from another.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord)]
+pub struct LocalFnId(pub u16);
+
+/// Global ID of a function, composing a module ID and a local function ID.  ///
+/// This ID is sufficient to identify a function across the entire loaded codebase,
+/// regardless of the module it belongs to.
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct FnId(pub ModuleId, pub LocalFnId);
+
+impl std::fmt::Debug for FnId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}/{}", self.0.0, self.1.0)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlobalIID(pub FnId, pub IID);
 
 impl std::fmt::Debug for GlobalIID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "f{}:i{}", self.0 .0, self.1 .0)
+        write!(f, "f{:?}:i{}", self.0, self.1 .0)
     }
 }
 
@@ -67,13 +105,6 @@ impl std::fmt::Debug for VReg {
         write!(f, "v{}", self.0)
     }
 }
-
-/// Global ID of a module.  Can be used, among other things, to fetch the Module object
-/// from importing modules.
-// me: "64K modules ought to be enough for anyone."
-// guy with knife: node_modules
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct ModuleId(pub u16);
 
 #[derive(Debug, Clone, Copy, IntoStaticStr)]
 pub enum Instr {
@@ -139,7 +170,7 @@ pub enum Instr {
 
     ClosureNew {
         dest: VReg,
-        fnid: FnId,
+        fnid: LocalFnId,
         forced_this: Option<VReg>,
     },
     ClosureAddCapture(VReg),
@@ -210,7 +241,7 @@ pub enum Instr {
         arg: VReg,
     },
 
-    GetModule(VReg, ModuleId),
+    ImportModule(VReg, VReg),
 
     // TODO exceptions are completely unimplemented yet, lol
     Throw(VReg),
@@ -313,7 +344,7 @@ impl Instr {
             Instr::IteratorAdvance { iter } => { an.read_vreg(*iter); },
             Instr::JmpIfIteratorFinished { iter, dest } => { an.read_vreg(*iter); an.jump_target(*dest); }
             Instr::TypeOf { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); }
-            Instr::GetModule(dest, _) => { an.write_vreg(*dest); }
+            Instr::ImportModule(dest, mod_spec) => { an.write_vreg(*dest); an.read_vreg(*mod_spec); }
             Instr::Throw(arg) => { an.read_vreg(*arg); }
         };
 
@@ -342,73 +373,6 @@ impl From<String> for Literal {
 }
 
 type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
-
-pub struct Codebase {
-    fns: HashMap<FnId, Function>,
-    // TODO Merge with sourcemap_of_module in a single struct?
-    rootfn_of_module: HashMap<ModuleId, FnId>,
-    module_of_fn: HashMap<FnId, ModuleId>,
-}
-
-impl Codebase {
-    pub fn new(
-        fns: HashMap<FnId, Function>,
-        rootfn_of_module: HashMap<ModuleId, FnId>,
-        module_of_fn: HashMap<FnId, ModuleId>,
-    ) -> Self {
-        Codebase {
-            fns,
-            rootfn_of_module,
-            module_of_fn,
-        }
-    }
-
-    pub fn get_function(&self, fnid: FnId) -> Option<&Function> {
-        self.fns.get(&fnid)
-    }
-
-    pub fn module_of_fn(&self, fn_id: FnId) -> Option<ModuleId> {
-        self.module_of_fn.get(&fn_id).copied()
-    }
-
-    pub fn get_module_root_fn(&self, module_id: ModuleId) -> Option<FnId> {
-        self.rootfn_of_module.get(&module_id).copied()
-    }
-
-    pub fn all_functions(&self) -> impl ExactSizeIterator<Item = (FnId, &Function)> {
-        self.fns.iter().map(|(fnid, func_ref)| (*fnid, func_ref))
-    }
-
-    pub fn dump(&self) {
-        eprintln!("=== code base");
-        for (fnid, func) in self.fns.iter() {
-            eprintln!("fn #{}:", fnid.0);
-            for (ndx, instr) in func.instrs.iter().enumerate() {
-                let lh = func.loop_heads.get(&IID(ndx as _));
-                eprintln!(
-                    "  {:4}{:4}: {:?}",
-                    if lh.is_some() { ">>" } else { "" },
-                    ndx,
-                    instr,
-                );
-                if let Some(lh) = lh {
-                    eprint!("            (phis: ");
-                    for var in &lh.interloop_vars {
-                        eprint!("{:?}, ", var);
-                    }
-                    eprintln!(")");
-                }
-            }
-
-            let size_code = func.instrs().len() * std::mem::size_of::<Instr>();
-            let size_data = func.consts().len() * std::mem::size_of::<Literal>();
-            eprintln!("size of code: ............ {}", size_code);
-            eprintln!("size of const data: ...... {}", size_data);
-            eprintln!("total size: .............. {}", size_code + size_data);
-            eprintln!("---");
-        }
-    }
-}
 
 pub struct Function {
     instrs: Box<[Instr]>,
