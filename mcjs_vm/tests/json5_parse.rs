@@ -33,9 +33,9 @@ fn test_integration_script(filename: &str) {
             .load_script(Some(filename.to_string()), content)
             .expect("error while compiling script");
 
-        mcjs_vm::Interpreter::new(&loader)
+        mcjs_vm::Interpreter::new(&mut loader)
             .run_function(fnid)
-            .unwrap_or_else(|err| panic!("runtime error: {:?}", err))
+            .unwrap_or_else(|err| panic!("runtime error:\n{:?}", err))
             .sink
     });
 

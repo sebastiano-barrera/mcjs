@@ -1,6 +1,5 @@
 use anyhow::Result;
-use mcjs_vm::error;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 struct TestEnv<'a> {
     /// Absolute path to the test262 root folder.
@@ -37,7 +36,7 @@ fn run_test262<'a>(params: &TestParams<'a>) -> Result<()> {
     }
 
     for fnid in chunk_fnids {
-        mcjs_vm::Interpreter::new(&loader)
+        mcjs_vm::Interpreter::new(&mut loader)
             .run_function(fnid)
             .map_err(|err| anyhow::anyhow!("error while running code: {:?}", err))?;
     }

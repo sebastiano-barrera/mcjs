@@ -1267,6 +1267,15 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     let ret = builder.new_vreg();
                     builder.set_const(ret, Literal::Undefined);
                     return Ok(ret);
+                } else if sym == "require" {
+                    if args.len() != 1 {
+                        return Err(error!("`require` takes a single argument only"));
+                    }
+
+                    let import_path = compile_expr(builder, &args[0].expr)?;
+                    let ret = builder.new_vreg();
+                    builder.emit(Instr::ImportModule(ret, import_path));
+                    return Ok(ret);
                 }
             }
 

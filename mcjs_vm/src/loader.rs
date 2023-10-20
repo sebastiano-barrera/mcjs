@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Mutex;
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::bytecode;
@@ -113,23 +114,38 @@ impl Loader {
         let bytecode::FnId(mod_id, lfnid) = fnid;
 
         match mod_id {
-            bytecode::SCRIPT_MODULE_ID => None,
+            bytecode::SCRIPT_MODULE_ID => self.script.functions.get(&lfnid),
             mod_id => self.modules.get(&mod_id)?.compiled.functions.get(&lfnid),
         }
     }
 
+    /// Load a module (only if necessary) from an import statement.
+    ///
+    /// The arguments reflect the "coordinates" of the import statement:
+    ///
+    ///  - `import_path`: The string that identifies the module or package to import.
+    ///    Supported forms:
+    ///
+    ///    - *relative paths* (e.g. `./asd/lol.js`) are for importing another module in
+    ///      the same package as the importing one.
+    ///
+    ///    - *bare specifiers* (e.g. `react`) are for importing another package. The other
+    ///      package's main module is loaded.
+    ///
+    ///  - `import_site`: the ID of the module where the import is taking place. This is
+    ///    used to resolve relative paths, among other things.
     pub fn load_import(
         &mut self,
         import_path: String,
-        import_site: ImportSite,
+        import_site: bytecode::ModuleId,
     ) -> Result<bytecode::FnId> {
         if import_path.starts_with("./") {
             // Relative path
 
             // The starting point is the module's parent package
             let mod_id = match import_site {
-                ImportSite::Module(m) => m,
-                ImportSite::Script(_) => return Err(error!("invalid import: relative path not allowed if import statement comes from a script")),
+                bytecode::SCRIPT_MODULE_ID => return Err(error!("invalid import: relative path not allowed if import statement comes from a script")),
+                m => m,
             };
 
             let module = self.modules.get(&mod_id).ok_or_else(|| {
@@ -325,14 +341,14 @@ fn parse_package(pkg_path: &Path) -> Result<Package> {
     };
 
     let main_filename_orig = pkg_spec
-        .get("main")
+        .get("module")
         .and_then(|val| val.as_str())
         .unwrap_or("index.js");
     let main_filename = pkg_path.join(main_filename_orig).canonicalize().unwrap();
-    if !main_filename.starts_with(pkg_path) {
+    if !main_filename.starts_with(pkg_path.canonicalize().unwrap()) {
         return Err(error!(
-                "invalid 'main' in package.json: path '{}' resolves to a file outside the package's root directory",
-                 main_filename_orig
+                "invalid 'main' in package.json: path '{}' resolves to '{}', which is outside the package's root directory",
+                 main_filename_orig, main_filename.to_string_lossy()
             ));
     }
 
@@ -342,15 +358,4 @@ fn parse_package(pkg_path: &Path) -> Result<Package> {
         root_path,
         main_filename,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_path_is_prefix() {
-        let base = PathBuf::from("/a/b/c");
-        assert!(!base.join("../x").starts_with(&base));
-    }
 }

@@ -153,7 +153,7 @@ pub struct Interpreter<'a, 'b> {
 
     module_objs: HashMap<bytecode::ModuleId, heap::ObjectId>,
     global_obj: heap::ObjectId,
-    loader: &'a loader::Loader,
+    loader: &'a mut loader::Loader,
 
     sink: Vec<Value>,
     // traces: HashMap<String, (jit::Trace, jit::NativeThunk)>,
@@ -261,7 +261,7 @@ struct Jitting {
 }
 
 impl<'a> Interpreter<'a, 'a> {
-    pub fn new(loader: &'a loader::Loader) -> Self {
+    pub fn new(loader: &'a mut loader::Loader) -> Self {
         let mut heap = heap::Heap::new();
         let global_obj = init_builtins(&mut heap);
         Interpreter {
@@ -337,10 +337,6 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
         assert!(self.data.len() == 0);
 
-        // TODO Allow running a function in "script mode"
-        //   - The bottom stack frame is allowed not to have a function ID
-        //   - Module ID = the special reserved "script" module ID
-
         self.data.push(stack::CallMeta {
             fnid,
             n_instrs,
@@ -377,14 +373,15 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             let fnid = self.data.top().header().fn_id;
             // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
             let func = self.loader.get_function(fnid).unwrap();
+            let n_instrs = func.instrs().len();
 
             assert!(
-                self.iid.0 as usize <= func.instrs().len(),
+                self.iid.0 as usize <= n_instrs,
                 "can't proceed to instruction at index {} (func has {})",
                 self.iid.0,
-                func.instrs().len()
+                n_instrs
             );
-            if self.iid.0 as usize == func.instrs().len() {
+            if self.iid.0 as usize == n_instrs {
                 if let Some(return_to_iid) = self.exit_function(None) {
                     self.iid = return_to_iid;
                     continue;
@@ -393,10 +390,10 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 }
             }
 
-            let instr = &func.instrs()[self.iid.0 as usize];
+            let instr = func.instrs()[self.iid.0 as usize];
 
             self.print_indent();
-            eprint!("{:4}: {:?}", self.iid.0, instr);
+            eprint!("{:<4}  {:?}", self.iid.0, instr);
             if let Instr::LoadConst(_, const_ndx) = instr {
                 let lit = &func.consts()[const_ndx.0 as usize];
                 eprint!(" = ({:?})", lit);
@@ -424,10 +421,8 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 match self.flags.jit_mode {
                     JitMode::Compile => {
                         if self.jitting.is_none() {
-                            let builder = jit::TraceBuilder::start(
-                                func.instrs().len(),
-                                jit::CloseMode::FunctionExit,
-                            );
+                            let builder =
+                                jit::TraceBuilder::start(n_instrs, jit::CloseMode::FunctionExit);
                             self.jitting = Some(Jitting {
                                 builder,
                                 fnid,
@@ -460,7 +455,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 }
             }
 
-            match instr {
+            match &instr {
                 Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
                     let literal = func.consts()[*const_ndx as usize].clone();
                     let value = literal_to_value(literal, &mut self.heap);
@@ -798,7 +793,6 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     let mut upvalues = Vec::new();
                     while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
                         let upv_id = self.data.top_mut().ensure_in_upvalue(cap);
-                        #[cfg(test)]
                         {
                             self.print_indent();
                             eprintln!("        upvalue: {:?} -> {:?}", cap, upv_id);
@@ -836,8 +830,8 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 }
 
                 Instr::ImportModule(dest, module_path) => {
-                    let import_site: loader::ImportSite = todo!();
-                    let module_path = self.get_operand_string(*module_path)?;
+                    let bytecode::FnId(import_site, _) = self.data.top().header().fn_id;
+                    let module_path = self.get_operand_string(*module_path)?.to_string();
 
                     let root_fnid = self
                         .loader
@@ -994,10 +988,9 @@ impl<'a, 'b> Interpreter<'a, 'b> {
     }
 
     fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<str>> {
-        let operand = self.get_operand_object(vreg)?;
-        operand
+        self.get_operand_object(vreg)?
             .as_str()
-            .map_err(|_| error!("can't string-concatenate on a non-string"))
+            .map_err(|_| error!("expected string, but got another type"))
     }
 
     fn dump_output(&mut self) -> Output {
@@ -1073,7 +1066,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
     fn print_indent(&self) {
         for _ in 0..(self.data.len() - 1) {
-            eprint!("    ");
+            eprint!("·   ");
         }
     }
 
@@ -1425,11 +1418,12 @@ mod tests {
                 .load_script(Some(filename), code.to_string())
                 .expect("couldn't compile test script");
 
-            let vm = Interpreter::new(&loader);
+            let vm = Interpreter::new(&mut loader);
             vm.run_function(chunk_fnid).unwrap()
         });
 
-        if res.is_err() {
+        if let Err(err) = &res {
+            println!("quick_run: error: {:?}", err);
             let include_paths = Vec::new();
             crate::inspector_case::export_inspector_case(
                 include_paths,
