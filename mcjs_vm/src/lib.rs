@@ -32,13 +32,11 @@ mod heap;
 pub mod heap;
 
 pub use bytecode::{FnId, GlobalIID, Literal, ModuleId, IID};
-pub use interpreter::{Interpreter, Value as InterpreterValue};
+pub use interpreter::{Realm, Interpreter, Value as InterpreterValue};
 pub use loader::Loader;
 
 #[cfg(feature = "inspection")]
 pub use bytecode_compiler::{CompiledChunk, SourceMap};
-#[cfg(feature = "inspection")]
-pub use interpreter::{CoreDump, InspectorAction, InspectorStep};
 
 // TODO Compile this module and build/link serde only for test builds
 pub mod inspector_case;

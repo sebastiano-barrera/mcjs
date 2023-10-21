@@ -138,10 +138,39 @@ impl std::fmt::Debug for NotADirectoryError {
     }
 }
 
-pub struct Interpreter<'a, 'b> {
-    iid: bytecode::IID,
-    data: stack::InterpreterData,
+pub struct Realm {
     heap: heap::Heap,
+    module_objs: HashMap<bytecode::ModuleId, heap::ObjectId>,
+    global_obj: heap::ObjectId,
+}
+
+impl Realm {
+    pub fn new() -> Realm {
+        let mut heap = heap::Heap::new();
+        let global_obj = init_builtins(&mut heap);
+        Realm {
+            heap,
+            module_objs: HashMap::new(),
+            global_obj,
+        }
+    }
+}
+
+pub struct Interpreter<'a, 'b> {
+    /// Exclusive reference to the Realm in which the code runs.
+    ///
+    /// It's important that this reference is exclusive: no one must access (much less
+    /// manipulate) this Realm object until the Interpreter finishes executing.
+    realm: &'a mut Realm,
+
+    iid: bytecode::IID,
+
+    /// The interpreter's stack.
+    ///
+    /// The data stored here does not survive after the Interpreter returns.  (Well, some
+    /// referenced objects may survive in the heap for a while, but the GC is supposed to
+    /// collect them.)
+    data: stack::InterpreterData,
 
     #[cfg(enable_jit)]
     jitting: Option<Jitting>,
@@ -151,8 +180,9 @@ pub struct Interpreter<'a, 'b> {
     #[cfg(not(feature = "inspection"))]
     _ph: PhantomData<&'b ()>,
 
-    module_objs: HashMap<bytecode::ModuleId, heap::ObjectId>,
-    global_obj: heap::ObjectId,
+    // The loader ref must never change for the whole lifecycle of the interpreter.  What would
+    // happen if the same module path suddenly corresponded to a different module? Better not to
+    // know
     loader: &'a mut loader::Loader,
 
     sink: Vec<Value>,
@@ -203,52 +233,20 @@ pub struct Output {
     pub sink: Vec<Option<bytecode::Literal>>,
 }
 
+// TODO Remove this InterpreterError?
+// It used to be justified by the addition of a CoreDump, but the CoreDump has been
+// removed since.
 pub struct InterpreterError {
     pub error: Error,
-    pub core_dump: Option<CoreDump>,
-}
-impl InterpreterError {
-    fn with_core_dump(self, dump: CoreDump) -> Self {
-        InterpreterError {
-            core_dump: Some(dump),
-            ..self
-        }
-    }
 }
 impl From<Error> for InterpreterError {
     fn from(error: Error) -> Self {
-        InterpreterError {
-            error,
-            core_dump: None,
-        }
+        InterpreterError { error }
     }
 }
 impl std::fmt::Debug for InterpreterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "InterpreterError (core dump {}included): {:?}",
-            if self.core_dump.is_some() { "" } else { "NOT " },
-            self.error,
-        )
-    }
-}
-
-pub struct CoreDump {
-    pub data: stack::InterpreterData,
-    pub heap: heap::Heap,
-    pub global_obj: heap::ObjectId,
-    pub sink: Vec<Option<bytecode::Literal>>,
-}
-impl CoreDump {
-    fn new(interpreter: Interpreter) -> Self {
-        let sink = try_values_to_literals(&interpreter.sink, &interpreter.heap);
-        CoreDump {
-            data: interpreter.data,
-            heap: interpreter.heap,
-            global_obj: interpreter.global_obj,
-            sink,
-        }
+        write!(f, "InterpreterError: {:?}", self.error,)
     }
 }
 
@@ -261,17 +259,13 @@ struct Jitting {
 }
 
 impl<'a> Interpreter<'a, 'a> {
-    pub fn new(loader: &'a mut loader::Loader) -> Self {
-        let mut heap = heap::Heap::new();
-        let global_obj = init_builtins(&mut heap);
+    pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader) -> Self {
         Interpreter {
             iid: bytecode::IID(0),
             data: stack::InterpreterData::new(),
-            heap,
+            realm,
             #[cfg(feature = "inspection")]
             step_handler: None,
-            module_objs: HashMap::new(),
-            global_obj,
             loader,
             sink: Vec::new(),
             opts: Default::default(),
@@ -302,7 +296,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
         values
             .into_iter()
-            .map(|val| try_value_to_literal(val, &self.heap))
+            .map(|val| try_value_to_literal(val, &self.realm.heap))
             .collect()
     }
 
@@ -325,8 +319,9 @@ impl<'a, 'b> Interpreter<'a, 'b> {
     ///
     /// This is the only entry point into the interpreter.
     ///
-    /// This function returns when the intepreter has finished its execution, successfully
-    /// or due to a failure
+    /// This function returns when the intepreter has finished its execution,
+    /// either successfully (the stack has been depleted, every function has
+    /// returned) or due to a failure.
     ///
     /// Impl. notes: This function initializes the interpreter and runs it until
     /// completion, starting from the given function. Do not use this function
@@ -346,10 +341,8 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             return_value_reg: None,
             return_to_iid: None,
         });
-        let output = self.run_until_done().map_err(|err| {
-            let dump = CoreDump::new(self);
-            InterpreterError::from(err).with_core_dump(dump)
-        })?;
+        let output = self.run_until_done().map_err(InterpreterError::from)?;
+
         #[cfg(enable_jit)]
         if let Some(jitting) = intrp.jitting {
             if let Some(trace) = jitting.builder.build() {
@@ -407,7 +400,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 let inspector_step = InspectorStep {
                     giid: bytecode::GlobalIID(fnid, self.iid),
                     intrp_data: &self.data,
-                    heap: &self.heap,
+                    heap: &self.realm.heap,
                 };
                 let action = handler.pre_instr(&inspector_step);
                 match action {
@@ -458,7 +451,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             match &instr {
                 Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
                     let literal = func.consts()[*const_ndx as usize].clone();
-                    let value = literal_to_value(literal, &mut self.heap);
+                    let value = literal_to_value(literal, &mut self.realm.heap);
                     self.data.top_mut().set_result(*dest, value);
                 }
 
@@ -543,6 +536,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 } => {
                     let oid = self.get_operand(*callee).expect_obj()?;
                     let heap_object = self
+                        .realm
                         .heap
                         .get(oid)
                         .ok_or_else(|| error!("invalid function (object is not callable)"))?;
@@ -669,13 +663,13 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 }
 
                 Instr::ObjCreateEmpty(dest) => {
-                    let oid = self.heap.new_ordinary_object(HashMap::new());
+                    let oid = self.realm.heap.new_ordinary_object(HashMap::new());
                     self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 Instr::ObjSet { obj, key, value } => {
                     let mut obj = self.get_operand_object_mut(*obj)?;
                     let key = self.get_operand(*key);
-                    let key = Self::value_to_index_or_key(&self.heap, &key)
+                    let key = Self::value_to_index_or_key(&self.realm.heap, &key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = self.get_operand(*value);
 
@@ -684,14 +678,15 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = self.get_operand_object(*obj)?;
                     let key = self.get_operand(*key);
-                    let key = Self::value_to_index_or_key(&self.heap, &key)
+                    let key = Self::value_to_index_or_key(&self.realm.heap, &key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
 
                     let value = match key {
                         heap::IndexOrKey::Index(ndx) => obj.as_object().get_element(ndx),
-                        heap::IndexOrKey::Key(key) => {
-                            self.heap.get_property_chained(obj.as_object(), key.deref())
-                        }
+                        heap::IndexOrKey::Key(key) => self
+                            .realm
+                            .heap
+                            .get_property_chained(obj.as_object(), key.deref()),
                     }
                     .unwrap_or(Value::Undefined);
 
@@ -708,11 +703,11 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     let keys = keys
                         .into_iter()
                         .map(|name| {
-                            let oid = self.heap.new_string(name);
+                            let oid = self.realm.heap.new_string(name);
                             Value::Object(oid)
                         })
                         .collect();
-                    let keys = Value::Object(self.heap.new_array(keys));
+                    let keys = Value::Object(self.realm.heap.new_array(keys));
                     self.data.top_mut().set_result(*dest, keys);
                 }
                 Instr::ObjDelete { dest, obj, key } => {
@@ -722,7 +717,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                     {
                         let mut obj = self.get_operand_object_mut(*obj)?;
                         let key = self.get_operand(*key);
-                        let key = Self::value_to_index_or_key(&self.heap, &key)
+                        let key = Self::value_to_index_or_key(&self.realm.heap, &key)
                             .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                         obj.as_object_mut().delete_own_element_or_property(key);
                     }
@@ -812,7 +807,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         forced_this,
                     });
 
-                    let oid = self.heap.new_function(closure, HashMap::new());
+                    let oid = self.realm.heap.new_function(closure, HashMap::new());
                     self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 // This is always handled in the code for ClosureNew
@@ -838,7 +833,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                         .load_import(module_path.to_string(), import_site)
                         .with_context(error!("while trying to import '{}'", module_path))?;
 
-                    if let Some(module_oid) = self.module_objs.get(&root_fnid.0) {
+                    if let Some(module_oid) = self.realm.module_objs.get(&root_fnid.0) {
                         self.data
                             .top_mut()
                             .set_result(*dest, Value::Object(*module_oid));
@@ -906,7 +901,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 Instr::Throw(_) => todo!(),
 
                 Instr::StrCreateEmpty(dest) => {
-                    let oid = self.heap.new_string(String::new());
+                    let oid = self.realm.heap.new_string(String::new());
                     self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 Instr::StrAppend(buf_reg, tail) => {
@@ -916,10 +911,10 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
                 Instr::GetGlobal { dest, key } => {
                     let key = self.get_operand(*key);
-                    let key = Self::value_to_index_or_key(&self.heap, &key)
+                    let key = Self::value_to_index_or_key(&self.realm.heap, &key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
 
-                    let gobj = self.heap.get(self.global_obj).unwrap();
+                    let gobj = self.realm.heap.get(self.realm.global_obj).unwrap();
 
                     let value = gobj
                         .as_object()
@@ -936,7 +931,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                 let inspector_step = InspectorStep {
                     giid: bytecode::GlobalIID(fnid, self.iid),
                     intrp_data: &self.data,
-                    heap: &self.heap,
+                    heap: &self.realm.heap,
                 };
                 let action = handler.post_instr(&inspector_step);
                 match action {
@@ -970,7 +965,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             let tail = tail_ref.deref();
             buf.push_str(tail);
         }
-        let value = literal_to_value(bytecode::Literal::String(buf), &mut self.heap);
+        let value = literal_to_value(bytecode::Literal::String(buf), &mut self.realm.heap);
         Ok(value)
     }
 
@@ -984,7 +979,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             Ok(obj) => obj,
             Err(_) => return false,
         };
-        self.heap.is_instance_of(obj.as_object(), sup_oid)
+        self.realm.heap.is_instance_of(obj.as_object(), sup_oid)
     }
 
     fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<str>> {
@@ -994,7 +989,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
     }
 
     fn dump_output(&mut self) -> Output {
-        let sink = try_values_to_literals(&self.sink, &self.heap);
+        let sink = try_values_to_literals(&self.sink, &self.realm.heap);
         Output { sink }
     }
 
@@ -1046,8 +1041,8 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             (Value::Null, Value::Null) => ValueOrdering::Equal,
             (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
             (Value::Object(a), Value::Object(b)) => {
-                let a = self.heap.get(*a);
-                let b = self.heap.get(*b);
+                let a = self.realm.heap.get(*a);
+                let b = self.realm.heap.get(*b);
                 match (a.as_deref(), b.as_deref()) {
                     (
                         Some(heap::HeapObject::StringObject(a)),
@@ -1085,13 +1080,13 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
     fn get_operand_object(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectRef> {
         let value = self.get_operand(vreg);
-        as_object_ref(value, &self.heap)
+        as_object_ref(value, &self.realm.heap)
             .ok_or_else(|| error!("could not use as object: {:?}", vreg))
     }
 
     fn get_operand_object_mut(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectMut> {
         let value = self.get_operand(vreg);
-        as_object_mut(value, &self.heap)
+        as_object_mut(value, &self.realm.heap)
             .ok_or_else(|| error!("could not use as object: {:?}", vreg))
     }
 
@@ -1100,7 +1095,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         let ty_s = match value {
             Value::Number(_) => "number",
             Value::Bool(_) => "boolean",
-            Value::Object(oid) => match self.heap.get(*oid).unwrap().as_object().type_of() {
+            Value::Object(oid) => match self.realm.heap.get(*oid).unwrap().as_object().type_of() {
                 heap::Typeof::Object => "object",
                 heap::Typeof::Function => "function",
                 heap::Typeof::String => "string",
@@ -1115,7 +1110,10 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             Value::Internal(_) => panic!("internal value has no typeof!"),
         };
 
-        literal_to_value(bytecode::Literal::String(ty_s.to_string()), &mut self.heap)
+        literal_to_value(
+            bytecode::Literal::String(ty_s.to_string()),
+            &mut self.realm.heap,
+        )
     }
 
     fn value_to_index_or_key<'h>(
@@ -1149,7 +1147,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         match value {
             Value::Bool(bool_val) => bool_val,
             Value::Number(num) => num != 0.0,
-            Value::Object(oid) => match self.heap.get(oid).unwrap().deref() {
+            Value::Object(oid) => match self.realm.heap.get(oid).unwrap().deref() {
                 heap::HeapObject::OrdObject(_) => true,
                 heap::HeapObject::ClosureObject(_) => true,
                 heap::HeapObject::StringObject(sobj) => !sobj.string().is_empty(),
@@ -1290,6 +1288,7 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
 fn nf_Array_isArray(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
     let value = if let Some(Value::Object(oid)) = args.get(0) {
         let obj = intrp
+            .realm
             .heap
             .get(*oid)
             .ok_or_else(|| error!("no such object!"))?;
@@ -1309,7 +1308,7 @@ fn nf_Array_isArray(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> R
 fn nf_Array_push(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
     // TODO Proper error handling, instead of these unwrap
     let oid = this.expect_obj().unwrap();
-    let mut arr = intrp.heap.get_mut(oid).unwrap();
+    let mut arr = intrp.realm.heap.get_mut(oid).unwrap();
     let len = arr.as_object().len();
     let value = args.get(0).unwrap().clone();
     arr.as_object_mut().set_element(len, value);
@@ -1324,14 +1323,14 @@ fn nf_Array_pop(_intrp: &mut Interpreter, _this: &Value, _args: &[Value]) -> Res
 #[allow(non_snake_case)]
 fn nf_RegExp(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     // TODO
-    let oid = intrp.heap.new_ordinary_object(HashMap::new());
+    let oid = intrp.realm.heap.new_ordinary_object(HashMap::new());
     Ok(Value::Object(oid))
 }
 
 #[allow(non_snake_case)]
 fn nf_Array(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     // TODO
-    let oid = intrp.heap.new_array(Vec::new());
+    let oid = intrp.realm.heap.new_array(Vec::new());
     Ok(Value::Object(oid))
 }
 
@@ -1352,7 +1351,7 @@ fn nf_Number_prototype_toString(
     };
 
     let num_str = num_value.to_string();
-    let oid = intrp.heap.new_string(num_str);
+    let oid = intrp.realm.heap.new_string(num_str);
     Ok(Value::Object(oid))
 }
 
@@ -1363,7 +1362,7 @@ fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<V
         Some(Value::Number(num)) => num.to_string(),
         Some(Value::Bool(true)) => "true".into(),
         Some(Value::Bool(false)) => "false".into(),
-        Some(Value::Object(oid)) => match intrp.heap.get(*oid).unwrap().deref() {
+        Some(Value::Object(oid)) => match intrp.realm.heap.get(*oid).unwrap().deref() {
             heap::HeapObject::OrdObject(_) => "<object>".to_owned(),
             heap::HeapObject::StringObject(sobj) => sobj.string().clone(),
             heap::HeapObject::ClosureObject(_) => "<closure>".to_owned(),
@@ -1377,7 +1376,7 @@ fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<V
 
     Ok(literal_to_value(
         bytecode::Literal::String(value_str),
-        &mut intrp.heap,
+        &mut intrp.realm.heap,
     ))
 }
 
@@ -1418,7 +1417,8 @@ mod tests {
                 .load_script(Some(filename), code.to_string())
                 .expect("couldn't compile test script");
 
-            let vm = Interpreter::new(&mut loader);
+            let mut realm = Realm::new();
+            let vm = Interpreter::new(&mut realm, &mut loader);
             vm.run_function(chunk_fnid).unwrap()
         });
 
