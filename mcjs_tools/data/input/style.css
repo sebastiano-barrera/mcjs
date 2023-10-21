@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind utilities;
+
+.stack-view-grid-rows {
+  grid-template-rows: minmax(0, 1fr) 5cm;
+}
+
+html {
+	font-weight: 300;
+	font-family: 'Rubik', sans-serif;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+	width: 0.15cm;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+	background: transparent;
+	border-right: 1px gray solid;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+	background: gray;
+}
+
+.text-vertical {
+	writing-mode: sideways-lr;
+	text-orientation: sideways;
+}
+
+
