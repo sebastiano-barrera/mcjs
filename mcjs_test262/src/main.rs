@@ -37,8 +37,8 @@ fn run_test262<'a>(params: &TestParams<'a>) -> Result<()> {
 
     for fnid in chunk_fnids {
         let mut realm = mcjs_vm::Realm::new();
-        mcjs_vm::Interpreter::new(&mut realm, &mut loader)
-            .run_function(fnid)
+        mcjs_vm::Interpreter::new(&mut realm, &mut loader, fnid)
+            .run()
             .map_err(|err| anyhow::anyhow!("error while running code: {:?}", err))?;
     }
 

@@ -86,7 +86,6 @@ pub struct JSClosure {
 }
 
 impl JSClosure {
-    #[cfg(feature = "inspection")]
     pub fn upvalues(&self) -> &[UpvalueId] {
         &self.upvalues
     }
@@ -156,7 +155,7 @@ impl Realm {
     }
 }
 
-pub struct Interpreter<'a, 'b> {
+pub struct Interpreter<'a> {
     /// Exclusive reference to the Realm in which the code runs.
     ///
     /// It's important that this reference is exclusive: no one must access (much less
@@ -175,18 +174,12 @@ pub struct Interpreter<'a, 'b> {
     #[cfg(enable_jit)]
     jitting: Option<Jitting>,
 
-    #[cfg(feature = "inspection")]
-    step_handler: Option<&'b mut dyn StepHandler>,
-    #[cfg(not(feature = "inspection"))]
-    _ph: PhantomData<&'b ()>,
-
     // The loader ref must never change for the whole lifecycle of the interpreter.  What would
     // happen if the same module path suddenly corresponded to a different module? Better not to
     // know
     loader: &'a mut loader::Loader,
 
     sink: Vec<Value>,
-    // traces: HashMap<String, (jit::Trace, jit::NativeThunk)>,
     opts: Options,
 }
 
@@ -208,29 +201,23 @@ impl<'a> InterpreterStep<'a> {
     }
 }
 
-#[cfg(feature = "inspection")]
-pub trait StepHandler {
-    fn pre_instr(&mut self, step: &InspectorStep) -> InspectorAction;
-    fn post_instr(&mut self, step: &InspectorStep) -> InspectorAction;
-}
+pub type InterpreterResult<'a> = std::result::Result<Exit<'a>, InterpreterError>;
 
-#[cfg(feature = "inspection")]
-pub struct InspectorStep<'a> {
-    pub giid: bytecode::GlobalIID,
-    pub intrp_data: &'a stack::InterpreterData,
-    pub heap: &'a heap::Heap,
-}
-
-#[cfg(feature = "inspection")]
-pub enum InspectorAction {
-    Continue,
-    Fail,
-}
-
-pub type InterpreterResult = std::result::Result<Output, InterpreterError>;
-
-pub struct Output {
+pub struct FinishedData {
     pub sink: Vec<Option<bytecode::Literal>>,
+}
+
+pub enum Exit<'a> {
+    Finished(FinishedData),
+    Suspended(Interpreter<'a>),
+}
+impl<'a> Exit<'a> {
+    pub fn expect_finished(self) -> FinishedData {
+        match self {
+            Exit::Finished(fd) => fd,
+            Exit::Suspended(_) => panic!("interpreter was interrupted, while it was expected to finish"),
+        }
+    }
 }
 
 // TODO Remove this InterpreterError?
@@ -258,46 +245,34 @@ struct Jitting {
     builder: jit::TraceBuilder,
 }
 
-impl<'a> Interpreter<'a, 'a> {
-    pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader) -> Self {
+impl<'a> Interpreter<'a> {
+    pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
+        // Initialize the stack with a single frame, corresponding to a call to fnid with no
+        // parameters
+        let mut data = stack::InterpreterData::new();
+        let root_fn = loader.get_function(fnid).unwrap();
+        let n_instrs = root_fn.instrs().len().try_into().unwrap();
+
+        data.push(stack::CallMeta {
+            fnid,
+            n_instrs,
+            n_captured_upvalues: 0,
+            n_args: 0,
+            this: Value::Undefined,
+            return_value_reg: None,
+            return_to_iid: None,
+        });
+
         Interpreter {
             iid: bytecode::IID(0),
-            data: stack::InterpreterData::new(),
+            data,
             realm,
-            #[cfg(feature = "inspection")]
-            step_handler: None,
             loader,
             sink: Vec::new(),
             opts: Default::default(),
             #[cfg(enable_jit)]
             jitting: None,
-            #[cfg(not(feature = "inspection"))]
-            _ph: PhantomData,
         }
-    }
-}
-
-impl<'a, 'b> Interpreter<'a, 'b> {
-    #[cfg(feature = "inspection")]
-    pub fn with_step_handler<'c>(self, handler: &'c mut dyn StepHandler) -> Interpreter<'a, 'c> {
-        Interpreter {
-            step_handler: Some(handler),
-            ..self
-        }
-    }
-
-    pub fn options_mut(&mut self) -> &mut Options {
-        &mut self.opts
-    }
-
-    pub fn take_sink(&mut self) -> Vec<Option<bytecode::Literal>> {
-        let mut values = Vec::new();
-        std::mem::swap(&mut values, &mut self.sink);
-
-        values
-            .into_iter()
-            .map(|val| try_value_to_literal(val, &self.realm.heap))
-            .collect()
     }
 
     #[cfg(enable_jit)]
@@ -315,52 +290,18 @@ impl<'a, 'b> Interpreter<'a, 'b> {
         self.traces.keys()
     }
 
-    /// Run the specified function.
+    /// Run the interpreter until it either finishes, or it gets interrupted.
     ///
-    /// This is the only entry point into the interpreter.
+    /// This is the only entry point into code execution.
     ///
-    /// This function returns when the intepreter has finished its execution,
-    /// either successfully (the stack has been depleted, every function has
-    /// returned) or due to a failure.
-    ///
-    /// Impl. notes: This function initializes the interpreter and runs it until
-    /// completion, starting from the given function. Do not use this function
-    /// to implement a function call happening during normal code execution.
-    pub fn run_function(mut self, fnid: FnId) -> InterpreterResult {
-        let root_fn = self.loader.get_function(fnid).unwrap();
-        let n_instrs = root_fn.instrs().len().try_into().unwrap();
-
-        assert!(self.data.len() == 0);
-
-        self.data.push(stack::CallMeta {
-            fnid,
-            n_instrs,
-            n_captured_upvalues: 0,
-            n_args: 0,
-            this: Value::Undefined,
-            return_value_reg: None,
-            return_to_iid: None,
-        });
-        let output = self.run_until_done().map_err(InterpreterError::from)?;
-
-        #[cfg(enable_jit)]
-        if let Some(jitting) = intrp.jitting {
-            if let Some(trace) = jitting.builder.build() {
-                #[cfg(test)]
-                {
-                    eprintln!(" ---- compiled trace");
-                    trace.dump();
-                }
-
-                let native_thunk = trace.compile();
-                let prev = self.traces.insert(jitting.trace_id, (trace, native_thunk));
-                assert!(prev.is_none());
-            }
-        }
-        Ok(output)
-    }
-
-    fn run_until_done(&mut self) -> Result<Output> {
+    /// Note that the receiver is passed by move (`mut self`, not `&mut self`).
+    ///   - If the interpreter finishes execution, it is 'consumed' by this call and no
+    ///     longer
+    ///   accessible.  
+    ///   - If the interpreter is interrupted (e.g. by a breakpoint), then it is returned
+    ///     again via
+    ///   the Output::Suspended variant; then it can be run again or dropped (destroyed).
+    pub fn run(mut self) -> Result<Exit<'a>> {
         while self.data.len() != 0 {
             // TODO Avoid calling get_function at each instructions
             let fnid = self.data.top().header().fn_id;
@@ -394,20 +335,6 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             eprint!("    ");
 
             let mut next_ndx = self.iid.0 + 1;
-
-            #[cfg(feature = "inspection")]
-            if let Some(handler) = &mut self.step_handler {
-                let inspector_step = InspectorStep {
-                    giid: bytecode::GlobalIID(fnid, self.iid),
-                    intrp_data: &self.data,
-                    heap: &self.realm.heap,
-                };
-                let action = handler.pre_instr(&inspector_step);
-                match action {
-                    InspectorAction::Continue => {}
-                    InspectorAction::Fail => return Err(error!("interrupted by inspector")),
-                }
-            }
 
             #[cfg(enable_jit)]
             if let Some(tanch) = func.get_trace_anchor(self.iid) {
@@ -640,7 +567,7 @@ impl<'a, 'b> Interpreter<'a, 'b> {
                             drop(heap_object);
 
                             let this = self.get_operand(*this);
-                            let ret_val = nf(self, &this, &arg_vals)?;
+                            let ret_val = nf(&mut self, &this, &arg_vals)?;
                             self.data.top_mut().set_result(*return_value, ret_val);
                             next_ndx = return_to_iid.0;
                         }
@@ -926,20 +853,6 @@ impl<'a, 'b> Interpreter<'a, 'b> {
 
             eprintln!();
 
-            #[cfg(feature = "inspection")]
-            if let Some(handler) = &mut self.step_handler {
-                let inspector_step = InspectorStep {
-                    giid: bytecode::GlobalIID(fnid, self.iid),
-                    intrp_data: &self.data,
-                    heap: &self.realm.heap,
-                };
-                let action = handler.post_instr(&inspector_step);
-                match action {
-                    InspectorAction::Continue => {}
-                    InspectorAction::Fail => return Err(error!("interrupted by inspector")),
-                }
-            }
-
             #[cfg(enable_jit)]
             if let Some(jitting) = &mut self.jitting {
                 jitting.builder.interpreter_step(&InterpreterStep {
@@ -988,9 +901,9 @@ impl<'a, 'b> Interpreter<'a, 'b> {
             .map_err(|_| error!("expected string, but got another type"))
     }
 
-    fn dump_output(&mut self) -> Output {
+    fn dump_output(self) -> Exit<'a> {
         let sink = try_values_to_literals(&self.sink, &self.realm.heap);
-        Output { sink }
+        Exit::Finished(FinishedData { sink })
     }
 
     fn exit_function(&mut self, callee_retval_reg: Option<VReg>) -> Option<IID> {
@@ -1408,7 +1321,7 @@ mod tests {
     use super::*;
     use crate::bytecode::Literal;
 
-    fn quick_run(code: &str) -> Output {
+    fn quick_run(code: &str) -> FinishedData {
         let res = std::panic::catch_unwind(|| {
             let filename = "<input>".to_string();
 
@@ -1418,8 +1331,8 @@ mod tests {
                 .expect("couldn't compile test script");
 
             let mut realm = Realm::new();
-            let vm = Interpreter::new(&mut realm, &mut loader);
-            vm.run_function(chunk_fnid).unwrap()
+            let vm = Interpreter::new(&mut realm, &mut loader, chunk_fnid);
+            vm.run().unwrap().expect_finished()
         });
 
         if let Err(err) = &res {

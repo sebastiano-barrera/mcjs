@@ -41,23 +41,3 @@ pub use bytecode_compiler::{CompiledChunk, SourceMap};
 // TODO Compile this module and build/link serde only for test builds
 pub mod inspector_case;
 
-// pub use interpreter::{InterpreterFlags, JitMode, TracerFlags, VM};
-//
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//
-//     use interpreter::{Value, VM};
-//
-//     struct Output {
-//         sink: Vec<Value>,
-//     }
-//
-//     fn quick_run(code: &str) -> Result<Output, interpreter::Error> {
-//         let mut vm = VM::new();
-//         vm.run_script(code.to_string(), Default::default())?;
-//         Ok(Output {
-//             sink: vm.take_sink(),
-//         })
-//     }
-// }

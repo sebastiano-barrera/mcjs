@@ -3,8 +3,6 @@ extern crate mcjs_vm;
 use mcjs_vm::Literal;
 use std::path::PathBuf;
 
-use serde::Serialize;
-
 #[test]
 fn test_load_json5_stringify() {
     test_integration_script("test_stringify.mjs");
@@ -33,9 +31,11 @@ fn test_integration_script(filename: &str) {
             .load_script(Some(filename.to_string()), content)
             .expect("error while compiling script");
 
-        mcjs_vm::Interpreter::new(&mut loader)
-            .run_function(fnid)
+        let mut realm = mcjs_vm::Realm::new();
+        mcjs_vm::Interpreter::new(&mut realm, &mut loader, fnid)
+            .run()
             .unwrap_or_else(|err| panic!("runtime error:\n{:?}", err))
+            .expect_finished()
             .sink
     });
 
