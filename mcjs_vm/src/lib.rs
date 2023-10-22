@@ -21,9 +21,6 @@ mod stack;
 #[cfg(feature = "inspection")]
 pub mod stack;
 
-#[cfg(not(feature = "inspection"))]
-mod interpreter;
-#[cfg(feature = "inspection")]
 pub mod interpreter;
 
 #[cfg(not(feature = "inspection"))]
@@ -32,7 +29,7 @@ mod heap;
 pub mod heap;
 
 pub use bytecode::{FnId, GlobalIID, Literal, ModuleId, IID};
-pub use interpreter::{Realm, Interpreter, Value as InterpreterValue};
+pub use interpreter::{Interpreter, Realm, Value as InterpreterValue};
 pub use loader::Loader;
 
 #[cfg(feature = "inspection")]
@@ -40,4 +37,3 @@ pub use bytecode_compiler::{CompiledChunk, SourceMap};
 
 // TODO Compile this module and build/link serde only for test builds
 pub mod inspector_case;
-

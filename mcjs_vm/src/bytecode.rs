@@ -245,6 +245,8 @@ pub enum Instr {
 
     // TODO exceptions are completely unimplemented yet, lol
     Throw(VReg),
+
+    Breakpoint,
 }
 
 impl Instr {
@@ -346,6 +348,7 @@ impl Instr {
             Instr::TypeOf { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); }
             Instr::ImportModule(dest, mod_spec) => { an.write_vreg(*dest); an.read_vreg(*mod_spec); }
             Instr::Throw(arg) => { an.read_vreg(*arg); }
+            Instr::Breakpoint => {},
         };
 
         an.end(self)

@@ -6,5 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-mcjs_vm = { path = "../mcjs_vm", features = ["inspection"] }
+mcjs_vm = { path = "../mcjs_vm", features = ["debugger"] }
 

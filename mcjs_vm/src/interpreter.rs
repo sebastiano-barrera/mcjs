@@ -215,7 +215,9 @@ impl<'a> Exit<'a> {
     pub fn expect_finished(self) -> FinishedData {
         match self {
             Exit::Finished(fd) => fd,
-            Exit::Suspended(_) => panic!("interpreter was interrupted, while it was expected to finish"),
+            Exit::Suspended(_) => {
+                panic!("interpreter was interrupted, while it was expected to finish")
+            }
         }
     }
 }
@@ -849,6 +851,13 @@ impl<'a> Interpreter<'a> {
                         .unwrap_or(Value::Undefined);
                     self.data.top_mut().set_result(*dest, value);
                 }
+
+                Instr::Breakpoint => {
+                    // We must update self.iid now, or the Interpreter will be back here on resume,
+                    // in an infinite loop
+                    self.iid.0 = next_ndx;
+                    return Ok(Exit::Suspended(self));
+                }
             }
 
             eprintln!();
@@ -1312,6 +1321,41 @@ impl From<std::cmp::Ordering> for ValueOrdering {
             Ordering::Less => ValueOrdering::Less,
             Ordering::Equal => ValueOrdering::Equal,
             Ordering::Greater => ValueOrdering::Greater,
+        }
+    }
+}
+
+#[cfg(feature = "debugger")]
+pub mod debugger {
+    use crate::{bytecode, InterpreterValue};
+
+    use super::Interpreter;
+
+    pub struct Probe<'a, 'b> {
+        interpreter: &'a mut Interpreter<'b>,
+    }
+
+    pub struct Position {
+        pub fnid: bytecode::FnId,
+        pub iid: bytecode::IID,
+    }
+
+    impl<'a, 'b> Probe<'a, 'b> {
+        pub fn attach(interpreter: &'a mut Interpreter<'b>) -> Self {
+            Probe { interpreter }
+        }
+
+        pub fn position(&self) -> Position {
+            let frame = self.interpreter.data.top();
+
+            Position {
+                fnid: frame.header().fn_id,
+                iid: self.interpreter.iid,
+            }
+        }
+
+        pub fn sink(&self) -> &[InterpreterValue] {
+            self.interpreter.sink.as_slice()
         }
     }
 }

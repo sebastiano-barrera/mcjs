@@ -679,7 +679,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             Ok(())
         }
         // Stmt::Empty(_) => todo!(),
-        // Stmt::Debugger(_) => todo!(),
+        Stmt::Debugger(_) => {
+            builder.emit(Instr::Breakpoint);
+            Ok(())
+        },
         // Stmt::With(_) => todo!(),
         Stmt::Return(stmt) => {
             let reg = if let Some(arg) = &stmt.arg {
