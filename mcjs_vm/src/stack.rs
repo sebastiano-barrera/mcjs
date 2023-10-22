@@ -85,20 +85,6 @@ impl InterpreterData {
         }
     }
 
-    /// Returns a Vec of "views" into each stack frame, ordered top to bottom.
-    // TODO Turn this into an iterator? (Along with self.stack.frames())
-    #[cfg(feature = "inspection")]
-    pub fn frames(&self) -> Vec<Frame> {
-        self.stack
-            .frames()
-            .into_iter()
-            .map(|frame_view| Frame {
-                inner: frame_view,
-                upv_alloc: &self.upv_alloc,
-            })
-            .collect()
-    }
-
     pub(crate) fn capture_to_var(
         &mut self,
         capture_ndx: bytecode::CaptureIndex,

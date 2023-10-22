@@ -1381,11 +1381,6 @@ mod tests {
 
         if let Err(err) = &res {
             println!("quick_run: error: {:?}", err);
-            let include_paths = Vec::new();
-            crate::inspector_case::export_inspector_case(
-                include_paths,
-                crate::inspector_case::Root::InlineScript(code.to_owned()),
-            );
         }
         res.unwrap()
     }
