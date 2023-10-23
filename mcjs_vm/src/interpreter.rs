@@ -1331,14 +1331,37 @@ pub mod debugger {
 
     use super::Interpreter;
 
+    /// The only real entry point to all the debugging features present in the
+    /// Interpreter.
+    ///
+    /// Create it it by calling Probe::attach with a reference to the Interpreter. The
+    /// Interpreter will stay suspended as long as the Probe exists. (Since the
+    /// interpreter only runs within a call to Interpreter::run, this implies that the
+    /// Interpreter is suspended at that time. And since the Probe acquires an
+    /// exclusive &mut reference to the Interpreter, you won't be able
+    /// to call Interpreter::run until dropping the probe).
+    ///
+    /// In general, a Probe can be used to:
+    ///  - query the interpreter's state (examine the call stack, local variables, etc.)
+    ///  - place breakpoints
     pub struct Probe<'a, 'b> {
         interpreter: &'a mut Interpreter<'b>,
+    }
+
+    pub type Result<T> = std::result::Result<T, ProbeError>;
+
+    pub enum ProbeError {
+        NoSuchModule,
+        AmbiguousFilename,
+        NoSourceMap,
     }
 
     pub struct Position {
         pub fnid: bytecode::FnId,
         pub iid: bytecode::IID,
     }
+
+    pub struct BreakpointId(u32);
 
     impl<'a, 'b> Probe<'a, 'b> {
         pub fn attach(interpreter: &'a mut Interpreter<'b>) -> Self {
@@ -1356,6 +1379,24 @@ pub mod debugger {
 
         pub fn sink(&self) -> &[InterpreterValue] {
             self.interpreter.sink.as_slice()
+        }
+
+        /// Set a breakpoint at the specified line of code.
+        ///
+        /// Note that the `filename` argument may be abbreviated to only a suffix of the
+        /// desired file's path.  As long as there is only one loaded file whose
+        /// filename matches that suffix, it will be automatically resolved to the
+        /// full path. If more than one file
+        /// matches, `Err(ProbeError::AmbiguousFilename)` will be returned.
+        ///
+        /// Note that
+        pub fn set_breakpoint(
+            &mut self,
+            filename: &str,
+            line_number: usize,
+        ) -> Result<BreakpointId> {
+            let loader = &self.interpreter.loader;
+            todo!("Resolve byte_lo:byte_hi to a range of instruction IDs, then actually set breakpoints on them")
         }
     }
 }

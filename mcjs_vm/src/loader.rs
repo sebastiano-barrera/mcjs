@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::{collections::HashMap, path::PathBuf};
 
@@ -108,6 +109,10 @@ impl Loader {
             bytecode::SCRIPT_MODULE_ID => None,
             module_id => Some(self.modules.get(&module_id)?.compiled.root_fnid),
         }
+    }
+
+    pub(crate) fn loaded_modules_paths(&self) -> &HashMap<PathBuf, bytecode::ModuleId> {
+        &self.mod_of_path
     }
 
     pub fn get_function(&self, fnid: bytecode::FnId) -> Option<&bytecode::Function> {
@@ -282,6 +287,34 @@ impl Loader {
         Ok(bytecode::FnId(bytecode::SCRIPT_MODULE_ID, chunk_fnid))
     }
 
+    pub fn resolve_loc(&self, filename: &str, line_number: usize) -> Result<Vec<GlobalIID>> {
+        // Resolve the (potentially partial) filename to a full path
+        let (filename, module_id) = {
+            let all_paths = self.loaded_modules_paths();
+            let mut matching_paths = all_paths
+                .iter()
+                .filter(|(path, _)| path.ends_with(filename));
+            let resolved = matching_paths.next().ok_or(error!("no module with path `{}` (either full or suffix)", filename )?;
+
+            // TODO Could it be useful to return all the matching paths? To help the user
+            // narrow it down?
+            if matching_paths.next().is_some() {
+                return Err(ProbeError::AmbiguousFilename);
+            }
+
+            resolved
+        };
+
+        let (byte_lo, byte_hi) = {
+            let source_map = self.get_source_map(*module_id).unwrap();
+            let source_file = source_map
+                .get_source_file(&swc_common::FileName::Real(filename.clone()))
+                .ok_or(ProbeError::NoSourceMap)?;
+
+            source_file.line_bounds(line_number)
+        };
+    }
+
     fn gen_mod_id(&mut self) -> bytecode::ModuleId {
         let mod_id = self.next_module_id;
         self.next_module_id += 1;
@@ -293,6 +326,14 @@ impl Loader {
         self.next_package_id += 1;
         assert_ne!(pkg_id, ROOT_PKG_ID.0);
         PackageId(pkg_id)
+    }
+
+    pub(crate) fn get_source_map(
+        &self,
+        module_id: bytecode::ModuleId,
+    ) -> Option<&swc_common::SourceMap> {
+        let module = self.modules.get(&module_id)?;
+        Some(Rc::as_ref(&module.compiled.source_map))
     }
 
     // TODO(performance) Does it make sense to mmap the input file?
