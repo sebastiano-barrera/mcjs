@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
-use swc_common::{sync::Lrc, Span};
+use swc_common::{sync::Lrc, Span, Spanned};
 use swc_ecma_ast::{
     ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, ForHead, Function, Lit, Pat, UpdateOp, VarDecl,
 };
@@ -28,6 +28,7 @@ struct Builder {
     fns: HashMap<LocalFnId, FnBuilder>,
     fn_stack: Vec<FnBuilder>,
     next_fnid: u16,
+    breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
 impl Builder {
@@ -37,6 +38,7 @@ impl Builder {
             fns: HashMap::new(),
             fn_stack: Vec::new(),
             next_fnid: min_fnid,
+            breakable_ranges: Vec::new(),
         }
     }
 }
@@ -45,6 +47,7 @@ pub struct CompiledChunk {
     pub root_fnid: LocalFnId,
     pub functions: HashMap<LocalFnId, bytecode::Function>,
     pub source_map: Rc<SourceMap>,
+    pub breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
 pub struct CompileFlags {
@@ -84,6 +87,7 @@ pub fn compile_file(
     Ok(CompiledChunk {
         root_fnid: compiled_mod.root_fnid,
         functions: compiled_mod.functions,
+        breakable_ranges: compiled_mod.breakable_ranges,
         source_map,
     })
 }
@@ -154,7 +158,6 @@ impl FnBuilder {
             self.consts.into_boxed_slice(),
             self.n_params,
             self.trace_anchors,
-            self.span,
         )
     }
 
@@ -300,6 +303,16 @@ impl Builder {
         self.cur_fnb().emit(instr)
     }
 
+    fn link_range(&mut self, iid: IID, span: &swc_common::Span) {
+        let local_fnid = self.cur_fnb().fnid;
+        self.breakable_ranges.push(bytecode::BreakRange {
+            lo: span.lo,
+            hi: span.hi,
+            local_fnid,
+            iid,
+        });
+    }
+
     fn set_const(&mut self, vreg: VReg, value: bytecode::Literal) {
         match value {
             bytecode::Literal::Null => self.emit(Instr::LoadNull(vreg)),
@@ -422,6 +435,7 @@ impl Builder {
 struct CompiledModule {
     root_fnid: LocalFnId,
     functions: HashMap<LocalFnId, bytecode::Function>,
+    breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
 fn compile_module(ast_module: &swc_ecma_ast::Module, min_fnid: u16) -> Result<CompiledModule> {
@@ -661,11 +675,17 @@ fn compile_module(ast_module: &swc_ecma_ast::Module, min_fnid: u16) -> Result<Co
     Ok(CompiledModule {
         root_fnid,
         functions,
+        breakable_ranges: builder.breakable_ranges,
     })
 }
 
 fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> {
     use swc_ecma_ast::Stmt;
+
+    {
+        let iid_start = builder.peek_iid();
+        builder.link_range(iid_start, &stmt.span());
+    }
 
     match stmt {
         Stmt::Block(block) => {
@@ -679,10 +699,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             Ok(())
         }
         // Stmt::Empty(_) => todo!(),
-        Stmt::Debugger(_) => {
+        Stmt::Debugger(stmt) => {
             builder.emit(Instr::Breakpoint);
             Ok(())
-        },
+        }
         // Stmt::With(_) => todo!(),
         Stmt::Return(stmt) => {
             let reg = if let Some(arg) = &stmt.arg {
@@ -1239,6 +1259,11 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
 /// The resulting code implicitly leaves the result in the accumulator register.
 fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg> {
     use swc_ecma_ast::{CallExpr, Expr};
+
+    {
+        let start_iid = builder.peek_iid();
+        builder.link_range(start_iid, &expr.span());
+    }
 
     match expr {
         Expr::Call(call_expr @ CallExpr { callee, args, .. }) => {

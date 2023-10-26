@@ -21,8 +21,8 @@ pub struct Loader {
     next_module_id: u16,
     next_package_id: u16,
 
-    // Every loader always contains a single script, which can only ever be *accreted* by compiling
-    // many chunks of code. (See Loader::load_script).
+    // Every loader always contains at most a single script.
+    // Other than its address (See Loader::load_script).
     script: Script,
 
     modules: HashMap<bytecode::ModuleId, Module>,
@@ -58,6 +58,8 @@ struct PkgJson {
 
 struct Script {
     functions: HashMap<bytecode::LocalFnId, bytecode::Function>,
+    source_map: Rc<swc_common::SourceMap>,
+    breakable_ranges: Vec<bytecode::BreakRange>,
     max_fnid: u16,
 }
 
@@ -124,6 +126,12 @@ impl Loader {
         }
     }
 
+    fn get_module(&self, mod_id: bytecode::ModuleId) -> Result<&Module> {
+        self.modules
+            .get(&mod_id)
+            .ok_or_else(|| error!("invalid import site: no such module with ID {:?}", mod_id))
+    }
+
     /// Load a module (only if necessary) from an import statement.
     ///
     /// The arguments reflect the "coordinates" of the import statement:
@@ -148,14 +156,11 @@ impl Loader {
             // Relative path
 
             // The starting point is the module's parent package
-            let mod_id = match import_site {
-                bytecode::SCRIPT_MODULE_ID => return Err(error!("invalid import: relative path not allowed if import statement comes from a script")),
-                m => m,
-            };
+            if import_site == bytecode::SCRIPT_MODULE_ID {
+                return Err(error!("invalid import: relative path not allowed if import statement comes from a script"));
+            }
 
-            let module = self.modules.get(&mod_id).ok_or_else(|| {
-                error!("invalid import site: no such module with ID {:?}", mod_id)
-            })?;
+            let module = self.get_module(import_site)?;
             // TODO Cleanup the choice of data types, so as to avoid so many unwrap()'s?
             let resolved_module_path = PathBuf::from(module.path.clone())
                 .parent()
@@ -287,32 +292,36 @@ impl Loader {
         Ok(bytecode::FnId(bytecode::SCRIPT_MODULE_ID, chunk_fnid))
     }
 
-    pub fn resolve_loc(&self, filename: &str, line_number: usize) -> Result<Vec<GlobalIID>> {
-        // Resolve the (potentially partial) filename to a full path
-        let (filename, module_id) = {
-            let all_paths = self.loaded_modules_paths();
-            let mut matching_paths = all_paths
-                .iter()
-                .filter(|(path, _)| path.ends_with(filename));
-            let resolved = matching_paths.next().ok_or(error!("no module with path `{}` (either full or suffix)", filename )?;
-
-            // TODO Could it be useful to return all the matching paths? To help the user
-            // narrow it down?
-            if matching_paths.next().is_some() {
-                return Err(ProbeError::AmbiguousFilename);
-            }
-
-            resolved
+    pub fn resolve_loc<'a>(
+        &'a self,
+        module_id: bytecode::ModuleId,
+        byte_pos: swc_common::BytePos,
+    ) -> Result<Vec<&'a bytecode::BreakRange>> {
+        let compiled = match module_id {
+            bytecode::SCRIPT_MODULE_ID => &self.script.compiled,
+            _ => &self.get_module(module_id)?.compiled,
         };
 
-        let (byte_lo, byte_hi) = {
-            let source_map = self.get_source_map(*module_id).unwrap();
-            let source_file = source_map
-                .get_source_file(&swc_common::FileName::Real(filename.clone()))
-                .ok_or(ProbeError::NoSourceMap)?;
+        // TODO Scanning the whole set every time resolve_loc is called may not be ideal. Interval
+        // tree?
+        Ok(compiled
+            .breakable_ranges
+            .iter()
+            .filter(|brange| brange.lo <= byte_pos && byte_pos <= brange.hi)
+            .collect())
+    }
 
-            source_file.line_bounds(line_number)
-        };
+    /// Resolve the given path to a module ID.
+    ///
+    /// Note that the `filename` argument may be abbreviated to only a suffix of the
+    /// desired file's path.  As long as there is only one loaded file whose filename
+    /// matches that suffix, it will be automatically resolved to its full path. If
+    /// more than one file matches, an error will be returned.
+    pub fn find_module(&self, filename: &str) -> Result<&bytecode::ModuleId> {
+        let all_paths = self.mod_of_path.keys().map(|pb| pb.as_path());
+        let filename = resolve_path_by_suffix(all_paths, filename)?;
+        let module_id = self.mod_of_path.get(filename).unwrap();
+        Ok(module_id)
     }
 
     fn gen_mod_id(&mut self) -> bytecode::ModuleId {
@@ -339,6 +348,28 @@ impl Loader {
     // TODO(performance) Does it make sense to mmap the input file?
     // TODO Indirect filesystem access? (Check if needed)
     // TODO Virtual module (for testing/debugging)? (Check if needed)
+}
+
+fn resolve_path_by_suffix<'a>(
+    all_paths: impl Iterator<Item = &'a Path>,
+    filename: &str,
+) -> Result<&'a Path> {
+    let mut matching_paths = all_paths.filter(|path| path.ends_with(filename));
+    let resolved = matching_paths.next().ok_or(error!(
+        "no module with path `{}` (either full or suffix)",
+        filename
+    ))?;
+
+    // TODO Could it be useful to return all the matching paths? To help the user
+    // narrow it down?
+    if matching_paths.next().is_some() {
+        return Err(error!(
+            "ambiguous filename: multiple loaded files match suffix `{}`",
+            filename
+        ));
+    }
+
+    Ok(resolved)
 }
 
 fn is_valid_package_name(import_path: &str) -> bool {

@@ -377,6 +377,14 @@ impl From<String> for Literal {
 
 type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
 
+#[derive(Clone)]
+pub struct BreakRange {
+    pub lo: swc_common::BytePos,
+    pub hi: swc_common::BytePos,
+    pub local_fnid: LocalFnId,
+    pub iid: IID,
+}
+
 pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
@@ -384,7 +392,6 @@ pub struct Function {
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
     trace_anchors: HashMap<IID, TraceAnchor>,
-    span: Option<Span>,
 }
 pub struct TraceAnchor {
     pub trace_id: String,
@@ -395,13 +402,13 @@ pub struct LoopInfo {
     // added based on this set.
     interloop_vars: HashSet<IID>,
 }
+
 impl Function {
     pub(crate) fn new(
         instrs: Box<[Instr]>,
         consts: Box<[Literal]>,
         n_params: ArgIndex,
         trace_anchors: HashMap<IID, TraceAnchor>,
-        span: Option<Span>,
     ) -> Function {
         #[cfg(to_be_rewritten)]
         let loop_heads = find_loop_heads(&instrs[..]);
@@ -413,7 +420,6 @@ impl Function {
             n_params,
             loop_heads,
             trace_anchors,
-            span,
         }
     }
 
@@ -427,10 +433,6 @@ impl Function {
 
     pub fn is_loop_head(&self, iid: IID) -> bool {
         self.loop_heads.contains_key(&iid)
-    }
-
-    pub fn source_span(&self) -> Option<&Span> {
-        self.span.as_ref()
     }
 
     pub fn get_trace_anchor(&self, iid: IID) -> Option<&TraceAnchor> {

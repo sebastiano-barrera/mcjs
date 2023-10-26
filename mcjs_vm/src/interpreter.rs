@@ -1327,6 +1327,7 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 
 #[cfg(feature = "debugger")]
 pub mod debugger {
+    use crate::common::Result;
     use crate::{bytecode, InterpreterValue};
 
     use super::Interpreter;
@@ -1346,14 +1347,6 @@ pub mod debugger {
     ///  - place breakpoints
     pub struct Probe<'a, 'b> {
         interpreter: &'a mut Interpreter<'b>,
-    }
-
-    pub type Result<T> = std::result::Result<T, ProbeError>;
-
-    pub enum ProbeError {
-        NoSuchModule,
-        AmbiguousFilename,
-        NoSourceMap,
     }
 
     pub struct Position {
@@ -1381,22 +1374,16 @@ pub mod debugger {
             self.interpreter.sink.as_slice()
         }
 
-        /// Set a breakpoint at the specified line of code.
+        /// Set a breakpoint at the specified instruction.
         ///
-        /// Note that the `filename` argument may be abbreviated to only a suffix of the
-        /// desired file's path.  As long as there is only one loaded file whose
-        /// filename matches that suffix, it will be automatically resolved to the
-        /// full path. If more than one file
-        /// matches, `Err(ProbeError::AmbiguousFilename)` will be returned.
+        /// After this operation, the interpreter will suspend itself (Interpreter::run
+        /// will return Exit::Suspended), and it will be possible to examine its
+        /// state (by attaching a new Probe on it).
         ///
-        /// Note that
-        pub fn set_breakpoint(
-            &mut self,
-            filename: &str,
-            line_number: usize,
-        ) -> Result<BreakpointId> {
+        /// Returns a BreakpointId, which can be used to manage or remove this breakpoint.
+        pub fn set_breakpoint(&mut self, giid: bytecode::GlobalIID) -> Result<BreakpointId> {
             let loader = &self.interpreter.loader;
-            todo!("Resolve byte_lo:byte_hi to a range of instruction IDs, then actually set breakpoints on them")
+            todo!("set a breakpoint at the specified instruction")
         }
     }
 }
