@@ -16,7 +16,7 @@ use crate::error;
 ///
 /// It stores modules, associating them to unique IDs.
 pub struct Loader {
-    root_pkg_path: Option<PathBuf>,
+    base_path: Option<PathBuf>,
 
     next_module_id: u16,
     next_package_id: u16,
@@ -25,24 +25,27 @@ pub struct Loader {
     // Other than its address (See Loader::load_script).
     script: Script,
 
+    functions: HashMap<bytecode::FnId, bytecode::Function>,
     modules: HashMap<bytecode::ModuleId, Module>,
+    // This is just a cache of previously parsed package.json.  Defining the PackageId is also
+    // useful to identify packages without further checks.
+    packages: HashMap<PackageId, Package>,
+
     // Key is the absolute filename of the (previously loaded) module
     mod_of_path: HashMap<PathBuf, bytecode::ModuleId>,
-    packages: HashMap<PackageId, Package>,
-    pkg_of_name: HashMap<String, PackageId>,
+    pkg_of_path: HashMap<PathBuf, PackageId>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
 struct PackageId(u16);
 
-const ROOT_PKG_ID: PackageId = PackageId(0);
-
 struct Module {
-    compiled: bytecode_compiler::CompiledChunk,
-    /// ID of the package this module belongs to.
-    package_id: PackageId,
-    /// This module's path, *relative* to the package's root path.
-    path: String,
+    root_fnid: bytecode::LocalFnId,
+    source_map: Rc<swc_common::SourceMap>,
+    breakable_ranges: Vec<bytecode::BreakRange>,
+    abs_path: PathBuf,
+    // The package that the module belongs to could be cached from abs_path.
+    // Worth the increase in complexity/trickiness?
 }
 
 struct Package {
@@ -52,31 +55,9 @@ struct Package {
     /// Relative path to the main module. (Relative to `root_path`)
     main_filename: PathBuf,
 }
-struct PkgJson {
-    main: String,
-}
 
 struct Script {
-    functions: HashMap<bytecode::LocalFnId, bytecode::Function>,
-    source_map: Rc<swc_common::SourceMap>,
-    breakable_ranges: Vec<bytecode::BreakRange>,
     max_fnid: u16,
-}
-
-impl Script {
-    fn add_functions(&mut self, new_funcs: HashMap<bytecode::LocalFnId, bytecode::Function>) {
-        if new_funcs.is_empty() {
-            return;
-        }
-
-        let min_lfnid = new_funcs.keys().min().unwrap().0;
-        let max_lfnid = new_funcs.keys().max().unwrap().0;
-
-        assert!(min_lfnid > self.max_fnid);
-        self.functions.extend(new_funcs.into_iter());
-
-        self.max_fnid = max_lfnid;
-    }
 }
 
 /// Represent where an import statement comes from (i.e., from a specific module or a
@@ -90,46 +71,46 @@ pub enum ImportSite<'a> {
 }
 
 impl Loader {
-    pub fn new(root_pkg_path: Option<PathBuf>) -> Self {
+    /// Create a new empty loader.
+    ///
+    /// `base_path` is a directory (this function will panic otherwise). To a first
+    /// approximation, it's the directory where the main file or the REPL is running.
+    /// More concretely, it is considered as the initial search path for relative
+    /// imports (e.g. when `import * as x from './asd/lol'` appears in a script/REPL
+    /// chunk).
+    pub fn new(base_path: Option<PathBuf>) -> Self {
         Loader {
-            root_pkg_path,
+            base_path,
             next_module_id: 1,
             next_package_id: 1,
+            script: Script { max_fnid: 0 },
+            functions: HashMap::new(),
             modules: HashMap::new(),
-            mod_of_path: HashMap::new(),
             packages: HashMap::new(),
-            pkg_of_name: HashMap::new(),
-            script: Script {
-                functions: HashMap::new(),
-                max_fnid: 0,
-            },
+            mod_of_path: HashMap::new(),
+            pkg_of_path: HashMap::new(),
         }
     }
 
     pub fn get_module_root_fn(&self, module_id: bytecode::ModuleId) -> Option<bytecode::LocalFnId> {
-        match module_id {
-            bytecode::SCRIPT_MODULE_ID => None,
-            module_id => Some(self.modules.get(&module_id)?.compiled.root_fnid),
-        }
-    }
+        assert_ne!(
+            module_id,
+            bytecode::SCRIPT_MODULE_ID,
+            "module_id == SCRIPT_MODULE_ID, but only modules have a root function"
+        );
 
-    pub(crate) fn loaded_modules_paths(&self) -> &HashMap<PathBuf, bytecode::ModuleId> {
-        &self.mod_of_path
+        Some(self.modules.get(&module_id)?.root_fnid)
     }
 
     pub fn get_function(&self, fnid: bytecode::FnId) -> Option<&bytecode::Function> {
-        let bytecode::FnId(mod_id, lfnid) = fnid;
-
-        match mod_id {
-            bytecode::SCRIPT_MODULE_ID => self.script.functions.get(&lfnid),
-            mod_id => self.modules.get(&mod_id)?.compiled.functions.get(&lfnid),
-        }
+        self.functions.get(&fnid)
     }
 
     fn get_module(&self, mod_id: bytecode::ModuleId) -> Result<&Module> {
+        assert_ne!(mod_id, bytecode::SCRIPT_MODULE_ID);
         self.modules
             .get(&mod_id)
-            .ok_or_else(|| error!("invalid import site: no such module with ID {:?}", mod_id))
+            .ok_or_else(|| error!("no such module with ID {:?}", mod_id))
     }
 
     /// Load a module (only if necessary) from an import statement.
@@ -149,131 +130,157 @@ impl Loader {
     ///    used to resolve relative paths, among other things.
     pub fn load_import(
         &mut self,
-        import_path: String,
+        import_path: &str,
         import_site: bytecode::ModuleId,
     ) -> Result<bytecode::FnId> {
-        if import_path.starts_with("./") {
-            // Relative path
+        // The starting point is the module's parent package
+        let base_path = match import_site {
+            bytecode::SCRIPT_MODULE_ID =>
+                self.base_path.as_ref()
+                .map(|pb| pb.as_path())
+                .ok_or_else(|| error!("imports not allowed in script context, because no base path configured for this Loader"))?,
 
-            // The starting point is the module's parent package
-            if import_site == bytecode::SCRIPT_MODULE_ID {
-                return Err(error!("invalid import: relative path not allowed if import statement comes from a script"));
-            }
-
-            let module = self.get_module(import_site)?;
-            // TODO Cleanup the choice of data types, so as to avoid so many unwrap()'s?
-            let resolved_module_path = PathBuf::from(module.path.clone())
+            import_site => self.get_module(import_site)?
+                .abs_path
                 .parent()
-                .unwrap()
-                .join(import_path)
-                .into_os_string()
-                .into_string()
-                .unwrap();
+                .expect("loader bug: module path has no parent"),
+        };
+        let base_path = base_path.to_owned();
 
-            self.load_module(module.package_id, &resolved_module_path)
+        let resolved_module_path = if import_path.starts_with("./") {
+            let import_path = Path::new(&import_path);
+            debug_assert!(import_path.is_relative());
+            base_path.join(import_path)
         } else if is_valid_package_name(&import_path) {
-            // Package name
-            if !self.pkg_of_name.contains_key(&import_path) {
-                let root_pkg_path = self.root_pkg_path.as_ref().ok_or_else(|| {
-                    error!("can't load packages from this loader: no root path has been configured")
-                })?;
-                let pkg_path = root_pkg_path.join("node_modules").join(&import_path);
+            // Package name ("bare import specifier")
+            let pkg_id = self.resolve_package_import(&base_path, &import_path)?;
+            let pkg = self.packages.get(&pkg_id).unwrap();
+            let mod_path = pkg.root_path.join(&pkg.main_filename);
 
-                let package = parse_package(&pkg_path).map_err(|err| {
-                    Error::from(err)
-                        .with_context(error!("while loading imported package '{}'", import_path))
+            // Otherwise the file's path would resolve to outside the package...
+            // Can't allow that
+            debug_assert!(mod_path.canonicalize().unwrap().starts_with(&pkg.root_path));
+
+            mod_path
+        } else {
+            return Err(error!(
+                "invalid module path: `{}` (only allowed: './relative/paths', and 'package-name')",
+                import_path
+            ));
+        };
+
+        self.load_module(&resolved_module_path)
+    }
+
+    fn resolve_package_import(
+        &mut self,
+        importing_mod_dir: &Path,
+        pkg_name: &str,
+    ) -> Result<PackageId> {
+        assert!(is_valid_package_name(pkg_name));
+        // There are a bunch of corner cases around '.' and '..' that we can avoid
+        assert!(!pkg_name.contains('.'));
+
+        let mut cur_dir = importing_mod_dir;
+        assert!(cur_dir.is_absolute());
+        debug_assert_eq!(cur_dir.canonicalize().unwrap(), cur_dir);
+
+        eprintln!("resolving package import {}", pkg_name);
+        let pkg_id = 'cycle: loop {
+            let pkg_dir = cur_dir.join("node_modules").join(&pkg_name);
+            eprintln!(" - checking in {}", pkg_dir.to_string_lossy());
+            if let Some(pkg_id) = self.pkg_of_path.get(&pkg_dir) {
+                break 'cycle *pkg_id;
+            } else if pkg_dir.join("package.json").is_file() {
+                let package = parse_package(&pkg_dir).map_err(|err| {
+                    err.with_context(error!("while loading imported package '{}'", pkg_name))
                 })?;
 
                 let pkg_id = self.gen_pkg_id();
                 self.packages.insert(pkg_id, package);
-                self.pkg_of_name.insert(import_path.clone(), pkg_id);
+                self.pkg_of_path.insert(pkg_dir, pkg_id);
+                break 'cycle pkg_id;
             }
 
-            let pkg_id = *self.pkg_of_name.get(&import_path).unwrap();
-            let pkg = self.packages.get(&pkg_id).unwrap();
-            let module_path = pkg.main_filename.as_os_str().to_str().unwrap().to_string();
+            cur_dir = match cur_dir.parent() {
+                Some(parent) => parent,
+                None => return Err(error!("no such package: {}", pkg_name)),
+            };
+        };
 
-            self.load_module(pkg_id, &module_path)
-        } else {
-            Err(error!(
-                "invalid module path: `{}` (only allowed: './relative/paths', and 'package-name')",
-                import_path
-            ))
-        }
+        Ok(pkg_id)
     }
 
-    fn load_module(&mut self, package_id: PackageId, module_path: &str) -> Result<bytecode::FnId> {
-        let package = self
-            .packages
-            .get(&package_id)
-            .ok_or_else(|| error!("no package with ID {}", package_id.0))?;
+    fn load_module(&mut self, module_path: &Path) -> Result<bytecode::FnId> {
+        assert!(module_path.is_absolute());
 
-        assert!(package.root_path.is_absolute());
-        let filename = package.root_path.join(module_path);
-        assert!(filename.is_absolute());
-
-        if !filename.starts_with(&package.root_path) {
-            return Err(error!(
-                "invalid module path (resolves to a path outside the package)"
-            ));
-        }
-
-        if let Some(mod_id) = self.mod_of_path.get(&filename) {
+        if let Some(mod_id) = self.mod_of_path.get(module_path) {
             // TODO Make the root FnId fixed (the same) across all modules (then
             // we can avoid this lookup)
             let module = self
                 .modules
                 .get(mod_id)
                 .expect("loader bug: inconsistent `module` and `module_id`");
-            return Ok(bytecode::FnId(*mod_id, module.compiled.root_fnid));
+            return Ok(bytecode::FnId(*mod_id, module.root_fnid));
         }
 
-        let content = std::fs::read_to_string(&filename).map_err(|err| {
-            Error::from(err)
-                .with_context(error!(
-                    "while reading file `{}`",
-                    filename.to_string_lossy()
-                ))
-                .with_context(error!("while loading module `{module_path}`"))
+        let content = std::fs::read_to_string(&module_path).map_err(|err| {
+            Error::from(err).with_context(error!(
+                "while loading module `{}`",
+                module_path.to_string_lossy()
+            ))
         })?;
 
         // TODO Remove this impedance mismatch between PathBufs and Strings
         let flags = bytecode_compiler::CompileFlags::default();
-        let compiled = bytecode_compiler::compile_file(
-            filename.to_string_lossy().into_owned(),
+        let bytecode_compiler::CompiledChunk {
+            root_fnid,
+            functions,
+            source_map,
+            breakable_ranges,
+        } = bytecode_compiler::compile_file(
+            module_path.to_string_lossy().into_owned(),
             content,
             &flags,
         )?;
 
-        let root_fnid = compiled.root_fnid;
         let module = Module {
-            compiled,
-            package_id,
-            path: module_path.to_string(),
+            root_fnid,
+            source_map,
+            breakable_ranges,
+            abs_path: module_path.to_owned(),
         };
-
         let module_id = self.gen_mod_id();
+
+        self.add_functions(functions.into_iter(), module_id);
+
         self.modules.insert(module_id, module);
-        self.mod_of_path.insert(filename, module_id);
+        self.mod_of_path.insert(module_path.to_owned(), module_id);
         Ok(bytecode::FnId(module_id, root_fnid))
+    }
+
+    fn add_functions(
+        &mut self,
+        functions: impl Iterator<Item = (bytecode::LocalFnId, bytecode::Function)>,
+        module_id: crate::ModuleId,
+    ) {
+        for (lfnid, func) in functions {
+            let prev = self
+                .functions
+                .insert(bytecode::FnId(module_id, lfnid), func);
+            assert!(prev.is_none(), "loader bug: duplicate fnid");
+        }
     }
 
     /// Compile a new chunk of script code.
     ///
-    /// This differs from module code in the following ways:
+    /// Since we're not in a browser, the only script code that should
+    /// realistically pass through here is a  REPL chunk.
     ///
-    ///  - each module is assigned to a separate ModuleId, whereas functions in the script
-    ///    context always have module ID == bytecode::SCRIPT_MODULE_ID,
-    ///
-    ///  - each Loader always stores exactly one script.  No script can be created,
-    ///    removed or replaced for a single Loader.
-    ///
-    ///  - each call to `load_module` generates a new module, completely independent from
-    ///    previous compilations, whereas each call to load_script only ever *adds* more
-    ///    functions to this Loader's script.
-    ///
-    ///    - nevertheless, compiling new script chunks never invalidates previously
-    ///      compiled function IDs.
+    /// The main characteristic of script code (at compile time) is that functions and
+    /// variables defined in script context always have module ID ==
+    /// `bytecode::SCRIPT_MODULE_ID`.  In other words, they appear as if coming from a
+    /// single file, even though they go through the compiler in chunks.
     pub fn load_script(
         &mut self,
         filename: Option<String>,
@@ -285,26 +292,29 @@ impl Loader {
         };
         let compiled = bytecode_compiler::compile_file(filename, content, &flags)?;
 
-        let chunk_fnid = compiled.root_fnid;
-        self.script.add_functions(compiled.functions);
-        // TODO Do something with the chunk's source map?
+        // Note that we discard everything other than the functions (e.g.
+        // source_map, breakable_ranges)
+        self.add_functions(compiled.functions.into_iter(), bytecode::SCRIPT_MODULE_ID);
 
-        Ok(bytecode::FnId(bytecode::SCRIPT_MODULE_ID, chunk_fnid))
+        Ok(bytecode::FnId(
+            bytecode::SCRIPT_MODULE_ID,
+            compiled.root_fnid,
+        ))
     }
 
-    pub fn resolve_loc<'a>(
+    pub fn resolve_break_loc<'a>(
         &'a self,
         module_id: bytecode::ModuleId,
         byte_pos: swc_common::BytePos,
     ) -> Result<Vec<&'a bytecode::BreakRange>> {
-        let compiled = match module_id {
-            bytecode::SCRIPT_MODULE_ID => &self.script.compiled,
-            _ => &self.get_module(module_id)?.compiled,
-        };
+        if module_id == bytecode::SCRIPT_MODULE_ID {
+            return Err(error!("breakpoints can't be put on script code"));
+        }
 
+        let module = self.get_module(module_id)?;
         // TODO Scanning the whole set every time resolve_loc is called may not be ideal. Interval
         // tree?
-        Ok(compiled
+        Ok(module
             .breakable_ranges
             .iter()
             .filter(|brange| brange.lo <= byte_pos && byte_pos <= brange.hi)
@@ -333,7 +343,6 @@ impl Loader {
     fn gen_pkg_id(&mut self) -> PackageId {
         let pkg_id = self.next_package_id;
         self.next_package_id += 1;
-        assert_ne!(pkg_id, ROOT_PKG_ID.0);
         PackageId(pkg_id)
     }
 
@@ -342,12 +351,11 @@ impl Loader {
         module_id: bytecode::ModuleId,
     ) -> Option<&swc_common::SourceMap> {
         let module = self.modules.get(&module_id)?;
-        Some(Rc::as_ref(&module.compiled.source_map))
+        Some(Rc::as_ref(&module.source_map))
     }
 
     // TODO(performance) Does it make sense to mmap the input file?
     // TODO Indirect filesystem access? (Check if needed)
-    // TODO Virtual module (for testing/debugging)? (Check if needed)
 }
 
 fn resolve_path_by_suffix<'a>(
@@ -379,6 +387,8 @@ fn is_valid_package_name(import_path: &str) -> bool {
 }
 
 // Private: packages are only loaded as part of the  'import' implementation (load_import)
+//
+// `pkg_path` must be the Path to the package's *directory*.
 fn parse_package(pkg_path: &Path) -> Result<Package> {
     let pkg_json_path = pkg_path.join("package.json");
     let pkg_json_file = std::fs::File::open(&pkg_json_path)

@@ -759,7 +759,7 @@ impl<'a> Interpreter<'a> {
 
                     let root_fnid = self
                         .loader
-                        .load_import(module_path.to_string(), import_site)
+                        .load_import(&module_path, import_site)
                         .with_context(error!("while trying to import '{}'", module_path))?;
 
                     if let Some(module_oid) = self.realm.module_objs.get(&root_fnid.0) {

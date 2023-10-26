@@ -1,3 +1,7 @@
+#![cfg(feature = "debugger")]
+
+use std::path::{Path, PathBuf};
+
 use mcjs_vm::bytecode;
 use mcjs_vm::interpreter::debugger::{Position, Probe};
 use mcjs_vm::interpreter::{Exit, Interpreter, Realm, Value};
@@ -55,31 +59,28 @@ foo();
 
 #[test]
 fn test_pos_breakpoint() {
-    const SOURCE_CODE: &'static str = "
-function foo() {
-    sink(1);
-    sink(2);
-}
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base_path = manifest_dir.join("test-resources/test-scripts/debugging/");
 
-foo();
-        ";
+    // Simulate `import ... from 'test_pkg'` from a script
+    let mut loader = mcjs_vm::Loader::new(Some(base_path));
 
-    let mut loader = mcjs_vm::Loader::new(None);
     let main_fnid = loader
-        .load_script(Some("foo.js".to_string()), SOURCE_CODE.to_string())
+        .load_import("./breakme-0.js", bytecode::SCRIPT_MODULE_ID)
         .unwrap();
-    
-    let module_id = main_fnid.0;
-    assert_eq!(module_id, bytecode::SCRIPT_MODULE_ID);
 
-    let (pos, _) = SOURCE_CODE.match_indices("sink").nth(1).unwrap();
-    let pos = swc_common::BytePos(pos as u32);
-    let break_ranges = loader.resolve_loc(module_id, pos).unwrap();
-    assert_eq!(break_ranges.len(), 1);
-    let break_range = break_ranges[0].clone();
+    let module_id = main_fnid.0;
+    assert_ne!(module_id, bytecode::SCRIPT_MODULE_ID);
+
+    let break_range = {
+        // Hardcoded. Must be updated if breakme-0.js changes
+        let pos = swc_common::BytePos(165);
+        let break_ranges = loader.resolve_break_loc(module_id, pos).unwrap();
+        assert_eq!(break_ranges.len(), 1);
+        break_ranges[0].clone()
+    };
 
     let mut realm = Realm::new();
-
     let mut interpreter = Interpreter::new(&mut realm, &mut loader, main_fnid);
 
     let mut probe = Probe::attach(&mut interpreter);
