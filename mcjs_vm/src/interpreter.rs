@@ -28,6 +28,20 @@ use crate::{
 
 pub use crate::common::Error;
 
+macro_rules! tprintln {
+    ($($args:expr),*) => {
+        #[cfg(test)]
+        eprintln!($($args),*);
+    }
+}
+
+macro_rules! tprint {
+    ($($args:expr),*) => {
+        #[cfg(test)]
+        eprint!($($args),*);
+    }
+}
+
 /// A value that can be input, output, or processed by the program at runtime.
 ///
 /// Design notes: Value is `Copy` in an effort to make it as dumb as possible (easy to
@@ -312,7 +326,10 @@ impl<'a> Interpreter<'a> {
             let fnid = self.data.top().header().fn_id;
 
             // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
-            if self.breakpoints.contains(&bytecode::GlobalIID(fnid, self.iid)) {
+            if self
+                .breakpoints
+                .contains(&bytecode::GlobalIID(fnid, self.iid))
+            {
                 // Gotta increase IID, or we'll be back here on resume
                 self.iid.0 += 1;
                 return Ok(Exit::Suspended(self));
@@ -340,12 +357,12 @@ impl<'a> Interpreter<'a> {
             let instr = func.instrs()[self.iid.0 as usize];
 
             self.print_indent();
-            eprint!("{:<4}  {:?}", self.iid.0, instr);
+            tprint!("{:<4}  {:?}", self.iid.0, instr);
             if let Instr::LoadConst(_, const_ndx) = instr {
                 let lit = &func.consts()[const_ndx.0 as usize];
-                eprint!(" = ({:?})", lit);
+                tprint!(" = ({:?})", lit);
             }
-            eprint!("    ");
+            tprint!("    ");
 
             let mut next_ndx = self.iid.0 + 1;
 
@@ -524,9 +541,9 @@ impl<'a> Interpreter<'a> {
                             arg_vals.truncate(n_params as usize);
                             arg_vals.resize(n_params as usize, Value::Undefined);
                             assert_eq!(arg_vals.len(), n_params as usize);
-                            eprintln!("     - call with {} params", n_params);
+                            tprintln!("     - call with {} params", n_params);
                             for (i, arg) in arg_vals.iter().enumerate() {
-                                eprintln!("     - call arg[{}]: {:?}", i, arg);
+                                tprintln!("     - call arg[{}]: {:?}", i, arg);
                             }
 
                             let this = closure
@@ -547,9 +564,9 @@ impl<'a> Interpreter<'a> {
                                 return_to_iid: Some(return_to_iid),
                             };
 
-                            eprintln!();
+                            tprintln!();
                             self.print_indent();
-                            eprintln!(
+                            tprintln!(
                                 "-- fn {:?} [{} captures]",
                                 call_meta.fnid.0, call_meta.n_captured_upvalues
                             );
@@ -560,7 +577,7 @@ impl<'a> Interpreter<'a> {
                                     capndx.try_into().expect("too many captures!"),
                                 );
                                 self.print_indent();
-                                eprintln!("    capture[{}] = {:?}", capndx.0, capture);
+                                tprintln!("    capture[{}] = {:?}", capndx.0, capture);
                                 self.data.top_mut().set_capture(capndx, *capture);
                                 assert_eq!(self.data.top().get_capture(capndx), *capture);
                             }
@@ -598,7 +615,7 @@ impl<'a> Interpreter<'a> {
                         .top()
                         .get_arg(*arg_ndx)
                         .unwrap_or(Value::Undefined);
-                    eprint!("-> {:?}", value);
+                    tprint!("-> {:?}", value);
                     self.data.top_mut().set_result(*dest, value);
                 }
 
@@ -630,7 +647,7 @@ impl<'a> Interpreter<'a> {
                     }
                     .unwrap_or(Value::Undefined);
 
-                    eprint!("  -> {:?}", value);
+                    tprint!("  -> {:?}", value);
                     drop(obj);
                     self.data.top_mut().set_result(*dest, value.clone());
                 }
@@ -703,7 +720,7 @@ impl<'a> Interpreter<'a> {
                 Instr::TypeOf { dest, arg: value } => {
                     let value = self.get_operand(*value);
                     let result = self.js_typeof(&value);
-                    eprint!("-> {:?}", result);
+                    tprint!("-> {:?}", result);
                     self.data.top_mut().set_result(*dest, result);
                 }
 
@@ -730,7 +747,7 @@ impl<'a> Interpreter<'a> {
                         let upv_id = self.data.top_mut().ensure_in_upvalue(cap);
                         {
                             self.print_indent();
-                            eprintln!("        upvalue: {:?} -> {:?}", cap, upv_id);
+                            tprintln!("        upvalue: {:?} -> {:?}", cap, upv_id);
                         }
 
                         upvalues.push(upv_id);
@@ -793,7 +810,7 @@ impl<'a> Interpreter<'a> {
                         };
 
                         self.print_indent();
-                        eprintln!("-- loading module {:?}", root_fnid.0);
+                        tprintln!("-- loading module {:?}", root_fnid.0);
 
                         self.data.push(call_meta);
                         self.iid = IID(0u16);
@@ -871,7 +888,7 @@ impl<'a> Interpreter<'a> {
                 }
             }
 
-            eprintln!();
+            tprintln!();
 
             #[cfg(enable_jit)]
             if let Some(jitting) = &mut self.jitting {
@@ -993,8 +1010,9 @@ impl<'a> Interpreter<'a> {
     }
 
     fn print_indent(&self) {
+        #[cfg(test)]
         for _ in 0..(self.data.len() - 1) {
-            eprint!("·   ");
+            tprint!("·   ");
         }
     }
 
@@ -1004,9 +1022,9 @@ impl<'a> Interpreter<'a> {
         //  TODO(cleanup) Move to a global logger. This is just for debugging!
         #[cfg(test)]
         {
-            eprintln!();
+            tprintln!();
             self.print_indent();
-            eprint!("        {:?} = {:?}", vreg, value);
+            tprint!("        {:?} = {:?}", vreg, value);
         }
         value
     }

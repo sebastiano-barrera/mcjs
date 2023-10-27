@@ -57,6 +57,7 @@ impl InterpreterData {
             fn_id: call_meta.fnid,
         };
 
+        #[cfg(test)]
         eprintln!(
             "  (allocated frame for {} args, {} captures, {} instrs)",
             call_meta.n_args, call_meta.n_captured_upvalues, call_meta.n_instrs,

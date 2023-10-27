@@ -844,8 +844,16 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             }
 
             let loop_start = builder.peek_iid();
-            let cond = match &stmt.test {
-                Some(test) => Some(compile_expr(builder, &*test)?),
+            let not_cond = match &stmt.test {
+                Some(test) => {
+                    let cond = compile_expr(builder, &*test)?;
+                    let not_cond = builder.new_vreg();
+                    builder.emit(Instr::BoolNot {
+                        dest: not_cond,
+                        arg: cond,
+                    });
+                    Some(not_cond)
+                }
                 None => None,
             };
             let jmpif = builder.reserve();
@@ -860,9 +868,9 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             builder.emit(Instr::Jmp(loop_start));
             let loop_end = builder.peek_iid();
 
-            *builder.get_mut(jmpif).unwrap() = if let Some(cond) = cond {
+            *builder.get_mut(jmpif).unwrap() = if let Some(not_cond) = not_cond {
                 Instr::JmpIf {
-                    cond,
+                    cond: not_cond,
                     dest: loop_end,
                 }
             } else {
