@@ -32,6 +32,16 @@ struct Builder {
 }
 
 impl Builder {
+    /// Create a new builder.
+    ///
+    /// At the end of the compilation process, the builder will have generated a
+    /// number of functions, each with a new function ID. These function IDs are
+    /// always >= than the `min_fnid` parameter. This is to make it easier to
+    /// generate function IDs that don't collide with other sets of IDs
+    /// generated somewhere else (for example, from a previous compilation).
+    ///
+    /// `source_map` is used to generate the spans where breakpoints can be set
+    /// (`breakable_ranges`).
     fn new(min_fnid: u16) -> Self {
         assert!(min_fnid >= 1);
         Builder {

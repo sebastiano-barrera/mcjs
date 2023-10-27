@@ -181,6 +181,8 @@ pub struct Interpreter<'a> {
 
     sink: Vec<Value>,
     opts: Options,
+
+    breakpoints: HashSet<bytecode::GlobalIID>,
 }
 
 // TODO Probably going to be changed or even replaced once I resume working on the JIT.
@@ -274,6 +276,7 @@ impl<'a> Interpreter<'a> {
             opts: Default::default(),
             #[cfg(enable_jit)]
             jitting: None,
+            breakpoints: HashSet::new(),
         }
     }
 
@@ -307,6 +310,14 @@ impl<'a> Interpreter<'a> {
         while self.data.len() != 0 {
             // TODO Avoid calling get_function at each instructions
             let fnid = self.data.top().header().fn_id;
+
+            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+            if self.breakpoints.contains(&bytecode::GlobalIID(fnid, self.iid)) {
+                // Gotta increase IID, or we'll be back here on resume
+                self.iid.0 += 1;
+                return Ok(Exit::Suspended(self));
+            }
+
             // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
             let func = self.loader.get_function(fnid).unwrap();
             let n_instrs = func.instrs().len();
@@ -1381,9 +1392,8 @@ pub mod debugger {
         /// state (by attaching a new Probe on it).
         ///
         /// Returns a BreakpointId, which can be used to manage or remove this breakpoint.
-        pub fn set_breakpoint(&mut self, giid: bytecode::GlobalIID) -> Result<BreakpointId> {
-            let loader = &self.interpreter.loader;
-            todo!("set a breakpoint at the specified instruction")
+        pub fn set_breakpoint(&mut self, giid: bytecode::GlobalIID) {
+            self.interpreter.breakpoints.insert(giid);
         }
     }
 }
