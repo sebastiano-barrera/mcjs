@@ -17,7 +17,7 @@
 				<span class="
 					bg-zinc-500 text-zinc-100
 					dark:bg-zinc-600 dark:text-zinc-200
-					font-semibold text-sm p-1 mx-2 uppercase
+					font-semibold text-sm px-1 py-0.5 mx-2 uppercase
 				"> Breakpoints </span>
 			</div>
 
@@ -53,17 +53,21 @@
 			%>
 				<div
 					id="stack-frame-<%= frameNdx %>"
-					class="grid stack-view-grid-rows min-w-fit mx-4 p-2 space-x-2 h-full
+					class="grid stack-view-grid-rows min-w-fit mx-4 mt-2 p-2 space-x-2 h-full
 						border-t-2 border-zinc-400 rounded-lg text-xs"
 				>
 					<div class="grid grid-rows-[1cm_1fr] max-h-full">
-						<div class="flex flex-row w-min h-fit mb-2
-								  ring-inset ring-1 ring-sky-700 rounded-full overflow-clip">
+						<div class="
+							flex flex-row w-min h-fit mb-2
+							ring-inset ring-1 ring-sky-700 dark:ring-zinc-700 rounded-full overflow-clip
+						">
 							<% for (const viewMode of ['bytecode', 'source']) { %>
-								<div class="w-fit p-1 first:pl-2 last:pr-2 inset-0 cursor-pointer
-										  [&.selected]:bg-sky-700 [&.selected]:text-white
-										  <%= frame.viewMode === viewMode && 'selected' %>
-									">
+								<div class="
+									w-fit py-1 px-2 inset-0 cursor-pointer rounded-full
+								  	[&.selected]:bg-sky-700 [&.selected]:text-white
+								  	[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300
+									<%= frame.viewMode === viewMode && 'selected' %>
+								">
 									<%= viewMode %>
 								</div>
 							<% } %>
