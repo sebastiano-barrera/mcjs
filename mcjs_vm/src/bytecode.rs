@@ -28,7 +28,7 @@ impl std::fmt::Debug for IID {
 // me: "64K modules ought to be enough for anyone."
 // guy with knife: node_modules
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct ModuleId(u16);
+pub struct ModuleId(pub u16);
 
 pub const SCRIPT_MODULE_ID: ModuleId = ModuleId(0);
 

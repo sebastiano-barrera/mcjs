@@ -86,6 +86,13 @@ impl InterpreterData {
         }
     }
 
+    pub fn frames(&self) -> impl Iterator<Item = Frame> {
+        self.stack.frames().into_iter().map(|ll_frame| Frame {
+            inner: ll_frame,
+            upv_alloc: &self.upv_alloc,
+        })
+    }
+
     pub(crate) fn capture_to_var(
         &mut self,
         capture_ndx: bytecode::CaptureIndex,

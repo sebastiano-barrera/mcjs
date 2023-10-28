@@ -196,8 +196,19 @@ pub struct Interpreter<'a> {
     sink: Vec<Value>,
     opts: Options,
 
-    breakpoints: HashSet<bytecode::GlobalIID>,
+    breakpoints: HashMap<BreakpointID, Breakpoint>,
+    next_bpid: u32,
+    break_giids: HashMap<GlobalIID, BreakpointID>,
 }
+
+pub struct Breakpoint {
+    pub mod_id: bytecode::ModuleId,
+    pub loc: swc_common::LineCol,
+    pub pos: swc_common::BytePos,
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+pub struct BreakpointID(u32);
 
 // TODO Probably going to be changed or even replaced once I resume working on the JIT.
 // TODO(performance) monomorphize get_operand?
@@ -290,7 +301,9 @@ impl<'a> Interpreter<'a> {
             opts: Default::default(),
             #[cfg(enable_jit)]
             jitting: None,
-            breakpoints: HashSet::new(),
+            breakpoints: HashMap::new(),
+            next_bpid: 1,
+            break_giids: HashMap::new(),
         }
     }
 
@@ -327,8 +340,8 @@ impl<'a> Interpreter<'a> {
 
             // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
             if self
-                .breakpoints
-                .contains(&bytecode::GlobalIID(fnid, self.iid))
+                .break_giids
+                .contains_key(&bytecode::GlobalIID(fnid, self.iid))
             {
                 // Gotta increase IID, or we'll be back here on resume
                 self.iid.0 += 1;
@@ -1357,10 +1370,13 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 
 #[cfg(feature = "debugger")]
 pub mod debugger {
+    use std::collections::HashSet;
+
     use crate::common::Result;
+    use crate::error;
     use crate::{bytecode, InterpreterValue};
 
-    use super::Interpreter;
+    use super::{Breakpoint, Interpreter};
 
     /// The only real entry point to all the debugging features present in the
     /// Interpreter.
@@ -1379,25 +1395,17 @@ pub mod debugger {
         interpreter: &'a mut Interpreter<'b>,
     }
 
-    pub struct Position {
-        pub fnid: bytecode::FnId,
-        pub iid: bytecode::IID,
-    }
-
-    pub struct BreakpointId(u32);
+    pub use super::BreakpointID;
 
     impl<'a, 'b> Probe<'a, 'b> {
         pub fn attach(interpreter: &'a mut Interpreter<'b>) -> Self {
             Probe { interpreter }
         }
 
-        pub fn position(&self) -> Position {
+        pub fn giid(&self) -> bytecode::GlobalIID {
             let frame = self.interpreter.data.top();
 
-            Position {
-                fnid: frame.header().fn_id,
-                iid: self.interpreter.iid,
-            }
+            bytecode::GlobalIID(frame.header().fn_id, self.interpreter.iid)
         }
 
         pub fn sink(&self) -> &[InterpreterValue] {
@@ -1409,10 +1417,71 @@ pub mod debugger {
         /// After this operation, the interpreter will suspend itself (Interpreter::run
         /// will return Exit::Suspended), and it will be possible to examine its
         /// state (by attaching a new Probe on it).
+        pub fn set_breakpoint(
+            &mut self,
+            mod_id: bytecode::ModuleId,
+            pos: swc_common::BytePos,
+        ) -> Result<BreakpointID> {
+            let intrp = &mut self.interpreter;
+
+            // Generate breakpoint ID
+            let bpid = BreakpointID(intrp.next_bpid);
+            intrp.next_bpid += 1;
+
+            // Resolve location into line:col
+            let source_map = intrp.loader.get_source_map(mod_id).ok_or_else(|| {
+                // TODO Report a filename and line:col
+                error!(
+                    "can't set a breakpoint at {:?}:byte#{}: no source map for file",
+                    mod_id, pos.0
+                )
+            })?;
+            let loc = source_map.lookup_char_pos(pos);
+            let loc = swc_common::LineCol {
+                line: loc.line.try_into().unwrap(),
+                col: loc.col_display.try_into().unwrap(),
+            };
+
+            // Resolve into the (potentially multiple) GIIDs
+            let giids = intrp
+                .loader
+                .resolve_break_loc(mod_id, pos)?
+                .into_iter()
+                .cloned()
+                .map(|br| bytecode::GlobalIID(bytecode::FnId(mod_id, br.local_fnid), br.iid));
+
+            // Add stuff into interpreter (we avoid doing this if there is an error)
+            for giid in giids {
+                // It could be that we're overwriting an existing breakpoint.  Alas, such is life.
+                intrp.break_giids.insert(giid, bpid);
+            }
+
+            let breakpoint = Breakpoint { mod_id, loc, pos };
+            self.interpreter.breakpoints.insert(bpid, breakpoint);
+
+            Ok(bpid)
+        }
+
+        pub fn breakpoints(&self) -> impl Iterator<Item = (&BreakpointID, &Breakpoint)> {
+            self.interpreter.breakpoints.iter()
+        }
+        pub fn breakpoint(&self, bpid: BreakpointID) -> Option<&Breakpoint> {
+            self.interpreter.breakpoints.get(&bpid)
+        }
+        /// Delete the breakpoint with the given ID.
         ///
-        /// Returns a BreakpointId, which can be used to manage or remove this breakpoint.
-        pub fn set_breakpoint(&mut self, giid: bytecode::GlobalIID) {
-            self.interpreter.breakpoints.insert(giid);
+        /// Returns true only if there was actually a breakpoint with the given ID; false
+        /// if the ID did not correspond to any breakpoint.
+        pub fn delete_breakpoint(&mut self, bpid: BreakpointID) -> bool {
+            self.interpreter.breakpoints.remove(&bpid).is_some()
+        }
+
+        pub fn loader(&self) -> &crate::loader::Loader {
+            &self.interpreter.loader
+        }
+
+        pub fn frames(&self) -> impl Iterator<Item = crate::stack::Frame> {
+            self.interpreter.data.frames()
         }
     }
 }

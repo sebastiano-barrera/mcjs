@@ -19,5 +19,3 @@ mod util;
 pub use bytecode::{FnId, GlobalIID, Literal, ModuleId, IID, SCRIPT_MODULE_ID};
 pub use interpreter::{Interpreter, Realm, Value as InterpreterValue};
 pub use loader::Loader;
-
-

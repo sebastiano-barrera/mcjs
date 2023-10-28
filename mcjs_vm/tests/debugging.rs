@@ -1,9 +1,9 @@
 #![cfg(feature = "debugger")]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use mcjs_vm::bytecode;
-use mcjs_vm::interpreter::debugger::{Position, Probe};
+use mcjs_vm::interpreter::debugger::Probe;
 use mcjs_vm::interpreter::{Exit, Interpreter, Realm, Value};
 
 #[test]
@@ -36,9 +36,9 @@ foo();
 
     {
         let probe = Probe::attach(&mut interpreter);
-        let position: Position = probe.position();
+        let bytecode::GlobalIID(fnid, _) = probe.giid();
         assert_eq!(
-            position.fnid,
+            fnid,
             bytecode::FnId(bytecode::SCRIPT_MODULE_ID, bytecode::LocalFnId(2))
         );
 
@@ -71,52 +71,46 @@ fn test_pos_breakpoint() {
 
     let module_id = main_fnid.0;
     assert_ne!(module_id, bytecode::SCRIPT_MODULE_ID);
-       
+
     // Hardcoded. Must be updated if breakme-0.js changes
     let pos = swc_common::BytePos(166);
-    let break_ranges: Vec<_> = loader.resolve_break_loc(module_id, pos).unwrap()
-        .into_iter()
-        .cloned()
-        .collect();
 
-    for break_range in break_ranges {
-        let mut realm = Realm::new();
-        let mut interpreter = Interpreter::new(&mut realm, &mut loader, main_fnid);
+    let mut realm = Realm::new();
+    let mut interpreter = Interpreter::new(&mut realm, &mut loader, main_fnid);
 
-        let mut probe = Probe::attach(&mut interpreter);
-        // TODO Damn this is rough
-        let break_giid = bytecode::GlobalIID(
-            bytecode::FnId(module_id, break_range.local_fnid),
-            break_range.iid,
-        );
+    let mut probe = Probe::attach(&mut interpreter);
+    let bpid = probe.set_breakpoint(module_id, pos).unwrap();
 
-        if break_giid.0.1 != bytecode::LocalFnId(2) {
-            continue
-        }
-        probe.set_breakpoint(break_giid);
-        eprintln!("breakpoint set at {}-{} -> {:?}", break_range.lo.0, break_range.hi.0, break_giid);
+    let bp = probe.breakpoint(bpid).unwrap();
+    eprintln!("breakpoint set at {}:{}", bp.loc.line, bp.loc.col);
 
-        let exit = interpreter.run().expect("interpreter failed");
+    let exit = interpreter.run().expect("interpreter failed");
 
-        let mut interpreter = match exit {
-            Exit::Finished(_) => panic!("finished instead of interrupting"),
+    let mut bp_hit = false;
+    let finish_data = loop {
+        interpreter = match exit {
+            Exit::Finished(finish_data) => break finish_data,
             Exit::Suspended(intrp) => intrp,
         };
 
+        bp_hit = true;
+
         let probe = Probe::attach(&mut interpreter);
-        let position: Position = probe.position();
+
+        // let mcjs_vm::GlobalIID(fnid, iid) = probe.giid();
+        // TODO Check that the interpreter is actually at one of the breakpoint's IIDs.
         // Check: the interpreter's position now points at the position that the
         // interpreter will *resume* at, which is 1 + where it's currently suspended.
-        assert_eq!(break_giid, bytecode::GlobalIID(position.fnid, bytecode::IID(position.iid.0 - 1)));
-        assert_eq!(probe.sink(), &[Value::Number(1.0)]);
 
-        let finish_data = interpreter.run().unwrap().expect_finished();
-        assert_eq!(
-            &finish_data.sink,
-            &[
-                Some(bytecode::Literal::Number(1.0)),
-                Some(bytecode::Literal::Number(2.0)),
-            ]
-        );
-    }
+        assert_eq!(probe.sink(), &[Value::Number(1.0)]);
+    };
+
+    assert!(bp_hit);
+    assert_eq!(
+        &finish_data.sink,
+        &[
+            Some(bytecode::Literal::Number(1.0)),
+            Some(bytecode::Literal::Number(2.0)),
+        ]
+    );
 }

@@ -106,6 +106,13 @@ impl Loader {
         self.functions.get(&fnid)
     }
 
+    pub fn get_abs_path(&self, module_id: bytecode::ModuleId) -> Option<&Path> {
+        match module_id {
+            bytecode::SCRIPT_MODULE_ID => None,
+            module_id => Some(self.modules.get(&module_id)?.abs_path.as_path()),
+        }
+    }
+
     fn get_module(&self, mod_id: bytecode::ModuleId) -> Result<&Module> {
         assert_ne!(mod_id, bytecode::SCRIPT_MODULE_ID);
         self.modules
@@ -346,10 +353,7 @@ impl Loader {
         PackageId(pkg_id)
     }
 
-    pub(crate) fn get_source_map(
-        &self,
-        module_id: bytecode::ModuleId,
-    ) -> Option<&swc_common::SourceMap> {
+    pub fn get_source_map(&self, module_id: bytecode::ModuleId) -> Option<&swc_common::SourceMap> {
         let module = self.modules.get(&module_id)?;
         Some(Rc::as_ref(&module.source_map))
     }

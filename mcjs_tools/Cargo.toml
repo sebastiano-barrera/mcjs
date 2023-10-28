@@ -6,13 +6,16 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+mcjs_vm = { path = "../mcjs_vm", features = ["debugger"] }
+
 actix-files = "0.6.2"
 actix-web = "4"
 actix-web-lab = "0.20.0"
 handlebars = { version = "4.4.0", features = ["dir_source"] }
 listenfd = "1.0.1"
-mcjs_vm = { path = "../mcjs_vm", features = ["debugger"] }
 rand = "0.8.5"
-serde_json = "1.0.107"
-tokio = "1.33.0"
+serde = "1"
+serde_json = "1"
+tokio = "1.33"
+anyhow = "1.0.75"
 
