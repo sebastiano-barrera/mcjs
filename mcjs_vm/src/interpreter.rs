@@ -568,7 +568,8 @@ impl<'a> Interpreter<'a> {
                             self.print_indent();
                             tprintln!(
                                 "-- fn {:?} [{} captures]",
-                                call_meta.fnid.0, call_meta.n_captured_upvalues
+                                call_meta.fnid.0,
+                                call_meta.n_captured_upvalues
                             );
 
                             self.data.push(call_meta);

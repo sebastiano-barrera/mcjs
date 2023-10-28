@@ -33,6 +33,7 @@ fn main() {
     println!("running...");
 
     let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
+
     loop {
         match intrp.run().expect("runtime error") {
             Exit::Finished(_) => break,

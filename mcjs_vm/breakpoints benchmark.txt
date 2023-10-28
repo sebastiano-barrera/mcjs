@@ -1,0 +1,19 @@
+The feature is: checking breakpoints in an HashSet at every interpreter cycle
+
+-- with:
+  0.98user 0.00system 0:00.99elapsed 99%CPU
+  0.98user 0.00system 0:00.98elapsed 99%CPU
+  0.96user 0.00system 0:00.96elapsed 99%CPU
+  0.98user 0.00system 0:00.98elapsed 99%CPU
+  0.98user 0.00system 0:00.98elapsed 100%CPU
+
+-- without:
+  0.73user 0.00system 0:00.73elapsed 100%CPU
+  0.71user 0.00system 0:00.71elapsed 99%CPU
+  0.71user 0.00system 0:00.72elapsed 99%CPU
+  0.78user 0.00system 0:00.78elapsed 99%CPU
+
+In a release build, we're getting ~32% overhead due to checking for breakpoints. 
+In this particular test, the HashSet contains a single breakpoint. The overhead
+may increase further if the HashSet starts getting significantly larger.
+
