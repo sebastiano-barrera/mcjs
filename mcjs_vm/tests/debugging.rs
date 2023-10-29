@@ -84,10 +84,9 @@ fn test_pos_breakpoint() {
     let bp = probe.breakpoint(bpid).unwrap();
     eprintln!("breakpoint set at {}:{}", bp.loc.line, bp.loc.col);
 
-    let exit = interpreter.run().expect("interpreter failed");
-
     let mut bp_hit = false;
     let finish_data = loop {
+        let exit = interpreter.run().expect("interpreter failed");
         interpreter = match exit {
             Exit::Finished(finish_data) => break finish_data,
             Exit::Suspended(intrp) => intrp,
@@ -102,7 +101,13 @@ fn test_pos_breakpoint() {
         // Check: the interpreter's position now points at the position that the
         // interpreter will *resume* at, which is 1 + where it's currently suspended.
 
-        assert_eq!(probe.sink(), &[Value::Number(1.0)]);
+        let giid = probe.giid();
+        eprintln!("we are at: {:?}; sink = {:?}", giid, probe.sink());
+        if giid.0 .1 == bytecode::LocalFnId(2) {
+            assert_eq!(probe.sink(), &[Value::Number(1.0)]);
+        } else {
+            assert_eq!(probe.sink(), &[]);
+        }
     };
 
     assert!(bp_hit);

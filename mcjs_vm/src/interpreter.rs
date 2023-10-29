@@ -327,12 +327,13 @@ impl<'a> Interpreter<'a> {
     /// This is the only entry point into code execution.
     ///
     /// Note that the receiver is passed by move (`mut self`, not `&mut self`).
+    ///
     ///   - If the interpreter finishes execution, it is 'consumed' by this call and no
-    ///     longer
-    ///   accessible.  
+    ///     longer accessible.
+    ///
     ///   - If the interpreter is interrupted (e.g. by a breakpoint), then it is returned
-    ///     again via
-    ///   the Output::Suspended variant; then it can be run again or dropped (destroyed).
+    ///     again via the Output::Suspended variant; then it can be run again or dropped
+    ///     (destroyed).
     pub fn run(mut self) -> Result<Exit<'a>> {
         while self.data.len() != 0 {
             // TODO Avoid calling get_function at each instructions

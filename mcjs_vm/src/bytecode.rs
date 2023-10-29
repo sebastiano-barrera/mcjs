@@ -60,7 +60,7 @@ pub struct FnId(pub ModuleId, pub LocalFnId);
 
 impl std::fmt::Debug for FnId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{}/{}", self.0.0, self.1.0)
+        write!(f, "m{}:f{}", self.0.0, self.1.0)
     }
 }
 
@@ -69,7 +69,7 @@ pub struct GlobalIID(pub FnId, pub IID);
 
 impl std::fmt::Debug for GlobalIID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "f{:?}:i{}", self.0, self.1 .0)
+        write!(f, "{:?}:{:?}", self.0, self.1)
     }
 }
 
