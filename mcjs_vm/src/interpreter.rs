@@ -28,6 +28,8 @@ use crate::{
 
 pub use crate::common::Error;
 
+use self::debugger::Probe;
+
 macro_rules! tprintln {
     ($($args:expr),*) => {
         #[cfg(test)]
@@ -228,7 +230,7 @@ impl<'a> InterpreterStep<'a> {
     }
 }
 
-pub type InterpreterResult<'a> = std::result::Result<Exit<'a>, InterpreterError>;
+pub type InterpreterResult<'a> = std::result::Result<Exit<'a>, InterpreterError<'a>>;
 
 pub struct FinishedData {
     pub sink: Vec<Option<bytecode::Literal>>,
@@ -249,18 +251,30 @@ impl<'a> Exit<'a> {
     }
 }
 
+/// Similar to `Exit`, but only exists for internal use.
+///
+/// Mostly exists to avoid boolean blindness.
+enum ExitInternal {
+    Finished,
+    Suspended,
+}
+
 // TODO Remove this InterpreterError?
 // It used to be justified by the addition of a CoreDump, but the CoreDump has been
 // removed since.
-pub struct InterpreterError {
+pub struct InterpreterError<'a> {
     pub error: Error,
+
+    // This struct owns the failed interpreter, but we explicitly disallow doing
+    // anything else with it other than examining it (read-only, via &)
+    interpreter: Interpreter<'a>,
 }
-impl From<Error> for InterpreterError {
-    fn from(error: Error) -> Self {
-        InterpreterError { error }
+impl<'a> InterpreterError<'a> {
+    pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
+        Probe::attach(&mut self.interpreter)
     }
 }
-impl std::fmt::Debug for InterpreterError {
+impl<'a> std::fmt::Debug for InterpreterError<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "InterpreterError: {:?}", self.error,)
     }
@@ -334,7 +348,32 @@ impl<'a> Interpreter<'a> {
     ///   - If the interpreter is interrupted (e.g. by a breakpoint), then it is returned
     ///     again via the Output::Suspended variant; then it can be run again or dropped
     ///     (destroyed).
-    pub fn run(mut self) -> Result<Exit<'a>> {
+    pub fn run(mut self) -> InterpreterResult<'a> {
+        match self.run_internal() {
+            Ok(ExitInternal::Finished) => Ok(Exit::Finished(self.dump_output())),
+            Ok(ExitInternal::Suspended) => Ok(Exit::Suspended(self)),
+            Err(common_err) => Err(InterpreterError {
+                interpreter: self,
+                error: common_err,
+            }),
+        }
+    }
+
+    /// Just `run`, but it takes self by &mut and returns a simple
+    /// `mcjs_vm::common::Error`.
+    ///
+    /// This implementation does not consume the Interpreter like `run` does,
+    /// but this allows the implementation code to be a little simpler.
+    ///
+    /// Returns:
+    ///  - `Ok(true)` if the interpreter finished successfully.
+    ///  - `Ok(false)` if the interpreter is supposed to suspend.
+    ///  - `Err(err)` if the interpreter failed.
+    ///
+    /// In all cases, it's `run` that perfects the process of returning the
+    /// control to the caller, ensuring the correct type of access to the
+    /// interpreter.
+    fn run_internal(&mut self) -> Result<ExitInternal> {
         while self.data.len() != 0 {
             // TODO Avoid calling get_function at each instructions
             let fnid = self.data.top().header().fn_id;
@@ -346,7 +385,7 @@ impl<'a> Interpreter<'a> {
             {
                 // Gotta increase IID, or we'll be back here on resume
                 self.iid.0 += 1;
-                return Ok(Exit::Suspended(self));
+                return Ok(ExitInternal::Suspended);
             }
 
             // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
@@ -364,7 +403,7 @@ impl<'a> Interpreter<'a> {
                     self.iid = return_to_iid;
                     continue;
                 } else {
-                    return Ok(self.dump_output());
+                    return Ok(ExitInternal::Finished);
                 }
             }
 
@@ -497,7 +536,7 @@ impl<'a> Interpreter<'a> {
                         self.iid = return_to_iid;
                         continue;
                     } else {
-                        return Ok(self.dump_output());
+                        return Ok(ExitInternal::Finished);
                     }
                 }
                 Instr::Call {
@@ -612,7 +651,7 @@ impl<'a> Interpreter<'a> {
                             drop(heap_object);
 
                             let this = self.get_operand(*this);
-                            let ret_val = nf(&mut self, &this, &arg_vals)?;
+                            let ret_val = nf(self, &this, &arg_vals)?;
                             self.data.top_mut().set_result(*return_value, ret_val);
                             next_ndx = return_to_iid.0;
                         }
@@ -899,7 +938,7 @@ impl<'a> Interpreter<'a> {
                     // We must update self.iid now, or the Interpreter will be back here on resume,
                     // in an infinite loop
                     self.iid.0 = next_ndx;
-                    return Ok(Exit::Suspended(self));
+                    return Ok(ExitInternal::Suspended);
                 }
             }
 
@@ -919,7 +958,7 @@ impl<'a> Interpreter<'a> {
             self.iid.0 = next_ndx;
         }
 
-        Ok(self.dump_output())
+        Ok(ExitInternal::Finished)
     }
 
     fn str_append(&mut self, a: &VReg, b: &VReg) -> Result<Value> {
@@ -953,9 +992,9 @@ impl<'a> Interpreter<'a> {
             .map_err(|_| error!("expected string, but got another type"))
     }
 
-    fn dump_output(self) -> Exit<'a> {
+    fn dump_output(self) -> FinishedData {
         let sink = try_values_to_literals(&self.sink, &self.realm.heap);
-        Exit::Finished(FinishedData { sink })
+        FinishedData { sink }
     }
 
     fn exit_function(&mut self, callee_retval_reg: Option<VReg>) -> Option<IID> {

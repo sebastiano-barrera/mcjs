@@ -9,6 +9,7 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Error, Result};
 use handlebars::Handlebars;
 use listenfd::ListenFd;
+use mcjs_vm::interpreter::debugger::Probe;
 use serde_json::json;
 use tokio::sync::broadcast;
 
@@ -52,8 +53,12 @@ async fn main() -> Result<()> {
                                 state.model = new_state;
                             }
                             InterpreterEvent::Finished => break,
-                            InterpreterEvent::Failed(err_msg) => {
-                                state.failure = Some(err_msg);
+                            InterpreterEvent::Failed {
+                                failed_state,
+                                message,
+                            } => {
+                                state.model = failed_state;
+                                state.failure = Some(message);
                             }
                         }
                     }
@@ -140,9 +145,14 @@ async fn events(app_data: web::Data<AppData<'static>>) -> impl Responder {
 
 #[derive(Clone)]
 enum InterpreterEvent {
-    Suspended { new_state: Arc<model::VMState> },
+    Suspended {
+        new_state: Arc<model::VMState>,
+    },
     Finished,
-    Failed(String),
+    Failed {
+        failed_state: Arc<model::VMState>,
+        message: String,
+    },
 }
 
 impl std::fmt::Debug for InterpreterEvent {
@@ -150,7 +160,9 @@ impl std::fmt::Debug for InterpreterEvent {
         match self {
             InterpreterEvent::Suspended { .. } => write!(f, "InterpreterEvent::Suspended"),
             InterpreterEvent::Finished => write!(f, "InterpreterEvent::Finished"),
-            InterpreterEvent::Failed(err_msg) => write!(f, "InterpreterEvent::Failed: {}", err_msg),
+            InterpreterEvent::Failed { message, .. } => {
+                write!(f, "InterpreterEvent::Failed: {}", message)
+            }
         }
     }
 }
@@ -196,7 +208,9 @@ async fn interpreter_main_loop(
             Ok(Exit::Suspended(next_intrp)) => {
                 intrp = next_intrp;
                 println!("interpreter suspended.  collecting snapshot");
-                let model = Arc::new(model::VMState::snapshot(&mut intrp));
+
+                let probe = Probe::attach(&mut intrp);
+                let model = Arc::new(model::VMState::snapshot(&probe));
                 let event = InterpreterEvent::Suspended { new_state: model };
 
                 let res = model_tx.send(event);
@@ -207,16 +221,21 @@ async fn interpreter_main_loop(
 
                 println!("(suspended; resuming immediately)");
             }
-            Err(err) => {
+            Err(mut err) => {
                 println!("interpreter failed.  reporting error");
 
-                let mut err_msg = String::new();
-                for msg in err.messages() {
+                let mut message = String::new();
+                for msg in err.error.messages() {
                     use std::fmt::Write;
-                    writeln!(err_msg, " - {}", msg).unwrap();
+                    writeln!(message, " - {}", msg).unwrap();
                 }
 
-                let res = model_tx.send(InterpreterEvent::Failed(err_msg));
+                let failed_state = Arc::new(model::VMState::snapshot(&err.probe()));
+
+                let res = model_tx.send(InterpreterEvent::Failed {
+                    failed_state,
+                    message,
+                });
                 if res.is_err() {
                     println!("channel closed. failure won't be discovered...");
                 }
@@ -229,6 +248,7 @@ async fn interpreter_main_loop(
     Ok(())
 }
 
+#[allow(non_snake_case)]
 mod model {
     use std::collections::HashMap;
 
@@ -251,8 +271,7 @@ mod model {
     }
 
     impl VMState {
-        pub fn snapshot(intrp: &mut mcjs_vm::Interpreter) -> Self {
-            let probe = Probe::attach(intrp);
+        pub fn snapshot(probe: &Probe) -> Self {
             let loader = probe.loader();
 
             let breakpoints = probe
@@ -280,7 +299,7 @@ mod model {
                     .unwrap_or_else(|| "???".to_string());
 
                 frames.push(Frame {
-                    viewMode: ViewMode::Source,
+                    viewMode: ViewMode::Bytecode,
                     sourceFile,
                     sourceLine: 0,
                     // TODO Remove the damn call ID

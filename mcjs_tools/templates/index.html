@@ -82,7 +82,7 @@
 									{{/each}}
 							</div>
 
-							{{#if (eq viewMode 'bytecode')}}
+							{{#if (eq viewMode 'Bytecode')}}
 								<div class='flex flex-row overflow-y-scroll'>
 									<div class='flex flex-col space-y-2 [&>*]:whitespace-nowrap'>
 										<div class="grid gap-x-1 grid-cols-[2cm_1fr]">
@@ -154,12 +154,12 @@
 								</div>
 
 							{{else}}
-								{{#if (eq viewMode 'source')}}
+								{{#if (eq viewMode 'Source')}}
 									<div class='inset-0 whitespace-pre overflow-y-scroll max-w-[12cm]'
 										>{{ (lookup files [sourceFile] content) }}</div>
 
 								{{else}}
-									<div class="whitespace-nowrap">[unsupported frame type: <%= frame.viewMode %>]</div>
+									<div class="whitespace-nowrap">[unsupported frame type: {{ viewMode }} ]</div>
 								{{/if}}
 
 							{{/if}}
