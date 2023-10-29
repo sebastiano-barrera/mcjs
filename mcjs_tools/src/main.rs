@@ -7,11 +7,32 @@ use std::{
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 
 use anyhow::{anyhow, Error, Result};
-use handlebars::Handlebars;
+use handlebars::{handlebars_helper, Handlebars};
 use listenfd::ListenFd;
 use mcjs_vm::interpreter::debugger::Probe;
 use serde_json::json;
+use serde_json::Value as JsonValue;
 use tokio::sync::broadcast;
+
+handlebars_helper!(lookup_deep: |*args| {
+    if args.len() == 0 {
+        panic!();
+    }
+
+    let mut value = args[0];
+    for step in &args[1..] {
+        value = if let Some(property) = step.as_str() {
+            value.get(property).unwrap_or(&JsonValue::Null)
+        } else if let Some(index) = step.as_number() {
+            let key = index.to_string();
+            value.get(key).unwrap_or(&JsonValue::Null)
+        } else {
+            return Ok(handlebars::ScopedJson::Missing)
+        };
+    }
+
+    value.clone()
+});
 
 #[actix_web::main]
 async fn main() -> Result<()> {
@@ -31,6 +52,7 @@ async fn main() -> Result<()> {
     handlebars
         .register_templates_directory(".html", "./templates")
         .unwrap();
+    handlebars.register_helper("lookup_deep", Box::new(lookup_deep));
     let data_ref = web::Data::new(AppData {
         handlebars,
         current_state: Mutex::new(State {
@@ -111,6 +133,11 @@ async fn main_screen(app_data: web::Data<AppData<'_>>) -> impl Responder {
         "failure": state.failure,
         "model": &*state.model,
     });
+
+    eprintln!(
+        "main_screen JSON = {}",
+        serde_json::to_string_pretty(&tmpl_params).unwrap()
+    );
 
     let body = app_data.handlebars.render("index", &tmpl_params).unwrap();
     HttpResponse::Ok().body(body)

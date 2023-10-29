@@ -59,7 +59,7 @@
 				<!-- Main area -->
 				{{#each frames}}
 					<div
-						id="stack-frame-<%= frameNdx %>"
+						id="stack-frame-{{ @index }}"
 						class="grid stack-view-grid-rows min-w-fit mx-4 mt-2 p-2 space-x-2 h-full
 							border-t-2 border-zinc-400 rounded-lg text-xs"
 					>
@@ -68,18 +68,27 @@
 								flex flex-row w-min h-fit mb-2
 								ring-inset ring-1 ring-sky-700 dark:ring-zinc-700 rounded-full overflow-clip
 							">
-									{{#each tabs as |thisViewMode|}}
-										<div class="
-											w-fit py-1 px-2 inset-0 cursor-pointer rounded-full
-										  	[&.selected]:bg-sky-700 [&.selected]:text-white
-										  	[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300
-												{{#if (eq viewMode thisViewMode)}}
-													selected
-												{{/if}}
-										">
-											{{ viewMode }}
-										</div>
-									{{/each}}
+								<div class="
+									w-fit py-1 px-2 inset-0 cursor-pointer rounded-full
+								  	[&.selected]:bg-sky-700 [&.selected]:text-white
+								  	[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300
+										{{#if (eq viewMode 'Bytecode')}}
+											selected
+										{{/if}}
+								">
+									Bytecode
+								</div>
+
+								<div class="
+									w-fit py-1 px-2 inset-0 cursor-pointer rounded-full
+								  	[&.selected]:bg-sky-700 [&.selected]:text-white
+								  	[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300
+										{{#if (eq viewMode 'Source')}}
+											selected
+										{{/if}}
+								">
+									Source
+								</div>
 							</div>
 
 							{{#if (eq viewMode 'Bytecode')}}
@@ -139,10 +148,10 @@
 										grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start overflow-y-scroll
 										script--highlight-mcjs-values [&>*]:whitespace-nowrap
 									">
-										{{#each (lookup modules [moduleID] functions [functionID] bytecode)}}
+										{{#each (lookup_deep ../modules moduleID 'functions' functionID 'bytecode')}}
 											<div
 												class="text-right script--value read [&.highlighted]:bg-sky-800 [&.highlighted]:text-white"
-												data-mcjs-value="call<%= frame.callID %>-v<%= instrNdx %>"
+												data-mcjs-value="call{{ callID }}-v{{ instrNdx }}"
 											>
 												⬥ <span class="font-mono">r{{ @index }}</span>
 											</div>
@@ -156,7 +165,7 @@
 							{{else}}
 								{{#if (eq viewMode 'Source')}}
 									<div class='inset-0 whitespace-pre overflow-y-scroll max-w-[12cm]'
-										>{{ (lookup files [sourceFile] content) }}</div>
+										>{{lookup files [sourceFile] content}}</div>
 
 								{{else}}
 									<div class="whitespace-nowrap">[unsupported frame type: {{ viewMode }} ]</div>
