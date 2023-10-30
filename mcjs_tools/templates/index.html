@@ -60,8 +60,8 @@
 				{{#each frames}}
 					<div
 						id="stack-frame-{{ @index }}"
-						class="grid stack-view-grid-rows min-w-fit mx-4 mt-2 p-2 space-x-2 h-full
-							border-t-2 border-zinc-400 rounded-lg text-xs"
+						class="grid stack-view-grid-rows min-w-fit mx-4 p-2 space-x-2 h-full
+							border-l border-zinc-600 text-xs"
 					>
 						<div class="grid grid-rows-[1cm_1fr] max-h-full">
 							<div class="
@@ -145,7 +145,7 @@
 									</div>
 
 									<div class="
-										grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start overflow-y-scroll
+										grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
 										script--highlight-mcjs-values [&>*]:whitespace-nowrap
 									">
 										{{#each (lookup_deep ../modules moduleID 'functions' functionID 'bytecode')}}

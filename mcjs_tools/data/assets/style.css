@@ -698,6 +698,10 @@ video {
   border-radius: 0.5rem;
 }
 
+.border-l {
+  border-left-width: 1px;
+}
+
 .border-t-2 {
   border-top-width: 2px;
 }
@@ -705,6 +709,11 @@ video {
 .border-zinc-400 {
   --tw-border-opacity: 1;
   border-color: rgb(161 161 170 / var(--tw-border-opacity));
+}
+
+.border-zinc-600 {
+  --tw-border-opacity: 1;
+  border-color: rgb(82 82 91 / var(--tw-border-opacity));
 }
 
 .bg-rose-500 {
@@ -834,6 +843,23 @@ video {
   --tw-ring-opacity: 1;
   --tw-ring-color: rgb(3 105 161 / var(--tw-ring-opacity));
 }
+
+::-webkit-scrollbar {
+  width: 0.25rem;
+  --tw-border-opacity: 1;
+  border-color: rgb(113 113 122 / var(--tw-border-opacity));
+  border-right-width: 1px;
+}
+
+::-webkit-scrollbar-thumb {
+  --tw-bg-opacity: 1;
+  background-color: rgb(113 113 122 / var(--tw-bg-opacity));
+  width: 0.25rem;
+}
+
+/* Firefox's default scollbars are thin, and look basically perfect already.
+ * Chromium needs some directives.
+ */
 
 .stack-view-grid-rows {
   grid-template-rows: minmax(0, 1fr) 5cm;
