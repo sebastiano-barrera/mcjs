@@ -326,7 +326,6 @@ mod model {
                     .unwrap_or_else(|| "???".to_string());
 
                 frames.push(Frame {
-                    viewMode: ViewMode::Bytecode,
                     sourceFile,
                     sourceLine: 0,
                     // TODO Remove the damn call ID
@@ -394,7 +393,6 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct Frame {
-        pub viewMode: ViewMode,
         pub sourceFile: String,
         pub sourceLine: LineNum,
 
@@ -421,12 +419,6 @@ mod model {
 
     type ObjectID = u32;
     type Object = HashMap<String, Value>;
-
-    #[derive(Clone, Serialize)]
-    pub enum ViewMode {
-        Source,
-        Bytecode,
-    }
 
     #[derive(Clone, Serialize)]
     pub struct Arg {}

@@ -5,24 +5,25 @@
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-	<!-- <script src="/assets/htmx-1.9.2.js"></script> -->
 	<link rel="stylesheet" type="text/css" href="/assets/style.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
 
 <body class="w-full h-full dark:bg-zinc-800 dark:text-white text-black">
-	{{#if failure}}
-		<div class="absolute m-4 px-4 py-2 text-white bg-zinc-900">
-			<p>
-				<span class="bg-rose-500 px-4 px-1"><b>Interpreter failed:</b></span>
-			</p>
-			{{failure}}
-		</div>
-	{{/if}}
-
   {{#with model}}
 		<div class="grid grid-cols-[7cm_1cm_1fr] inset-0 w-full h-full">
 			<div class="flex flex-col p-0 cursor-default">
 				<!-- Left sidebar -->
+
+				{{#if ../failure}}
+					<div class="m-2 px-4 py-2 text-white bg-zinc-900">
+						<p>
+							<span class="bg-rose-500 px-4 px-1"><b>Interpreter failed:</b></span>
+						</p>
+						{{../failure}}
+					</div>
+				{{/if}}
+
 				<div class="my-1">
 					<span class="
 						bg-zinc-500 text-zinc-100
@@ -63,115 +64,104 @@
 						class="grid stack-view-grid-rows min-w-fit mx-4 p-2 space-x-2 h-full
 							border-l border-zinc-600 text-xs"
 					>
-						<div class="grid grid-rows-[1cm_1fr] max-h-full">
+						<div class="grid grid-rows-[1cm_1fr] max-h-full" x-data="{currentTab: 'bytecode'}">
 							<div class="
 								flex flex-row w-min h-fit mb-2
 								ring-inset ring-1 ring-sky-700 dark:ring-zinc-700 rounded-full overflow-clip
 							">
-								<div class="
-									w-fit py-1 px-2 inset-0 cursor-pointer rounded-full
-								  	[&.selected]:bg-sky-700 [&.selected]:text-white
-								  	[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300
-										{{#if (eq viewMode 'Bytecode')}}
-											selected
-										{{/if}}
-								">
-									Bytecode
-								</div>
-
-								<div class="
-									w-fit py-1 px-2 inset-0 cursor-pointer rounded-full
-								  	[&.selected]:bg-sky-700 [&.selected]:text-white
-								  	[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300
-										{{#if (eq viewMode 'Source')}}
-											selected
-										{{/if}}
-								">
-									Source
-								</div>
+								{{#*inline "tab"}}
+									<div class="
+										w-fit py-1 px-2 inset-0 m-1 cursor-pointer rounded-full
+									  	[&.selected]:bg-sky-700 [&.selected]:text-white
+									  	[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300"
+										x-bind:class="currentTab == '{{content}}' ? 'selected' : ''"
+										x-on:click="currentTab = '{{content}}'"
+									>
+										{{title}}
+									</div>
+								{{/inline}}
+					
+								{{>tab title="Bytecode" content="bytecode" selected=true}}
+								{{>tab title="Source" content="source"}}
 							</div>
 
-							{{#if (eq viewMode 'Bytecode')}}
-								<div class='flex flex-row overflow-y-scroll'>
-									<div class='flex flex-col space-y-2 [&>*]:whitespace-nowrap'>
-										<div class="grid gap-x-1 grid-cols-[2cm_1fr]">
-											<div class='text-right'>Call ID =</div>
-											<div>{{ callID }}</div>
+							<div
+								class='flex flex-row overflow-y-scroll bytecode'
+								x-bind:class="currentTab === 'bytecode' ? '' : 'hidden'"
+							>
+								<div class='flex flex-col space-y-2 [&>*]:whitespace-nowrap'>
+									<div class="grid gap-x-1 grid-cols-[2cm_1fr]">
+										<div class='text-right'>Call ID =</div>
+										<div>{{ callID }}</div>
 
-											<div class='text-right'>Function =</div>
-											<div>{{ moduleID }}.{{ functionID }}</div>
-							
-											<div class='text-right'>This =</div>
-											<div>{{ thisValue }}</div>
+										<div class='text-right'>Function =</div>
+										<div>{{ moduleID }}.{{ functionID }}</div>
+						
+										<div class='text-right'>This =</div>
+										<div>{{ thisValue }}</div>
 
-											<div class='text-right'>Return to =</div>
-											<div>{{ returnToInstrID }}</div>
-										</div>
-
-										<div class='grid grid-cols-[2cm_1fr] gap-x-1 [&>*]:whitespace-nowrap'>
-											<div class='text-zinc-500'>Arguments</div>
-											<div></div>
-											{{#each args}}
-												<div
-													data-mcjs-value='call{{ callID }}-arg{{ argNdx }}'
-													class="
-														text-right script--value px-1
-														[&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
-														[&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
-													">
-													arg <span class="font-mono">{{ @index }}</span>
-												</div>
-												<div>[a value]</div>
-											{{/each}}
-										</div>
-
-										<div class='grid grid-cols-[2cm_1fr] gap-x-1 [&>*]:whitespace-nowrap'>
-											<div class='text-zinc-500'>Captures</div>
-											<div></div>
-											{{#each captures}}
-											   <div 
-												   class="
-													   text-right script--value px-1
-													   [&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
-													   [&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
-												   "
-												   data-mcjs-value="call{{ callID }}-cap{{ capNdx }}"
-											   >
-												   cap <span class="font-mono">{{ @index }}</span>
-											   </div>
-											   <div>upv {{ index }}/{{ gen }}</div>
-											{{/each}}
-										</div>
+										<div class='text-right'>Return to =</div>
+										<div>{{ returnToInstrID }}</div>
 									</div>
 
-									<div class="
-										grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
-										script--highlight-mcjs-values [&>*]:whitespace-nowrap
-									">
-										{{#each (lookup_deep ../modules moduleID 'functions' functionID 'bytecode')}}
+									<div class='grid grid-cols-[2cm_1fr] gap-x-1 [&>*]:whitespace-nowrap'>
+										<div class='text-zinc-500'>Arguments</div>
+										<div></div>
+										{{#each args}}
 											<div
-												class="text-right script--value read [&.highlighted]:bg-sky-800 [&.highlighted]:text-white"
-												data-mcjs-value="call{{ callID }}-v{{ instrNdx }}"
-											>
-												⬥ <span class="font-mono">r{{ @index }}</span>
+												data-mcjs-value='call{{ callID }}-arg{{ argNdx }}'
+												class="
+													text-right script--value px-1
+													[&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
+													[&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
+												">
+												arg <span class="font-mono">{{ @index }}</span>
 											</div>
-											<div>
-												{{ this }}
-											</div>
+											<div>[a value]</div>
+										{{/each}}
+									</div>
+
+									<div class='grid grid-cols-[2cm_1fr] gap-x-1 [&>*]:whitespace-nowrap'>
+										<div class='text-zinc-500'>Captures</div>
+										<div></div>
+										{{#each captures}}
+										   <div 
+											   class="
+												   text-right script--value px-1
+												   [&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
+												   [&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
+											   "
+											   data-mcjs-value="call{{ callID }}-cap{{ capNdx }}"
+										   >
+											   cap <span class="font-mono">{{ @index }}</span>
+										   </div>
+										   <div>upv {{ index }}/{{ gen }}</div>
 										{{/each}}
 									</div>
 								</div>
 
-							{{else}}
-								{{#if (eq viewMode 'Source')}}
-									<div class='inset-0 whitespace-pre overflow-y-scroll max-w-[12cm]'
-										>{{lookup files [sourceFile] content}}</div>
+								<div class="
+									grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
+									script--highlight-mcjs-values [&>*]:whitespace-nowrap
+								">
+									{{#each (lookup_deep ../modules moduleID 'functions' functionID 'bytecode')}}
+										<div
+											class="text-right script--value read [&.highlighted]:bg-sky-800 [&.highlighted]:text-white"
+											data-mcjs-value="call{{ callID }}-v{{ instrNdx }}"
+										>
+											⬥ <span class="font-mono">r{{ @index }}</span>
+										</div>
+										<div>
+											{{ this }}
+										</div>
+									{{/each}}
+								</div>
+							</div>
 
-								{{else}}
-									<div class="whitespace-nowrap">[unsupported frame type: {{ viewMode }} ]</div>
-								{{/if}}
-
-							{{/if}}
+							<div
+							  class='inset-0 whitespace-pre overflow-y-scroll max-w-[12cm]'
+								x-bind:class="currentTab === 'source' ? '' : 'hidden'"
+							>{{lookup files [sourceFile] content}}</div>
 						</div>
 						<div>
 							[values]
