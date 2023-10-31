@@ -328,6 +328,16 @@ impl Loader {
             .collect())
     }
 
+    pub fn breakrange_at_giid(&self, giid: bytecode::GlobalIID) -> Option<&bytecode::BreakRange> {
+        let bytecode::GlobalIID(bytecode::FnId(mod_id, lfnid), iid) = giid;
+
+        let module = self.get_module(mod_id).ok()?;
+        module
+            .breakable_ranges
+            .iter()
+            .find(|brange| brange.local_fnid == lfnid && brange.iid == iid)
+    }
+
     /// Resolve the given path to a module ID.
     ///
     /// Note that the `filename` argument may be abbreviated to only a suffix of the

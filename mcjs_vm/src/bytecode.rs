@@ -5,7 +5,7 @@ use std::{
 
 use strum::IntoStaticStr;
 use swc_atoms::JsWord;
-use swc_common::{Span, SourceMap};
+use swc_common::{Span, SourceMap, BytePos};
 
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -388,6 +388,7 @@ pub struct BreakRange {
 pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
+    src_poss: Box<[BytePos]>,
     n_params: ArgIndex,
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
@@ -407,9 +408,12 @@ impl Function {
     pub(crate) fn new(
         instrs: Box<[Instr]>,
         consts: Box<[Literal]>,
+        src_poss: Box<[BytePos]>,
         n_params: ArgIndex,
         trace_anchors: HashMap<IID, TraceAnchor>,
     ) -> Function {
+        assert_eq!(instrs.len(), consts.len());
+        assert_eq!(instrs.len(), src_poss.len());
         #[cfg(to_be_rewritten)]
         let loop_heads = find_loop_heads(&instrs[..]);
         #[cfg(not(to_be_rewritten))]
@@ -417,6 +421,7 @@ impl Function {
         Function {
             instrs,
             consts,
+            src_poss,
             n_params,
             loop_heads,
             trace_anchors,

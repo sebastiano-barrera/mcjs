@@ -316,18 +316,36 @@ mod model {
 
             let mut frames = Vec::new();
             for (i, frame) in probe.frames().enumerate() {
-                let bytecode::FnId(mod_id, lfnid) = frame.header().fn_id;
+                let fnid = frame.header().fn_id;
+                let bytecode::FnId(mod_id, lfnid) = fnid;
+                let giid = bytecode::GlobalIID(fnid, todo!("determine the IID of this frame by looking at the frame on top of this one, or directly in the Interpreter"));
 
-                let sourceFile = loader
-                    .get_source_map(mod_id)
-                    // NOTE We're making a distinct source map  per file, but the API clearly
+                let source_map = loader.get_source_map(mod_id);
+
+                let sourceFile = source_map
+                    // NOTE We're making a distinct source map per file, but the API clearly
                     // supports a single source map for multiple files.  Should I use it?
-                    .map(|sm| sm.files().first().unwrap().name.to_string())
-                    .unwrap_or_else(|| "???".to_string());
+                    .and_then(|source_map| {
+                        let files = source_map.files();
+                        match &files.first().unwrap().name {
+                            swc_common::FileName::Real(path) => {
+                                Some(path.to_string_lossy().into_owned())
+                            }
+                            _ => None,
+                        }
+                    });
+
+                let sourceLine = source_map.and_then(|source_map| {
+                    // TODO This system sucks.  It won't actually resolve to the right location a
+                    // bunch of the time.
+                    let bytepos = loader.breakrange_at_giid(giid)?;
+                    let loc = source_map.lookup_char_pos(bytepos.lo);
+                    Some(loc.line.try_into().unwrap())
+                });
 
                 frames.push(Frame {
                     sourceFile,
-                    sourceLine: 0,
+                    sourceLine,
                     // TODO Remove the damn call ID
                     callID: i.try_into().unwrap(),
                     functionID: lfnid.0 as u16,
@@ -393,8 +411,8 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct Frame {
-        pub sourceFile: String,
-        pub sourceLine: LineNum,
+        pub sourceFile: Option<String>,
+        pub sourceLine: Option<LineNum>,
 
         pub callID: u32,
         pub functionID: u16,
