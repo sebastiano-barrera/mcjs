@@ -1488,7 +1488,7 @@ pub mod debugger {
                 .resolve_break_loc(mod_id, pos)?
                 .into_iter()
                 .cloned()
-                .map(|br| bytecode::GlobalIID(bytecode::FnId(mod_id, br.local_fnid), br.iid));
+                .map(|br| bytecode::GlobalIID(bytecode::FnId(mod_id, br.local_fnid), br.iid_start));
 
             // Add stuff into interpreter (we avoid doing this if there is an error)
             for giid in giids {
@@ -1520,6 +1520,8 @@ pub mod debugger {
             &self.interpreter.loader
         }
 
+        /// Returns the sequence of stack frames in the form of an iterator, ordered top
+        /// to bottom.
         pub fn frames(&self) -> impl Iterator<Item = crate::stack::Frame> {
             self.interpreter.data.frames()
         }

@@ -332,10 +332,10 @@ impl Loader {
         let bytecode::GlobalIID(bytecode::FnId(mod_id, lfnid), iid) = giid;
 
         let module = self.get_module(mod_id).ok()?;
-        module
-            .breakable_ranges
-            .iter()
-            .find(|brange| brange.local_fnid == lfnid && brange.iid == iid)
+        // TODO We expect there to be at most 1 range matching the filter.  Any better mechanism?
+        module.breakable_ranges.iter().find(|brange| {
+            brange.local_fnid == lfnid && brange.iid_start <= iid && iid < brange.iid_end
+        })
     }
 
     /// Resolve the given path to a module ID.

@@ -162,8 +162,12 @@
 							  class='inset-0 whitespace-pre overflow-y-scroll max-w-[12cm]'
 								x-bind:class="currentTab === 'source' ? '' : 'hidden'"
 							>
-								<i>Show the source code here!</i>
-								{{lookup_deep files [sourceFile] content}}
+								<div>
+									Source file: {{sourceFile}}
+								</div>
+								<div>
+									Line: {{sourceLine}}
+								</div>
 							</div>
 						</div>
 						<div>

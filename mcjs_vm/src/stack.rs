@@ -86,6 +86,8 @@ impl InterpreterData {
         }
     }
 
+    /// Returns the sequence of stack frames in the form of an iterator, ordered top to
+    /// bottom.
     pub fn frames(&self) -> impl Iterator<Item = Frame> {
         self.stack.frames().into_iter().map(|ll_frame| Frame {
             inner: ll_frame,

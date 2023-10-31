@@ -377,18 +377,28 @@ impl From<String> for Literal {
 
 type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
 
+/// Correspondence between source code and bytecode.
+///
+/// The source code range is represented by the members `lo` and `hi`, with the
+/// same semantics as the members of the same name in `swc_common::Span`.
+///
+/// The bytecode range is [`iid_start`, `iid_end`) (note that the left-hand side
+/// is inclusive, while the right-hand side is exclusive).
+///
+/// Each BreakRange implicitly belongs to a specific module.  "Implicit" because
+/// the module ID is not included in this struct.
 #[derive(Clone)]
 pub struct BreakRange {
     pub lo: swc_common::BytePos,
     pub hi: swc_common::BytePos,
     pub local_fnid: LocalFnId,
-    pub iid: IID,
+    pub iid_start: IID,
+    pub iid_end: IID,
 }
 
 pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
-    src_poss: Box<[BytePos]>,
     n_params: ArgIndex,
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
@@ -408,12 +418,9 @@ impl Function {
     pub(crate) fn new(
         instrs: Box<[Instr]>,
         consts: Box<[Literal]>,
-        src_poss: Box<[BytePos]>,
         n_params: ArgIndex,
         trace_anchors: HashMap<IID, TraceAnchor>,
     ) -> Function {
-        assert_eq!(instrs.len(), consts.len());
-        assert_eq!(instrs.len(), src_poss.len());
         #[cfg(to_be_rewritten)]
         let loop_heads = find_loop_heads(&instrs[..]);
         #[cfg(not(to_be_rewritten))]
@@ -421,7 +428,6 @@ impl Function {
         Function {
             instrs,
             consts,
-            src_poss,
             n_params,
             loop_heads,
             trace_anchors,

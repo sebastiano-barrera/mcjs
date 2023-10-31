@@ -315,10 +315,16 @@ mod model {
                 .collect();
 
             let mut frames = Vec::new();
+            let mut prev_return_iid = None;
             for (i, frame) in probe.frames().enumerate() {
                 let fnid = frame.header().fn_id;
                 let bytecode::FnId(mod_id, lfnid) = fnid;
-                let giid = bytecode::GlobalIID(fnid, todo!("determine the IID of this frame by looking at the frame on top of this one, or directly in the Interpreter"));
+                // TODO Refactor this elsewhere?
+                let giid = {
+                    let iid = prev_return_iid.unwrap_or(probe.giid().1);
+                    prev_return_iid = frame.header().return_to_iid;
+                    bytecode::GlobalIID(fnid, iid)
+                };
 
                 let source_map = loader.get_source_map(mod_id);
 
@@ -327,7 +333,9 @@ mod model {
                     // supports a single source map for multiple files.  Should I use it?
                     .and_then(|source_map| {
                         let files = source_map.files();
-                        match &files.first().unwrap().name {
+                        let file_name = &files.first().unwrap().name;
+                        eprintln!("sourceFile <- {:?}", file_name);
+                        match file_name {
                             swc_common::FileName::Real(path) => {
                                 Some(path.to_string_lossy().into_owned())
                             }

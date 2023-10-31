@@ -29,6 +29,7 @@ struct Builder {
     fn_stack: Vec<FnBuilder>,
     next_fnid: u16,
     breakable_ranges: Vec<bytecode::BreakRange>,
+    brange_stack: Vec<bytecode::BreakRange>,
 }
 
 impl Builder {
@@ -49,7 +50,46 @@ impl Builder {
             fn_stack: Vec::new(),
             next_fnid: min_fnid,
             breakable_ranges: Vec::new(),
+            brange_stack: Vec::new(),
         }
+    }
+
+    fn with_span(&mut self, span: &swc_common::Span) -> BuilderWithBreakRange {
+        let iid_start = self.peek_iid();
+        let iid_end = IID(iid_start.0 + 1);
+        let local_fnid = self.cur_fnb().fnid;
+
+        self.brange_stack.push(bytecode::BreakRange {
+            lo: span.lo,
+            hi: span.hi,
+            local_fnid,
+            iid_start,
+            iid_end,
+        });
+        BuilderWithBreakRange(self)
+    }
+}
+
+struct BuilderWithBreakRange<'a>(&'a mut Builder);
+
+impl<'a> std::ops::Deref for BuilderWithBreakRange<'a> {
+    type Target = Builder;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+impl<'a> std::ops::DerefMut for BuilderWithBreakRange<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+
+impl<'a> Drop for BuilderWithBreakRange<'a> {
+    fn drop(&mut self) {
+        let mut brange = self.0.brange_stack.pop().unwrap();
+        brange.iid_end = self.0.peek_iid();
+        self.0.breakable_ranges.push(brange);
     }
 }
 
@@ -311,16 +351,6 @@ impl Builder {
 
     fn emit(&mut self, instr: Instr) -> IID {
         self.cur_fnb().emit(instr)
-    }
-
-    fn link_range(&mut self, iid: IID, span: &swc_common::Span) {
-        let local_fnid = self.cur_fnb().fnid;
-        self.breakable_ranges.push(bytecode::BreakRange {
-            lo: span.lo,
-            hi: span.hi,
-            local_fnid,
-            iid,
-        });
     }
 
     fn set_const(&mut self, vreg: VReg, value: bytecode::Literal) {
@@ -692,10 +722,7 @@ fn compile_module(ast_module: &swc_ecma_ast::Module, min_fnid: u16) -> Result<Co
 fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> {
     use swc_ecma_ast::Stmt;
 
-    {
-        let iid_start = builder.peek_iid();
-        builder.link_range(iid_start, &stmt.span());
-    }
+    let mut builder = builder.with_span(&stmt.span());
 
     match stmt {
         Stmt::Block(block) => {
@@ -703,20 +730,20 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
             let stmts = &block.stmts;
 
-            compile_block(builder, stmts)?;
+            compile_block(&mut builder, stmts)?;
 
             builder.cur_fnb().pop_scope();
             Ok(())
         }
         // Stmt::Empty(_) => todo!(),
-        Stmt::Debugger(stmt) => {
+        Stmt::Debugger(_) => {
             builder.emit(Instr::Breakpoint);
             Ok(())
         }
         // Stmt::With(_) => todo!(),
         Stmt::Return(stmt) => {
             let reg = if let Some(arg) = &stmt.arg {
-                compile_expr(builder, arg)?
+                compile_expr(&mut builder, arg)?
             } else {
                 let reg = builder.new_vreg();
                 builder.set_const(reg, Literal::Undefined);
@@ -741,7 +768,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             Ok(())
         }
         Stmt::Switch(switch_stmt) => {
-            let discriminant = compile_expr(builder, &switch_stmt.discriminant)?;
+            let discriminant = compile_expr(&mut builder, &switch_stmt.discriminant)?;
 
             // TODO(performance): any better allocation strategy?
             // NOTE: This Vec skips the `default:` label!
@@ -750,7 +777,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
             for case in &switch_stmt.cases {
                 if let Some(test) = &case.test {
-                    let value = compile_expr(builder, test)?;
+                    let value = compile_expr(&mut builder, test)?;
                     builder.emit(Instr::CmpEQ(cmp_result, discriminant, value));
                     case_jumps.push(builder.reserve()); // Jump to label for this case
                 }
@@ -774,7 +801,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 }
 
                 for stmt in &case.cons {
-                    compile_stmt(builder, stmt)?;
+                    compile_stmt(&mut builder, stmt)?;
                 }
             }
 
@@ -788,7 +815,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         }
 
         Stmt::Throw(throw_stmt) => {
-            let exception = compile_expr(builder, &*throw_stmt.arg)?;
+            let exception = compile_expr(&mut builder, &*throw_stmt.arg)?;
             builder.emit(Instr::Throw(exception));
             Ok(())
         }
@@ -797,14 +824,14 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::While(while_stmt) => {
             let while_header_iid = builder.peek_iid();
 
-            let cond = compile_expr(builder, &while_stmt.test)?;
+            let cond = compile_expr(&mut builder, &while_stmt.test)?;
             builder.emit(Instr::BoolNot {
                 dest: cond,
                 arg: cond,
             });
             let jmpif = builder.reserve();
 
-            compile_stmt(builder, &while_stmt.body)?;
+            compile_stmt(&mut builder, &while_stmt.body)?;
             builder.emit(Instr::Jmp(while_header_iid));
             let while_end_iid = builder.peek_iid();
 
@@ -818,8 +845,8 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
         Stmt::DoWhile(stmt) => {
             let loop_start = builder.peek_iid();
-            compile_stmt(builder, &*stmt.body)?;
-            let cond = compile_expr(builder, &*stmt.test)?;
+            compile_stmt(&mut builder, &*stmt.body)?;
+            let cond = compile_expr(&mut builder, &*stmt.test)?;
             builder.emit(Instr::JmpIf {
                 cond,
                 dest: loop_start,
@@ -834,11 +861,11 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                     VarDeclOrExpr::VarDecl(var_decl) => {
                         // This one we don't need to hoist really.  The for statement has its own
                         // scope.
-                        compile_var_decl_namedef(builder, &var_decl);
-                        compile_var_decl_assignment(builder, &var_decl)?;
+                        compile_var_decl_namedef(&mut builder, &var_decl);
+                        compile_var_decl_assignment(&mut builder, &var_decl)?;
                     }
                     VarDeclOrExpr::Expr(expr) => {
-                        compile_expr(builder, &expr)?;
+                        compile_expr(&mut builder, &expr)?;
                     }
                 }
             }
@@ -846,7 +873,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             let loop_start = builder.peek_iid();
             let not_cond = match &stmt.test {
                 Some(test) => {
-                    let cond = compile_expr(builder, &*test)?;
+                    let cond = compile_expr(&mut builder, &*test)?;
                     let not_cond = builder.new_vreg();
                     builder.emit(Instr::BoolNot {
                         dest: not_cond,
@@ -858,11 +885,11 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             };
             let jmpif = builder.reserve();
 
-            compile_stmt(builder, &stmt.body)?;
+            compile_stmt(&mut builder, &stmt.body)?;
 
             let continue_target = builder.peek_iid();
             if let Some(update) = &stmt.update {
-                compile_expr(builder, &*update)?;
+                compile_expr(&mut builder, &*update)?;
             }
 
             builder.emit(Instr::Jmp(loop_start));
@@ -904,7 +931,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             let key_ndx = builder.new_vreg();
             builder.set_const(key_ndx, Literal::Number(0.0));
 
-            let iteree = compile_expr(builder, &forin_stmt.right)?;
+            let iteree = compile_expr(&mut builder, &forin_stmt.right)?;
             let keys = builder.new_vreg();
             builder.emit(Instr::ObjGetKeys {
                 dest: keys,
@@ -933,7 +960,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             });
             builder.define_var(item_var_name.clone(), Loc::VReg(key));
 
-            compile_stmt(builder, &forin_stmt.body)?;
+            compile_stmt(&mut builder, &forin_stmt.body)?;
 
             builder.emit(Instr::ArithInc(key_ndx, key_ndx));
 
@@ -970,7 +997,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 ),
             };
 
-            let iteree = compile_expr(builder, &forof_stmt.right)?;
+            let iteree = compile_expr(&mut builder, &forof_stmt.right)?;
             let iterator = builder.new_vreg();
             builder.emit(Instr::NewIterator {
                 dest: iterator,
@@ -988,7 +1015,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 iter: iterator,
             });
             builder.define_var(item_var_name.clone(), Loc::VReg(item));
-            compile_stmt(builder, &forof_stmt.body)?;
+            compile_stmt(&mut builder, &forof_stmt.body)?;
 
             builder.cur_fnb().pop_scope();
 
@@ -1007,16 +1034,16 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         // Function declarations are be processed in a dedicated phase, not here.
         // The assignment part of variable declarations is evaluated here instead.
         // See [#hoisting]
-        Stmt::Decl(Decl::Var(var_decl)) => compile_var_decl_assignment(builder, &var_decl),
+        Stmt::Decl(Decl::Var(var_decl)) => compile_var_decl_assignment(&mut builder, &var_decl),
         Stmt::Decl(Decl::Fn(_)) => Ok(()),
 
         Stmt::Expr(expr) => {
-            compile_expr(builder, &expr.expr)?;
+            compile_expr(&mut builder, &expr.expr)?;
             Ok(())
         }
 
         Stmt::If(if_stmt) => {
-            let cond = compile_expr(builder, &if_stmt.test)
+            let cond = compile_expr(&mut builder, &if_stmt.test)
                 .with_context(error!("in if statement").with_span(if_stmt.span))?;
             builder.emit(Instr::BoolNot {
                 dest: cond,
@@ -1024,12 +1051,12 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             });
             let jmp_to_alt = builder.reserve();
 
-            compile_stmt(builder, &if_stmt.cons)?;
+            compile_stmt(&mut builder, &if_stmt.cons)?;
             let jmp_to_end = builder.reserve();
 
             let alt = builder.peek_iid();
             if let Some(else_blk) = &if_stmt.alt {
-                compile_stmt(builder, else_blk)?;
+                compile_stmt(&mut builder, else_blk)?;
             }
 
             let end: IID = builder.peek_iid();
@@ -1278,10 +1305,7 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
 fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg> {
     use swc_ecma_ast::{CallExpr, Expr};
 
-    {
-        let start_iid = builder.peek_iid();
-        builder.link_range(start_iid, &expr.span());
-    }
+    let mut builder = builder.with_span(&expr.span());
 
     match expr {
         Expr::Call(call_expr @ CallExpr { callee, args, .. }) => {
@@ -1294,7 +1318,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                 let sym = callee.sym.as_ref();
                 if sym == "sink" {
                     for arg in args {
-                        let var = compile_expr(builder, &arg.expr)?;
+                        let var = compile_expr(&mut builder, &arg.expr)?;
                         builder.emit(Instr::PushToSink(var));
                     }
 
@@ -1318,7 +1342,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                         return Err(error!("`require` takes a single argument only"));
                     }
 
-                    let import_path = compile_expr(builder, &args[0].expr)?;
+                    let import_path = compile_expr(&mut builder, &args[0].expr)?;
                     let ret = builder.new_vreg();
                     builder.emit(Instr::ImportModule(ret, import_path));
                     return Ok(ret);
@@ -1330,21 +1354,21 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                 if arg.spread.is_some() {
                     panic!("unsupported: spread function parameter: function(a, b, ...)");
                 }
-                let reg = compile_expr(builder, &arg.expr)?;
+                let reg = compile_expr(&mut builder, &arg.expr)?;
                 arg_regs.push(reg);
             }
 
             let (this, callee) = match callee.as_ref() {
                 Expr::Member(member_expr) => {
                     let MemberAccess { obj, key: _, value } =
-                        compile_member_access(builder, &member_expr)?;
+                        compile_member_access(&mut builder, &member_expr)?;
                     (obj, value)
                 }
                 other_expr => {
                     let this = builder.new_vreg();
                     builder.set_const(this, bytecode::Literal::Undefined);
 
-                    let callee_func = compile_expr(builder, &other_expr)?;
+                    let callee_func = compile_expr(&mut builder, &other_expr)?;
                     (this, callee_func)
                 }
             };
@@ -1363,8 +1387,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
         }
 
         Expr::Bin(bin_expr) => {
-            let a = compile_expr(builder, &bin_expr.left)?;
-            let b = compile_expr(builder, &bin_expr.right)?;
+            let a = compile_expr(&mut builder, &bin_expr.left)?;
+            let b = compile_expr(&mut builder, &bin_expr.right)?;
 
             // TODO There must be a better way.  2-operand instructions?  accumulator register?
             let ret = builder.new_vreg();
@@ -1423,7 +1447,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     builder.set_const(arg, re_str);
                     let args = vec![arg];
 
-                    compile_new(builder, constructor, ret, &args);
+                    compile_new(&mut builder, constructor, ret, &args);
                 }
                 // Lit::BigInt(_) => todo!(),
                 // Lit::JSXText(_) => todo!(),
@@ -1456,7 +1480,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             Ok(ret)
         }
 
-        Expr::Assign(asmt) => compile_assignment(asmt, builder)
+        Expr::Assign(asmt) => compile_assignment(asmt, &mut builder)
             .with_context(error!("in assignment").with_span(asmt.span)),
 
         Expr::Object(obj_expr) => {
@@ -1475,7 +1499,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                             let name = compile_prop_name(&kv_expr.key)?;
                             builder.set_const(key, name);
 
-                            let value = compile_expr(builder, &kv_expr.value)?;
+                            let value = compile_expr(&mut builder, &kv_expr.value)?;
 
                             builder.emit(Instr::ObjSet { obj, key, value });
                         }
@@ -1485,7 +1509,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                             let name = compile_prop_name(&method_prop.key)?;
                             builder.set_const(key, name);
 
-                            let value = compile_function(builder, None, &*method_prop.function)?;
+                            let value =
+                                compile_function(&mut builder, None, &*method_prop.function)?;
 
                             builder.emit(Instr::ObjSet { obj, key, value });
                         }
@@ -1532,7 +1557,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             let constructor = builder
                 .read_var(&JsWord::from("Array"))
                 .expect("undefined native constructor: Array");
-            compile_new(builder, constructor, array, &[]);
+            compile_new(&mut builder, constructor, array, &[]);
 
             for elem in arr_expr.elems.iter() {
                 match elem {
@@ -1541,7 +1566,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                             return Err(error!("spread syntax is currently unsupported")
                                 .with_span(arr_expr.span));
                         }
-                        let value = compile_expr(builder, expr)?;
+                        let value = compile_expr(&mut builder, expr)?;
                         builder.emit(Instr::ArrayPush { arr: array, value });
                     }
                     None => {
@@ -1558,13 +1583,13 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
 
         Expr::Arrow(arrow_expr) => {
             // TODO Refactor this with Decl::Fn
-            compile_arrow_function(builder, arrow_expr)
+            compile_arrow_function(&mut builder, arrow_expr)
         }
         Expr::Fn(fn_expr) => {
             // TODO Refactor this with Decl::Fn
             let name = fn_expr.ident.as_ref().map(|ident| ident.to_id().0);
             let func = &fn_expr.function;
-            let func = compile_function(builder, name.clone(), func)?;
+            let func = compile_function(&mut builder, name.clone(), func)?;
 
             if let Some(name) = name {
                 builder.define_var(name, Loc::VReg(func));
@@ -1577,19 +1602,19 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             let dest = builder.new_vreg();
             match unary_expr.op {
                 swc_ecma_ast::UnaryOp::Bang => {
-                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    let arg = compile_expr(&mut builder, &unary_expr.arg)?;
                     builder.emit(Instr::BoolNot { dest, arg });
                 }
                 swc_ecma_ast::UnaryOp::TypeOf => {
-                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    let arg = compile_expr(&mut builder, &unary_expr.arg)?;
                     builder.emit(Instr::TypeOf { dest, arg });
                 }
                 swc_ecma_ast::UnaryOp::Minus => {
-                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    let arg = compile_expr(&mut builder, &unary_expr.arg)?;
                     builder.emit(Instr::UnaryMinus { dest, arg });
                 }
                 swc_ecma_ast::UnaryOp::Plus => {
-                    let arg = compile_expr(builder, &unary_expr.arg)?;
+                    let arg = compile_expr(&mut builder, &unary_expr.arg)?;
                     builder.emit(Instr::Copy {
                         dst: dest,
                         src: arg,
@@ -1603,8 +1628,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                         },
                     };
 
-                    let obj = compile_expr(builder, &member_expr.obj)?;
-                    let key = compile_obj_member_prop(builder, &member_expr.prop)?;
+                    let obj = compile_expr(&mut builder, &member_expr.obj)?;
+                    let key = compile_obj_member_prop(&mut builder, &member_expr.prop)?;
                     builder.emit(Instr::ObjDelete { dest, obj, key });
                 }
                 other => unsupported_node!(other),
@@ -1622,13 +1647,13 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                         .read_var(&ident.sym)
                         .with_context(error!("resolving identifier").with_span(ident.span))?;
 
-                    compile_value_update(builder, update_expr.op, var);
+                    compile_value_update(&mut builder, update_expr.op, var);
                     Ok(var)
                 }
                 Expr::Member(member_expr) => {
                     let MemberAccess { obj, key, value } =
-                        compile_member_access(builder, member_expr)?;
-                    compile_value_update(builder, update_expr.op, value);
+                        compile_member_access(&mut builder, member_expr)?;
+                    compile_value_update(&mut builder, update_expr.op, value);
                     builder.emit(Instr::ObjSet { obj, key, value });
                     Ok(value)
                 }
@@ -1638,21 +1663,21 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                 ),
             }
         }
-        Expr::Member(member_expr) => Ok(compile_member_access(builder, member_expr)?.value),
+        Expr::Member(member_expr) => Ok(compile_member_access(&mut builder, member_expr)?.value),
 
-        Expr::Paren(inner) => compile_expr(builder, &inner.expr),
+        Expr::Paren(inner) => compile_expr(&mut builder, &inner.expr),
 
         Expr::Cond(cond_expr) => {
             let ret = builder.new_vreg();
 
-            let cond = compile_expr(builder, &cond_expr.test)?;
+            let cond = compile_expr(&mut builder, &cond_expr.test)?;
             builder.emit(Instr::BoolNot {
                 dest: cond,
                 arg: cond,
             });
             let jmpif = builder.reserve();
 
-            let value = compile_expr(builder, &cond_expr.cons)?;
+            let value = compile_expr(&mut builder, &cond_expr.cons)?;
             builder.emit(Instr::Copy {
                 dst: ret,
                 src: value,
@@ -1661,7 +1686,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
 
             let alt = builder.peek_iid();
             *builder.get_mut(jmpif).unwrap() = Instr::JmpIf { cond, dest: alt };
-            let value = compile_expr(builder, &cond_expr.alt)?;
+            let value = compile_expr(&mut builder, &cond_expr.alt)?;
             builder.emit(Instr::Copy {
                 dst: ret,
                 src: value,
@@ -1681,14 +1706,14 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                         arg_or_spread.spread.is_none(),
                         "unsupported: spread (...) in call args"
                     );
-                    let arg = compile_expr(builder, &arg_or_spread.expr)?;
+                    let arg = compile_expr(&mut builder, &arg_or_spread.expr)?;
                     arg_regs.push(arg);
                 }
             }
 
             let ret = builder.new_vreg();
-            let callee = compile_expr(builder, &*new_expr.callee)?;
-            compile_new(builder, callee, ret, &arg_regs);
+            let callee = compile_expr(&mut builder, &*new_expr.callee)?;
+            compile_new(&mut builder, callee, ret, &arg_regs);
             Ok(ret)
         }
 
@@ -1702,7 +1727,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                 builder.set_const(tmp_reg, Literal::String(quasi.raw.to_string()));
                 builder.emit(Instr::StrAppend(buf_reg, tmp_reg));
 
-                let value = compile_expr(builder, expr)?;
+                let value = compile_expr(&mut builder, expr)?;
                 builder.emit(Instr::StrAppend(buf_reg, value));
             }
 
@@ -1915,7 +1940,8 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
         )),
     );
 
-    let source_file = source_map.new_source_file(FileName::Custom(filename), content);
+    let path = std::path::PathBuf::from(filename);
+    let source_file = source_map.new_source_file(FileName::Real(path), content);
 
     let input = StringInput::from(&*source_file);
     let lexer = Lexer::new(
