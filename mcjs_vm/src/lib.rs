@@ -10,7 +10,7 @@ mod loader;
 // mod jit;
 mod heap;
 pub mod interpreter;
-mod stack;
+pub mod stack;
 mod stack_access;
 
 mod util;

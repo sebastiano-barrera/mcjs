@@ -189,8 +189,25 @@
 								{{/if}}
 							</div>
 						</div>
-						<div>
-							[values]
+						<div class="overflow-y-scroll">
+							<table>
+								<tbody>
+									{{#each locs}}
+										<tr>
+											<td class="text-right">{{ name }}</td>
+											<td>{{ ident }}</td>
+											<td>{{ value }}</td>
+										</tr>
+										{{#if prev_idents}}
+										<tr>
+											<td colspan="3">
+												{{prev_idents}}
+											</td>
+										</tr>
+										{{/if}}
+									{{/each}}
+								</tbody>
+							</table>
 						</div>
 					</div>
 

@@ -342,42 +342,12 @@ mod model {
 
                 let source_map = loader.get_source_map(mod_id);
 
-                let source = source_map.and_then(|source_map| {
-                    // NOTE We're making a distinct source map per file, but the API clearly
-                    // supports a single source map for multiple files.  Should I use it?
-                    let files = source_map.files();
-                    let source_file = &files.first().unwrap();
+                let source = decode_frame_source(source_map, loader, giid);
 
-                    let filename = {
-                        let file_name = &source_file.name;
-                        eprintln!("sourceFile <- {:?}", file_name);
-                        match file_name {
-                            swc_common::FileName::Real(path) => path.to_string_lossy().into_owned(),
-                            _ => return None,
-                        }
-                    };
-
-                    let line_focus = {
-                        let break_range = loader.breakrange_at_giid(giid)?;
-                        source_file.lookup_line(break_range.lo).unwrap()
-                    };
-
-                    let line_start = max(0, line_focus as isize - 150) as usize;
-                    let line_end = min(source_file.count_lines() - 1, line_focus + 150);
-
-                    let lines: Vec<_> = (line_start..line_end)
-                        .map(|line_ndx| SourceLine {
-                            ndx: line_ndx.try_into().unwrap(),
-                            text: source_file.get_line(line_ndx).unwrap().into_owned(),
-                        })
-                        .collect();
-
-                    Some(FrameSource {
-                        filename,
-                        line_focus: line_focus.try_into().unwrap(),
-                        lines,
-                    })
-                });
+                let func = loader.get_function(fnid).unwrap();
+                let locs = decode_locs_state(&frame, func, giid.1)
+                    .into_values()
+                    .collect();
 
                 frames.push(Frame {
                     source,
@@ -391,6 +361,7 @@ mod model {
                     args: Vec::new(),
                     captures: Vec::new(),
                     results: Vec::new(),
+                    locs,
                 });
             }
 
@@ -437,6 +408,115 @@ mod model {
         }
     }
 
+    fn decode_frame_source(
+        source_map: Option<&swc_common::SourceMap>,
+        loader: &mcjs_vm::Loader,
+        giid: mcjs_vm::GlobalIID,
+    ) -> Option<FrameSource> {
+        let source = source_map.and_then(|source_map| {
+            // NOTE We're making a distinct source map per file, but the API clearly
+            // supports a single source map for multiple files.  Should I use it?
+            let files = source_map.files();
+            let source_file = &files.first().unwrap();
+
+            let filename = {
+                let file_name = &source_file.name;
+                eprintln!("sourceFile <- {:?}", file_name);
+                match file_name {
+                    swc_common::FileName::Real(path) => path.to_string_lossy().into_owned(),
+                    _ => return None,
+                }
+            };
+
+            let line_focus = {
+                let break_range = loader.breakrange_at_giid(giid)?;
+                source_file.lookup_line(break_range.lo).unwrap()
+            };
+
+            let line_start = max(0, line_focus as isize - 150) as usize;
+            let line_end = min(source_file.count_lines() - 1, line_focus + 150);
+
+            let lines: Vec<_> = (line_start..line_end)
+                .map(|line_ndx| SourceLine {
+                    ndx: line_ndx.try_into().unwrap(),
+                    text: source_file.get_line(line_ndx).unwrap().into_owned(),
+                })
+                .collect();
+
+            Some(FrameSource {
+                filename,
+                line_focus: line_focus.try_into().unwrap(),
+                lines,
+            })
+        });
+        source
+    }
+
+    fn decode_locs_state<'a>(
+        frame: &mcjs_vm::stack::Frame<'a>,
+        func: &bytecode::Function,
+        iid: mcjs_vm::IID,
+    ) -> HashMap<bytecode::Loc, LocState> {
+        // We use `ident_history` (the history of how the Identifier->Loc mappings change as the
+        // function proceeds) to reconstruct the Identifier->Loc mapping at a specific
+        // point of the bytecode (represented by `iid`).
+
+        use bytecode::{ArgIndex, CaptureIndex, VReg};
+
+        let model_value = |value| format!("{:?}", value);
+
+        let mut locs_state = HashMap::new();
+
+        for (vreg_ndx, value) in frame.results().enumerate() {
+            let loc = VReg(vreg_ndx as _).into();
+            let state = LocState {
+                name: format!("{:?}", loc),
+                value: model_value(value),
+                ident: None,
+                prev_idents: Vec::new(),
+            };
+            locs_state.insert(loc, state);
+        }
+
+        for (arg_ndx, value_opt) in frame.args().enumerate() {
+            let loc = ArgIndex(arg_ndx as _).into();
+            let state = LocState {
+                name: format!("{:?}", loc),
+                value: value_opt
+                    .map(model_value)
+                    .unwrap_or_else(|| "???".to_string()),
+                ident: None,
+                prev_idents: Vec::new(),
+            };
+            locs_state.insert(loc, state);
+        }
+
+        for (cap_ndx, upv_id) in frame.captures().enumerate() {
+            let loc = CaptureIndex(cap_ndx as _).into();
+            let state = LocState {
+                name: format!("{:?}", loc),
+                value: format!("{:?}", upv_id),
+                ident: None,
+                prev_idents: Vec::new(),
+            };
+            locs_state.insert(loc, state);
+        }
+
+        let asmts = func
+            .ident_history()
+            .iter()
+            .take_while(|asmt| asmt.iid.0 <= iid.0);
+        for asmt in asmts {
+            let state = locs_state.get_mut(&asmt.loc).unwrap();
+            let prev_ident = state.ident.replace(asmt.ident.to_string());
+            if let Some(prev_ident) = prev_ident {
+                state.prev_idents.push(prev_ident);
+            }
+        }
+
+        locs_state
+    }
+
     #[derive(Clone, Serialize)]
     pub struct Breakpoint {
         pub filename: String,
@@ -459,6 +539,17 @@ mod model {
         pub args: Vec<Arg>,
         pub captures: Vec<Capture>,
         pub results: Vec<Value>,
+
+        pub locs: Vec<LocState>,
+    }
+
+    #[derive(Clone, Serialize)]
+    pub struct LocState {
+        pub name: String,
+        pub ident: Option<String>,
+        pub prev_idents: Vec<String>,
+        // Just a *model* of the value
+        pub value: String,
     }
 
     #[derive(Clone, Serialize)]

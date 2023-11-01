@@ -6,7 +6,7 @@ use swc_ecma_ast::{
     ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, ForHead, Function, Lit, Pat, UpdateOp, VarDecl,
 };
 
-use crate::bytecode::{self, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
+use crate::bytecode::{self, IdentAsmt, Instr, Literal, Loc, LocalFnId, NativeFnId, VReg, IID};
 use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::util::Mask;
@@ -156,15 +156,7 @@ struct FnBuilder {
     pending_break_instrs: Vec<IID>,
     pending_continue_instrs: Vec<IID>,
     captures: Vec<String>,
-}
-
-/// Represents the location where a certain variable's value is stored.  This location
-/// determines the correct instruction to use to read/write the variable.
-#[derive(Clone, Copy, Debug)]
-enum Loc {
-    VReg(VReg),
-    Arg(bytecode::ArgIndex),
-    Capture(bytecode::CaptureIndex),
+    ident_history: Vec<IdentAsmt>,
 }
 
 #[derive(Debug)]
@@ -195,6 +187,7 @@ impl FnBuilder {
             pending_break_instrs: Vec::new(),
             pending_continue_instrs: Vec::new(),
             span: None,
+            ident_history: Vec::new(),
         }
     }
 
@@ -207,6 +200,7 @@ impl FnBuilder {
             self.instrs.into_boxed_slice(),
             self.consts.into_boxed_slice(),
             self.n_params,
+            self.ident_history,
             self.trace_anchors,
         )
     }
@@ -292,6 +286,12 @@ impl FnBuilder {
             // definition of var $name shadows previous definition
         }
 
+        self.ident_history.push(IdentAsmt {
+            iid: self.peek_iid(),
+            loc,
+            ident: name,
+        });
+
         loc
     }
 
@@ -311,10 +311,16 @@ impl FnBuilder {
         }
 
         let scope = self.inner_scope_mut();
-        let prev = scope.vars.insert(name, loc);
+        let prev = scope.vars.insert(name.clone(), loc);
         if prev.is_some() {
             // definition of var $name shadows previous definition
         }
+
+        self.ident_history.push(IdentAsmt {
+            iid: self.peek_iid(),
+            loc,
+            ident: name,
+        });
     }
 
     fn next_vreg(&mut self) -> VReg {

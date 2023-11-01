@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet}, sync::{Arc, Mutex},
 };
 
+use serde::Serialize;
 use strum::IntoStaticStr;
 use swc_atoms::JsWord;
 use swc_common::{Span, SourceMap, BytePos};
@@ -73,16 +74,16 @@ impl std::fmt::Debug for GlobalIID {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
 pub struct ConstIndex(pub u16);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 pub struct ArgIndex(pub u8);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 pub struct CaptureIndex(pub u16);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct VReg(pub u8);
 
 impl std::fmt::Debug for ArgIndex {
@@ -402,6 +403,7 @@ pub struct Function {
     n_params: ArgIndex,
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
+    ident_history: Vec<IdentAsmt>,
     trace_anchors: HashMap<IID, TraceAnchor>,
 }
 pub struct TraceAnchor {
@@ -414,11 +416,55 @@ pub struct LoopInfo {
     interloop_vars: HashSet<IID>,
 }
 
+#[derive(Debug)]
+pub struct IdentAsmt {
+    pub iid: IID,
+    pub loc: Loc,
+    pub ident: JsWord,
+}
+
+/// Represents the location where a certain variable's value is stored.  This location
+/// determines the correct instruction to use to read/write the variable.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum Loc {
+    VReg(VReg),
+    Arg(ArgIndex),
+    Capture(CaptureIndex),
+}
+
+impl From<VReg> for Loc {
+    fn from(value: VReg) -> Self {
+        Loc::VReg(value)
+    }
+}
+impl From<ArgIndex> for Loc {
+    fn from(value: ArgIndex) -> Self {
+        Loc::Arg(value)
+    }
+}
+impl From<CaptureIndex> for Loc {
+    fn from(value: CaptureIndex) -> Self {
+        Loc::Capture(value)
+    }
+}
+
+impl std::fmt::Debug for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Each variant's Debug impl is specific enough
+        match self {
+            Loc::VReg(vreg) => write!(f, "{:?}", vreg),
+            Loc::Arg(arg_ndx) => write!(f, "{:?}", arg_ndx),
+            Loc::Capture(cap_ndx) => write!(f, "{:?}", cap_ndx),
+        }
+    }
+}
+
 impl Function {
     pub(crate) fn new(
         instrs: Box<[Instr]>,
         consts: Box<[Literal]>,
         n_params: ArgIndex,
+        ident_history: Vec<IdentAsmt>,
         trace_anchors: HashMap<IID, TraceAnchor>,
     ) -> Function {
         #[cfg(to_be_rewritten)]
@@ -430,6 +476,7 @@ impl Function {
             consts,
             n_params,
             loop_heads,
+            ident_history,
             trace_anchors,
         }
     }
@@ -440,6 +487,10 @@ impl Function {
 
     pub fn consts(&self) -> &[Literal] {
         self.consts.as_ref()
+    }
+
+    pub fn ident_history(&self) -> &[IdentAsmt] {
+        &self.ident_history
     }
 
     pub fn is_loop_head(&self, iid: IID) -> bool {
