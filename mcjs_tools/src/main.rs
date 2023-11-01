@@ -331,6 +331,11 @@ mod model {
                 // TODO Refactor this elsewhere?
                 let giid = {
                     let iid = prev_return_iid.unwrap_or(probe.giid().1);
+                    // For the top frame: `iid` is the instruction to *resume* to.
+                    // For other frames: `iid` is the instruction to *return* to.
+                    // In either case: we actually want the instruction we suspended/called at,
+                    // which is the previous one.
+                    let iid = mcjs_vm::IID(iid.0 - 1);
                     prev_return_iid = frame.header().return_to_iid;
                     bytecode::GlobalIID(fnid, iid)
                 };
