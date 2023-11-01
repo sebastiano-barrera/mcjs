@@ -161,6 +161,7 @@
 							<div
 							  class='max-w-[12cm] grid grid-rows-[1cm_1fr] overflow-y-scroll'
 								x-bind:class="currentTab === 'source' ? '' : 'hidden'"
+								onload='this.querySelector(".current").scrollIntoView()'
 							>
 								{{#if source}}
 									{{#with source}}
