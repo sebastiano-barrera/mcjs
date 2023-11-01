@@ -140,16 +140,21 @@
 									</div>
 								</div>
 
-								<div class="
-									grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
-									script--highlight-mcjs-values [&>*]:whitespace-nowrap
-								">
+								<div 
+									class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
+										script--highlight-mcjs-values [&>*]:whitespace-nowrap"
+									onload="this.querySelector('.highlighted').scrollIntoView({ block: 'center' })"
+								>
 									{{#each (lookup_deep ../modules moduleID 'functions' functionID 'bytecode')}}
 										<div
-											class="text-right script--value read [&.highlighted]:bg-sky-800 [&.highlighted]:text-white"
+											class="text-right read 
+											{{#if (eq @index ../iid)}} highlighted {{/if}}
+											[&.highlighted]:bg-white [&.highlighted]:text-black"
 											data-mcjs-value="call{{ callID }}-v{{ instrNdx }}"
 										>
-											⬥ <span class="font-mono">r{{ @index }}</span>
+											<span class="font-mono">
+												r{{ @index }}⬥ 
+											</span>
 										</div>
 										<div>
 											{{ this }}
@@ -161,7 +166,7 @@
 							<div
 							  class='max-w-[12cm] grid grid-rows-[1cm_1fr] overflow-y-scroll'
 								x-bind:class="currentTab === 'source' ? '' : 'hidden'"
-								onload='this.querySelector(".current").scrollIntoView()'
+								onload="this.querySelector('.current').scrollIntoView({ block: 'center' })"
 							>
 								{{#if source}}
 									{{#with source}}

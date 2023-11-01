@@ -383,8 +383,9 @@ mod model {
                     source,
                     // TODO Remove the damn call ID
                     callID: i.try_into().unwrap(),
-                    functionID: lfnid.0 as u16,
                     moduleID: mod_id.0,
+                    functionID: lfnid.0 as u16,
+                    iid: giid.1 .0,
                     thisValue: "<todo>".to_string(),
                     returnToInstrID: "<todo>".to_string(),
                     args: Vec::new(),
@@ -449,11 +450,12 @@ mod model {
         pub source: Option<FrameSource>,
 
         pub callID: u32,
-        pub functionID: u16,
         pub moduleID: u16,
+        pub functionID: u16,
+        pub iid: u16,
+
         pub thisValue: String,
         pub returnToInstrID: String,
-
         pub args: Vec<Arg>,
         pub captures: Vec<Capture>,
         pub results: Vec<Value>,
