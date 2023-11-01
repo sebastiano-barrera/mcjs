@@ -167,13 +167,13 @@
 										<div>{{filename}}</div>
 										<ul class='inset-0'>
 											{{#each lines}}
-												<li class="group {{#if (eq ndx ../line_focus)}}current{{/if}}">
+												<li class="font-mono group {{#if (eq ndx ../line_focus)}}current{{/if}}">
 													<div class="
 														inline-block w-8 text-right 
 														group-[.current]:bg-white
 														group-[.current]:text-black
 													">{{ndx}}</div>
-													<div class="inline-block font-mono whitespace-pre">{{text}}</div>
+													<div class="inline-block whitespace-pre">{{text}}</div>
 												</li>
 											{{/each}}
 										</ul>
