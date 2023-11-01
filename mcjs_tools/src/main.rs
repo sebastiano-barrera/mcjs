@@ -48,10 +48,13 @@ async fn main() -> Result<()> {
     let (model_tx, mut model_rx) = broadcast::channel(5);
 
     let mut handlebars = Handlebars::new();
+
     // TODO Make it independent from the cwd
-    handlebars
-        .register_templates_directory(".html", "./templates")
-        .unwrap();
+    if let Err(err) = handlebars.register_templates_directory(".html", "./templates") {
+        eprintln!("template compile error:\n\n{}", err);
+        return Ok(());
+    }
+
     handlebars.register_helper("lookup_deep", Box::new(lookup_deep));
     let data_ref = web::Data::new(AppData {
         handlebars,
@@ -139,8 +142,13 @@ async fn main_screen(app_data: web::Data<AppData<'_>>) -> impl Responder {
         serde_json::to_string_pretty(&tmpl_params).unwrap()
     );
 
-    let body = app_data.handlebars.render("index", &tmpl_params).unwrap();
-    HttpResponse::Ok().body(body)
+    match app_data.handlebars.render("index", &tmpl_params) {
+        Ok(body) => HttpResponse::Ok().body(body),
+        Err(err) => {
+            let body = format!("template render error:\n\n{}", err);
+            HttpResponse::InternalServerError().body(body)
+        }
+    }
 }
 
 #[actix_web::get("/events")]
@@ -277,6 +285,7 @@ async fn interpreter_main_loop(
 
 #[allow(non_snake_case)]
 mod model {
+    use std::cmp::{max, min};
     use std::collections::HashMap;
 
     use mcjs_vm::{bytecode, interpreter::debugger::Probe};
@@ -328,32 +337,45 @@ mod model {
 
                 let source_map = loader.get_source_map(mod_id);
 
-                let sourceFile = source_map
+                let source = source_map.and_then(|source_map| {
                     // NOTE We're making a distinct source map per file, but the API clearly
                     // supports a single source map for multiple files.  Should I use it?
-                    .and_then(|source_map| {
-                        let files = source_map.files();
-                        let file_name = &files.first().unwrap().name;
+                    let files = source_map.files();
+                    let source_file = &files.first().unwrap();
+
+                    let filename = {
+                        let file_name = &source_file.name;
                         eprintln!("sourceFile <- {:?}", file_name);
                         match file_name {
-                            swc_common::FileName::Real(path) => {
-                                Some(path.to_string_lossy().into_owned())
-                            }
-                            _ => None,
+                            swc_common::FileName::Real(path) => path.to_string_lossy().into_owned(),
+                            _ => return None,
                         }
-                    });
+                    };
 
-                let sourceLine = source_map.and_then(|source_map| {
-                    // TODO This system sucks.  It won't actually resolve to the right location a
-                    // bunch of the time.
-                    let bytepos = loader.breakrange_at_giid(giid)?;
-                    let loc = source_map.lookup_char_pos(bytepos.lo);
-                    Some(loc.line.try_into().unwrap())
+                    let line_focus = {
+                        let break_range = loader.breakrange_at_giid(giid)?;
+                        source_file.lookup_line(break_range.lo).unwrap()
+                    };
+
+                    let line_start = max(0, line_focus as isize - 150) as usize;
+                    let line_end = min(source_file.count_lines() - 1, line_focus + 150);
+
+                    let lines: Vec<_> = (line_start..line_end)
+                        .map(|line_ndx| SourceLine {
+                            ndx: line_ndx.try_into().unwrap(),
+                            text: source_file.get_line(line_ndx).unwrap().into_owned(),
+                        })
+                        .collect();
+
+                    Some(FrameSource {
+                        filename,
+                        line_focus: line_focus.try_into().unwrap(),
+                        lines,
+                    })
                 });
 
                 frames.push(Frame {
-                    sourceFile,
-                    sourceLine,
+                    source,
                     // TODO Remove the damn call ID
                     callID: i.try_into().unwrap(),
                     functionID: lfnid.0 as u16,
@@ -419,8 +441,7 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct Frame {
-        pub sourceFile: Option<String>,
-        pub sourceLine: Option<LineNum>,
+        pub source: Option<FrameSource>,
 
         pub callID: u32,
         pub functionID: u16,
@@ -431,6 +452,20 @@ mod model {
         pub args: Vec<Arg>,
         pub captures: Vec<Capture>,
         pub results: Vec<Value>,
+    }
+
+    #[derive(Clone, Serialize)]
+    pub struct FrameSource {
+        pub filename: String,
+        pub line_focus: LineNum,
+        // Yes, whatever, we're copying, I don't care right now
+        pub lines: Vec<SourceLine>,
+    }
+
+    #[derive(Clone, Serialize)]
+    pub struct SourceLine {
+        ndx: LineNum,
+        text: String,
     }
 
     #[derive(Clone, Serialize)]

@@ -86,7 +86,7 @@
 							</div>
 
 							<div
-								class='flex flex-row overflow-y-scroll bytecode'
+								class='flex flex-row overflow-y-scroll'
 								x-bind:class="currentTab === 'bytecode' ? '' : 'hidden'"
 							>
 								<div class='flex flex-col space-y-2 [&>*]:whitespace-nowrap'>
@@ -159,15 +159,28 @@
 							</div>
 
 							<div
-							  class='inset-0 whitespace-pre overflow-y-scroll max-w-[12cm]'
+							  class='max-w-[12cm] grid grid-rows-[1cm_1fr] overflow-y-scroll'
 								x-bind:class="currentTab === 'source' ? '' : 'hidden'"
 							>
-								<div>
-									Source file: {{sourceFile}}
-								</div>
-								<div>
-									Line: {{sourceLine}}
-								</div>
+								{{#if source}}
+									{{#with source}}
+										<div>{{filename}}</div>
+										<ul class='inset-0'>
+											{{#each lines}}
+												<li class="group {{#if (eq ndx ../line_focus)}}current{{/if}}">
+													<div class="
+														inline-block w-8 text-right 
+														group-[.current]:bg-white
+														group-[.current]:text-black
+													">{{ndx}}</div>
+													<div class="inline-block font-mono whitespace-pre">{{text}}</div>
+												</li>
+											{{/each}}
+										</ul>
+									{{/with}}
+								{{else}}
+									<div>(no source available)</div>
+								{{/if}}
 							</div>
 						</div>
 						<div>
