@@ -49,10 +49,10 @@
 
 			<div id="main-area-labels" class="grid stack-view-grid-rows inset-0">
 				<div class="sticky lowercase text-xl text-vertical dark:text-white py-2 ml-auto mr-auto">
-					Stack + Code
+					Code
 				</div>
-				<div class="sticky lowercase text-xl text-vertical dark:text-white py-2 ml-auto mr-auto">
-					Values
+				<div class="sticky lowercase text-xl text-vertical text-right dark:text-white py-2 ml-auto mr-auto">
+					Data
 				</div>
 			</div>
 
@@ -61,85 +61,68 @@
 				{{#each frames}}
 					<div
 						id="stack-frame-{{ @index }}"
-						class="grid stack-view-grid-rows min-w-fit mx-4 p-2 space-x-2 h-full
+						class="grid stack-view-grid-rows min-w-fit mr-4 space-x-2 h-full
 							border-l border-zinc-600 text-xs"
 					>
-						<div class="grid grid-rows-[1cm_1fr] max-h-full" x-data="{currentTab: 'bytecode'}">
-							<div class="
-								flex flex-row w-min h-fit mb-2
-								ring-inset ring-1 ring-sky-700 dark:ring-zinc-700 rounded-full overflow-clip
-							">
-								{{#*inline "tab"}}
-									<div class="
-										w-fit py-1 px-2 inset-0 m-1 cursor-pointer rounded-full
-									  	[&.selected]:bg-sky-700 [&.selected]:text-white
-									  	[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300"
-										x-bind:class="currentTab == '{{content}}' ? 'selected' : ''"
-										x-on:click="currentTab = '{{content}}'"
-									>
-										{{title}}
-									</div>
-								{{/inline}}
-					
-								{{>tab title="Bytecode" content="bytecode" selected=true}}
-								{{>tab title="Source" content="source"}}
+						<div
+							class="grid grid-rows-[1.2cm_1fr] 
+								border-b border-dashed border-zinc-600"
+							x-data="{currentTab: 'bytecode'}"
+						>
+							<div 
+								class="flex flex-row items-center gap-2 px-2 relative"
+								x-data="{ detailsVisible: false }"
+							>
+								<div class="
+									flex flex-row w-min
+									ring-inset ring-1 ring-sky-700 dark:ring-zinc-700 rounded-full overflow-clip
+								">
+									{{#*inline "tab"}}
+										<div class="
+											w-fit py-1 px-2 inset-0 m-1 cursor-pointer rounded-full
+											[&.selected]:bg-sky-700 [&.selected]:text-white
+											[&.selected]:dark:bg-zinc-700 [&.selected]:dark:text-zinc-300"
+											x-bind:class="currentTab == '{{content}}' ? 'selected' : ''"
+											x-on:click="currentTab = '{{content}}'"
+										>
+											{{title}}
+										</div>
+									{{/inline}}
+						
+									{{>tab title="Bytecode" content="bytecode" selected=true}}
+									{{>tab title="Source" content="source"}}
+								</div>
+
+								<div>
+									<span class="">fn</span>
+									<span class="font-mono">{{ moduleID }}.{{ functionID }}</span>
+								</div>
+
+								<!-- TODO add tooltip -->
+								<div
+									class="max-w-[5cm] inline-block whitespace-nowrap text-ellipsis overflow-hidden
+										cursor-default"
+									style="direction: rtl"
+									x-on:mouseenter="detailsVisible = true"
+									x-on:mouseleave="detailsVisible = false"
+								>
+									{{ source.filename }}
+								</div>
+
+								<div
+									class="absolute rounded-md bg-slate-900 ring-2 ring-slate-700
+										p-2 mt-[2.8cm] max-w-[9cm]"
+									x-show="detailsVisible"
+								>
+									<div class="font-bold">Source file:</div>
+									<div class="pl-2">{{ source.filename }}</div>
+								</div>
 							</div>
 
 							<div
-								class='flex flex-row overflow-y-scroll'
+								class='flex flex-row px-2 overflow-y-scroll'
 								x-bind:class="currentTab === 'bytecode' ? '' : 'hidden'"
 							>
-								<div class='flex flex-col space-y-2 [&>*]:whitespace-nowrap'>
-									<div class="grid gap-x-1 grid-cols-[2cm_1fr]">
-										<div class='text-right'>Call ID =</div>
-										<div>{{ callID }}</div>
-
-										<div class='text-right'>Function =</div>
-										<div>{{ moduleID }}.{{ functionID }}</div>
-						
-										<div class='text-right'>This =</div>
-										<div>{{ thisValue }}</div>
-
-										<div class='text-right'>Return to =</div>
-										<div>{{ returnToInstrID }}</div>
-									</div>
-
-									<div class='grid grid-cols-[2cm_1fr] gap-x-1 [&>*]:whitespace-nowrap'>
-										<div class='text-zinc-500'>Arguments</div>
-										<div></div>
-										{{#each args}}
-											<div
-												data-mcjs-value='call{{ callID }}-arg{{ argNdx }}'
-												class="
-													text-right script--value px-1
-													[&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
-													[&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
-												">
-												arg <span class="font-mono">{{ @index }}</span>
-											</div>
-											<div>[a value]</div>
-										{{/each}}
-									</div>
-
-									<div class='grid grid-cols-[2cm_1fr] gap-x-1 [&>*]:whitespace-nowrap'>
-										<div class='text-zinc-500'>Captures</div>
-										<div></div>
-										{{#each captures}}
-										   <div 
-											   class="
-												   text-right script--value px-1
-												   [&.highlighted]:bg-cyan-200 [&.highlighted]:text-cyan-900
-												   [&.highlighted]:dark:bg-cyan-900 [&.highlighted]:dark:text-cyan-200
-											   "
-											   data-mcjs-value="call{{ callID }}-cap{{ capNdx }}"
-										   >
-											   cap <span class="font-mono">{{ @index }}</span>
-										   </div>
-										   <div>upv {{ index }}/{{ gen }}</div>
-										{{/each}}
-									</div>
-								</div>
-
 								<div 
 									class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
 										script--highlight-mcjs-values [&>*]:whitespace-nowrap"
@@ -170,7 +153,6 @@
 							>
 								{{#if source}}
 									{{#with source}}
-										<div>{{filename}}</div>
 										<ul class='inset-0'>
 											{{#each lines}}
 												<li class="font-mono group {{#if (eq ndx ../line_focus)}}current{{/if}}">
@@ -192,6 +174,12 @@
 						<div class="overflow-y-scroll">
 							<table>
 								<tbody>
+									<tr>
+										<td class="text-right">this</td>
+										<td></td>
+										<td>{{ thisValue }}</td>
+									</tr>
+
 									{{#each locs}}
 										<tr>
 											<td class="text-right">{{ name }}</td>

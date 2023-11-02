@@ -18,7 +18,7 @@
 }
 
 .stack-view-grid-rows {
-  grid-template-rows: minmax(0, 1fr) 5cm;
+  grid-template-rows: minmax(0, 1fr) max(40%, 3cm);
 }
 
 html {
@@ -38,8 +38,9 @@ html {
 }
 
 .text-vertical {
-	writing-mode: sideways-lr;
-	text-orientation: sideways;
+	/* A bit unintuitive, but it works on both Firefox and Chrome, so, ship it */
+    text-orientation: sideways-right;
+    writing-mode: vertical-lr;
+    transform: rotate(180deg);
 }
-
 
