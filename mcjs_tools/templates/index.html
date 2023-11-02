@@ -180,20 +180,53 @@
 										<td>{{ thisValue }}</td>
 									</tr>
 
-									{{#each locs}}
-										<tr>
-											<td class="text-right">{{ name }}</td>
-											<td>{{ ident }}</td>
-											<td>{{ value }}</td>
-										</tr>
-										{{#if prev_idents}}
-										<tr>
-											<td colspan="3">
-												{{prev_idents}}
-											</td>
-										</tr>
-										{{/if}}
-									{{/each}}
+									{{#with values}}
+										{{#each captures}}
+											<tr>
+												<td class="text-right">{{ name }}</td>
+												<td>{{ ident }}</td>
+												<td>{{ value }}</td>
+											</tr>
+											{{#if prev_idents}}
+											<tr>
+												<td colspan="3">
+													{{prev_idents}}
+												</td>
+											</tr>
+											{{/if}}
+										{{/each}}
+
+
+										{{#each arguments}}
+											<tr>
+												<td class="text-right">{{ name }}</td>
+												<td>{{ ident }}</td>
+												<td>{{ value }}</td>
+											</tr>
+											{{#if prev_idents}}
+											<tr>
+												<td colspan="3">
+													{{prev_idents}}
+												</td>
+											</tr>
+											{{/if}}
+										{{/each}}
+
+										{{#each registers}}
+											<tr>
+												<td class="text-right">{{ name }}</td>
+												<td>{{ ident }}</td>
+												<td>{{ value }}</td>
+											</tr>
+											{{#if prev_idents}}
+											<tr>
+												<td colspan="3">
+													{{prev_idents}}
+												</td>
+											</tr>
+											{{/if}}
+										{{/each}}
+									{{/with}}
 								</tbody>
 							</table>
 						</div>

@@ -288,6 +288,7 @@ mod model {
     use std::cmp::{max, min};
     use std::collections::HashMap;
 
+    use bytecode::{ArgIndex, CaptureIndex, VReg};
     use mcjs_vm::{bytecode, interpreter::debugger::Probe};
     use serde::Serialize;
 
@@ -345,9 +346,7 @@ mod model {
                 let source = decode_frame_source(source_map, loader, giid);
 
                 let func = loader.get_function(fnid).unwrap();
-                let locs = decode_locs_state(&frame, func, giid.1)
-                    .into_values()
-                    .collect();
+                let values = decode_locs_state(&frame, func, giid.1);
 
                 frames.push(Frame {
                     source,
@@ -356,12 +355,7 @@ mod model {
                     moduleID: mod_id.0,
                     functionID: lfnid.0,
                     iid: giid.1 .0,
-                    thisValue: "<todo>".to_string(),
-                    returnToInstrID: "<todo>".to_string(),
-                    args: Vec::new(),
-                    captures: Vec::new(),
-                    results: Vec::new(),
-                    locs,
+                    values,
                 });
             }
 
@@ -455,19 +449,20 @@ mod model {
         frame: &mcjs_vm::stack::Frame<'_>,
         func: &bytecode::Function,
         iid: mcjs_vm::IID,
-    ) -> HashMap<bytecode::Loc, LocState> {
+    ) -> Values {
+        use bytecode::Loc;
+
         // We use `ident_history` (the history of how the Identifier->Loc mappings change as the
         // function proceeds) to reconstruct the Identifier->Loc mapping at a specific
         // point of the bytecode (represented by `iid`).
 
-        use bytecode::{ArgIndex, CaptureIndex, VReg};
-
         let model_value = |value| format!("{:?}", value);
-
         let mut locs_state = HashMap::new();
 
+        // Merge all 3 categories of values into a single map
+
         for (vreg_ndx, value) in frame.results().enumerate() {
-            let loc = VReg(vreg_ndx as _).into();
+            let loc: Loc = VReg(vreg_ndx as _).into();
             let state = LocState {
                 name: format!("{:?}", loc),
                 value: model_value(value),
@@ -501,6 +496,7 @@ mod model {
             locs_state.insert(loc, state);
         }
 
+        // Use merged map to add identifiers associations
         let asmts = func
             .ident_history()
             .iter()
@@ -513,7 +509,44 @@ mod model {
             }
         }
 
-        locs_state
+        // Split by categories again for viewing
+
+        let registers: Vec<_> = (0..frame.results().len())
+            .filter_map(|vreg_ndx| {
+                let key = VReg(vreg_ndx as _);
+                locs_state.remove(&key.into())
+            })
+            .collect();
+
+        let arguments: Vec<_> = (0..frame.args().len())
+            .filter_map(|arg_ndx| {
+                let key = ArgIndex(arg_ndx as _);
+                locs_state.remove(&key.into())
+            })
+            .collect();
+
+        let captures: Vec<_> = (0..frame.captures().len())
+            .filter_map(|cap_ndx| {
+                let key = CaptureIndex(cap_ndx as _);
+                locs_state.remove(&key.into())
+            })
+            .collect();
+
+        debug_assert!(locs_state.is_empty());
+
+        let this = LocState {
+            name: "this".to_string(),
+            value: format!("{:?}", frame.header().this),
+            ident: Some("this".to_string()),
+            prev_idents: Vec::new(),
+        };
+
+        Values {
+            registers,
+            arguments,
+            captures,
+            this,
+        }
     }
 
     #[derive(Clone, Serialize)]
@@ -533,13 +566,15 @@ mod model {
         pub functionID: u16,
         pub iid: u16,
 
-        pub thisValue: String,
-        pub returnToInstrID: String,
-        pub args: Vec<Arg>,
-        pub captures: Vec<Capture>,
-        pub results: Vec<Value>,
+        pub values: Values,
+    }
 
-        pub locs: Vec<LocState>,
+    #[derive(Clone, Serialize)]
+    pub struct Values {
+        pub registers: Vec<LocState>,
+        pub captures: Vec<LocState>,
+        pub arguments: Vec<LocState>,
+        pub this: LocState,
     }
 
     #[derive(Clone, Serialize)]
@@ -576,14 +611,6 @@ mod model {
     }
 
     type ObjectID = u32;
-    type Object = HashMap<String, Value>;
-
-    #[derive(Clone, Serialize)]
-    pub struct Arg {}
-
-    #[derive(Clone, Serialize)]
-    pub struct Capture {}
-
-    #[derive(Clone, Serialize)]
-    pub struct Value {}
+    // TODO This is destined to become HashMap<String, interpreter::Value>
+    type Object = HashMap<String, String>;
 }
