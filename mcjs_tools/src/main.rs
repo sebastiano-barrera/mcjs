@@ -15,7 +15,7 @@ use serde_json::Value as JsonValue;
 use tokio::sync::broadcast;
 
 handlebars_helper!(lookup_deep: |*args| {
-    if args.len() == 0 {
+    if args.is_empty() {
         panic!();
     }
 
@@ -354,7 +354,7 @@ mod model {
                     // TODO Remove the damn call ID
                     callID: i.try_into().unwrap(),
                     moduleID: mod_id.0,
-                    functionID: lfnid.0 as u16,
+                    functionID: lfnid.0,
                     iid: giid.1 .0,
                     thisValue: "<todo>".to_string(),
                     returnToInstrID: "<todo>".to_string(),
@@ -413,47 +413,46 @@ mod model {
         loader: &mcjs_vm::Loader,
         giid: mcjs_vm::GlobalIID,
     ) -> Option<FrameSource> {
-        let source = source_map.and_then(|source_map| {
-            // NOTE We're making a distinct source map per file, but the API clearly
-            // supports a single source map for multiple files.  Should I use it?
-            let files = source_map.files();
-            let source_file = &files.first().unwrap();
+        let source_map = source_map?;
 
-            let filename = {
-                let file_name = &source_file.name;
-                eprintln!("sourceFile <- {:?}", file_name);
-                match file_name {
-                    swc_common::FileName::Real(path) => path.to_string_lossy().into_owned(),
-                    _ => return None,
-                }
-            };
+        // NOTE We're making a distinct source map per file, but the API clearly
+        // supports a single source map for multiple files.  Should I use it?
+        let files = source_map.files();
+        let source_file = &files.first().unwrap();
 
-            let line_focus = {
-                let break_range = loader.breakrange_at_giid(giid)?;
-                source_file.lookup_line(break_range.lo).unwrap()
-            };
+        let filename = {
+            let file_name = &source_file.name;
+            eprintln!("sourceFile <- {:?}", file_name);
+            match file_name {
+                swc_common::FileName::Real(path) => path.to_string_lossy().into_owned(),
+                _ => return None,
+            }
+        };
 
-            let line_start = max(0, line_focus as isize - 150) as usize;
-            let line_end = min(source_file.count_lines() - 1, line_focus + 150);
+        let line_focus = {
+            let break_range = loader.breakrange_at_giid(giid)?;
+            source_file.lookup_line(break_range.lo).unwrap()
+        };
 
-            let lines: Vec<_> = (line_start..line_end)
-                .map(|line_ndx| SourceLine {
-                    ndx: line_ndx.try_into().unwrap(),
-                    text: source_file.get_line(line_ndx).unwrap().into_owned(),
-                })
-                .collect();
+        let line_start = max(0, line_focus as isize - 150) as usize;
+        let line_end = min(source_file.count_lines() - 1, line_focus + 150);
 
-            Some(FrameSource {
-                filename,
-                line_focus: line_focus.try_into().unwrap(),
-                lines,
+        let lines: Vec<_> = (line_start..line_end)
+            .map(|line_ndx| SourceLine {
+                ndx: line_ndx.try_into().unwrap(),
+                text: source_file.get_line(line_ndx).unwrap().into_owned(),
             })
-        });
-        source
+            .collect();
+
+        Some(FrameSource {
+            filename,
+            line_focus: line_focus.try_into().unwrap(),
+            lines,
+        })
     }
 
-    fn decode_locs_state<'a>(
-        frame: &mcjs_vm::stack::Frame<'a>,
+    fn decode_locs_state(
+        frame: &mcjs_vm::stack::Frame<'_>,
         func: &bytecode::Function,
         iid: mcjs_vm::IID,
     ) -> HashMap<bytecode::Loc, LocState> {
