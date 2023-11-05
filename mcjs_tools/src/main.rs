@@ -1,15 +1,10 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result};
 use handlebars::{handlebars_helper, Handlebars};
 use listenfd::ListenFd;
-use mcjs_vm::interpreter::debugger::Probe;
 use serde_json::json;
 use serde_json::Value as JsonValue;
 use tokio::sync::broadcast;
@@ -45,8 +40,6 @@ async fn main() -> Result<()> {
     };
     let main_path = PathBuf::from(main_path).canonicalize().unwrap();
 
-    let (model_tx, mut model_rx) = broadcast::channel(5);
-
     let mut handlebars = Handlebars::new();
 
     // TODO Make it independent from the cwd
@@ -54,52 +47,13 @@ async fn main() -> Result<()> {
         eprintln!("template compile error:\n\n{}", err);
         return Ok(());
     }
-
     handlebars.register_helper("lookup_deep", Box::new(lookup_deep));
+
+    let intrp_handle = interpreter_manager::spawn_interpreter(main_path);
+
     let data_ref = web::Data::new(AppData {
         handlebars,
-        current_state: Mutex::new(State {
-            failure: None,
-            model: Arc::new(model::VMState::init()),
-        }),
-    });
-
-    {
-        let data_ref = data_ref.clone();
-        tokio::spawn(async move {
-            loop {
-                match model_rx.recv().await {
-                    Ok(new_event) => {
-                        eprintln!("event: {:?}", new_event);
-
-                        let mut state = data_ref.current_state.lock().unwrap();
-                        match new_event {
-                            InterpreterEvent::Suspended { new_state } => {
-                                state.model = new_state;
-                            }
-                            InterpreterEvent::Finished => break,
-                            InterpreterEvent::Failed {
-                                failed_state,
-                                message,
-                            } => {
-                                state.model = failed_state;
-                                state.failure = Some(message);
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(err) => panic!("interpreter state latch: unexpected error: {:?} ", err),
-                }
-            }
-        });
-    }
-
-    let interpreter_jh = tokio::spawn(interpreter_main_loop(main_path, model_tx));
-
-    tokio::spawn(async move {
-        if let Err(err) = interpreter_jh.await {
-            eprintln!("interpreter panicked: {:?}", err.to_string());
-        }
+        intrp_handle,
     });
 
     let server = HttpServer::new(move || {
@@ -121,20 +75,30 @@ async fn main() -> Result<()> {
 
 struct AppData<'a> {
     handlebars: Handlebars<'a>,
-    current_state: Mutex<State>,
-}
-
-struct State {
-    failure: Option<String>,
-    model: Arc<model::VMState>,
+    intrp_handle: interpreter_manager::Handle,
 }
 
 #[actix_web::get("/")]
 async fn main_screen(app_data: web::Data<AppData<'_>>) -> impl Responder {
-    let state = app_data.current_state.lock().unwrap();
+    // TODO Cache the snapshot
+    let (failure, model) = app_data
+        .intrp_handle
+        .query(|state| match state {
+            interpreter_manager::State::Finished { version: _ } => (None, None),
+            interpreter_manager::State::Suspended { version: _, probe } => {
+                (None, Some(model::VMState::snapshot(probe)))
+            }
+            interpreter_manager::State::Failed {
+                version: _,
+                probe,
+                error,
+            } => (Some(error.clone()), Some(model::VMState::snapshot(probe))),
+        })
+        .await;
+
     let tmpl_params = json!({
-        "failure": state.failure,
-        "model": &*state.model,
+        "failure": failure,
+        "model": &model,
     });
 
     eprintln!(
@@ -178,109 +142,169 @@ async fn events(app_data: web::Data<AppData<'static>>) -> impl Responder {
     sse::Sse::from_infallible_receiver(rx).with_retry_duration(Duration::from_secs(10))
 }
 
-#[derive(Clone)]
-enum InterpreterEvent {
-    Suspended {
-        new_state: Arc<model::VMState>,
-    },
-    Finished,
-    Failed {
-        failed_state: Arc<model::VMState>,
-        message: String,
-    },
-}
+mod interpreter_manager {
+    use mcjs_vm::interpreter::debugger::Probe;
 
-impl std::fmt::Debug for InterpreterEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            InterpreterEvent::Suspended { .. } => write!(f, "InterpreterEvent::Suspended"),
-            InterpreterEvent::Finished => write!(f, "InterpreterEvent::Finished"),
-            InterpreterEvent::Failed { message, .. } => {
-                write!(f, "InterpreterEvent::Failed: {}", message)
-            }
+    use anyhow::{anyhow, Result};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
+    pub type Version = u32;
+
+    pub enum State<'a, 'b, 'c> {
+        Finished {
+            version: Version,
+        },
+        Suspended {
+            version: Version,
+            probe: &'a mut Probe<'b, 'c>,
+        },
+        Failed {
+            version: Version,
+            probe: &'a mut Probe<'b, 'c>,
+            error: String,
+        },
+    }
+
+    pub struct Handle {
+        queue_sender: mpsc::Sender<Message>,
+    }
+
+    // TODO Remove model_tx?
+    pub fn spawn_interpreter(main_path: PathBuf) -> Handle {
+        let (queue_sender, queue_recver) = mpsc::channel();
+        // TODO Need the JoinHandle?
+        std::thread::spawn(move || interpreter_main_loop(main_path, queue_recver));
+        Handle { queue_sender }
+    }
+
+    impl Handle {
+        pub async fn query<T, F>(&self, thunk: F) -> T
+        where
+            T: 'static + Send,
+            F: 'static + Send + FnOnce(&State) -> T,
+        {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+
+            let message = Message::Query(Box::new(move |state| {
+                let ret_val = thunk(state);
+                if let Err(_) = sender.send(ret_val) {
+                    panic!("could not send query result from interpreter main loop");
+                }
+            }));
+
+            self.queue_sender
+                .send(message)
+                .expect("could not send query to interpreter main loop");
+
+            receiver.await.unwrap()
         }
     }
-}
 
-async fn interpreter_main_loop(
-    main_path: PathBuf,
-    model_tx: broadcast::Sender<InterpreterEvent>,
-) -> Result<()> {
-    use mcjs_vm::interpreter::Exit;
-    use mcjs_vm::{Interpreter, Loader, Realm};
+    enum Message {
+        Query(Box<dyn Send + FnOnce(&State)>),
+        Resume,
+    }
 
-    let base_path = main_path.parent().unwrap();
-    let filename = main_path
-        .file_name()
-        .unwrap()
-        .to_str()
-        .expect("can't convert main filename to UTF-8");
-    let import_path = format!("./{}", filename);
+    fn interpreter_main_loop(
+        main_path: PathBuf,
+        queue_rx: mpsc::Receiver<Message>,
+    ) -> Result<()> {
+        use mcjs_vm::interpreter::Exit;
+        use mcjs_vm::{Interpreter, Loader, Realm};
 
-    let mut realm = Realm::new();
-    let mut loader = Loader::new(Some(base_path.to_owned()));
+        let base_path = main_path.parent().unwrap();
+        let filename = main_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .expect("can't convert main filename to UTF-8");
+        let import_path = format!("./{}", filename);
 
-    let main_fnid = loader
-        .load_import(&import_path, mcjs_vm::SCRIPT_MODULE_ID)
-        .map_err(|err| anyhow!("compile error: {:?}", err))?;
+        let mut realm = Realm::new();
+        let mut loader = Loader::new(Some(base_path.to_owned()));
 
-    // TODO Replace println! with logging
+        let main_fnid = loader
+            .load_import(&import_path, mcjs_vm::SCRIPT_MODULE_ID)
+            .map_err(|err| anyhow!("compile error: {:?}", err))?;
 
-    println!();
-    println!("running...");
+        // TODO Replace println! with logging
 
-    let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
+        println!();
+        println!("running...");
 
-    loop {
-        match intrp.run() {
-            Ok(Exit::Finished(_)) => {
-                let res = model_tx.send(InterpreterEvent::Finished);
-                if res.is_err() {
-                    println!("channel closed. nobody will know the interpreter finished...");
+        let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
+        let mut version = 0;
+
+        let mut process_messages = move |state: &State| {
+            loop {
+                let msg = queue_rx
+                    .recv()
+                    .expect("bug: channel closed before terminating the interpreter");
+
+                match msg {
+                    // "Return"
+                    Message::Resume => break,
+                    Message::Query(query) => {
+                        query(state);
+                    }
                 }
-                break;
             }
-            Ok(Exit::Suspended(next_intrp)) => {
-                intrp = next_intrp;
-                println!("interpreter suspended.  collecting snapshot");
+        };
 
-                let probe = Probe::attach(&mut intrp);
-                let model = Arc::new(model::VMState::snapshot(&probe));
-                let event = InterpreterEvent::Suspended { new_state: model };
+        loop {
+            version += 1;
 
-                let res = model_tx.send(event);
-                if res.is_err() {
-                    println!("channel closed; finishing interpreter process, deleting interpreter");
+            match intrp.run() {
+                Ok(Exit::Finished(_)) => {
+                    process_messages(&State::Finished { version });
                     break;
                 }
+                Ok(Exit::Suspended(next_intrp)) => {
+                    intrp = next_intrp;
+                    println!("interpreter suspended.  collecting snapshot");
 
-                println!("(suspended; resuming immediately)");
-            }
-            Err(mut err) => {
-                println!("interpreter failed.  reporting error");
+                    let mut probe = Probe::attach(&mut intrp);
+                    // let model = Arc::new(model::VMState::snapshot(&probe));
+                    let state = State::Suspended {
+                        version,
+                        probe: &mut probe,
+                    };
 
-                let mut message = String::new();
-                for msg in err.error.messages() {
-                    use std::fmt::Write;
-                    writeln!(message, " - {}", msg).unwrap();
+                    println!("(suspended; handling queries)");
+                    process_messages(&state);
+                    println!("(resuming)");
                 }
+                Err(mut err) => {
 
-                let failed_state = Arc::new(model::VMState::snapshot(&err.probe()));
+                    let error = {
+                        let mut message = String::new();
+                        for msg in err.error.messages() {
+                            use std::fmt::Write;
+                            writeln!(message, " - {}", msg).unwrap();
+                        }
 
-                let res = model_tx.send(InterpreterEvent::Failed {
-                    failed_state,
-                    message,
-                });
-                if res.is_err() {
-                    println!("channel closed. failure won't be discovered...");
+                        message
+                    };
+
+                    let probe = &mut err.probe();
+                    let state = State::Failed {
+                        version,
+                        probe,
+                        error,
+                    };
+
+                    println!("(interpreter error; handling queries)");
+                    process_messages(&state);
+
+                    break;
                 }
-
-                break;
             }
         }
-    }
 
-    Ok(())
+        println!("(main loop quitting)");
+        Ok(())
+    }
 }
 
 #[allow(non_snake_case)]
