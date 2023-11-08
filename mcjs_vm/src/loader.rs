@@ -338,6 +338,23 @@ impl Loader {
         })
     }
 
+    pub fn function_breakranges(
+        &self,
+        fnid: bytecode::FnId,
+    ) -> Option<impl Iterator<Item = &bytecode::BreakRange>> {
+        let bytecode::FnId(mod_id, lfnid) = fnid;
+
+        let module = self.get_module(mod_id).ok()?;
+        // TODO We scan the whole vector every time.  This can be solved by segregating
+        // breakable_ranges by function, or with an index data structure.  But for now, I can't be
+        // bothered
+        let branges = module
+            .breakable_ranges
+            .iter()
+            .filter(move |brange| brange.local_fnid == lfnid);
+        Some(branges)
+    }
+
     /// Resolve the given path to a module ID.
     ///
     /// Note that the `filename` argument may be abbreviated to only a suffix of the

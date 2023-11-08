@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
@@ -148,9 +149,18 @@ async fn some_text(
     app_data: web::Data<AppData<'static>>,
     path: web::Path<(u32,)>,
 ) -> impl Responder {
+    use mcjs_vm::bytecode::IID;
+
     let (frame_ndx,) = path.into_inner();
 
-    let frame_src = app_data
+    struct BreakRange {
+        line: u32,
+        col: u32,
+        iid_start: IID,
+        iid_end: IID,
+    }
+
+    let res = app_data
         .intrp_handle
         .query(move |state| {
             let probe = state.probe()?;
@@ -158,28 +168,79 @@ async fn some_text(
             let fnid = giid.0;
 
             let source_map = probe.loader().get_source_map(fnid.0);
-            model::decode_frame_source(source_map, probe.loader(), giid)
+
+            let frame_src = model::decode_frame_source(source_map, probe.loader(), giid)?;
+
+            let loader = probe.loader();
+            let breakable_points: Vec<_> = loader
+                .function_breakranges(fnid)
+                .unwrap()
+                .map(|break_range| {
+                    let pos = source_map.unwrap().lookup_char_pos(break_range.lo);
+                    BreakRange {
+                        line: pos.line.try_into().unwrap(),
+                        col: pos.col.0.try_into().unwrap(),
+                        iid_start: break_range.iid_start,
+                        iid_end: break_range.iid_end,
+                    }
+                })
+                .collect();
+
+            Some((frame_src, breakable_points))
         })
         .await;
 
-    match frame_src {
-        Some(frame_src) => {
+    match res {
+        Some((frame_src, mut breakable_points)) => {
+            breakable_points.sort_by_key(|brange| (brange.line, brange.col));
+
+            let mut breakable_points = breakable_points.iter().peekable();
+
             use std::fmt::Write;
 
             let mut buf = String::new();
+            let mut line_buf = String::new();
 
             writeln!(buf, "<pre x-init=\"$el.querySelector('.current').scrollIntoView({{ block: 'center' }})\">").unwrap();
             for line in frame_src.lines {
-                if line.ndx == frame_src.line_focus {
-                    writeln!(
+                if line.ndx1 == frame_src.line_focus {
+                    write!(
                         buf,
-                        "<span class='current bg-white text-black'>{:4}</span> {}",
-                        line.ndx, line.text
+                        "<span class='current bg-white text-black'>{:4}</span> ",
+                        line.ndx1,
                     )
                     .unwrap();
                 } else {
-                    writeln!(buf, "{:4} {}", line.ndx, line.text).unwrap();
+                    write!(buf, "{:4} ", line.ndx1).unwrap();
                 }
+
+                line_buf.clear();
+                let chars = line.text.chars().enumerate();
+                for (col, ch) in chars {
+                    if let Some(break_range) = breakable_points.peek() {
+                        let bline = break_range.line;
+                        let bcol = break_range.col;
+
+                        if bline < line.ndx1 + 1 {
+                            breakable_points.next();
+                        } else if bline == line.ndx1 + 1 {
+                            if bcol as usize == col {
+                                write!(line_buf,
+                                   "<span class='relative cursor-pointer' x-on:click='highlight.iidStart = {}; highlight.iidEnd = {};'>◯</span>",
+                                   break_range.iid_start.0,
+                                   break_range.iid_end.0,
+                               ).unwrap();
+                            }
+                            if bcol as usize <= col {
+                                breakable_points.next();
+                            }
+                        }
+                    }
+
+                    line_buf.push(ch);
+                }
+
+                writeln!(buf, "{}", line_buf).unwrap();
             }
             writeln!(buf, "</pre>").unwrap();
 
@@ -516,7 +577,7 @@ mod model {
 
         let lines: Vec<_> = (line_start..line_end)
             .map(|line_ndx| SourceLine {
-                ndx: line_ndx.try_into().unwrap(),
+                ndx1: line_ndx.try_into().unwrap(),
                 text: source_file.get_line(line_ndx).unwrap().into_owned(),
             })
             .collect();
@@ -679,7 +740,7 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct SourceLine {
-        pub ndx: LineNum,
+        pub ndx1: LineNum,
         pub text: String,
     }
 
