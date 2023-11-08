@@ -1522,8 +1522,40 @@ pub mod debugger {
 
         /// Returns the sequence of stack frames in the form of an iterator, ordered top
         /// to bottom.
-        pub fn frames(&self) -> impl Iterator<Item = crate::stack::Frame> {
+        pub fn frames(&self) -> impl ExactSizeIterator<Item = crate::stack::Frame> {
             self.interpreter.data.frames()
+        }
+
+        /// Get the instruction pointer for the n-th frame (0 = top)
+        ///
+        /// Panics if `frame_ndx` is invalid.
+        pub fn frame_giid(&self, frame_ndx: usize) -> bytecode::GlobalIID {
+            // This function is necessary because we actually store the
+            // "instruction pointer" for the i-th frame in the (i - 1)-frame,
+            // (the topmost frame's is stored in the interpreter's state)
+
+            let mut frames = self.frames();
+            let (fnid, iid) = if frame_ndx == 0 {
+                let iid = self.interpreter.iid;
+                let fnid = frames.next().unwrap().header().fn_id;
+                (fnid, iid)
+            } else {
+                let frame_above = frames.nth(frame_ndx - 1).unwrap();
+                let frame = frames.next().unwrap();
+
+                let fnid = frame.header().fn_id;
+                let iid = frame_above.header().return_to_iid.unwrap();
+
+                (fnid, iid)
+            };
+
+            // For the top frame: `iid` is the instruction to *resume* to.
+            // For other frames: `iid` is the instruction to *return* to.
+            // In either case: we actually want the instruction we suspended/called at,
+            // which is the previous one.
+
+            let iid = bytecode::IID(iid.0 - 1);
+            bytecode::GlobalIID(fnid, iid)
         }
     }
 }

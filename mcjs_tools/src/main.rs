@@ -143,24 +143,51 @@ async fn events(app_data: web::Data<AppData<'static>>) -> impl Responder {
     sse::Sse::from_infallible_receiver(rx).with_retry_duration(Duration::from_secs(10))
 }
 
-#[actix_web::get("/some_text")]
-async fn some_text() -> impl Responder {
-    HttpResponse::Ok().body(
-        "
-    Sed ut perspiciatis unde omnis iste natus error sit voluptatem
-accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo
-inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo.
-Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit,
-sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt.
-Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur,
-adipisci velit, sed quia non numquam eius modi tempora incidunt ut labore et
-dolore magnam aliquam quaerat voluptatem. Ut enim ad minima veniam, quis nostrum
-exercitationem ullam corporis suscipit laboriosam, nisi ut aliquid ex ea commodi
-consequatur? Quis autem vel eum iure reprehenderit qui in ea voluptate velit
-esse quam nihil molestiae consequatur, vel illum qui dolorem eum fugiat quo
-voluptas nulla pariatur?
-        ",
-    )
+#[actix_web::get("/frames/{frame_ndx}/source_preview")]
+async fn some_text(
+    app_data: web::Data<AppData<'static>>,
+    path: web::Path<(u32,)>,
+) -> impl Responder {
+    let (frame_ndx,) = path.into_inner();
+
+    let frame_src = app_data
+        .intrp_handle
+        .query(move |state| {
+            let probe = state.probe()?;
+            let giid = probe.frame_giid(frame_ndx as usize);
+            let fnid = giid.0;
+
+            let source_map = probe.loader().get_source_map(fnid.0);
+            model::decode_frame_source(source_map, probe.loader(), giid)
+        })
+        .await;
+
+    match frame_src {
+        Some(frame_src) => {
+            use std::fmt::Write;
+
+            let mut buf = String::new();
+
+            writeln!(buf, "<pre x-init=\"$el.querySelector('.current').scrollIntoView({{ block: 'center' }})\">").unwrap();
+            for line in frame_src.lines {
+                if line.ndx == frame_src.line_focus {
+                    writeln!(
+                        buf,
+                        "<span class='current bg-white text-black'>{:4}</span> {}",
+                        line.ndx, line.text
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(buf, "{:4} {}", line.ndx, line.text).unwrap();
+                }
+            }
+            writeln!(buf, "</pre>").unwrap();
+
+            HttpResponse::Ok().body(buf)
+        }
+        // TODO Actually expose any errors
+        None => HttpResponse::NotFound().body(""),
+    }
 }
 
 mod interpreter_manager {
@@ -185,6 +212,21 @@ mod interpreter_manager {
             probe: &'a mut Probe<'b, 'c>,
             error: String,
         },
+    }
+
+    impl<'a, 'b, 'c> State<'a, 'b, 'c> {
+        pub fn probe(&'a self) -> Option<&'a Probe<'b, 'c>> {
+            match self {
+                State::Finished { .. } => None,
+                State::Suspended { probe, .. } | State::Failed { probe, .. } => Some(probe),
+            }
+        }
+        pub fn probe_mut(&'a mut self) -> Option<&'a mut Probe<'b, 'c>> {
+            match self {
+                State::Finished { .. } => None,
+                State::Suspended { probe, .. } | State::Failed { probe, .. } => Some(probe),
+            }
+        }
     }
 
     pub struct Handle {
@@ -443,7 +485,7 @@ mod model {
         }
     }
 
-    fn decode_frame_source(
+    pub fn decode_frame_source(
         source_map: Option<&swc_common::SourceMap>,
         loader: &mcjs_vm::Loader,
         giid: mcjs_vm::GlobalIID,
@@ -637,8 +679,8 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct SourceLine {
-        ndx: LineNum,
-        text: String,
+        pub ndx: LineNum,
+        pub text: String,
     }
 
     #[derive(Clone, Serialize)]
