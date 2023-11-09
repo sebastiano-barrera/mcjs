@@ -153,13 +153,6 @@ async fn some_text(
 
     let (frame_ndx,) = path.into_inner();
 
-    struct BreakRange {
-        line: u32,
-        col: u32,
-        iid_start: IID,
-        iid_end: IID,
-    }
-
     let res = app_data
         .intrp_handle
         .query(move |state| {
@@ -177,7 +170,7 @@ async fn some_text(
                 .unwrap()
                 .map(|break_range| {
                     let pos = source_map.unwrap().lookup_char_pos(break_range.lo);
-                    BreakRange {
+                    model::BreakRange {
                         line: pos.line.try_into().unwrap(),
                         col: pos.col.0.try_into().unwrap(),
                         iid_start: break_range.iid_start,
@@ -193,62 +186,73 @@ async fn some_text(
     match res {
         Some((frame_src, mut breakable_points)) => {
             breakable_points.sort_by_key(|brange| (brange.line, brange.col));
-
-            let mut breakable_points = breakable_points.iter().peekable();
-
-            use std::fmt::Write;
-
-            let mut buf = String::new();
-            let mut line_buf = String::new();
-
-            writeln!(buf, "<pre x-init=\"$el.querySelector('.current').scrollIntoView({{ block: 'center' }})\">").unwrap();
-            for line in frame_src.lines {
-                if line.ndx1 == frame_src.line_focus {
-                    write!(
-                        buf,
-                        "<span class='current bg-white text-black'>{:4}</span> ",
-                        line.ndx1,
-                    )
-                    .unwrap();
-                } else {
-                    write!(buf, "{:4} ", line.ndx1).unwrap();
-                }
-
-                line_buf.clear();
-                let chars = line.text.chars().enumerate();
-                for (col, ch) in chars {
-                    if let Some(break_range) = breakable_points.peek() {
-                        let bline = break_range.line;
-                        let bcol = break_range.col;
-
-                        if bline < line.ndx1 + 1 {
-                            breakable_points.next();
-                        } else if bline == line.ndx1 + 1 {
-                            if bcol as usize == col {
-                                write!(line_buf,
-                                   "<span class='relative cursor-pointer' x-on:click='highlight.iidStart = {}; highlight.iidEnd = {};'>◯</span>",
-                                   break_range.iid_start.0,
-                                   break_range.iid_end.0,
-                               ).unwrap();
-                            }
-                            if bcol as usize <= col {
-                                breakable_points.next();
-                            }
-                        }
-                    }
-
-                    line_buf.push(ch);
-                }
-
-                writeln!(buf, "{}", line_buf).unwrap();
-            }
-            writeln!(buf, "</pre>").unwrap();
-
+            let buf = render_source_code(&breakable_points, frame_src).unwrap();
             HttpResponse::Ok().body(buf)
         }
         // TODO Actually expose any errors
         None => HttpResponse::NotFound().body(""),
     }
+}
+
+fn render_source_code(
+    breakable_points: &[model::BreakRange],
+    frame_src: model::FrameSource,
+) -> std::result::Result<String, std::fmt::Error> {
+    use std::fmt::Write;
+
+    let mut breakable_points = breakable_points.iter().peekable();
+    let mut buf = String::new();
+
+    writeln!(buf, "<div class=\"grid source-view-grid-cols\">")?;
+    writeln!(
+        buf,
+        "<pre x-init=\"$el.querySelector('.current').scrollIntoView({{ block: 'center' }})\">"
+    )?;
+    for line in &frame_src.lines {
+        if line.ndx1 == frame_src.line_focus {
+            writeln!(
+                buf,
+                "<span class='current bg-white text-black'>{:4}</span>",
+                line.ndx1,
+            )?;
+        } else {
+            writeln!(buf, "{:4}", line.ndx1)?;
+        }
+    }
+    writeln!(buf, "</pre>")?;
+
+    writeln!(buf, "<pre>")?;
+    for line in &frame_src.lines {
+        let chars = line.text.chars().enumerate();
+        for (col, ch) in chars {
+            if let Some(break_range) = breakable_points.peek() {
+                let bline = break_range.line;
+                let bcol = break_range.col;
+
+                if bline < line.ndx1 + 1 {
+                    breakable_points.next();
+                } else if bline == line.ndx1 + 1 {
+                    if bcol as usize == col {
+                        write!(buf,
+                           "<span class='relative cursor-pointer' x-on:click='highlight.iidStart = {}; highlight.iidEnd = {};'>◯</span>",
+                           break_range.iid_start.0,
+                           break_range.iid_end.0,
+                       )?;
+                    }
+                    if bcol as usize <= col {
+                        breakable_points.next();
+                    }
+                }
+            }
+
+            write!(buf, "{}", ch)?;
+        }
+
+        writeln!(buf)?;
+    }
+    writeln!(buf, "</pre>")?;
+
+    Ok(buf)
 }
 
 mod interpreter_manager {
@@ -433,6 +437,7 @@ mod model {
     use std::collections::HashMap;
 
     use bytecode::{ArgIndex, CaptureIndex, VReg};
+    use mcjs_vm::IID;
     use mcjs_vm::{bytecode, interpreter::debugger::Probe};
     use serde::Serialize;
 
@@ -711,6 +716,13 @@ mod model {
         pub iid: u16,
 
         pub values: Values,
+    }
+
+    pub struct BreakRange {
+        pub line: u32,
+        pub col: u32,
+        pub iid_start: IID,
+        pub iid_end: IID,
     }
 
     #[derive(Clone, Serialize)]

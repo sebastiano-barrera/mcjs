@@ -69,8 +69,8 @@
 				{{#each frames}}
 					<div
 						id="stack-frame-{{ @index }}"
-						class="grid stack-view-grid-rows min-w-fit mr-4 space-x-2 h-full
-							border-l border-zinc-600 text-xs"
+						class="grid stack-view-grid-rows min-w-fit pr-4 space-x-2 h-full
+							border-l border-zinc-600 text-xs odd:bg-zinc-900"
 						x-data="{sourceVisible: false, highlight: {iidStart: null, iidEnd: null}}"
 					>
 						<div 
@@ -142,7 +142,7 @@
 										data-mcjs-value="call{{ callID }}-v{{ instrNdx }}"
 									>
 										<span
-											class="font-mono px-2 border-white [&.highlight]:border-l-2"
+											class="font-mono px-2 border-white [&.highlight]:border-r-2"
 											x-bind:class="{{ @index }} >= highlight.iidStart && {{ @index }} < highlight.iidEnd && 'highlight'"
 										>
 											{{ @index }}⬥ 

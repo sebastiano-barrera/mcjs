@@ -18,7 +18,11 @@
 }
 
 .stack-view-grid-rows {
-  grid-template-rows: 1.2cm minmax(0, 1fr) max(40%, 3cm);
+	grid-template-rows: 1.2cm minmax(0, 1fr) max(40%, 3cm);
+}
+
+.source-view-grid-cols {
+	grid-template-columns: 1.2cm 1fr;
 }
 
 html {
