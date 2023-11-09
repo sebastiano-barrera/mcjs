@@ -116,9 +116,15 @@
 							</div>
 						</div>
 
+						<!-- 
+							Why overflow-x-hidden: There is a bug (I think in Firefox) that scrolls the
+							view of a little bit in the X direction when the window gains or loses focus
+							(in the window manager, e.g. by using alt-tab). Plus it also messes up with the
+							general layout, where horizontal scrolling is used to view other stack frames.
+						-->
 						<div
 							id="source-content-{{@index}}"
-							class="overflow-scroll min-w-[8cm] max-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
+							class="overflow-x-hidden overflow-y-scroll min-w-[8cm] max-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
 							x-show="sourceVisible">
 						</div>
 
