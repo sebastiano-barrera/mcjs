@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::ops::Range;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
@@ -6,6 +7,7 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{Error, Result};
 use handlebars::{handlebars_helper, Handlebars};
 use listenfd::ListenFd;
+use mcjs_vm::bytecode;
 use serde_json::json;
 use serde_json::Value as JsonValue;
 use tokio::sync::broadcast;
@@ -149,8 +151,6 @@ async fn some_text(
     app_data: web::Data<AppData<'static>>,
     path: web::Path<(u32,)>,
 ) -> impl Responder {
-    use mcjs_vm::bytecode::IID;
-
     let (frame_ndx,) = path.into_inner();
 
     let res = app_data
@@ -160,47 +160,66 @@ async fn some_text(
             let giid = probe.frame_giid(frame_ndx as usize);
             let fnid = giid.0;
 
-            let source_map = probe.loader().get_source_map(fnid.0);
-
-            let frame_src = model::decode_frame_source(source_map, probe.loader(), giid)?;
+            let source_map = probe.loader().get_source_map(fnid.0)?;
 
             let loader = probe.loader();
-            let breakable_points: Vec<_> = loader
-                .function_breakranges(fnid)
-                .unwrap()
-                .map(|break_range| {
-                    let pos = source_map.unwrap().lookup_char_pos(break_range.lo);
-                    model::BreakRange {
-                        line: pos.line.try_into().unwrap(),
-                        col: pos.col.0.try_into().unwrap(),
-                        iid_start: break_range.iid_start,
-                        iid_end: break_range.iid_end,
-                    }
-                })
-                .collect();
+            let markers: Vec<_> = {
+                use model::break_range::*;
 
-            Some((frame_src, breakable_points))
+                let mut markers = Vec::new();
+
+                let break_ranges = loader.function_breakranges(fnid).unwrap();
+
+                for brange in break_ranges {
+                    let bytecode::BreakRange {
+                        iid_start, iid_end, ..
+                    } = *brange;
+
+                    markers.push(Marker {
+                        kind: MarkerKind::Start { iid_start, iid_end },
+                        offset: brange.lo.0,
+                    });
+                    markers.push(Marker {
+                        kind: MarkerKind::End,
+                        offset: brange.hi.0,
+                    });
+                }
+
+                markers.sort_by_key(|m| m.offset);
+                markers
+            };
+
+            if markers.is_empty() {
+                return None;
+            }
+
+            let offset_range = {
+                let offset_min = markers.iter().map(|m| m.offset).min().unwrap();
+                let offset_max = markers.iter().map(|m| m.offset).max().unwrap();
+                offset_min..offset_max
+            };
+
+            let frame_src = extract_frame_source(source_map, probe.loader(), giid, offset_range)?;
+            render_source_code(&markers, &frame_src).ok()
         })
         .await;
 
     match res {
-        Some((frame_src, mut breakable_points)) => {
-            breakable_points.sort_by_key(|brange| (brange.line, brange.col));
-            let buf = render_source_code(&breakable_points, frame_src).unwrap();
-            HttpResponse::Ok().body(buf)
-        }
+        Some(text) => HttpResponse::Ok().body(text),
         // TODO Actually expose any errors
         None => HttpResponse::NotFound().body(""),
     }
 }
 
 fn render_source_code(
-    breakable_points: &[model::BreakRange],
-    frame_src: model::FrameSource,
+    markers: &[model::break_range::Marker],
+    frame_src: &model::FrameSource,
 ) -> std::result::Result<String, std::fmt::Error> {
+    use model::break_range::MarkerKind;
     use std::fmt::Write;
 
-    let mut breakable_points = breakable_points.iter().peekable();
+    let mut markers = markers.into_iter().enumerate().peekable();
+
     let mut buf = String::new();
 
     writeln!(buf, "<div class=\"grid source-view-grid-cols\">")?;
@@ -208,51 +227,101 @@ fn render_source_code(
         buf,
         "<pre x-init=\"$el.querySelector('.current').scrollIntoView({{ block: 'center' }})\">"
     )?;
-    for line in &frame_src.lines {
-        if line.ndx1 == frame_src.line_focus {
+    // TODO Is the range inclusive?
+    for line_ndx in frame_src.start_line..frame_src.end_line {
+        if Some(line_ndx) == frame_src.line_focus {
             writeln!(
                 buf,
                 "<span class='current bg-white text-black'>{:4}</span>",
-                line.ndx1,
+                line_ndx,
             )?;
         } else {
-            writeln!(buf, "{:4}", line.ndx1)?;
+            writeln!(buf, "{:4}", line_ndx)?;
         }
     }
     writeln!(buf, "</pre>")?;
 
-    writeln!(buf, "<pre>")?;
-    for line in &frame_src.lines {
-        let chars = line.text.chars().enumerate();
-        for (col, ch) in chars {
-            if let Some(break_range) = breakable_points.peek() {
-                let bline = break_range.line;
-                let bcol = break_range.col;
+    writeln!(buf, "<pre x-data='{{ markerIndex: 0 }}'>")?;
+    for (rel_offset, ch) in frame_src.text.chars().enumerate() {
+        let rel_offset: u32 = rel_offset.try_into().unwrap();
+        let offset = frame_src.start_offset.0 + rel_offset + 1;
 
-                if bline < line.ndx1 + 1 {
-                    breakable_points.next();
-                } else if bline == line.ndx1 + 1 {
-                    if bcol as usize == col {
-                        write!(buf,
-                           "<span class='relative cursor-pointer' x-on:click='highlight.iidStart = {}; highlight.iidEnd = {};'>◯</span>",
-                           break_range.iid_start.0,
-                           break_range.iid_end.0,
-                       )?;
-                    }
-                    if bcol as usize <= col {
-                        breakable_points.next();
-                    }
+        while let Some((mkr_ndx, mkr)) = markers.peek().filter(|(_, mkr)| mkr.offset == offset) {
+            assert!(mkr.offset >= offset);
+
+            match mkr.kind {
+                MarkerKind::Start { iid_start, iid_end } => {
+                    write!(buf,
+                       "<span class='relative cursor-pointer' x-bind:class=\"markerIndex == {} && 'bg-sky-800'\"><span x-on:click='markerIndex = {}; highlight.iidStart = {}; highlight.iidEnd = {};'>◯ </span>",
+                       mkr_ndx,
+                       mkr_ndx,
+                       iid_start.0,
+                       iid_end.0,
+                   )?;
                 }
-            }
+                MarkerKind::End => {
+                    write!(buf, "</span>")?;
+                }
+            };
 
-            write!(buf, "{}", ch)?;
+            markers.next();
         }
 
-        writeln!(buf)?;
+        write!(buf, "{}", ch)?;
     }
-    writeln!(buf, "</pre>")?;
+
+    assert!(markers.next().is_none());
+    writeln!(buf, "</div>")?;
 
     Ok(buf)
+}
+
+pub fn extract_frame_source(
+    source_map: &swc_common::SourceMap,
+    loader: &mcjs_vm::Loader,
+    giid: mcjs_vm::GlobalIID,
+    offset_range: Range<u32>,
+) -> Option<model::FrameSource> {
+    use swc_common::BytePos;
+
+    // NOTE We're making a distinct source map per file, but the API clearly
+    // supports a single source map for multiple files.  Should I use it?
+    let files = source_map.files();
+    let source_file = &files.first().unwrap();
+
+    let line_focus = line_number_of_giid(loader, giid, source_file);
+
+    use std::cmp::{max, min};
+    let Range { mut start, mut end } = offset_range;
+    start = max(0, start - 150);
+    end = min(source_file.src.len().try_into().unwrap(), end + 150);
+
+    // Snap to line boundaries
+    let start_line = source_file.lookup_line(BytePos(start)).unwrap();
+    let (start_offset, _) = source_file.line_bounds(start_line);
+
+    let end_line = source_file.lookup_line(BytePos(end)).unwrap();
+    let (_, end_offset) = source_file.line_bounds(end_line);
+
+    let text = &source_file.src[start_offset.0 as usize..end_offset.0 as usize];
+
+    Some(model::FrameSource {
+        text: text.to_string(),
+        line_focus,
+        start_line,
+        start_offset,
+        end_line,
+        end_offset,
+    })
+}
+
+fn line_number_of_giid(
+    loader: &mcjs_vm::Loader,
+    giid: mcjs_vm::GlobalIID,
+    source_file: &swc_common::SourceFile,
+) -> Option<usize> {
+    let break_range = loader.breakrange_at_giid(giid)?;
+    Some(source_file.lookup_line(break_range.lo).unwrap())
 }
 
 mod interpreter_manager {
@@ -433,11 +502,9 @@ mod interpreter_manager {
 
 #[allow(non_snake_case)]
 mod model {
-    use std::cmp::{max, min};
     use std::collections::HashMap;
 
     use bytecode::{ArgIndex, CaptureIndex, VReg};
-    use mcjs_vm::IID;
     use mcjs_vm::{bytecode, interpreter::debugger::Probe};
     use serde::Serialize;
 
@@ -490,15 +557,15 @@ mod model {
                     bytecode::GlobalIID(fnid, iid)
                 };
 
-                let source_map = loader.get_source_map(mod_id);
-
-                let source = decode_frame_source(source_map, loader, giid);
+                let source_filename = loader
+                    .get_source_map(mod_id)
+                    .and_then(|sm| get_filename(sm.files().first().unwrap()));
 
                 let func = loader.get_function(fnid).unwrap();
                 let values = decode_locs_state(&frame, func, giid.1);
 
                 frames.push(Frame {
-                    source,
+                    source_filename,
                     // TODO Remove the damn call ID
                     callID: i.try_into().unwrap(),
                     moduleID: mod_id.0,
@@ -551,47 +618,13 @@ mod model {
         }
     }
 
-    pub fn decode_frame_source(
-        source_map: Option<&swc_common::SourceMap>,
-        loader: &mcjs_vm::Loader,
-        giid: mcjs_vm::GlobalIID,
-    ) -> Option<FrameSource> {
-        let source_map = source_map?;
-
-        // NOTE We're making a distinct source map per file, but the API clearly
-        // supports a single source map for multiple files.  Should I use it?
-        let files = source_map.files();
-        let source_file = &files.first().unwrap();
-
-        let filename = {
-            let file_name = &source_file.name;
-            eprintln!("sourceFile <- {:?}", file_name);
-            match file_name {
-                swc_common::FileName::Real(path) => path.to_string_lossy().into_owned(),
-                _ => return None,
-            }
-        };
-
-        let line_focus = {
-            let break_range = loader.breakrange_at_giid(giid)?;
-            source_file.lookup_line(break_range.lo).unwrap()
-        };
-
-        let line_start = max(0, line_focus as isize - 150) as usize;
-        let line_end = min(source_file.count_lines() - 1, line_focus + 150);
-
-        let lines: Vec<_> = (line_start..line_end)
-            .map(|line_ndx| SourceLine {
-                ndx1: line_ndx.try_into().unwrap(),
-                text: source_file.get_line(line_ndx).unwrap().into_owned(),
-            })
-            .collect();
-
-        Some(FrameSource {
-            filename,
-            line_focus: line_focus.try_into().unwrap(),
-            lines,
-        })
+    pub fn get_filename(source_file: &swc_common::SourceFile) -> Option<String> {
+        let file_name = &source_file.name;
+        eprintln!("sourceFile <- {:?}", file_name);
+        match file_name {
+            swc_common::FileName::Real(path) => Some(path.to_string_lossy().into_owned()),
+            _ => None,
+        }
     }
 
     fn decode_locs_state(
@@ -708,7 +741,7 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct Frame {
-        pub source: Option<FrameSource>,
+        pub source_filename: Option<String>,
 
         pub callID: u32,
         pub moduleID: u16,
@@ -718,11 +751,19 @@ mod model {
         pub values: Values,
     }
 
-    pub struct BreakRange {
-        pub line: u32,
-        pub col: u32,
-        pub iid_start: IID,
-        pub iid_end: IID,
+    pub mod break_range {
+        use mcjs_vm::IID;
+
+        #[derive(Debug)]
+        pub enum MarkerKind {
+            Start { iid_start: IID, iid_end: IID },
+            End,
+        }
+        #[derive(Debug)]
+        pub struct Marker {
+            pub kind: MarkerKind,
+            pub offset: u32,
+        }
     }
 
     #[derive(Clone, Serialize)]
@@ -744,10 +785,12 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct FrameSource {
-        pub filename: String,
-        pub line_focus: LineNum,
-        // Yes, whatever, we're copying, I don't care right now
-        pub lines: Vec<SourceLine>,
+        pub text: String,
+        pub start_line: usize,
+        pub start_offset: swc_common::BytePos,
+        pub end_line: usize,
+        pub end_offset: swc_common::BytePos,
+        pub line_focus: Option<usize>,
     }
 
     #[derive(Clone, Serialize)]

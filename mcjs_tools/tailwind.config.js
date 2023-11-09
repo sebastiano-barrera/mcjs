@@ -7,7 +7,8 @@ module.exports = {
     'text-black',
     'bg-red-700',
     'relative',
-    'bottom-[2lh]'
+    'bottom-[2lh]',
+    'bg-sky-800'
   ],
   theme: {
     extend: {},
