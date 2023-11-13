@@ -28,8 +28,6 @@ use crate::{
 
 pub use crate::common::Error;
 
-use self::debugger::Probe;
-
 macro_rules! tprintln {
     ($($args:expr),*) => {
         #[cfg(test)]
@@ -269,9 +267,10 @@ pub struct InterpreterError<'a> {
     // anything else with it other than examining it (read-only, via &)
     interpreter: Interpreter<'a>,
 }
+#[cfg(feature = "debugger")]
 impl<'a> InterpreterError<'a> {
     pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
-        Probe::attach(&mut self.interpreter)
+        debugger::Probe::attach(&mut self.interpreter)
     }
 }
 impl<'a> std::fmt::Debug for InterpreterError<'a> {
@@ -296,15 +295,23 @@ impl<'a> Interpreter<'a> {
         let root_fn = loader.get_function(fnid).unwrap();
         let n_instrs = root_fn.instrs().len().try_into().unwrap();
 
-        data.push(stack::CallMeta {
-            fnid,
-            n_instrs,
-            n_captured_upvalues: 0,
-            n_args: 0,
-            this: Value::Undefined,
-            return_value_reg: None,
-            return_to_iid: None,
-        });
+        let n_captures = root_fn.n_captures();
+        let init_captures: Vec<UpvalueId> = (0..n_captures.0)
+            .map(|_| data.new_upvalue(Value::Undefined))
+            .collect();
+
+        data.push(
+            stack::CallMeta {
+                fnid,
+                n_instrs,
+                n_captured_upvalues: n_captures.0,
+                n_args: 0,
+                this: Value::Undefined,
+                return_value_reg: None,
+                return_to_iid: None,
+            },
+            &init_captures,
+        );
 
         Interpreter {
             iid: bytecode::IID(0),
@@ -519,7 +526,18 @@ impl<'a> Interpreter<'a> {
                     self.data.top_mut().set_result(*dst, value);
                 }
                 Instr::LoadCapture(dest, cap_ndx) => {
-                    self.data.capture_to_var(*cap_ndx, *dest);
+                    let upv_id = self.data.top().get_capture(*cap_ndx).unwrap();
+                    let value: Value = self.data.load_upvalue(upv_id);
+                    self.data.top_mut().set_result(*dest, value);
+                }
+                Instr::StoreCapture(cap_ndx, src) => {
+                    let upv_id = self
+                        .data
+                        .top()
+                        .get_capture(*cap_ndx)
+                        .ok_or_else(|| error!("no such capture {:?}", cap_ndx))?;
+                    let value: Value = self.data.top().get_result(*src);
+                    self.data.store_upvalue(upv_id, value);
                 }
 
                 Instr::Nop => {}
@@ -625,15 +643,10 @@ impl<'a> Interpreter<'a> {
                                 call_meta.n_captured_upvalues
                             );
 
-                            self.data.push(call_meta);
+                            self.data.push(call_meta, &closure.upvalues);
                             for (capndx, capture) in closure.upvalues.iter().enumerate() {
-                                let capndx = bytecode::CaptureIndex(
-                                    capndx.try_into().expect("too many captures!"),
-                                );
                                 self.print_indent();
-                                tprintln!("    capture[{}] = {:?}", capndx.0, capture);
-                                self.data.top_mut().set_capture(capndx, *capture);
-                                assert_eq!(self.data.top().get_capture(capndx), *capture);
+                                tprintln!("    capture[{}] = {:?}", capndx, capture);
                             }
                             for (i, arg) in arg_vals.into_iter().enumerate() {
                                 self.data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
@@ -797,15 +810,12 @@ impl<'a> Interpreter<'a> {
                     forced_this,
                 } => {
                     let mut upvalues = Vec::new();
-                    while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
-                        let upv_id = self.data.top_mut().ensure_in_upvalue(cap);
-                        {
-                            self.print_indent();
-                            tprintln!("        upvalue: {:?} -> {:?}", cap, upv_id);
-                        }
-
+                    while let Instr::ClosureShare(capture_ndx) = func.instrs()[next_ndx as usize] {
+                        let upv_id =
+                            self.data.top().get_capture(capture_ndx).ok_or_else(|| {
+                                error!("no such capture at index {}", capture_ndx.0)
+                            })?;
                         upvalues.push(upv_id);
-
                         next_ndx += 1;
                     }
 
@@ -822,9 +832,9 @@ impl<'a> Interpreter<'a> {
                     self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 // This is always handled in the code for ClosureNew
-                Instr::ClosureAddCapture(_) => {
+                Instr::ClosureShare(_) => {
                     unreachable!(
-                        "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
+                        "interpreter bug: ClosureShare should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureShare and ClosureNew.)"
                     )
                 }
 
@@ -866,7 +876,7 @@ impl<'a> Interpreter<'a> {
                         self.print_indent();
                         tprintln!("-- loading module {:?}", root_fnid.0);
 
-                        self.data.push(call_meta);
+                        self.data.push(call_meta, &[]);
                         self.iid = IID(0u16);
                         continue;
                     }

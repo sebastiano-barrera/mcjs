@@ -44,7 +44,7 @@ impl InterpreterData {
         self.n_frames
     }
 
-    pub(crate) fn push(&mut self, call_meta: CallMeta) {
+    pub(crate) fn push(&mut self, call_meta: CallMeta, captures: &[UpvalueId]) {
         let frame_hdr = stack_access::FrameHeader {
             #[cfg(test)]
             magic: stack_access::FrameHeader::MAGIC,
@@ -63,7 +63,7 @@ impl InterpreterData {
             call_meta.n_args, call_meta.n_captured_upvalues, call_meta.n_instrs,
         );
 
-        self.stack.push_frame(frame_hdr);
+        self.stack.push_frame(frame_hdr, captures);
         self.n_frames += 1;
     }
 
@@ -95,13 +95,18 @@ impl InterpreterData {
         })
     }
 
-    pub(crate) fn capture_to_var(
-        &mut self,
-        capture_ndx: bytecode::CaptureIndex,
-        vreg: bytecode::VReg,
-    ) {
-        let upv_id = self.top().get_capture(capture_ndx);
-        self.top_mut().inner.vars_mut()[vreg.0 as usize] = stack_access::Slot::Upvalue(upv_id);
+    pub(crate) fn load_upvalue(&self, upv_id: UpvalueId) -> Value {
+        let slot = self.upv_alloc.get(upv_id).unwrap();
+        *slot
+    }
+
+    pub(crate) fn store_upvalue(&mut self, upv_id: UpvalueId, value: Value) {
+        let slot = self.upv_alloc.get_mut(upv_id).unwrap();
+        *slot = value;
+    }
+
+    pub(crate) fn new_upvalue(&mut self, value: Value) -> UpvalueId {
+        self.upv_alloc.insert(value)
     }
 }
 
@@ -120,8 +125,7 @@ impl<'a> Frame<'a> {
     }
 
     pub fn get_result(&self, vreg: bytecode::VReg) -> Value {
-        let slot = &self.inner.vars()[vreg.0 as usize];
-        slot_value(slot, &self.upv_alloc)
+        self.inner.vars()[vreg.0 as usize]
     }
     pub fn results<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = Value> {
         (0..self.header().n_instrs).map(|i| {
@@ -131,10 +135,7 @@ impl<'a> Frame<'a> {
     }
 
     pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Option<Value> {
-        self.inner
-            .args()
-            .get(argndx.0 as usize)
-            .map(|slot| slot_value(slot, &self.upv_alloc))
+        self.inner.args().get(argndx.0 as usize).copied()
     }
     pub fn args<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = Option<Value>> {
         (0..self.header().n_args).map(|i| {
@@ -143,17 +144,13 @@ impl<'a> Frame<'a> {
         })
     }
 
-    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
-        let slot = &self.inner.captures()[capture_ndx.0 as usize];
-        match slot {
-            stack_access::Slot::Inline(_) => unreachable!(),
-            stack_access::Slot::Upvalue(upv_id) => *upv_id,
-        }
+    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> Option<UpvalueId> {
+        self.inner.captures().get(capture_ndx.0 as usize).copied()
     }
     pub fn captures<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = UpvalueId> {
         (0..self.header().n_captures).map(|i| {
             let capndx = bytecode::CaptureIndex(i.try_into().unwrap());
-            self.get_capture(capndx)
+            self.get_capture(capndx).unwrap()
         })
     }
 }
@@ -161,51 +158,32 @@ impl<'a> Frame<'a> {
 impl<'a> FrameMut<'a> {
     pub(crate) fn set_result(mut self, vreg: bytecode::VReg, value: Value) {
         let slot = &mut self.inner.vars_mut()[vreg.0 as usize];
-        set_slot_value(slot, value, &mut self.upv_alloc);
+        *slot = value;
     }
 
     pub(crate) fn set_arg(mut self, argndx: bytecode::ArgIndex, value: Value) {
         let slot = &mut self.inner.args_mut()[argndx.0 as usize];
-        set_slot_value(slot, value, &mut self.upv_alloc);
+        *slot = value;
     }
 
-    pub(crate) fn ensure_in_upvalue(self, var: bytecode::VReg) -> UpvalueId {
-        let varndx = var.0 as usize;
-        let slot = &mut self.inner.vars_mut()[varndx as usize];
-
-        match slot {
-            stack_access::Slot::Inline(value) => {
-                let upv_id = self.upv_alloc.insert(*value);
-                *slot = stack_access::Slot::Upvalue(upv_id);
-                upv_id
-            }
-            stack_access::Slot::Upvalue(upv_id) => *upv_id,
-        }
-    }
-
-    pub(crate) fn set_capture(self, capture_ndx: bytecode::CaptureIndex, capture: UpvalueId) {
-        self.inner.captures_mut()[capture_ndx.0 as usize] = stack_access::Slot::Upvalue(capture);
+    pub(crate) fn set_capture(self, capture_ndx: bytecode::CaptureIndex, upv_id: UpvalueId) {
+        self.inner.captures_mut()[capture_ndx.0 as usize] = upv_id;
     }
 }
 
-fn slot_value(slot: &stack_access::Slot, upv_alloc: &Heap) -> Value {
-    match slot {
-        stack_access::Slot::Inline(value) => *value,
-        stack_access::Slot::Upvalue(upv_id) => *upv_alloc
-            .get(*upv_id)
-            .expect("gc bug: value deleted but still referenced by stack"),
-    }
+fn read_capture(upv_alloc: &slotmap::SlotMap<UpvalueId, Value>, upv_id: &UpvalueId) -> Value {
+    *upv_alloc
+        .get(*upv_id)
+        .expect("gc bug: value deleted but still referenced by stack")
 }
-fn set_slot_value(slot: &mut stack_access::Slot, value: Value, upv_alloc: &mut Heap) {
-    match slot {
-        stack_access::Slot::Inline(slot_value) => {
-            *slot_value = value;
-        }
-        stack_access::Slot::Upvalue(upv_id) => {
-            let heap_value = upv_alloc
-                .get_mut(*upv_id)
-                .expect("gc bug: value deleted but still referenced by stack");
-            *heap_value = value;
-        }
-    };
+
+fn write_capture(
+    upv_alloc: &mut slotmap::SlotMap<UpvalueId, Value>,
+    upv_id: &mut UpvalueId,
+    value: Value,
+) {
+    let heap_value = upv_alloc
+        .get_mut(*upv_id)
+        .expect("gc bug: value deleted but still referenced by stack");
+    *heap_value = value;
 }

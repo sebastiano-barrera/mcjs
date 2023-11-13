@@ -10,11 +10,7 @@ type ResultSlot = Slot;
 type ArgSlot = Slot;
 type CaptureSlot = UpvalueId;
 
-#[derive(Clone, Copy)]
-pub(crate) enum Slot {
-    Inline(Value),
-    Upvalue(UpvalueId),
-}
+pub(crate) type Slot = Value;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameHeader {
@@ -52,7 +48,8 @@ impl Stack {
         self.store.len()
     }
 
-    pub(crate) fn push_frame(&mut self, header: FrameHeader) {
+    pub(crate) fn push_frame(&mut self, header: FrameHeader, captures: &[UpvalueId]) {
+
         let layout = FrameLayout::measure(&header);
         assert!(self.top_offset >= layout.size);
         self.top_offset -= layout.size;
@@ -60,13 +57,15 @@ impl Stack {
         let frame_raw = &mut self.store[self.top_offset..self.top_offset + layout.size];
         layout.header.write(frame_raw, header);
         for (i, var_slot) in layout.vars.get_mut(frame_raw).iter_mut().enumerate() {
-            *var_slot = Slot::Inline(Value::Number(i as f64));
+            *var_slot = Value::Number(i as f64);
         }
         for (i, arg_slot) in layout.args.get_mut(frame_raw).iter_mut().enumerate() {
-            *arg_slot = Slot::Inline(Value::Number(i as f64));
+            *arg_slot = Value::Number(i as f64);
         }
-        for (i, cap_slot) in layout.captures.get_mut(frame_raw).iter_mut().enumerate() {
-            *cap_slot = Slot::Inline(Value::Number(i as f64));
+
+        assert_eq!(captures.len(), header.n_captures as usize);
+        for (cap_slot, upv_id) in layout.captures.get_mut(frame_raw).iter_mut().zip(captures) {
+            *cap_slot = *upv_id;
         }
     }
 
@@ -130,7 +129,7 @@ impl<'a> FrameView<'a> {
     pub(crate) fn vars(&self) -> &'a [Slot] {
         self.layout.vars.get(self.raw_data)
     }
-    pub(crate) fn captures(&self) -> &'a [Slot] {
+    pub(crate) fn captures(&self) -> &'a [UpvalueId] {
         self.layout.captures.get(self.raw_data)
     }
 }
@@ -145,7 +144,7 @@ impl<'a> FrameViewMut<'a> {
     pub(crate) fn vars_mut(self) -> &'a mut [Slot] {
         self.layout.vars.get_mut(self.raw_data)
     }
-    pub(crate) fn captures_mut(self) -> &'a mut [Slot] {
+    pub(crate) fn captures_mut(self) -> &'a mut [UpvalueId] {
         self.layout.captures.get_mut(self.raw_data)
     }
 }
@@ -154,7 +153,7 @@ struct FrameLayout {
     header: Field<FrameHeader>,
     vars: SliceField<Slot>,
     args: SliceField<Slot>,
-    captures: SliceField<Slot>,
+    captures: SliceField<UpvalueId>,
     size: usize,
 }
 impl FrameLayout {

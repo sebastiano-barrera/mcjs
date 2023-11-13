@@ -6,7 +6,9 @@ use swc_ecma_ast::{
     ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, ForHead, Function, Lit, Pat, UpdateOp, VarDecl,
 };
 
-use crate::bytecode::{self, IdentAsmt, Instr, Literal, Loc, LocalFnId, NativeFnId, VReg, IID};
+use crate::bytecode::{
+    self, CaptureIndex, IdentAsmt, Instr, Literal, Loc, LocalFnId, NativeFnId, VReg, IID,
+};
 use crate::common::{Context, Error, Result};
 use crate::error;
 use crate::util::Mask;
@@ -149,7 +151,7 @@ struct FnBuilder {
     consts: Vec<Literal>,
     span: Option<swc_common::Span>,
     trace_anchors: HashMap<IID, bytecode::TraceAnchor>,
-    next_vreg: u8,
+    next_vreg: u16,
     n_params: bytecode::ArgIndex,
     // Places where a break instruction must be placed when the break target is finally "written"
     // by the compiler.
@@ -157,6 +159,20 @@ struct FnBuilder {
     pending_continue_instrs: Vec<IID>,
     captures: Vec<String>,
     ident_history: Vec<IdentAsmt>,
+}
+
+/// Specifies how a given capture is initialized. 
+enum CaptureSpec {
+    /// The capture slot is for a variable captured from the function's surrounding context
+    /// ("environment").  This means that the value for it will be put in the closure during closure
+    /// construction (ClosureShare), and it will be taken from the by the interpreter when the
+    /// function is called.
+    Imported(String),
+
+    /// The capture slot is for a variable that is shared with one or more of the functions nested into
+    /// the current one.  The value for it will be written by a StoreCapture instruction.  Upon
+    /// calling the function, the interpreter will leave this capture slot uninitialized..
+    Exported,
 }
 
 #[derive(Debug)]
@@ -196,10 +212,12 @@ impl FnBuilder {
             self.pending_break_instrs.is_empty(),
             "bytecode compiler bug: the function is over, but some break instructions were not placed yet"
         );
+        let n_captures = CaptureIndex(self.captures.len().try_into().unwrap());
         bytecode::Function::new(
             self.instrs.into_boxed_slice(),
             self.consts.into_boxed_slice(),
             self.n_params,
+            n_captures,
             self.ident_history,
             self.trace_anchors,
         )
@@ -256,10 +274,9 @@ impl FnBuilder {
         iid
     }
 
-    // Assign a new upvalue index to the given variable, and emits the necessary "GetCapture"
-    // instruction.
-    // Subsequent calls to get_var will return  the IID for the GetCapture instruction.
-    fn set_var_captured(&mut self, name: JsWord) -> Loc {
+    // Assign a new capture index to the given variable.
+    // All subsequent calls to get_var for the same 'name' will refer to the CaptureIndex allocated to the new capture.
+    fn var_to_new_capture(&mut self, name: JsWord) -> CaptureIndex {
         let name_str = name.to_string();
         assert!(!self.captures.iter().any(|cap| cap == &name_str));
 
@@ -292,14 +309,33 @@ impl FnBuilder {
             ident: name,
         });
 
-        loc
+        cap_ndx
     }
 
-    fn get_var(&self, name: &JsWord) -> Option<Loc> {
+    fn ensure_captured(&mut self, name: JsWord) -> CaptureIndex {
+        let cap_ndx = match self.get_var(name.clone()) {
+            Some(Loc::Capture(cap_ndx)) => cap_ndx,
+            Some(Loc::VReg(vreg)) => {
+                // `name` designates a local variable => we want to make it a shared variable
+                // So we create a capture, associate it to `name` and emit code to initialize it.
+                // The register `vreg` should never be used again. 
+                let cap_ndx = self.var_to_new_capture(name.clone());
+                self.emit(Instr::StoreCapture(cap_ndx, vreg));
+                cap_ndx
+            },
+            _ => self.var_to_new_capture(name.clone()),
+        };
+
+        debug_assert!(self.get_var(name.clone()) == Some(Loc::Capture(cap_ndx)));
+
+        cap_ndx
+    }
+
+    fn get_var(&self, name: JsWord) -> Option<Loc> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.vars.get(name))
+            .find_map(|scope| scope.vars.get(&name))
             .copied()
     }
 
@@ -386,7 +422,7 @@ impl Builder {
             .iter()
             .rev()
             .enumerate()
-            .find_map(|(ndx, fnb)| fnb.get_var(sym).map(|vreg| (ndx, vreg)))
+            .find_map(|(ndx, fnb)| fnb.get_var(sym.clone()).map(|vreg| (ndx, vreg)))
             .or_else(|| {
                 let vreg = self.new_vreg();
                 self.set_const(vreg, Literal::String(sym.to_string()));
@@ -400,19 +436,20 @@ impl Builder {
 
     fn get_var(&mut self, sym: &JsWord) -> Result<Loc> {
         match self.find_vreg(sym) {
-            // Hell yeah, found it in the current function, we have a "simple" IID
+            // Hell yeah, found it in the current function, we have a "simple" vreg
             Some((0, vreg)) => Ok(vreg),
             Some((_, _)) => {
                 // Found it in one of the enclosing functions.  We'll have to add a capture, but we
                 // know the variable is there
-                let vreg = self.cur_fnb().set_var_captured(sym.clone());
+                let cap_ndx = self.cur_fnb().var_to_new_capture(sym.clone());
+                let loc = Loc::Capture(cap_ndx);
 
                 {
                     let (depth, _) = self.find_vreg(sym).unwrap();
-                    assert_eq!(depth, 0);
+                    debug_assert_eq!(depth, 0);
                 }
 
-                Ok(vreg)
+                Ok(loc)
             }
             None => Err(error!("unbound symbol: {}", sym)),
         }
@@ -420,7 +457,11 @@ impl Builder {
 
     fn read_var(&mut self, sym: &JsWord) -> Result<VReg> {
         let loc = self.get_var(sym)?;
-        let vreg = match loc {
+        Ok(self.read_loc(loc))
+    }
+
+    fn read_loc(&mut self, loc: Loc) -> VReg {
+        match loc {
             Loc::VReg(vreg) => vreg,
             Loc::Arg(arg_ndx) => {
                 let vreg = self.new_vreg();
@@ -432,8 +473,7 @@ impl Builder {
                 self.emit(Instr::LoadCapture(vreg, cap_ndx));
                 vreg
             }
-        };
-        Ok(vreg)
+        }
     }
 
     fn new_vreg(&mut self) -> VReg {
@@ -705,9 +745,6 @@ fn compile_module(ast_module: &swc_ecma_ast::Module, min_fnid: u16) -> Result<Co
     builder.emit(Instr::Return(module_obj));
     let root_fnid = builder.end_function();
 
-    // The root function is the outermost scope, and therefore must capture
-    // nothing.  Otherwise, we have a bug.
-    assert!(builder.fns.get(&root_fnid).unwrap().captures.is_empty());
     for fnid in builder.fns.keys() {
         assert!(fnid.0 >= min_fnid);
     }
@@ -1207,32 +1244,49 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     let stmts = &func.body.as_ref().expect("function without body?!").stmts;
     compile_block(builder, stmts)?;
 
-    let mut inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
-    inner_fnb.span = Some(func.span);
+    builder.cur_fnb().span = Some(func.span);
+
+    let inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
+
+    let dest = compile_closure(builder, inner_fnb, None);
+    Ok(dest)
+}
+
+fn compile_closure(builder: &mut Builder, inner_fnb: FnBuilder, forced_this: Option<VReg>) -> VReg {
+    // Here is a trick:
+    //   - Each variable 'v' that is captured by the new ("inner") function will have to be stored in an
+    //     upvalue in order to be shared with this ("outer") function.
+    //
+    //   - As a consequence,  each new access (read/write) to 'v' in the outer function has to be
+    //   translated to an access to that upvalue. This is identical to what would happen if 'v' had
+    //   been captured from some outer scope in the first place.
+    //
+    //   => We can 'just' record 'v' as being a captured variable in the outer function first.
+    //   Then we'll copy the upvalue ID to the inner function's closure.
+    //
+    //  Then all we have to do is to 'share' a capture with the inner function.
 
     // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
     // the ClosureNew and any associated ClosureAddCapture are adjacent
     let mut captures = Vec::new();
     for var_name in inner_fnb.captures.iter() {
         let var_name = JsWord::from(var_name.as_str());
-        let vreg = builder.read_var(&var_name).with_context(
-            error!("resolving identifier for function's capture").with_span(func.span),
-        )?;
-        captures.push(vreg);
+        let cap_ndx = builder.cur_fnb().ensure_captured(var_name);
+        captures.push(cap_ndx);
     }
 
     let dest = builder.new_vreg();
     builder.emit(Instr::ClosureNew {
         dest,
         fnid: inner_fnb.fnid,
-        forced_this: None,
+        forced_this,
     });
-    for vreg in captures {
-        builder.emit(Instr::ClosureAddCapture(vreg));
+    for cap_ndx in captures {
+        builder.emit(Instr::ClosureShare(cap_ndx));
     }
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
-    Ok(dest)
+    dest
 }
 
 fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VReg> {
@@ -1274,34 +1328,7 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
     let forced_this = builder.new_vreg();
     builder.emit(Instr::LoadThis(forced_this));
 
-    // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
-    // the ClosureNew and any associated ClosureAddCapture are adjacent
-    // TODO(performance) avoid this allocation?
-    let mut args = Vec::new();
-    for var_name in inner_fnb.captures.iter() {
-        let var_name = JsWord::from(var_name.as_str());
-        let vreg = builder.read_var(&var_name).with_context(
-            error!("resolving identifier for function's capture").with_span(arrow.span),
-        )?;
-        args.push(vreg);
-    }
-
-    let dest = builder.new_vreg();
-    let fnid = inner_fnb.fnid;
-    builder.emit(Instr::ClosureNew {
-        dest,
-        fnid,
-        forced_this: Some(forced_this),
-    });
-    // all the calls to `get_var` must come before builder.emit(ClosureNew), to guarantee that
-    // the ClosureNew and any associated ClosureAddCapture are adjacent
-    // TODO(performance) avoid this allocation?
-    for vreg in args.into_iter() {
-        builder.emit(Instr::ClosureAddCapture(vreg));
-    }
-
-    builder.fns.insert(inner_fnb.fnid, inner_fnb);
-
+    let dest = compile_closure(builder, inner_fnb, Some(forced_this));
     Ok(dest)
 }
 
@@ -1825,18 +1852,18 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
     if let Some(ident) = asmt.left.as_ident() {
         let rhs = compile_expr(builder, &asmt.right)?;
 
-        let var = builder
-            .read_var(&ident.sym)
+        let var_loc = builder
+            .get_var(&ident.sym)
             .with_context(error!("resolving identifier").with_span(ident.span))?;
-        compile_assignment_rhs(builder, asmt.op, var, rhs)?;
-        Ok(var)
+        compile_assignment_rhs(builder, asmt.op, var_loc, rhs);
+        Ok(builder.read_loc(var_loc))
     } else if let Some(target_expr) = asmt.left.as_expr() {
         match target_expr {
             Expr::Member(member_expr) => {
                 let rhs = compile_expr(builder, &asmt.right)?;
 
                 let MemberAccess { obj, key, value } = compile_member_access(builder, member_expr)?;
-                compile_assignment_rhs(builder, asmt.op, value, rhs)?;
+                compile_assignment_rhs(builder, asmt.op, Loc::VReg(value), rhs);
                 builder.emit(Instr::ObjSet { obj, key, value });
                 Ok(value)
             }
@@ -1900,15 +1927,25 @@ fn compile_obj_member_prop(
 fn compile_assignment_rhs(
     builder: &mut Builder,
     assign_op: swc_ecma_ast::AssignOp,
-    lhs: VReg,
+    lhs: Loc,
     rhs: VReg,
-) -> Result<()> {
+) {
+    let lhs_value = builder.read_loc(lhs);
+
     match assign_op {
-        AssignOp::Assign => builder.emit(Instr::Copy { dst: lhs, src: rhs }),
-        AssignOp::AddAssign => builder.emit(Instr::ArithAdd(lhs, lhs, rhs)),
-        AssignOp::SubAssign => builder.emit(Instr::ArithSub(lhs, lhs, rhs)),
-        AssignOp::MulAssign => builder.emit(Instr::ArithMul(lhs, lhs, rhs)),
-        AssignOp::DivAssign => builder.emit(Instr::ArithDiv(lhs, lhs, rhs)),
+        AssignOp::Assign => {}
+        AssignOp::AddAssign => {
+            builder.emit(Instr::ArithAdd(lhs_value, lhs_value, rhs));
+        }
+        AssignOp::SubAssign => {
+            builder.emit(Instr::ArithSub(lhs_value, lhs_value, rhs));
+        }
+        AssignOp::MulAssign => {
+            builder.emit(Instr::ArithMul(lhs_value, lhs_value, rhs));
+        }
+        AssignOp::DivAssign => {
+            builder.emit(Instr::ArithDiv(lhs_value, lhs_value, rhs));
+        }
         // AssignOp::ModAssign => todo!(),
         // AssignOp::LShiftAssign => todo!(),
         // AssignOp::RShiftAssign => todo!(),
@@ -1922,7 +1959,13 @@ fn compile_assignment_rhs(
         // AssignOp::NullishAssign => todo!(),
         other => unsupported_node!(other),
     };
-    Ok(())
+
+    match lhs {
+        Loc::VReg(_) | Loc::Arg(_) => {},
+        Loc::Capture(cap_ndx) => {
+            builder.emit(Instr::StoreCapture(cap_ndx, lhs_value));
+        }
+    }
 }
 
 fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_ecma_ast::Module)> {

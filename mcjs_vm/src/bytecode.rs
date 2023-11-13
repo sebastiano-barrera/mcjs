@@ -84,7 +84,7 @@ pub struct ArgIndex(pub u8);
 pub struct CaptureIndex(pub u16);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct VReg(pub u8);
+pub struct VReg(pub u16);
 
 impl std::fmt::Debug for ArgIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,6 +114,7 @@ pub enum Instr {
     LoadNull(VReg),
     LoadUndefined(VReg),
     LoadCapture(VReg, CaptureIndex),
+    StoreCapture(CaptureIndex, VReg),
     LoadArg(VReg, ArgIndex),
     LoadThis(VReg),
 
@@ -174,7 +175,7 @@ pub enum Instr {
         fnid: LocalFnId,
         forced_this: Option<VReg>,
     },
-    ClosureAddCapture(VReg),
+    ClosureShare(CaptureIndex),
 
     ObjCreateEmpty(VReg),
     ObjSet {
@@ -271,6 +272,7 @@ pub trait InstrAnalyzer {
     fn load_null(&mut self);
     fn load_undefined(&mut self);
     fn load_capture(&mut self, item: CaptureIndex);
+    fn write_capture(&mut self, item: CaptureIndex);
     fn load_arg(&mut self, item: ArgIndex);
     fn load_this(&mut self);
     fn end(&mut self, instr: &Instr);
@@ -290,6 +292,7 @@ impl Instr {
             Instr::LoadNull(dest) => { an.write_vreg(*dest); an.load_null(); }
             Instr::LoadUndefined(dest) => { an.write_vreg(*dest); an.load_undefined(); }
             Instr::LoadCapture(dest, capndx) => { an.write_vreg(*dest); an.load_capture(*capndx); },
+            Instr::StoreCapture(capndx, src) => { an.write_capture(*capndx); an.read_vreg(*src); },
             Instr::LoadArg(dest, argndx) => { an.write_vreg(*dest); an.load_arg(*argndx); },
             Instr::LoadThis(dest) => { an.write_vreg(*dest); an.load_this(); },
             Instr::Copy { dst, src } => { an.write_vreg(*dst); an.read_vreg(*src); },
@@ -330,7 +333,7 @@ impl Instr {
                 fnid: _,
                 forced_this: _,
             } => { an.write_vreg(*dest);  },
-            Instr::ClosureAddCapture(arg) => { an.read_vreg(*arg); },
+            Instr::ClosureShare(cap_ndx) => { an.load_capture(*cap_ndx); },
             Instr::ObjCreateEmpty(dest) => { an.write_vreg(*dest); },
             Instr::ObjSet { obj, key, value } => { an.read_vreg(*obj); an.read_vreg(*key); an.read_vreg(*value); }
             Instr::ObjGet { dest, obj, key } => { an.write_vreg(*dest); an.read_vreg(*obj); an.read_vreg(*key); }
@@ -401,6 +404,7 @@ pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
     n_params: ArgIndex,
+    n_captures: CaptureIndex,
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
     ident_history: Vec<IdentAsmt>,
@@ -464,6 +468,7 @@ impl Function {
         instrs: Box<[Instr]>,
         consts: Box<[Literal]>,
         n_params: ArgIndex,
+        n_captures: CaptureIndex,
         ident_history: Vec<IdentAsmt>,
         trace_anchors: HashMap<IID, TraceAnchor>,
     ) -> Function {
@@ -475,6 +480,7 @@ impl Function {
             instrs,
             consts,
             n_params,
+            n_captures,
             loop_heads,
             ident_history,
             trace_anchors,
@@ -509,6 +515,9 @@ impl Function {
 
     pub fn n_params(&self) -> ArgIndex {
         self.n_params
+    }
+    pub fn n_captures(&self) -> CaptureIndex {
+        self.n_captures
     }
 }
 

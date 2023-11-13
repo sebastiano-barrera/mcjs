@@ -270,7 +270,7 @@ fn render_source_code(
         write!(buf, "{}", ch)?;
     }
 
-    assert!(markers.next().is_none());
+    // assert!(markers.next().is_none());
     writeln!(buf, "</div>")?;
 
     Ok(buf)
@@ -291,18 +291,28 @@ pub fn extract_frame_source(
 
     let line_focus = line_number_of_giid(loader, giid, source_file);
 
-    use std::cmp::{max, min};
+    use std::cmp::min;
+    let source_len = source_file.src.len().try_into().unwrap();
     let Range { mut start, mut end } = offset_range;
-    start = max(0, start - 150);
-    end = min(source_file.src.len().try_into().unwrap(), end + 150);
+    start = if start > 150 { start - 150 } else { 1 };
+    end = min(source_len, end + 150);
 
     // Snap to line boundaries
-    let start_line = source_file.lookup_line(BytePos(start)).unwrap();
+    //  (If lookup_line fails, we just fetch the whole file)
+    let start_line = source_file.lookup_line(BytePos(start)).unwrap_or(0);
     let (start_offset, _) = source_file.line_bounds(start_line);
+    let start_offset = BytePos(start_offset.0 - 1);
 
-    let end_line = source_file.lookup_line(BytePos(end)).unwrap();
+    let end_line = source_file
+        .lookup_line(BytePos(end))
+        .unwrap_or(source_file.count_lines()) - 1;
     let (_, end_offset) = source_file.line_bounds(end_line);
+    let end_offset = BytePos(end_offset.0 - 1);
 
+    eprintln!(
+        "extracting text in range {}:{} (lines {}:{})",
+        start_offset.0 as usize, end_offset.0 as usize, start_line, end_line
+    );
     let text = &source_file.src[start_offset.0 as usize..end_offset.0 as usize];
 
     Some(model::FrameSource {
