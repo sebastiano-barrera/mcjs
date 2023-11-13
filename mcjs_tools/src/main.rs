@@ -1,6 +1,5 @@
-use std::cmp::Ordering;
 use std::ops::Range;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 
@@ -10,7 +9,6 @@ use listenfd::ListenFd;
 use mcjs_vm::bytecode;
 use serde_json::json;
 use serde_json::Value as JsonValue;
-use tokio::sync::broadcast;
 
 handlebars_helper!(lookup_deep: |*args| {
     if args.is_empty() {
@@ -430,7 +428,7 @@ mod interpreter_manager {
         let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
         let mut version = 0;
 
-        let mut process_messages = move |state: &State| {
+        let process_messages = move |state: &State| {
             loop {
                 let msg = queue_rx
                     .recv()
@@ -604,15 +602,6 @@ mod model {
                 breakpoints,
                 frames,
                 modules,
-                objects: HashMap::new(),
-            }
-        }
-
-        pub(crate) fn init() -> VMState {
-            VMState {
-                breakpoints: Vec::new(),
-                frames: Vec::new(),
-                modules: HashMap::new(),
                 objects: HashMap::new(),
             }
         }
