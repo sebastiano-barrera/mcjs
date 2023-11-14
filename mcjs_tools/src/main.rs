@@ -173,17 +173,23 @@ async fn some_text(
                         iid_start, iid_end, ..
                     } = *brange;
 
+                    let lo = brange.lo.0;
+                    let hi = brange.hi.0;
+
                     markers.push(Marker {
                         kind: MarkerKind::Start { iid_start, iid_end },
-                        offset: brange.lo.0,
+                        offset: lo,
+                        length: hi as i32 - lo as i32,
                     });
                     markers.push(Marker {
                         kind: MarkerKind::End,
-                        offset: brange.hi.0,
+                        offset: hi,
+                        length: lo as i32 - hi as i32,  // Will be negative
                     });
                 }
 
-                markers.sort_by_key(|m| m.offset);
+                // Longer segments first
+                markers.sort_by_key(|m| (m.offset, -m.length));
                 markers
             };
 
@@ -752,6 +758,7 @@ mod model {
         pub struct Marker {
             pub kind: MarkerKind,
             pub offset: u32,
+            pub length: i32, // Only used for ordering
         }
     }
 
