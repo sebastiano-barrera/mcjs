@@ -328,7 +328,7 @@ fn render_source_code(
     }
     writeln!(buf, "</pre>")?;
 
-    writeln!(buf, "<pre x-data='{{ markerIndex: 0 }}'>")?;
+    writeln!(buf, "<pre x-data='{{ markerIndex: null }}'>")?;
     for (rel_offset, ch) in frame_src.text.chars().enumerate() {
         let rel_offset: u32 = rel_offset.try_into().unwrap();
         let offset = frame_src.start_offset.0 + rel_offset + 1;
