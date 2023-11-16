@@ -794,6 +794,10 @@ video {
   border-left-width: 1px;
 }
 
+.border-r-2 {
+  border-right-width: 2px;
+}
+
 .border-t-2 {
   border-top-width: 2px;
 }
@@ -802,9 +806,8 @@ video {
   border-style: dashed;
 }
 
-.border-white {
-  --tw-border-opacity: 1;
-  border-color: rgb(255 255 255 / var(--tw-border-opacity));
+.border-transparent {
+  border-color: transparent;
 }
 
 .border-zinc-400 {
@@ -815,6 +818,11 @@ video {
 .border-zinc-600 {
   --tw-border-opacity: 1;
   border-color: rgb(82 82 91 / var(--tw-border-opacity));
+}
+
+.border-white {
+  --tw-border-opacity: 1;
+  border-color: rgb(255 255 255 / var(--tw-border-opacity));
 }
 
 .bg-red-700 {
@@ -1068,6 +1076,11 @@ html {
   background-color: rgb(113 113 122 / var(--tw-bg-opacity));
 }
 
+.hover\:bg-zinc-600:hover {
+  --tw-bg-opacity: 1;
+  background-color: rgb(82 82 91 / var(--tw-bg-opacity));
+}
+
 @media (prefers-color-scheme: dark) {
   .dark\:bg-zinc-600 {
     --tw-bg-opacity: 1;
@@ -1105,8 +1118,23 @@ html {
   background-color: rgb(228 228 231 / var(--tw-bg-opacity));
 }
 
+.\[\&\.current\]\:bg-white.current {
+  --tw-bg-opacity: 1;
+  background-color: rgb(255 255 255 / var(--tw-bg-opacity));
+}
+
+.\[\&\.current\]\:text-black.current {
+  --tw-text-opacity: 1;
+  color: rgb(0 0 0 / var(--tw-text-opacity));
+}
+
 .\[\&\.highlight\]\:border-r-2.highlight {
   border-right-width: 2px;
+}
+
+.\[\&\.highlight\]\:border-sky-800.highlight {
+  --tw-border-opacity: 1;
+  border-color: rgb(7 89 133 / var(--tw-border-opacity));
 }
 
 .\[\&\.highlighted\]\:bg-cyan-200.highlighted {
@@ -1124,11 +1152,6 @@ html {
   background-color: rgb(255 255 255 / var(--tw-bg-opacity));
 }
 
-.\[\&\.highlighted\]\:text-black.highlighted {
-  --tw-text-opacity: 1;
-  color: rgb(0 0 0 / var(--tw-text-opacity));
-}
-
 .\[\&\.highlighted\]\:text-cyan-900.highlighted {
   --tw-text-opacity: 1;
   color: rgb(22 78 99 / var(--tw-text-opacity));
@@ -1137,6 +1160,11 @@ html {
 .\[\&\.highlighted\]\:text-white.highlighted {
   --tw-text-opacity: 1;
   color: rgb(255 255 255 / var(--tw-text-opacity));
+}
+
+.\[\&\.highlighted\]\:text-black.highlighted {
+  --tw-text-opacity: 1;
+  color: rgb(0 0 0 / var(--tw-text-opacity));
 }
 
 @media (prefers-color-scheme: dark) {

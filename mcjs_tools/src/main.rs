@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
 use std::{path::PathBuf, time::Duration};
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
@@ -7,6 +8,7 @@ use anyhow::{Error, Result};
 use handlebars::{handlebars_helper, Handlebars};
 use listenfd::ListenFd;
 use mcjs_vm::bytecode;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value as JsonValue;
 
@@ -55,6 +57,10 @@ async fn main() -> Result<()> {
     let data_ref = web::Data::new(AppData {
         handlebars,
         intrp_handle,
+        cached_snapshot: Mutex::new(Arc::new(Snapshot {
+            failure: None,
+            model: None,
+        })),
     });
 
     let server = HttpServer::new(move || {
@@ -63,6 +69,8 @@ async fn main() -> Result<()> {
             .service(main_screen)
             .service(events)
             .service(some_text)
+            .service(create_breakpoint)
+            .service(frame_view)
             .app_data(data_ref.clone())
     });
 
@@ -78,42 +86,61 @@ async fn main() -> Result<()> {
 struct AppData<'a> {
     handlebars: Handlebars<'a>,
     intrp_handle: interpreter_manager::Handle,
+    cached_snapshot: Mutex<Arc<Snapshot>>,
+}
+
+#[derive(Serialize)]
+struct Snapshot {
+    failure: Option<String>,
+    model: Option<model::VMState>,
+}
+
+impl<'a> AppData<'a> {
+    async fn snapshot(&self) -> Arc<Snapshot> {
+        let mut cached_snapshot = self.cached_snapshot.lock().unwrap();
+
+        if cached_snapshot.model.is_some() {
+            return Arc::clone(&cached_snapshot);
+        }
+
+        let (failure, model) = self
+            .intrp_handle
+            .query(|state| match state {
+                interpreter_manager::State::Finished { version: _ } => (None, None),
+                interpreter_manager::State::Suspended { version: _, probe } => {
+                    (None, Some(model::VMState::snapshot(probe)))
+                }
+                interpreter_manager::State::Failed {
+                    version: _,
+                    probe,
+                    error,
+                } => (Some(error.clone()), Some(model::VMState::snapshot(probe))),
+            })
+            .await;
+
+        let snapshot = Arc::new(Snapshot { model, failure });
+        *cached_snapshot = Arc::clone(&snapshot);
+
+        snapshot
+    }
 }
 
 #[actix_web::get("/")]
-async fn main_screen(app_data: web::Data<AppData<'_>>) -> impl Responder {
-    // TODO Cache the snapshot
-    let (failure, model) = app_data
-        .intrp_handle
-        .query(|state| match state {
-            interpreter_manager::State::Finished { version: _ } => (None, None),
-            interpreter_manager::State::Suspended { version: _, probe } => {
-                (None, Some(model::VMState::snapshot(probe)))
-            }
-            interpreter_manager::State::Failed {
-                version: _,
-                probe,
-                error,
-            } => (Some(error.clone()), Some(model::VMState::snapshot(probe))),
-        })
-        .await;
+async fn main_screen(app_data: web::Data<AppData<'_>>) -> actix_web::Result<HttpResponse> {
+    let snapshot = app_data.snapshot().await;
+    if snapshot.model.is_some() {
+        eprintln!(
+            "main_screen JSON = {}",
+            serde_json::to_string_pretty(&*snapshot).unwrap()
+        );
 
-    let tmpl_params = json!({
-        "failure": failure,
-        "model": &model,
-    });
-
-    eprintln!(
-        "main_screen JSON = {}",
-        serde_json::to_string_pretty(&tmpl_params).unwrap()
-    );
-
-    match app_data.handlebars.render("index", &tmpl_params) {
-        Ok(body) => HttpResponse::Ok().body(body),
-        Err(err) => {
-            let body = format!("template render error:\n\n{}", err);
-            HttpResponse::InternalServerError().body(body)
-        }
+        let body = app_data
+            .handlebars
+            .render("index", &*snapshot)
+            .map_err(actix_web::error::ErrorInternalServerError)?;
+        Ok(HttpResponse::Ok().body(body))
+    } else {
+        Ok(HttpResponse::Ok().body("Interpreter finished successfully.  No debugging!"))
     }
 }
 
@@ -142,6 +169,62 @@ async fn events(app_data: web::Data<AppData<'static>>) -> impl Responder {
 
     // TODO Figure out *exactly* what this means
     sse::Sse::from_infallible_receiver(rx).with_retry_duration(Duration::from_secs(10))
+}
+
+#[derive(Deserialize)]
+struct BreakpointReq {
+    mod_id: u16,
+    fn_id: u16,
+    iid: u16,
+}
+
+#[actix_web::post("/breakpoints")]
+async fn create_breakpoint(
+    app_data: web::Data<AppData<'_>>,
+    params: web::Form<BreakpointReq>,
+) -> impl Responder {
+    // let breakpoint_req = params.into_inner();
+
+    // app_data.into_inner().intrp_handle.query(|| {});
+
+    //HttpResponse::Ok()
+    //    .insert_header(("HX-Trigger", "mcjs_tools_breakpoint_changed"))
+    //    .into()
+
+    HttpResponse::NotImplemented().body("not yet implemented!")
+}
+
+#[actix_web::get("/frames/{frame_ndx}/view")]
+async fn frame_view(
+    app_data: web::Data<AppData<'static>>,
+    path_params: web::Path<(usize,)>,
+) -> actix_web::Result<HttpResponse> {
+    let (frame_ndx,) = path_params.into_inner();
+
+    let snapshot = app_data.snapshot().await;
+    let frame = snapshot
+        .model
+        .as_ref()
+        .and_then(move |model| model.frames.get(frame_ndx))
+        .ok_or_else(|| actix_web::error::ErrorNotFound("no frame at given index"))?;
+
+    #[derive(Serialize)]
+    struct TmplParams<'a> {
+        frame: &'a model::Frame,
+        self_url: String,
+    }
+
+    let params = TmplParams {
+        frame,
+        self_url: format!("/frames/{frame_ndx}/view"),
+    };
+
+    let body = app_data
+        .handlebars
+        .render("code_view", &params)
+        .map_err(|err| actix_web::error::ErrorInternalServerError(err))?;
+
+    Ok(HttpResponse::Ok().body(body))
 }
 
 #[actix_web::get("/frames/{frame_ndx}/source_preview")]
@@ -184,7 +267,7 @@ async fn some_text(
                     markers.push(Marker {
                         kind: MarkerKind::End,
                         offset: hi,
-                        length: lo as i32 - hi as i32,  // Will be negative
+                        length: lo as i32 - hi as i32, // Will be negative
                     });
                 }
 
@@ -522,9 +605,6 @@ mod model {
 
         /// Stack frames, in bottom-to-top order
         pub frames: Vec<Frame>,
-
-        pub modules: HashMap<u16, Module>,
-        pub objects: HashMap<ObjectID, Object>,
     }
 
     impl VMState {
@@ -576,39 +656,19 @@ mod model {
                     functionID: lfnid.0,
                     iid: giid.1 .0,
                     values,
-                });
-            }
-
-            let mut modules = HashMap::new();
-            for frame in frames.iter() {
-                let fnid = bytecode::FnId(
-                    bytecode::ModuleId(frame.moduleID),
-                    bytecode::LocalFnId(frame.functionID),
-                );
-
-                let module_model = modules.entry(frame.moduleID).or_insert_with(|| Module {
-                    functions: HashMap::new(),
-                });
-
-                module_model
-                    .functions
-                    .entry(frame.functionID)
-                    .or_insert_with(|| Function {
-                        bytecode: loader
-                            .get_function(fnid)
-                            .unwrap()
+                    function: Function {
+                        bytecode: func
                             .instrs()
                             .iter()
                             .map(|instr| format!("{:?}", instr))
                             .collect(),
-                    });
+                    },
+                });
             }
 
             VMState {
                 breakpoints,
                 frames,
-                modules,
-                objects: HashMap::new(),
             }
         }
     }
@@ -743,6 +803,7 @@ mod model {
         pub functionID: u16,
         pub iid: u16,
 
+        pub function: Function,
         pub values: Values,
     }
 
@@ -793,11 +854,6 @@ mod model {
     pub struct SourceLine {
         pub ndx1: LineNum,
         pub text: String,
-    }
-
-    #[derive(Clone, Serialize)]
-    pub struct Module {
-        functions: HashMap<u16, Function>,
     }
 
     #[derive(Clone, Serialize)]

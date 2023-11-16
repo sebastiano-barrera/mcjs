@@ -13,7 +13,7 @@
 <body 
 	class="w-full h-full dark:bg-zinc-800 dark:text-white text-black"
 	>
-  {{#with model}}
+	{{#with model}}
 		<div class="grid grid-cols-[minmax(0,auto)_1cm_1fr] inset-0 w-full h-full">
 			<div
 				class="grid grid-rows-[auto_1fr]"
@@ -72,150 +72,10 @@
 						class="grid stack-view-grid-rows min-w-fit pr-4 space-x-2 h-full
 							border-l border-zinc-600 text-xs odd:bg-zinc-900"
 						x-data="{sourceVisible: false, highlight: {iidStart: null, iidEnd: null}}"
-					>
-						<div 
-							class="flex flex-row items-center gap-2 px-2 relative"
-							x-data="{ detailsVisible: false }"
-						>
-							<!-- Top bar, above bytecode -->
-							<button 
-								class="p-1 rounded-full bg-zinc-600 hover:bg-zinc-500 text-black shadow cursor-pointer
-									[&.active]:bg-zinc-200"
-								@click="sourceVisible = ! sourceVisible"
-								x-bind:class="sourceVisible && 'active'"
-								hx-get="/frames/{{ @index }}/source_preview"
-								hx-target="next #source-content-{{@index}}"
-								hx-swap="innerHTML show:#current:top"
-								>
-								JS
-							</button>
-
-							<div>
-								<span class="">fn</span>
-								<span class="font-mono">{{ moduleID }}.{{ functionID }}</span>
-							</div>
-
-							<!-- TODO add tooltip -->
-							<div
-								class="max-w-[5cm] inline-block whitespace-nowrap text-ellipsis overflow-hidden
-									cursor-default"
-								style="direction: rtl"
-								x-on:mouseenter="detailsVisible = true"
-								x-on:mouseleave="detailsVisible = false"
-							>
-								{{ source.filename }}
-							</div>
-
-							<div
-								class="absolute rounded-md bg-slate-900 ring-2 ring-slate-700
-									p-2 mt-[2.8cm] max-w-[9cm]"
-								x-show="detailsVisible"
-							>
-								<div class="font-bold">Source file:</div>
-								<div class="pl-2">{{ source.filename }}</div>
-							</div>
-						</div>
-
-						<!-- 
-							Why overflow-x-hidden: There is a bug (I think in Firefox) that scrolls the
-							view of a little bit in the X direction when the window gains or loses focus
-							(in the window manager, e.g. by using alt-tab). Plus it also messes up with the
-							general layout, where horizontal scrolling is used to view other stack frames.
-						-->
-						<div
-							id="source-content-{{@index}}"
-							class="overflow-x-hidden overflow-y-scroll min-w-[8cm] max-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
-							x-show="sourceVisible">
-						</div>
-
-						<div class='flex flex-row px-2 overflow-y-scroll border-b border-dashed border-zinc-600'>
-							<div 
-								class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
-									script--highlight-mcjs-values [&>*]:whitespace-nowrap"
-								onload="this.querySelector('.highlighted').scrollIntoView({ block: 'center' })"
-							>
-								{{#each (lookup_deep ../modules moduleID 'functions' functionID 'bytecode')}}
-									<div
-										class="text-right read 
-										{{#if (eq @index ../iid)}} highlighted {{/if}}
-										[&.highlighted]:bg-white [&.highlighted]:text-black"
-										data-mcjs-value="call{{ callID }}-v{{ instrNdx }}"
-									>
-										<span
-											class="font-mono px-2 border-white [&.highlight]:border-r-2"
-											x-bind:class="{{ @index }} >= highlight.iidStart && {{ @index }} < highlight.iidEnd && 'highlight'"
-										>
-											{{ @index }}⬥ 
-										</span>
-									</div>
-									<div>
-										{{ this }}
-									</div>
-								{{/each}}
-							</div>
-						</div>
-
-						<div class="overflow-y-scroll">
-							<table>
-								<tbody>
-									<tr>
-										<td class="text-right">this</td>
-										<td></td>
-										<td>{{ thisValue }}</td>
-									</tr>
-
-									{{#with values}}
-										{{#each captures}}
-											<tr>
-												<td class="text-right">{{ name }}</td>
-												<td>{{ ident }}</td>
-												<td>{{ value }}</td>
-											</tr>
-											{{#if prev_idents}}
-											<tr>
-												<td colspan="3">
-													{{prev_idents}}
-												</td>
-											</tr>
-											{{/if}}
-										{{/each}}
-
-
-										{{#each arguments}}
-											<tr>
-												<td class="text-right">{{ name }}</td>
-												<td>{{ ident }}</td>
-												<td>{{ value }}</td>
-											</tr>
-											{{#if prev_idents}}
-											<tr>
-												<td colspan="3">
-													{{prev_idents}}
-												</td>
-											</tr>
-											{{/if}}
-										{{/each}}
-
-										{{#each registers}}
-											<tr>
-												<td class="text-right">{{ name }}</td>
-												<td>{{ ident }}</td>
-												<td>{{ value }}</td>
-											</tr>
-											{{#if prev_idents}}
-											<tr>
-												<td colspan="3">
-													{{prev_idents}}
-												</td>
-											</tr>
-											{{/if}}
-										{{/each}}
-									{{/with}}
-								</tbody>
-							</table>
-						</div>
-					</div>
-				 {{/each}}
+						hx-trigger="load"
+						hx-get="/frames/{{ @index }}/view"
+					></div>
+				{{/each}}
 			</div>
 		</div>
 	{{/with}}
