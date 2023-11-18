@@ -221,7 +221,7 @@ async fn frame_view(
 
     let body = app_data
         .handlebars
-        .render("code_view", &params)
+        .render("frame_view", &params)
         .map_err(|err| actix_web::error::ErrorInternalServerError(err))?;
 
     Ok(HttpResponse::Ok().body(body))
@@ -437,12 +437,6 @@ mod interpreter_manager {
 
     impl<'a, 'b, 'c> State<'a, 'b, 'c> {
         pub fn probe(&'a self) -> Option<&'a Probe<'b, 'c>> {
-            match self {
-                State::Finished { .. } => None,
-                State::Suspended { probe, .. } | State::Failed { probe, .. } => Some(probe),
-            }
-        }
-        pub fn probe_mut(&'a mut self) -> Option<&'a mut Probe<'b, 'c>> {
             match self {
                 State::Finished { .. } => None,
                 State::Suspended { probe, .. } | State::Failed { probe, .. } => Some(probe),
@@ -860,8 +854,4 @@ mod model {
     pub struct Function {
         bytecode: Vec<String>,
     }
-
-    type ObjectID = u32;
-    // TODO This is destined to become HashMap<String, interpreter::Value>
-    type Object = HashMap<String, String>;
 }
