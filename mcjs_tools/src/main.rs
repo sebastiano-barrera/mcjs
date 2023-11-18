@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value as JsonValue;
 
+use maud::{html, Markup};
+
 handlebars_helper!(lookup_deep: |*args| {
     if args.is_empty() {
         panic!();
@@ -71,6 +73,7 @@ async fn main() -> Result<()> {
             .service(some_text)
             .service(create_breakpoint)
             .service(frame_view)
+            .service(frame_set_breakpoint)
             .app_data(data_ref.clone())
     });
 
@@ -211,11 +214,13 @@ async fn frame_view(
     #[derive(Serialize)]
     struct TmplParams<'a> {
         frame: &'a model::Frame,
+        frame_ndx: usize,
         self_url: String,
     }
 
     let params = TmplParams {
         frame,
+        frame_ndx,
         self_url: format!("/frames/{frame_ndx}/view"),
     };
 
@@ -227,14 +232,39 @@ async fn frame_view(
     Ok(HttpResponse::Ok().body(body))
 }
 
+#[actix_web::post("/frames/{frame_ndx}/break_range/{brange_id}/set")]
+async fn frame_set_breakpoint(
+    app_data: web::Data<AppData<'static>>,
+    path_params: web::Path<(usize, usize)>,
+) -> actix_web::Result<HttpResponse> {
+    let (frame_ndx, brange_id) = path_params.into_inner();
+
+    let app_data = app_data.into_inner();
+    app_data
+        .intrp_handle
+        .query(move |state| -> std::result::Result<(), &'static str> {
+            let probe = state
+                .probe_mut()
+                .ok_or_else(|| "interpreter is finished; can't set a breakpoint in this state")?;
+
+            todo!("Enable new source breakpoint at break range {brange_id:?} if not already set");
+
+            Ok(())
+        })
+        .await
+        .map_err(actix_web::error::ErrorNotAcceptable)?;
+
+    todo!()
+}
+
 #[actix_web::get("/frames/{frame_ndx}/source_preview")]
 async fn some_text(
     app_data: web::Data<AppData<'static>>,
     path: web::Path<(u32,)>,
-) -> impl Responder {
+) -> actix_web::Result<Markup> {
     let (frame_ndx,) = path.into_inner();
 
-    let res = app_data
+    let (markers, frame_src) = app_data
         .intrp_handle
         .query(move |state| {
             let probe = state.probe()?;
@@ -260,7 +290,11 @@ async fn some_text(
                     let hi = brange.hi.0;
 
                     markers.push(Marker {
-                        kind: MarkerKind::Start { iid_start, iid_end },
+                        kind: MarkerKind::Start {
+                            // brng_id,
+                            iid_start,
+                            iid_end,
+                        },
                         offset: lo,
                         length: hi as i32 - lo as i32,
                     });
@@ -286,82 +320,88 @@ async fn some_text(
                 offset_min..offset_max
             };
 
-            let frame_src = extract_frame_source(source_map, probe.loader(), giid, offset_range)?;
-            render_source_code(&markers, &frame_src).ok()
+            extract_frame_source(source_map, probe.loader(), giid, offset_range)
+                .map(|frame_src| (markers, frame_src))
         })
-        .await;
+        .await
+        .ok_or_else(|| actix_web::error::ErrorNotFound("Source code not available"))?;
 
-    match res {
-        Some(text) => HttpResponse::Ok().body(text),
-        // TODO Actually expose any errors
-        None => HttpResponse::NotFound().body(""),
-    }
+    let markup = render_source_code(&markers, &frame_src)?;
+    Ok(markup)
 }
 
 fn render_source_code(
     markers: &[model::break_range::Marker],
     frame_src: &model::FrameSource,
-) -> std::result::Result<String, std::fmt::Error> {
-    use model::break_range::MarkerKind;
-    use std::fmt::Write;
+) -> actix_web::Result<Markup> {
+    let pre_escaped_code = {
+        use model::break_range::MarkerKind;
+        use std::fmt::Write;
 
-    let mut markers = markers.into_iter().enumerate().peekable();
+        let mut pre_escaped_code = String::new();
 
-    let mut buf = String::new();
+        let offset = frame_src.start_offset.0 as usize;
+        let mut prev_end = offset;
 
-    writeln!(buf, "<div class=\"grid source-view-grid-cols\">")?;
-    writeln!(
-        buf,
-        "<pre x-init=\"$el.querySelector('.current-instr').scrollIntoView({{ block: 'center' }})\">"
-    )?;
-    // TODO Is the range inclusive?
-    for line_ndx in frame_src.start_line..frame_src.end_line {
-        if Some(line_ndx) == frame_src.line_focus {
-            writeln!(buf, "<span class='current-instr'>{:4}</span>", line_ndx,)?;
-        } else {
-            writeln!(buf, "{:4}", line_ndx)?;
-        }
-    }
-    writeln!(buf, "</pre>")?;
+        for marker in markers {
+            let mkr_offset = marker.offset as usize - 1;
+            let text = &frame_src.text[prev_end - offset..mkr_offset - offset];
+            write!(pre_escaped_code, "{}", text).unwrap();
 
-    writeln!(buf, "<pre x-data='{{ markerIndex: null }}'>")?;
-    for (rel_offset, ch) in frame_src.text.chars().enumerate() {
-        let rel_offset: u32 = rel_offset.try_into().unwrap();
-        let offset = frame_src.start_offset.0 + rel_offset + 1;
-
-        while let Some((mkr_ndx, mkr)) = markers.peek().filter(|(_, mkr)| mkr.offset == offset) {
-            assert!(mkr.offset >= offset);
-
-            match mkr.kind {
-                MarkerKind::Start { iid_start, iid_end } => {
+            match marker.kind {
+                MarkerKind::Start {
+                    // brng_id,
+                    ..
+                } => {
                     write!(
-                        buf,
-                        "<span class='relative' x-bind:class=\"markerIndex == {} && 'src-range-selected'\">",
-                        mkr_ndx
-                    )?;
+                        pre_escaped_code,
+                        "<span class='relative' x-bind:class=\"markedBreakRange == {} && 'src-range-selected'\">",
+                        123,
+                    ).unwrap();
 
-                    write!(buf,
-                        "<span class='cursor-pointer' x-on:click='markerIndex = {}; highlight.iidStart = {}; highlight.iidEnd = {};'>◯ </span>",
-                        mkr_ndx,
-                        iid_start.0,
-                        iid_end.0,
-                   )?;
+                    write!(
+                        pre_escaped_code,
+                        "<span class='cursor-pointer' x-on:click='pickBreakRange({})'>◯ </span>",
+                        123,
+                    )
+                    .unwrap();
                 }
                 MarkerKind::End => {
-                    write!(buf, "</span>")?;
+                    write!(pre_escaped_code, "</span>").unwrap();
                 }
-            };
+            }
 
-            markers.next();
+            prev_end = mkr_offset;
         }
 
-        write!(buf, "{}", ch)?;
-    }
+        let text_tail = &frame_src.text[prev_end as usize - offset..];
+        write!(pre_escaped_code, "{}", text_tail).unwrap();
 
-    assert!(markers.next().is_none());
-    writeln!(buf, "</div>")?;
+        maud::PreEscaped(pre_escaped_code)
+    };
 
-    Ok(buf)
+
+    let markup = html! {
+        div.grid.source-view-grid-cols {
+            pre x-init="$el.querySelector('.current-instr').scrollIntoView({ block: 'center' })" {
+                @for line_ndx in frame_src.start_line..frame_src.end_line {
+                    @if Some(line_ndx) == frame_src.line_focus {
+                        span.current-instr { (format!("{:4}\n", line_ndx)) }
+                    } @else {
+                        span { (format!("{:4}\n", line_ndx)) }
+                    }
+                }
+            }
+
+            div.grid {
+                pre x-data="{ markedBreakRange: null, pickBreakRange(brangeID) {} }" {
+                    (pre_escaped_code)
+                }
+            }
+        }
+    };
+
+    Ok(markup)
 }
 
 pub fn extract_frame_source(
@@ -421,23 +461,30 @@ mod interpreter_manager {
 
     pub type Version = u32;
 
-    pub enum State<'a, 'b, 'c> {
+    pub enum State<'a, 'b> {
         Finished {
             version: Version,
         },
         Suspended {
             version: Version,
-            probe: &'a mut Probe<'b, 'c>,
+            probe: Probe<'a, 'b>,
         },
         Failed {
             version: Version,
-            probe: &'a mut Probe<'b, 'c>,
+            probe: Probe<'a, 'b>,
             error: String,
         },
     }
 
-    impl<'a, 'b, 'c> State<'a, 'b, 'c> {
-        pub fn probe(&'a self) -> Option<&'a Probe<'b, 'c>> {
+    impl<'a, 'b> State<'a, 'b> {
+        pub fn probe(&self) -> Option<&Probe<'a, 'b>> {
+            match self {
+                State::Finished { .. } => None,
+                State::Suspended { probe, .. } | State::Failed { probe, .. } => Some(probe),
+            }
+        }
+
+        pub fn probe_mut(&mut self) -> Option<&mut Probe<'a, 'b>> {
             match self {
                 State::Finished { .. } => None,
                 State::Suspended { probe, .. } | State::Failed { probe, .. } => Some(probe),
@@ -461,7 +508,7 @@ mod interpreter_manager {
         pub async fn query<T, F>(&self, thunk: F) -> T
         where
             T: 'static + Send,
-            F: 'static + Send + FnOnce(&State) -> T,
+            F: 'static + Send + FnOnce(&mut State) -> T,
         {
             let (sender, receiver) = tokio::sync::oneshot::channel();
 
@@ -481,7 +528,7 @@ mod interpreter_manager {
     }
 
     enum Message {
-        Query(Box<dyn Send + FnOnce(&State)>),
+        Query(Box<dyn Send + FnOnce(&mut State)>),
         Resume,
     }
 
@@ -512,7 +559,7 @@ mod interpreter_manager {
         let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
         let mut version = 0;
 
-        let process_messages = move |state: &State| {
+        let process_messages = move |state: &mut State| {
             loop {
                 let msg = queue_rx
                     .recv()
@@ -533,7 +580,7 @@ mod interpreter_manager {
 
             match intrp.run() {
                 Ok(Exit::Finished(_)) => {
-                    process_messages(&State::Finished { version });
+                    process_messages(&mut State::Finished { version });
                     break;
                 }
                 Ok(Exit::Suspended(next_intrp)) => {
@@ -542,13 +589,10 @@ mod interpreter_manager {
 
                     let mut probe = Probe::attach(&mut intrp);
                     // let model = Arc::new(model::VMState::snapshot(&probe));
-                    let state = State::Suspended {
-                        version,
-                        probe: &mut probe,
-                    };
+                    let mut state = State::Suspended { version, probe };
 
                     println!("(suspended; handling queries)");
-                    process_messages(&state);
+                    process_messages(&mut state);
                     println!("(resuming)");
                 }
                 Err(mut err) => {
@@ -562,15 +606,14 @@ mod interpreter_manager {
                         message
                     };
 
-                    let probe = &mut err.probe();
-                    let state = State::Failed {
+                    let mut state = State::Failed {
                         version,
-                        probe,
+                        probe: err.probe(),
                         error,
                     };
 
                     println!("(interpreter error; handling queries)");
-                    process_messages(&state);
+                    process_messages(&mut state);
 
                     break;
                 }
@@ -807,7 +850,11 @@ mod model {
 
         #[derive(Debug)]
         pub enum MarkerKind {
-            Start { iid_start: IID, iid_end: IID },
+            Start {
+                // brng_id: BreakRangeID,
+                iid_start: IID,
+                iid_end: IID,
+            },
             End,
         }
         #[derive(Debug)]

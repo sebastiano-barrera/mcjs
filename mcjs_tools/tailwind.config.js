@@ -13,7 +13,7 @@ module.exports = {
   theme: {
     extend: {},
     fontFamily: {
-      'mono': ['Iosevka Extended', 'Source Code Pro', 'ui-monospace']
+      'mono': ['Iosevka Extended', 'Source Code Pro Medium', 'ui-monospace']
     }
   },
   plugins: [],

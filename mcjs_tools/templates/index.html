@@ -68,14 +68,7 @@
 			<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
 				<!-- Main area -->
 				{{#each frames}}
-					<div
-						id="stack-frame-{{ @index }}"
-						class="grid stack-view-grid-rows min-w-fit pr-4 space-x-2 h-full
-							text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
-						x-data="{sourceVisible: false, highlight: {iidStart: null, iidEnd: null}}"
-						hx-trigger="load"
-						hx-get="/frames/{{ @index }}/view"
-					></div>
+					<div hx-trigger="load" hx-get="/frames/{{ @index }}/view" hx-swap="outerHTML"></div>
 				{{/each}}
 			</div>
 		</div>
