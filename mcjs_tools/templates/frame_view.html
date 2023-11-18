@@ -76,8 +76,11 @@
 		{{#each function.bytecode}}
 			<div
 				class="text-right read 
-				{{#if (eq @index ../iid)}} highlighted {{/if}}
-				[&.highlighted]:bg-white [&.highlighted]:text-black"
+					rounded-sm
+					{{#if (eq @index ../iid)}} highlighted {{/if}}
+					[&.highlighted]:bg-zinc-100 [&.highlighted]:font-medium [&.highlighted]:ring-1 [&.highlighted]:ring-zinc-400
+					[&.highlighted]:dark:bg-white [&.highlighted]:dark:text-black [&.highlighted]:dark:ring-transparent
+				"
 				data-mcjs-value="call{{ callID }}-v{{ instrNdx }}"
 			>
 				<span
