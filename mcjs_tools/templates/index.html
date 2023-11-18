@@ -22,9 +22,9 @@
 					<!-- Left sidebar -->
 
 					{{#if ../failure}}
-						<div class="m-2 px-4 py-2 text-white bg-zinc-900">
+						<div class="m-2 px-4 py-2 ring-1 ring-zinc-300 dark:ring-transparent dark:text-white dark:bg-zinc-900">
 							<p>
-								<span class="bg-rose-500 px-4 px-1"><b>Interpreter failed:</b></span>
+								<span class="bg-rose-400 dark:bg-rose-500 px-4 px-1 text-white"><b>Interpreter failed:</b></span>
 							</p>
 							{{../failure}}
 						</div>
@@ -32,7 +32,7 @@
 
 					<div class="my-1">
 						<span class="
-							bg-zinc-500 text-zinc-100
+							bg-zinc-400 text-white
 							dark:bg-zinc-600 dark:text-zinc-200
 							font-semibold text-sm px-1 py-0.5 mx-2 uppercase
 						"> Breakpoints </span>
@@ -70,7 +70,7 @@
 					<div
 						id="stack-frame-{{ @index }}"
 						class="grid stack-view-grid-rows min-w-fit pr-4 space-x-2 h-full
-							border-l border-zinc-600 text-xs odd:bg-zinc-900"
+							text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
 						x-data="{sourceVisible: false, highlight: {iidStart: null, iidEnd: null}}"
 						hx-trigger="load"
 						hx-get="/frames/{{ @index }}/view"

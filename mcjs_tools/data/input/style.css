@@ -48,3 +48,11 @@ html {
     transform: rotate(180deg);
 }
 
+.current-instr {
+	@apply bg-zinc-200 dark:bg-white text-black;
+}
+
+.src-range-selected {
+	@apply bg-sky-200 dark:bg-sky-800;
+}
+

@@ -312,16 +312,12 @@ fn render_source_code(
     writeln!(buf, "<div class=\"grid source-view-grid-cols\">")?;
     writeln!(
         buf,
-        "<pre x-init=\"$el.querySelector('.current').scrollIntoView({{ block: 'center' }})\">"
+        "<pre x-init=\"$el.querySelector('.current-instr').scrollIntoView({{ block: 'center' }})\">"
     )?;
     // TODO Is the range inclusive?
     for line_ndx in frame_src.start_line..frame_src.end_line {
         if Some(line_ndx) == frame_src.line_focus {
-            writeln!(
-                buf,
-                "<span class='current bg-white text-black'>{:4}</span>",
-                line_ndx,
-            )?;
+            writeln!(buf, "<span class='current-instr'>{:4}</span>", line_ndx,)?;
         } else {
             writeln!(buf, "{:4}", line_ndx)?;
         }
@@ -338,12 +334,17 @@ fn render_source_code(
 
             match mkr.kind {
                 MarkerKind::Start { iid_start, iid_end } => {
+                    write!(
+                        buf,
+                        "<span class='relative' x-bind:class=\"markerIndex == {} && 'src-range-selected'\">",
+                        mkr_ndx
+                    )?;
+
                     write!(buf,
-                       "<span class='relative cursor-pointer' x-bind:class=\"markerIndex == {} && 'bg-sky-800'\"><span x-on:click='markerIndex = {}; highlight.iidStart = {}; highlight.iidEnd = {};'>◯ </span>",
-                       mkr_ndx,
-                       mkr_ndx,
-                       iid_start.0,
-                       iid_end.0,
+                        "<span class='cursor-pointer' x-on:click='markerIndex = {}; highlight.iidStart = {}; highlight.iidEnd = {};'>◯ </span>",
+                        mkr_ndx,
+                        iid_start.0,
+                        iid_end.0,
                    )?;
                 }
                 MarkerKind::End => {
