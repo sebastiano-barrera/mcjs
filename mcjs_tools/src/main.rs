@@ -8,6 +8,7 @@ use anyhow::{Error, Result};
 use handlebars::{handlebars_helper, Handlebars};
 use listenfd::ListenFd;
 use mcjs_vm::bytecode;
+use mcjs_vm::interpreter::debugger::BreakRangeID;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value as JsonValue;
@@ -71,7 +72,6 @@ async fn main() -> Result<()> {
             .service(main_screen)
             .service(events)
             .service(some_text)
-            .service(create_breakpoint)
             .service(frame_view)
             .service(frame_set_breakpoint)
             .app_data(data_ref.clone())
@@ -174,36 +174,19 @@ async fn events(app_data: web::Data<AppData<'static>>) -> impl Responder {
     sse::Sse::from_infallible_receiver(rx).with_retry_duration(Duration::from_secs(10))
 }
 
-#[derive(Deserialize)]
-struct BreakpointReq {
-    mod_id: u16,
-    fn_id: u16,
-    iid: u16,
-}
-
-#[actix_web::post("/breakpoints")]
-async fn create_breakpoint(
-    app_data: web::Data<AppData<'_>>,
-    params: web::Form<BreakpointReq>,
-) -> impl Responder {
-    // let breakpoint_req = params.into_inner();
-
-    // app_data.into_inner().intrp_handle.query(|| {});
-
-    //HttpResponse::Ok()
-    //    .insert_header(("HX-Trigger", "mcjs_tools_breakpoint_changed"))
-    //    .into()
-
-    HttpResponse::NotImplemented().body("not yet implemented!")
-}
-
 #[actix_web::get("/frames/{frame_ndx}/view")]
 async fn frame_view(
     app_data: web::Data<AppData<'static>>,
     path_params: web::Path<(usize,)>,
 ) -> actix_web::Result<HttpResponse> {
     let (frame_ndx,) = path_params.into_inner();
+    render_frame_view(&app_data, frame_ndx).await
+}
 
+async fn render_frame_view(
+    app_data: &AppData<'static>,
+    frame_ndx: usize,
+) -> actix_web::Result<HttpResponse> {
     let snapshot = app_data.snapshot().await;
     let frame = snapshot
         .model
@@ -235,9 +218,12 @@ async fn frame_view(
 #[actix_web::post("/frames/{frame_ndx}/break_range/{brange_id}/set")]
 async fn frame_set_breakpoint(
     app_data: web::Data<AppData<'static>>,
-    path_params: web::Path<(usize, usize)>,
+    path_params: web::Path<(usize, String)>,
 ) -> actix_web::Result<HttpResponse> {
-    let (frame_ndx, brange_id) = path_params.into_inner();
+    let (frame_ndx, brange_id_s) = path_params.into_inner();
+
+    let brange_id = BreakRangeID::parse_string(&brange_id_s)
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid break range ID"))?;
 
     let app_data = app_data.into_inner();
     app_data
@@ -247,14 +233,16 @@ async fn frame_set_breakpoint(
                 .probe_mut()
                 .ok_or_else(|| "interpreter is finished; can't set a breakpoint in this state")?;
 
-            todo!("Enable new source breakpoint at break range {brange_id:?} if not already set");
+            probe
+                .set_source_breakpoint(brange_id)
+                .map_err(|err| err.message())?;
 
             Ok(())
         })
         .await
-        .map_err(actix_web::error::ErrorNotAcceptable)?;
+        .map_err(|err_msg| actix_web::error::ErrorBadRequest(err_msg))?;
 
-    todo!()
+    render_frame_view(&app_data, frame_ndx).await
 }
 
 #[actix_web::get("/frames/{frame_ndx}/source_preview")]
@@ -281,7 +269,7 @@ async fn some_text(
 
                 let break_ranges = loader.function_breakranges(fnid).unwrap();
 
-                for brange in break_ranges {
+                for (brid, brange) in break_ranges {
                     let bytecode::BreakRange {
                         iid_start, iid_end, ..
                     } = *brange;
@@ -291,7 +279,7 @@ async fn some_text(
 
                     markers.push(Marker {
                         kind: MarkerKind::Start {
-                            // brng_id,
+                            brid,
                             iid_start,
                             iid_end,
                         },
@@ -326,13 +314,14 @@ async fn some_text(
         .await
         .ok_or_else(|| actix_web::error::ErrorNotFound("Source code not available"))?;
 
-    let markup = render_source_code(&markers, &frame_src)?;
+    let markup = render_source_code(&markers, &frame_src, frame_ndx as usize)?;
     Ok(markup)
 }
 
 fn render_source_code(
     markers: &[model::break_range::Marker],
     frame_src: &model::FrameSource,
+    frame_ndx: usize,
 ) -> actix_web::Result<Markup> {
     let pre_escaped_code = {
         use model::break_range::MarkerKind;
@@ -349,20 +338,25 @@ fn render_source_code(
             write!(pre_escaped_code, "{}", text).unwrap();
 
             match marker.kind {
-                MarkerKind::Start {
-                    // brng_id,
-                    ..
-                } => {
+                MarkerKind::Start { brid, .. } => {
                     write!(
                         pre_escaped_code,
-                        "<span class='relative' x-bind:class=\"markedBreakRange == {} && 'src-range-selected'\">",
-                        123,
+                        "<span class='relative' x-bind:class=\"markedBreakRange == '{}' && 'src-range-selected'\">",
+                        brid.to_string(),
                     ).unwrap();
+
+                    let brid_str = brid.to_string();
+                    assert!(brid_str.chars().all(|ch| ch == ',' || ch.is_numeric()));
 
                     write!(
                         pre_escaped_code,
-                        "<span class='cursor-pointer' x-on:click='pickBreakRange({})'>◯ </span>",
-                        123,
+                        "<span class='cursor-pointer' 
+                            x-on:click='markedBreakRange = \"{brid_str}\"'
+                            hx-trigger='dblclick'
+                            hx-post='/frames/{frame_ndx}/break_range/{brid_str}/set'
+                            hx-target='closest .stack-frame'
+                            hx-swap='outerHTML'
+                        >◯ </span>",
                     )
                     .unwrap();
                 }
@@ -380,7 +374,6 @@ fn render_source_code(
         maud::PreEscaped(pre_escaped_code)
     };
 
-
     let markup = html! {
         div.grid.source-view-grid-cols {
             pre x-init="$el.querySelector('.current-instr').scrollIntoView({ block: 'center' })" {
@@ -394,7 +387,7 @@ fn render_source_code(
             }
 
             div.grid {
-                pre x-data="{ markedBreakRange: null, pickBreakRange(brangeID) {} }" {
+                pre x-data="{ markedBreakRange: null }" {
                     (pre_escaped_code)
                 }
             }
@@ -448,7 +441,7 @@ fn line_number_of_giid(
     giid: mcjs_vm::GlobalIID,
     source_file: &swc_common::SourceFile,
 ) -> Option<usize> {
-    let break_range = loader.breakrange_at_giid(giid)?;
+    let (_, break_range) = loader.breakrange_at_giid(giid)?;
     Some(source_file.lookup_line(break_range.lo).unwrap())
 }
 
@@ -650,14 +643,20 @@ mod model {
             let loader = probe.loader();
 
             let breakpoints = probe
-                .breakpoints()
-                .map(|(_, bp)| {
+                .source_breakpoints()
+                .map(|(brid, _)| {
                     let filename = loader
-                        .get_abs_path(bp.mod_id)
+                        .get_abs_path(brid.module_id())
                         .unwrap()
                         .to_string_lossy()
                         .into_owned();
-                    let line = bp.loc.line;
+                    let brange = loader.get_break_range(brid).unwrap();
+
+                    // TODO Reduce number of calls to get_source_map
+                    // (Ideally reduce everything to a single source map)
+                    let source_map = loader.get_source_map(brid.module_id()).unwrap();
+                    let loc = source_map.lookup_char_pos(brange.lo);
+                    let line = loc.line.try_into().unwrap();
                     Breakpoint { line, filename }
                 })
                 .collect();
@@ -846,12 +845,13 @@ mod model {
     }
 
     pub mod break_range {
+        use mcjs_vm::interpreter::debugger::BreakRangeID;
         use mcjs_vm::IID;
 
         #[derive(Debug)]
         pub enum MarkerKind {
             Start {
-                // brng_id: BreakRangeID,
+                brid: BreakRangeID,
                 iid_start: IID,
                 iid_end: IID,
             },

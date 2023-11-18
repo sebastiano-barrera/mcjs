@@ -19,7 +19,7 @@ use crate::{
     common::{Context, Result},
     error,
     heap::{self, Heap, Object, ObjectExt},
-    loader,
+    loader::{self, BreakRangeID},
     // jit::{self, InterpreterStep},
     stack,
     stack_access,
@@ -198,19 +198,27 @@ pub struct Interpreter<'a> {
     sink: Vec<Value>,
     opts: Options,
 
-    breakpoints: HashMap<BreakpointID, Breakpoint>,
-    next_bpid: u32,
-    break_giids: HashMap<GlobalIID, BreakpointID>,
+    /// Instruction breakpoints
+    instr_bkpts: HashSet<GlobalIID>,
+
+    /// Source breakpoints, indexed by their ID.
+    ///
+    /// Each source breakpoint corresponds to exactly to one instruction breakpoint, which is
+    /// added/deleted together with it.
+    source_bkpts: HashMap<BreakRangeID, SourceBreakpoint>,
 }
 
-pub struct Breakpoint {
-    pub mod_id: bytecode::ModuleId,
-    pub loc: swc_common::LineCol,
-    pub pos: swc_common::BytePos,
+struct FuncBreakpoints {
+    /// bkpt_active[i] === whether a breakpoint has been placed on the i-th instruction.
+    ///
+    /// A bool is used because it's explicitly forbidden to place multiple breakpoints on the same
+    /// instuction.
+    bkpt_active: Box<[bool]>,
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
-pub struct BreakpointID(u32);
+// There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
+// enough (but some addtional parameters might have to be includede here later)
+pub struct SourceBreakpoint;
 
 // TODO Probably going to be changed or even replaced once I resume working on the JIT.
 // TODO(performance) monomorphize get_operand?
@@ -315,9 +323,8 @@ impl<'a> Interpreter<'a> {
             opts: Default::default(),
             #[cfg(enable_jit)]
             jitting: None,
-            breakpoints: HashMap::new(),
-            next_bpid: 1,
-            break_giids: HashMap::new(),
+            instr_bkpts: HashSet::new(),
+            source_bkpts: HashMap::new(),
         }
     }
 
@@ -377,16 +384,6 @@ impl<'a> Interpreter<'a> {
         while self.data.len() != 0 {
             // TODO Avoid calling get_function at each instructions
             let fnid = self.data.top().header().fn_id;
-
-            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
-            if self
-                .break_giids
-                .contains_key(&bytecode::GlobalIID(fnid, self.iid))
-            {
-                // Gotta increase IID, or we'll be back here on resume
-                self.iid.0 += 1;
-                return Ok(ExitInternal::Suspended);
-            }
 
             // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
             let func = self.loader.get_function(fnid).unwrap();
@@ -955,6 +952,14 @@ impl<'a> Interpreter<'a> {
                 });
             }
 
+            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+            let giid = bytecode::GlobalIID(fnid, self.iid);
+            if self.instr_bkpts.contains(&giid) {
+                // Gotta increase IID, or we'll be back here on resume
+                self.iid.0 = next_ndx;
+                return Ok(ExitInternal::Suspended);
+            }
+
             self.iid.0 = next_ndx;
         }
 
@@ -1416,7 +1421,7 @@ pub mod debugger {
     use crate::error;
     use crate::{bytecode, InterpreterValue};
 
-    use super::{Breakpoint, Interpreter};
+    use super::{Interpreter, SourceBreakpoint};
 
     /// The only real entry point to all the debugging features present in the
     /// Interpreter.
@@ -1435,7 +1440,23 @@ pub mod debugger {
         interpreter: &'a mut Interpreter<'b>,
     }
 
-    pub use super::BreakpointID;
+    pub use crate::loader::BreakRangeID;
+
+    pub enum BreakpointError {
+        /// Breakpoint already set at the given location (can't have more than 1 at the same
+        /// location).
+        AlreadyThere,
+        InvalidLocation,
+    }
+
+    impl BreakpointError {
+        pub fn message(&self) -> &'static str {
+            match self {
+                BreakpointError::AlreadyThere => "A breakpoint had already been set there",
+                BreakpointError::InvalidLocation => "Invalid location to place a breakpoint at",
+            }
+        }
+    }
 
     impl<'a, 'b> Probe<'a, 'b> {
         pub fn attach(interpreter: &'a mut Interpreter<'b>) -> Self {
@@ -1457,63 +1478,88 @@ pub mod debugger {
         /// After this operation, the interpreter will suspend itself (Interpreter::run
         /// will return Exit::Suspended), and it will be possible to examine its
         /// state (by attaching a new Probe on it).
-        pub fn set_breakpoint(
+        pub fn set_source_breakpoint(
             &mut self,
-            mod_id: bytecode::ModuleId,
-            pos: swc_common::BytePos,
-        ) -> Result<BreakpointID> {
-            let intrp = &mut self.interpreter;
+            brange_id: BreakRangeID,
+        ) -> std::result::Result<(), BreakpointError> {
+            let module_id = brange_id.module_id();
 
-            // Generate breakpoint ID
-            let bpid = BreakpointID(intrp.next_bpid);
-            intrp.next_bpid += 1;
+            let break_range: &bytecode::BreakRange = self
+                .interpreter
+                .loader
+                .get_break_range(brange_id)
+                .ok_or(BreakpointError::InvalidLocation)?;
+            let giid = bytecode::GlobalIID(
+                bytecode::FnId(module_id, break_range.local_fnid),
+                break_range.iid_start,
+            );
 
-            // Resolve location into line:col
-            let source_map = intrp.loader.get_source_map(mod_id).ok_or_else(|| {
-                // TODO Report a filename and line:col
-                error!(
-                    "can't set a breakpoint at {:?}:byte#{}: no source map for file",
-                    mod_id, pos.0
-                )
-            })?;
-            let loc = source_map.lookup_char_pos(pos);
-            let loc = swc_common::LineCol {
-                line: loc.line.try_into().unwrap(),
-                col: loc.col_display.try_into().unwrap(),
+            self.set_instr_breakpoint(giid)?;
+
+            let prev = self
+                .interpreter
+                .source_bkpts
+                .insert(brange_id, SourceBreakpoint);
+            let ret = match prev {
+                Some(_) => Err(BreakpointError::AlreadyThere),
+                None => Ok(()),
             };
 
-            // Resolve into the (potentially multiple) GIIDs
-            let giids = intrp
-                .loader
-                .resolve_break_loc(mod_id, pos)?
-                .into_iter()
-                .cloned()
-                .map(|br| bytecode::GlobalIID(bytecode::FnId(mod_id, br.local_fnid), br.iid_start));
-
-            // Add stuff into interpreter (we avoid doing this if there is an error)
-            for giid in giids {
-                // It could be that we're overwriting an existing breakpoint.  Alas, such is life.
-                intrp.break_giids.insert(giid, bpid);
+            if ret.is_err() {
+                self.clear_instr_breakpoint(giid);
             }
 
-            let breakpoint = Breakpoint { mod_id, loc, pos };
-            self.interpreter.breakpoints.insert(bpid, breakpoint);
-
-            Ok(bpid)
+            ret
         }
 
-        pub fn breakpoints(&self) -> impl Iterator<Item = (&BreakpointID, &Breakpoint)> {
-            self.interpreter.breakpoints.iter()
-        }
-        pub fn breakpoint(&self, bpid: BreakpointID) -> Option<&Breakpoint> {
-            self.interpreter.breakpoints.get(&bpid)
-        }
+        ///
         /// Delete the breakpoint with the given ID.
         ///
         /// Returns true only if there was actually a breakpoint with the given ID; false
         /// if the ID did not correspond to any breakpoint.
-        pub fn delete_breakpoint(&mut self, bpid: BreakpointID) -> bool {
-            self.interpreter.breakpoints.remove(&bpid).is_some()
+        pub fn clear_source_breakpoint(
+            &mut self,
+            brange_id: BreakRangeID,
+        ) -> std::result::Result<bool, BreakpointError> {
+            if self.interpreter.source_bkpts.remove(&brange_id).is_some() {
+                let break_range = self
+                    .interpreter
+                    .loader
+                    .get_break_range(brange_id)
+                    .ok_or(BreakpointError::InvalidLocation)?;
+                let giid = bytecode::GlobalIID(
+                    bytecode::FnId(brange_id.module_id(), break_range.local_fnid),
+                    break_range.iid_start,
+                );
+                let was_there = self.clear_instr_breakpoint(giid);
+                assert!(was_there);
+
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        pub fn source_breakpoints(
+            &self,
+        ) -> impl Iterator<Item = (BreakRangeID, &SourceBreakpoint)> {
+            self.interpreter.source_bkpts.iter().map(|(k, v)| (*k, v))
+        }
+
+        fn set_instr_breakpoint(
+            &mut self,
+            giid: bytecode::GlobalIID,
+        ) -> std::result::Result<(), BreakpointError> {
+            let new_insert = self.interpreter.instr_bkpts.insert(giid);
+            if new_insert {
+                Ok(())
+            } else {
+                Err(BreakpointError::AlreadyThere)
+            }
+        }
+
+        fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
+            self.interpreter.instr_bkpts.remove(&giid)
         }
 
         pub fn loader(&self) -> &crate::loader::Loader {

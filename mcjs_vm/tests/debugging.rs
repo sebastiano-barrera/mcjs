@@ -79,43 +79,65 @@ fn test_pos_breakpoint() {
     let mut interpreter = Interpreter::new(&mut realm, &mut loader, main_fnid);
 
     let mut probe = Probe::attach(&mut interpreter);
-    let bpid = probe.set_breakpoint(module_id, pos).unwrap();
 
-    let bp = probe.breakpoint(bpid).unwrap();
-    eprintln!("breakpoint set at {}:{}", bp.loc.line, bp.loc.col);
-
-    let mut bp_hit = false;
-    let finish_data = loop {
-        let exit = interpreter.run().expect("interpreter failed");
-        interpreter = match exit {
-            Exit::Finished(finish_data) => break finish_data,
-            Exit::Suspended(intrp) => intrp,
-        };
-
-        bp_hit = true;
-
-        let probe = Probe::attach(&mut interpreter);
-
-        // let mcjs_vm::GlobalIID(fnid, iid) = probe.giid();
-        // TODO Check that the interpreter is actually at one of the breakpoint's IIDs.
-        // Check: the interpreter's position now points at the position that the
-        // interpreter will *resume* at, which is 1 + where it's currently suspended.
-
-        let giid = probe.giid();
-        eprintln!("we are at: {:?}; sink = {:?}", giid, probe.sink());
-        if giid.0 .1 == bytecode::LocalFnId(2) {
-            assert_eq!(probe.sink(), &[Value::Number(1.0)]);
-        } else {
-            assert_eq!(probe.sink(), &[]);
+    // Resolve byte offset into line:col
+    let loc = {
+        let source_map = intrp.loader.get_source_map(module_id).ok_or_else(|| {
+            // TODO Report a filename and line:col
+            error!(
+                "can't set a breakpoint at {:?}:byte#{}: no source map for file",
+                mod_id, pos.0
+            )
+        })?;
+        let loc = source_map.lookup_char_pos(pos);
+        swc_common::LineCol {
+            line: loc.line.try_into().unwrap(),
+            col: loc.col_display.try_into().unwrap(),
         }
     };
 
-    assert!(bp_hit);
-    assert_eq!(
-        &finish_data.sink,
-        &[
-            Some(bytecode::Literal::Number(1.0)),
-            Some(bytecode::Literal::Number(2.0)),
-        ]
-    );
+    // Resolve into the (potentially multiple) GIIDs
+    let break_ranges = intrp.loader.resolve_break_loc(module_id, pos)?.into_iter();
+
+    for break_range in break_ranges {
+        let bpid = probe.set_source_breakpoint(module_id, pos).unwrap();
+
+        let bp = probe.breakpoint(bpid).unwrap();
+        eprintln!("breakpoint set at {}:{}", bp.loc.line, bp.loc.col);
+
+        let mut bp_hit = false;
+        let finish_data = loop {
+            let exit = interpreter.run().expect("interpreter failed");
+            interpreter = match exit {
+                Exit::Finished(finish_data) => break finish_data,
+                Exit::Suspended(intrp) => intrp,
+            };
+
+            bp_hit = true;
+
+            let probe = Probe::attach(&mut interpreter);
+
+            // let mcjs_vm::GlobalIID(fnid, iid) = probe.giid();
+            // TODO Check that the interpreter is actually at one of the breakpoint's IIDs.
+            // Check: the interpreter's position now points at the position that the
+            // interpreter will *resume* at, which is 1 + where it's currently suspended.
+
+            let giid = probe.giid();
+            eprintln!("we are at: {:?}; sink = {:?}", giid, probe.sink());
+            if giid.0 .1 == bytecode::LocalFnId(2) {
+                assert_eq!(probe.sink(), &[Value::Number(1.0)]);
+            } else {
+                assert_eq!(probe.sink(), &[]);
+            }
+        };
+
+        assert!(bp_hit);
+        assert_eq!(
+            &finish_data.sink,
+            &[
+                Some(bytecode::Literal::Number(1.0)),
+                Some(bytecode::Literal::Number(2.0)),
+            ]
+        );
+    }
 }

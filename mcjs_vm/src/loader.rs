@@ -48,6 +48,26 @@ struct Module {
     // Worth the increase in complexity/trickiness?
 }
 
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+pub struct BreakRangeID(bytecode::ModuleId, usize);
+
+impl BreakRangeID {
+    pub fn module_id(&self) -> bytecode::ModuleId {
+        self.0
+    }
+
+    pub fn to_string(&self) -> String {
+        format!("{},{}", self.0 .0, self.1)
+    }
+
+    pub fn parse_string(s: &str) -> Option<Self> {
+        let (mod_id_s, ndx_s) = s.split_once(',')?;
+        let mod_id = mod_id_s.parse().ok()?;
+        let ndx = ndx_s.parse().ok()?;
+        Some(BreakRangeID(bytecode::ModuleId(mod_id), ndx))
+    }
+}
+
 struct Package {
     /// Absolute path of the package's root directory.  Modules belonging to
     /// this package can be designated by a relative path from this directory.
@@ -328,20 +348,21 @@ impl Loader {
             .collect())
     }
 
-    pub fn breakrange_at_giid(&self, giid: bytecode::GlobalIID) -> Option<&bytecode::BreakRange> {
-        let bytecode::GlobalIID(bytecode::FnId(mod_id, lfnid), iid) = giid;
+    pub fn breakrange_at_giid(
+        &self,
+        giid: bytecode::GlobalIID,
+    ) -> Option<(BreakRangeID, &bytecode::BreakRange)> {
+        let bytecode::GlobalIID(fnid, iid) = giid;
 
-        let module = self.get_module(mod_id).ok()?;
         // TODO We expect there to be at most 1 range matching the filter.  Any better mechanism?
-        module.breakable_ranges.iter().find(|brange| {
-            brange.local_fnid == lfnid && brange.iid_start <= iid && iid < brange.iid_end
-        })
+        self.function_breakranges(fnid)?
+            .find(|(ndx, brange)| brange.iid_start <= iid && iid < brange.iid_end)
     }
 
     pub fn function_breakranges(
         &self,
         fnid: bytecode::FnId,
-    ) -> Option<impl Iterator<Item = &bytecode::BreakRange>> {
+    ) -> Option<impl Iterator<Item = (BreakRangeID, &bytecode::BreakRange)>> {
         let bytecode::FnId(mod_id, lfnid) = fnid;
 
         let module = self.get_module(mod_id).ok()?;
@@ -351,8 +372,16 @@ impl Loader {
         let branges = module
             .breakable_ranges
             .iter()
-            .filter(move |brange| brange.local_fnid == lfnid);
+            .enumerate()
+            .filter(move |(_, brange)| brange.local_fnid == lfnid)
+            .map(move |(ndx, brange)| (BreakRangeID(mod_id, ndx), brange));
         Some(branges)
+    }
+
+    pub fn get_break_range(&self, brange_id: BreakRangeID) -> Option<&bytecode::BreakRange> {
+        let BreakRangeID(mod_id, ndx) = brange_id;
+        let module = self.get_module(mod_id).ok()?;
+        module.breakable_ranges.get(ndx)
     }
 
     /// Resolve the given path to a module ID.
