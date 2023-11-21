@@ -71,7 +71,6 @@ async fn main() -> Result<()> {
             .service(actix_files::Files::new("/assets", "./data/assets/"))
             .service(main_screen)
             .service(events)
-            .service(some_text)
             .service(frame_view)
             .service(frame_set_breakpoint)
             .app_data(data_ref.clone())
@@ -187,6 +186,9 @@ async fn render_frame_view(
     app_data: &AppData<'static>,
     frame_ndx: usize,
 ) -> actix_web::Result<HttpResponse> {
+    // TODO Possible write-after-read hazard here, after snapshot() 'releases'
+    // the interpreter manager and the subsequent query (markers, frame_src)
+    // takes it again
     let snapshot = app_data.snapshot().await;
     let frame = snapshot
         .model
@@ -194,17 +196,56 @@ async fn render_frame_view(
         .and_then(move |model| model.frames.get(frame_ndx))
         .ok_or_else(|| actix_web::error::ErrorNotFound("no frame at given index"))?;
 
+    let source_raw_markup = {
+        let (markers, frame_src) = app_data
+            .intrp_handle
+            .query(move |state| {
+                let probe = state.probe()?;
+                let loader = probe.loader();
+
+                let giid = probe.frame_giid(frame_ndx as usize);
+                let fnid = giid.0;
+
+                let source_map = loader.get_source_map(fnid.0)?;
+
+                let break_ranges = loader.function_breakranges(fnid).unwrap();
+                let markers: Vec<_> = markers_for_breakranges(break_ranges);
+                if markers.is_empty() {
+                    return None;
+                }
+
+                let offset_range = {
+                    let offset_min = markers.iter().map(|m| m.offset).min().unwrap();
+                    let offset_max = markers.iter().map(|m| m.offset).max().unwrap();
+                    offset_min..offset_max
+                };
+
+                let frame_src = extract_frame_source(source_map, loader, giid, offset_range)?;
+                Some((markers, frame_src))
+            })
+            .await
+            .ok_or_else(|| actix_web::error::ErrorNotFound("Source code not available"))?;
+
+        render_source_code(&markers, &frame_src, frame_ndx as usize)
+            .map(|pre_escaped| pre_escaped.into_string())
+            .unwrap_or(String::new())
+    };
+
     #[derive(Serialize)]
     struct TmplParams<'a> {
         frame: &'a model::Frame,
         frame_ndx: usize,
         self_url: String,
+        source_raw_markup: String,
+        source_visible: bool,
     }
 
     let params = TmplParams {
         frame,
         frame_ndx,
         self_url: format!("/frames/{frame_ndx}/view"),
+        source_raw_markup,
+        source_visible: true,
     };
 
     let body = app_data
@@ -213,6 +254,42 @@ async fn render_frame_view(
         .map_err(|err| actix_web::error::ErrorInternalServerError(err))?;
 
     Ok(HttpResponse::Ok().body(body))
+}
+
+fn markers_for_breakranges<'a>(
+    break_ranges: impl Iterator<Item = (BreakRangeID, &'a bytecode::BreakRange)>,
+) -> Vec<model::break_range::Marker> {
+    use model::break_range::*;
+
+    let mut markers = Vec::new();
+
+    for (brid, brange) in break_ranges {
+        let bytecode::BreakRange {
+            iid_start, iid_end, ..
+        } = *brange;
+
+        let lo = brange.lo.0;
+        let hi = brange.hi.0;
+
+        markers.push(Marker {
+            kind: MarkerKind::Start {
+                brid,
+                iid_start,
+                iid_end,
+            },
+            offset: lo,
+            length: hi as i32 - lo as i32,
+        });
+        markers.push(Marker {
+            kind: MarkerKind::End,
+            offset: hi,
+            length: lo as i32 - hi as i32, // Will be negative
+        });
+    }
+
+    // Longer segments first
+    markers.sort_by_key(|m| (m.offset, -m.length));
+    markers
 }
 
 #[actix_web::post("/frames/{frame_ndx}/break_range/{brange_id}/set")]
@@ -245,79 +322,6 @@ async fn frame_set_breakpoint(
     render_frame_view(&app_data, frame_ndx).await
 }
 
-#[actix_web::get("/frames/{frame_ndx}/source_preview")]
-async fn some_text(
-    app_data: web::Data<AppData<'static>>,
-    path: web::Path<(u32,)>,
-) -> actix_web::Result<Markup> {
-    let (frame_ndx,) = path.into_inner();
-
-    let (markers, frame_src) = app_data
-        .intrp_handle
-        .query(move |state| {
-            let probe = state.probe()?;
-            let giid = probe.frame_giid(frame_ndx as usize);
-            let fnid = giid.0;
-
-            let source_map = probe.loader().get_source_map(fnid.0)?;
-
-            let loader = probe.loader();
-            let markers: Vec<_> = {
-                use model::break_range::*;
-
-                let mut markers = Vec::new();
-
-                let break_ranges = loader.function_breakranges(fnid).unwrap();
-
-                for (brid, brange) in break_ranges {
-                    let bytecode::BreakRange {
-                        iid_start, iid_end, ..
-                    } = *brange;
-
-                    let lo = brange.lo.0;
-                    let hi = brange.hi.0;
-
-                    markers.push(Marker {
-                        kind: MarkerKind::Start {
-                            brid,
-                            iid_start,
-                            iid_end,
-                        },
-                        offset: lo,
-                        length: hi as i32 - lo as i32,
-                    });
-                    markers.push(Marker {
-                        kind: MarkerKind::End,
-                        offset: hi,
-                        length: lo as i32 - hi as i32, // Will be negative
-                    });
-                }
-
-                // Longer segments first
-                markers.sort_by_key(|m| (m.offset, -m.length));
-                markers
-            };
-
-            if markers.is_empty() {
-                return None;
-            }
-
-            let offset_range = {
-                let offset_min = markers.iter().map(|m| m.offset).min().unwrap();
-                let offset_max = markers.iter().map(|m| m.offset).max().unwrap();
-                offset_min..offset_max
-            };
-
-            extract_frame_source(source_map, probe.loader(), giid, offset_range)
-                .map(|frame_src| (markers, frame_src))
-        })
-        .await
-        .ok_or_else(|| actix_web::error::ErrorNotFound("Source code not available"))?;
-
-    let markup = render_source_code(&markers, &frame_src, frame_ndx as usize)?;
-    Ok(markup)
-}
-
 fn render_source_code(
     markers: &[model::break_range::Marker],
     frame_src: &model::FrameSource,
@@ -333,7 +337,7 @@ fn render_source_code(
         let mut prev_end = offset;
 
         for marker in markers {
-            let mkr_offset = marker.offset as usize - 1;
+            let mkr_offset = marker.offset as usize;
             let text = &frame_src.text[prev_end - offset..mkr_offset - offset];
             write!(pre_escaped_code, "{}", text).unwrap();
 
@@ -404,27 +408,30 @@ pub fn extract_frame_source(
     offset_range: Range<u32>,
 ) -> Option<model::FrameSource> {
     use swc_common::BytePos;
+    use std::cmp::{max, min};
 
     // NOTE We're making a distinct source map per file, but the API clearly
     // supports a single source map for multiple files.  Should I use it?
     let files = source_map.files();
-    let source_file = &files.first().unwrap();
+    let source_file = files.first().unwrap();
 
     let line_focus = line_number_of_giid(loader, giid, source_file);
 
-    use std::cmp::{max, min};
-    let Range { mut start, mut end } = offset_range;
-    start = max(0, start - 150);
-    end = min(source_file.src.len().try_into().unwrap(), end + 150);
-
-    // Snap to line boundaries
+    // Snap offset_range to line boundaries
+    let start = max(0, offset_range.start - 150);
     let start_line = source_file.lookup_line(BytePos(start)).unwrap();
     let (start_offset, _) = source_file.line_bounds(start_line);
+    let start_offset0 = start_offset.0 as usize - 1;
 
+    let end = min(
+        (source_file.src.len() - 1).try_into().unwrap(),
+        offset_range.end + 150,
+    );
     let end_line = source_file.lookup_line(BytePos(end)).unwrap();
     let (_, end_offset) = source_file.line_bounds(end_line);
+    let end_offset0 = end_offset.0 as usize - 1;
 
-    let text = &source_file.src[start_offset.0 as usize..end_offset.0 as usize];
+    let text = &source_file.src[start_offset0..end_offset0];
 
     Some(model::FrameSource {
         text: text.to_string(),

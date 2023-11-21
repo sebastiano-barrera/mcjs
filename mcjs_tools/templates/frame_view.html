@@ -3,7 +3,7 @@
 	id="stack-frame-{{ frame_ndx }}"
 	class="stack-frame grid stack-view-grid-rows min-w-fit pr-4 space-x-2 h-full
 		text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
-	x-data="{sourceVisible: false, highlight: {iidStart: null, iidEnd: null}}"
+	x-data="{highlight: {iidStart: null, iidEnd: null}}"
 >
 	<div 
 		class="flex flex-row items-center gap-2 px-2 relative"
@@ -19,11 +19,6 @@
 				dark:text-black dark:bg-zinc-600 
 				dark:hover:bg-zinc-500 
 				[&.active]:dark:bg-zinc-900 [&.active]:dark:ring-zinc-400 [&.active]:dark:text-white"
-			@click="sourceVisible = ! sourceVisible"
-			x-bind:class="sourceVisible && 'active'"
-			hx-get="{{ self_url }}/../source_preview"
-			hx-target="next .source-text"
-			hx-swap="innerHTML show:#current:top"
 			>
 			JS
 		</button>
@@ -66,8 +61,11 @@
 	}}
 	<div
 		class="source-text overflow-x-hidden overflow-y-scroll min-w-[8cm] max-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
-		x-show="sourceVisible"
-	></div>
+	>
+		{{#if source_visible}}
+		{{{ source_raw_markup }}}
+		{{/if}}
+	</div>
 
 
 	{{#with frame}}
