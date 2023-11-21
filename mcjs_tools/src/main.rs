@@ -125,17 +125,20 @@ impl<'a> AppData<'a> {
 
         snapshot
     }
+
+    fn invalidate_snapshot(&self) {
+        let mut cached_snapshot = self.cached_snapshot.lock().unwrap();
+        *cached_snapshot = Arc::new(Snapshot {
+            failure: None,
+            model: None,
+        });
+    }
 }
 
 #[actix_web::get("/")]
 async fn main_screen(app_data: web::Data<AppData<'_>>) -> actix_web::Result<HttpResponse> {
     let snapshot = app_data.snapshot().await;
     if snapshot.model.is_some() {
-        eprintln!(
-            "main_screen JSON = {}",
-            serde_json::to_string_pretty(&*snapshot).unwrap()
-        );
-
         let body = app_data
             .handlebars
             .render("index", &*snapshot)
@@ -173,18 +176,26 @@ async fn events(app_data: web::Data<AppData<'static>>) -> impl Responder {
     sse::Sse::from_infallible_receiver(rx).with_retry_duration(Duration::from_secs(10))
 }
 
+#[derive(Deserialize)]
+struct FrameViewParams {
+    source_visible: bool,
+}
+
 #[actix_web::get("/frames/{frame_ndx}/view")]
 async fn frame_view(
     app_data: web::Data<AppData<'static>>,
     path_params: web::Path<(usize,)>,
+    query_params: web::Query<FrameViewParams>,
 ) -> actix_web::Result<HttpResponse> {
     let (frame_ndx,) = path_params.into_inner();
-    render_frame_view(&app_data, frame_ndx).await
+    let query_params = query_params.into_inner();
+    render_frame_view(&app_data, frame_ndx, query_params.source_visible).await
 }
 
 async fn render_frame_view(
     app_data: &AppData<'static>,
     frame_ndx: usize,
+    source_visible: bool,
 ) -> actix_web::Result<HttpResponse> {
     // TODO Possible write-after-read hazard here, after snapshot() 'releases'
     // the interpreter manager and the subsequent query (markers, frame_src)
@@ -245,7 +256,7 @@ async fn render_frame_view(
         frame_ndx,
         self_url: format!("/frames/{frame_ndx}/view"),
         source_raw_markup,
-        source_visible: true,
+        source_visible,
     };
 
     let body = app_data
@@ -296,8 +307,10 @@ fn markers_for_breakranges<'a>(
 async fn frame_set_breakpoint(
     app_data: web::Data<AppData<'static>>,
     path_params: web::Path<(usize, String)>,
+    form_params: web::Form<FrameViewParams>,
 ) -> actix_web::Result<HttpResponse> {
     let (frame_ndx, brange_id_s) = path_params.into_inner();
+    let form_params = form_params.into_inner();
 
     let brange_id = BreakRangeID::parse_string(&brange_id_s)
         .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid break range ID"))?;
@@ -319,7 +332,9 @@ async fn frame_set_breakpoint(
         .await
         .map_err(|err_msg| actix_web::error::ErrorBadRequest(err_msg))?;
 
-    render_frame_view(&app_data, frame_ndx).await
+    app_data.invalidate_snapshot();
+
+    render_frame_view(&app_data, frame_ndx, form_params.source_visible).await
 }
 
 fn render_source_code(
@@ -358,8 +373,6 @@ fn render_source_code(
                             x-on:click='markedBreakRange = \"{brid_str}\"'
                             hx-trigger='dblclick'
                             hx-post='/frames/{frame_ndx}/break_range/{brid_str}/set'
-                            hx-target='closest .stack-frame'
-                            hx-swap='outerHTML'
                         >◯ </span>",
                     )
                     .unwrap();
@@ -407,8 +420,8 @@ pub fn extract_frame_source(
     giid: mcjs_vm::GlobalIID,
     offset_range: Range<u32>,
 ) -> Option<model::FrameSource> {
-    use swc_common::BytePos;
     use std::cmp::{max, min};
+    use swc_common::BytePos;
 
     // NOTE We're making a distinct source map per file, but the API clearly
     // supports a single source map for multiple files.  Should I use it?
@@ -630,7 +643,7 @@ mod model {
     use std::collections::HashMap;
 
     use bytecode::{ArgIndex, CaptureIndex, VReg};
-    use mcjs_vm::{bytecode, interpreter::debugger::Probe};
+    use mcjs_vm::{bytecode, interpreter::debugger::Probe, GlobalIID};
     use serde::Serialize;
 
     /// A model (a copy, a projection) of the (suspended) interpreter's state,
@@ -639,7 +652,8 @@ mod model {
     /// It is also used directly as the template input data for the main screen template.
     #[derive(Clone, Serialize)]
     pub struct VMState {
-        pub breakpoints: Vec<Breakpoint>,
+        pub source_breakpoints: Vec<SourceBreakpoint>,
+        pub instr_breakpoints: Vec<GlobalIID>,
 
         /// Stack frames, in bottom-to-top order
         pub frames: Vec<Frame>,
@@ -649,7 +663,7 @@ mod model {
         pub fn snapshot(probe: &Probe) -> Self {
             let loader = probe.loader();
 
-            let breakpoints = probe
+            let source_breakpoints = probe
                 .source_breakpoints()
                 .map(|(brid, _)| {
                     let filename = loader
@@ -664,9 +678,11 @@ mod model {
                     let source_map = loader.get_source_map(brid.module_id()).unwrap();
                     let loc = source_map.lookup_char_pos(brange.lo);
                     let line = loc.line.try_into().unwrap();
-                    Breakpoint { line, filename }
+                    SourceBreakpoint { line, filename }
                 })
                 .collect();
+
+            let instr_breakpoints: Vec<_> = probe.instr_breakpoints().collect();
 
             let mut frames = Vec::new();
             let mut prev_return_iid = None;
@@ -704,14 +720,23 @@ mod model {
                         bytecode: func
                             .instrs()
                             .iter()
-                            .map(|instr| format!("{:?}", instr))
+                            .enumerate()
+                            .map(|(ndx, instr)| {
+                                let iid = bytecode::IID(ndx.try_into().unwrap());
+                                let giid = bytecode::GlobalIID(fnid, iid);
+                                Instruction {
+                                    textual_repr: format!("{:?}", instr),
+                                    has_breakpoint: instr_breakpoints.contains(&giid),
+                                }
+                            })
                             .collect(),
                     },
                 });
             }
 
             VMState {
-                breakpoints,
+                source_breakpoints,
+                instr_breakpoints,
                 frames,
             }
         }
@@ -831,7 +856,7 @@ mod model {
     }
 
     #[derive(Clone, Serialize)]
-    pub struct Breakpoint {
+    pub struct SourceBreakpoint {
         pub filename: String,
         pub line: LineNum,
     }
@@ -907,6 +932,12 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct Function {
-        bytecode: Vec<String>,
+        bytecode: Vec<Instruction>,
+    }
+
+    #[derive(Clone, Serialize)]
+    pub struct Instruction {
+        textual_repr: String,
+        has_breakpoint: bool,
     }
 }

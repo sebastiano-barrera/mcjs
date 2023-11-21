@@ -3,6 +3,9 @@
 	id="stack-frame-{{ frame_ndx }}"
 	class="stack-frame grid stack-view-grid-rows min-w-fit pr-4 space-x-2 h-full
 		text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
+	hx-target="this"
+	hx-swap="outerHTML"
+	hx-vals='{"source_visible": {{source_visible}} }'
 	x-data="{highlight: {iidStart: null, iidEnd: null}}"
 >
 	<div 
@@ -11,7 +14,8 @@
 	>
 		<!-- Top bar, above bytecode -->
 		<button 
-			class="py-0 px-2 rounded-sm ring-1 cursor-pointer
+			class="{{#if source_visible}}active{{/if}}
+				py-0 px-2 rounded-sm ring-1 cursor-pointer
 				text-zinc-500 bg-zinc-200 ring-transparent
 				hover:bg-zinc-300 
 				[&.active]:text-black [&.active]:ring-zinc-800
@@ -19,6 +23,8 @@
 				dark:text-black dark:bg-zinc-600 
 				dark:hover:bg-zinc-500 
 				[&.active]:dark:bg-zinc-900 [&.active]:dark:ring-zinc-400 [&.active]:dark:text-white"
+			hx-get="{{ self_url }}"   {{! Any better way than passing 'self_url'? }}
+			hx-vals='{"source_visible":  {{#if source_visible}}false{{else}}true{{/if}} }'
 			>
 			JS
 		</button>
@@ -59,13 +65,13 @@
 		(in the window manager, e.g. by using alt-tab). Plus it also messes up with the
 		general layout, where horizontal scrolling is used to view other stack frames.
 	}}
-	<div
-		class="source-text overflow-x-hidden overflow-y-scroll min-w-[8cm] max-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
-	>
-		{{#if source_visible}}
-		{{{ source_raw_markup }}}
-		{{/if}}
-	</div>
+	{{#if source_visible}}
+		<div
+			class="source-text overflow-x-hidden overflow-y-scroll min-w-[8cm] max-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
+		>
+			{{{ source_raw_markup }}}
+		</div>
+	{{/if}}
 
 
 	{{#with frame}}
@@ -93,11 +99,14 @@
 						class="font-mono px-2 border-sky-500 dark:border-white [&.highlight]:border-r-2"
 						x-bind:class="{{ @index }} >= highlight.iidStart && {{ @index }} < highlight.iidEnd && 'highlight'"
 					>
+						{{#if has_breakpoint}}
+							<span class="text-red-500">●</span>
+						{{/if}}
 						{{ @index }}⬥ 
 					</span>
 				</div>
 				<div>
-					{{ this }}
+					{{ textual_repr }}
 				</div>
 			{{/each}}
 		</div>

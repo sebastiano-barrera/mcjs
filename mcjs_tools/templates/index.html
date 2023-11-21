@@ -36,12 +36,12 @@
 							bg-zinc-400 text-white
 							dark:bg-zinc-600 dark:text-zinc-200
 							font-semibold text-sm px-1 py-0.5 mx-2 uppercase
-						"> Breakpoints </span>
+						"> Source Breakpoints </span>
 					</div>
 
 					<div>
 						<div class="text-xs whitespace-nowrap">
-							{{#each breakpoints}}
+							{{#each source_breakpoints}}
 								<div class="
 									px-1 cursor-pointer
 									hover:bg-sky-100
@@ -52,6 +52,29 @@
 							{{/each}}
 						</div>
 					</div>
+
+					<div class="my-1">
+						<span class="
+							bg-zinc-400 text-white
+							dark:bg-zinc-600 dark:text-zinc-200
+							font-semibold text-sm px-1 py-0.5 mx-2 uppercase
+						"> Instr. Breakpoints </span>
+					</div>
+
+					<div>
+						<div class="text-xs whitespace-nowrap">
+							{{#each instr_breakpoints}}
+								<div class="
+									px-1 cursor-pointer
+									hover:bg-sky-100
+									dark:bg-zinc-800 dark:hover:bg-zinc-700
+								">
+									{{this}}
+								</div>
+							{{/each}}
+						</div>
+					</div>
+
 				</div>
 			</div>
 
@@ -68,7 +91,7 @@
 			<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
 				<!-- Main area -->
 				{{#each frames}}
-					<div hx-trigger="load" hx-get="/frames/{{ @index }}/view" hx-swap="outerHTML"></div>
+					<div hx-trigger="load" hx-get="/frames/{{ @index }}/view?source_visible=false" hx-swap="outerHTML"></div>
 				{{/each}}
 			</div>
 		</div>

@@ -9,7 +9,7 @@ use swc_atoms::JsWord;
 use swc_common::{Span, SourceMap, BytePos};
 
 // Instruction ID. Can identify an instruction, or its result.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[allow(clippy::upper_case_acronyms)]
 pub struct IID(pub u16);
 
@@ -28,7 +28,7 @@ impl std::fmt::Debug for IID {
 /// from importing modules.
 // me: "64K modules ought to be enough for anyone."
 // guy with knife: node_modules
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize)]
 pub struct ModuleId(pub u16);
 
 pub const SCRIPT_MODULE_ID: ModuleId = ModuleId(0);
@@ -50,13 +50,13 @@ impl From<u16> for ModuleId {
 ///
 /// Implements Ord, so it's possible to quickly and cheaply check if a set of
 /// LocalFnIds are disjoint from another.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord, Serialize)]
 pub struct LocalFnId(pub u16);
 
 /// Global ID of a function, composing a module ID and a local function ID.  ///
 /// This ID is sufficient to identify a function across the entire loaded codebase,
 /// regardless of the module it belongs to.
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 pub struct FnId(pub ModuleId, pub LocalFnId);
 
 impl std::fmt::Debug for FnId {
@@ -65,7 +65,7 @@ impl std::fmt::Debug for FnId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct GlobalIID(pub FnId, pub IID);
 
 impl std::fmt::Debug for GlobalIID {

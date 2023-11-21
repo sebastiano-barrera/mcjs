@@ -1546,7 +1546,7 @@ pub mod debugger {
             self.interpreter.source_bkpts.iter().map(|(k, v)| (*k, v))
         }
 
-        fn set_instr_breakpoint(
+        pub fn set_instr_breakpoint(
             &mut self,
             giid: bytecode::GlobalIID,
         ) -> std::result::Result<(), BreakpointError> {
@@ -1558,8 +1558,12 @@ pub mod debugger {
             }
         }
 
-        fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
+        pub fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
             self.interpreter.instr_bkpts.remove(&giid)
+        }
+
+        pub fn instr_breakpoints(&self) -> impl '_ + Iterator<Item = bytecode::GlobalIID> {
+            self.interpreter.instr_bkpts.iter().copied()
         }
 
         pub fn loader(&self) -> &crate::loader::Loader {
