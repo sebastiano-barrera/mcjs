@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
             .service(events)
             .service(frame_view)
             .service(frame_set_breakpoint)
-            .service(breakpoints)
+            .service(sidebar)
             .app_data(data_ref.clone())
     });
 
@@ -303,14 +303,14 @@ fn markers_for_breakranges<'a>(
     markers
 }
 
-#[actix_web::get("/breakpoints")]
-async fn breakpoints(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
+#[actix_web::get("/sidebar")]
+async fn sidebar(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
     let app_data = app_data.into_inner();
     let snapshot = app_data.snapshot().await;
 
     let body = app_data
         .handlebars
-        .render("breakpoints", &*snapshot)
+        .render("sidebar", &*snapshot)
         .map_err(|err| actix_web::error::ErrorInternalServerError(err))?;
 
     Ok(HttpResponse::Ok().body(body))

@@ -83,18 +83,12 @@
 			onload="this.querySelector('.highlighted').scrollIntoView({ block: 'center' })"
 		>
 			{{#each function.bytecode}}
-				<div
-					class="text-right rounded-sm cursor-pointer
-						{{#if (eq @index ../iid)}} highlighted {{/if}}
-						hover:bg-zinc-100 hover:dark:bg-zinc-700
-						[&.highlighted]:bg-zinc-100 [&.highlighted]:font-medium [&.highlighted]:ring-1 [&.highlighted]:ring-zinc-400
-						[&.highlighted]:dark:bg-white [&.highlighted]:dark:text-black [&.highlighted]:dark:ring-transparent
-					"
-					hx-post="{{ self_url }}/../set_breakpoint"
-					hx-target="#stack-frame-{{ ../../frame_ndx }}"
-					hx-vals='{"iid": {{ @index }}}'
-					hx-swap="outerHTML"
-				>
+				<div class="text-right rounded-sm cursor-pointer
+					{{#if (eq @index ../iid)}} highlighted {{/if}}
+					hover:bg-zinc-100 hover:dark:bg-zinc-700
+					[&.highlighted]:bg-zinc-100 [&.highlighted]:font-medium [&.highlighted]:ring-1 [&.highlighted]:ring-zinc-400
+					[&.highlighted]:dark:bg-white [&.highlighted]:dark:text-black [&.highlighted]:dark:ring-transparent
+				">
 					<span
 						class="font-mono px-2 border-sky-500 dark:border-white [&.highlight]:border-r-2"
 						x-bind:class="{{ @index }} >= highlight.iidStart && {{ @index }} < highlight.iidEnd && 'highlight'"

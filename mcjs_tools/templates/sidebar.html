@@ -11,9 +11,12 @@
         </div>
     {{/if}}
 
+    <div class="text-xs text-center">
+        Double-click <span class="inline-block src-range-selected">◯ source code range</span> to set breakpoint.
+    </div>
+
     <div class="my-1">
         <span class="
-            bg-zinc-400 text-white
             dark:bg-zinc-600 dark:text-zinc-200
             font-semibold text-sm px-1 py-0.5 mx-2 uppercase
         "> Source Breakpoints </span>
@@ -36,7 +39,6 @@
 
     <div class="my-1">
         <span class="
-            bg-zinc-400 text-white
             dark:bg-zinc-600 dark:text-zinc-200
             font-semibold text-sm px-1 py-0.5 mx-2 uppercase
         "> Instr. Breakpoints </span>
@@ -50,7 +52,14 @@
                     hover:bg-sky-100
                     dark:bg-zinc-800 dark:hover:bg-zinc-700
                 ">
-                    {{this}}
+                    fn
+                    <span class="font-mono">
+                        {{this.[0].[0]}}.{{this.[0].[1]}}
+                    </span>
+                    ins
+                    <span class="font-mono">
+                        {{this.[1]}}
+                    </span>
                 </div>
             {{/each}}
         </div>
