@@ -1,0 +1,59 @@
+{{#with model}}
+<div class="flex flex-col p-0 cursor-default">
+    <!-- Left sidebar -->
+
+    {{#if ../failure}}
+        <div class="m-2 px-4 py-2 ring-1 ring-zinc-300 dark:ring-transparent dark:text-white dark:bg-zinc-900">
+            <p>
+                <span class="bg-rose-400 dark:bg-rose-500 px-4 px-1 text-white"><b>Interpreter failed:</b></span>
+            </p>
+            {{../failure}}
+        </div>
+    {{/if}}
+
+    <div class="my-1">
+        <span class="
+            bg-zinc-400 text-white
+            dark:bg-zinc-600 dark:text-zinc-200
+            font-semibold text-sm px-1 py-0.5 mx-2 uppercase
+        "> Source Breakpoints </span>
+    </div>
+
+    <div>
+        <div class="text-xs whitespace-nowrap">
+            {{#each source_breakpoints}}
+                <div 
+                    class="px-1 cursor-pointer
+                        hover:bg-sky-100
+                        dark:bg-zinc-800 dark:hover:bg-zinc-700
+                        whitespace-nowrap text-ellipsis overflow-hidden"
+                    style="direction: rtl">
+                    {{ filename }}:{{ line }}
+                </div>
+            {{/each}}
+        </div>
+    </div>
+
+    <div class="my-1">
+        <span class="
+            bg-zinc-400 text-white
+            dark:bg-zinc-600 dark:text-zinc-200
+            font-semibold text-sm px-1 py-0.5 mx-2 uppercase
+        "> Instr. Breakpoints </span>
+    </div>
+
+    <div>
+        <div class="text-xs whitespace-nowrap">
+            {{#each instr_breakpoints}}
+                <div class="
+                    px-1 cursor-pointer
+                    hover:bg-sky-100
+                    dark:bg-zinc-800 dark:hover:bg-zinc-700
+                ">
+                    {{this}}
+                </div>
+            {{/each}}
+        </div>
+    </div>
+</div>
+{{/with}}

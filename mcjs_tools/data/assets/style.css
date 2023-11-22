@@ -697,6 +697,10 @@ video {
   grid-template-columns: minmax(0,auto) 1cm 1fr;
 }
 
+.grid-cols-\[minmax\(0\2c 7cm\)_1cm_1fr\] {
+  grid-template-columns: minmax(0,7cm) 1cm 1fr;
+}
+
 .grid-rows-\[1cm_1fr\] {
   grid-template-rows: 1cm 1fr;
 }

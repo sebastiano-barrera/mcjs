@@ -11,91 +11,29 @@
 	<script defer src="/assets/htmx-1.9.6.js"></script>
 </head>
 
-<body 
-	class="w-full h-full dark:bg-zinc-800 dark:text-white text-black"
-	>
-	{{#with model}}
-		<div class="grid grid-cols-[minmax(0,auto)_1cm_1fr] inset-0 w-full h-full">
-			<div
-				class="grid grid-rows-[auto_1fr]"
-			>
-				<div class="flex flex-col p-0 cursor-default">
-					<!-- Left sidebar -->
+<body class="w-full h-full dark:bg-zinc-800 dark:text-white text-black">
+	<div class="grid grid-cols-[minmax(0,7cm)_1cm_1fr] inset-0 w-full h-full">
+		<div class="p-0" hx-get="/breakpoints" hx-trigger="load, breakpoints-changed from:body">
+			Loading...
+		</div>
 
-					{{#if ../failure}}
-						<div class="m-2 px-4 py-2 ring-1 ring-zinc-300 dark:ring-transparent dark:text-white dark:bg-zinc-900">
-							<p>
-								<span class="bg-rose-400 dark:bg-rose-500 px-4 px-1 text-white"><b>Interpreter failed:</b></span>
-							</p>
-							{{../failure}}
-						</div>
-					{{/if}}
-
-					<div class="my-1">
-						<span class="
-							bg-zinc-400 text-white
-							dark:bg-zinc-600 dark:text-zinc-200
-							font-semibold text-sm px-1 py-0.5 mx-2 uppercase
-						"> Source Breakpoints </span>
-					</div>
-
-					<div>
-						<div class="text-xs whitespace-nowrap">
-							{{#each source_breakpoints}}
-								<div class="
-									px-1 cursor-pointer
-									hover:bg-sky-100
-									dark:bg-zinc-800 dark:hover:bg-zinc-700
-								">
-									{{ filename }}:{{ line }}
-								</div>
-							{{/each}}
-						</div>
-					</div>
-
-					<div class="my-1">
-						<span class="
-							bg-zinc-400 text-white
-							dark:bg-zinc-600 dark:text-zinc-200
-							font-semibold text-sm px-1 py-0.5 mx-2 uppercase
-						"> Instr. Breakpoints </span>
-					</div>
-
-					<div>
-						<div class="text-xs whitespace-nowrap">
-							{{#each instr_breakpoints}}
-								<div class="
-									px-1 cursor-pointer
-									hover:bg-sky-100
-									dark:bg-zinc-800 dark:hover:bg-zinc-700
-								">
-									{{this}}
-								</div>
-							{{/each}}
-						</div>
-					</div>
-
-				</div>
+		<div id="main-area-labels" class="grid stack-view-grid-rows inset-0">
+			<div></div>
+			<div class="sticky lowercase text-xl text-vertical dark:text-white py-2 ml-auto mr-auto">
+				Code
 			</div>
-
-			<div id="main-area-labels" class="grid stack-view-grid-rows inset-0">
-				<div></div>
-				<div class="sticky lowercase text-xl text-vertical dark:text-white py-2 ml-auto mr-auto">
-					Code
-				</div>
-				<div class="sticky lowercase text-xl text-vertical text-right dark:text-white py-2 ml-auto mr-auto">
-					Data
-				</div>
-			</div>
-
-			<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
-				<!-- Main area -->
-				{{#each frames}}
-					<div hx-trigger="load" hx-get="/frames/{{ @index }}/view?source_visible=false" hx-swap="outerHTML"></div>
-				{{/each}}
+			<div class="sticky lowercase text-xl text-vertical text-right dark:text-white py-2 ml-auto mr-auto">
+				Data
 			</div>
 		</div>
-	{{/with}}
+
+		<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
+			<!-- Main area -->
+			{{#each model.frames}}
+				<div hx-trigger="load" hx-get="/frames/{{ @index }}/view?source_visible=false" hx-swap="outerHTML"></div>
+			{{/each}}
+		</div>
+	</div>
 </body>
 
 

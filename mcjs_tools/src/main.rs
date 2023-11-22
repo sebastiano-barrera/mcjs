@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
             .service(events)
             .service(frame_view)
             .service(frame_set_breakpoint)
+            .service(breakpoints)
             .app_data(data_ref.clone())
     });
 
@@ -189,14 +190,15 @@ async fn frame_view(
 ) -> actix_web::Result<HttpResponse> {
     let (frame_ndx,) = path_params.into_inner();
     let query_params = query_params.into_inner();
-    render_frame_view(&app_data, frame_ndx, query_params.source_visible).await
+    let body = render_frame_view(&app_data, frame_ndx, query_params.source_visible).await?;
+    Ok(HttpResponse::Ok().body(body))
 }
 
 async fn render_frame_view(
     app_data: &AppData<'static>,
     frame_ndx: usize,
     source_visible: bool,
-) -> actix_web::Result<HttpResponse> {
+) -> actix_web::Result<String> {
     // TODO Possible write-after-read hazard here, after snapshot() 'releases'
     // the interpreter manager and the subsequent query (markers, frame_src)
     // takes it again
@@ -259,12 +261,10 @@ async fn render_frame_view(
         source_visible,
     };
 
-    let body = app_data
+    app_data
         .handlebars
         .render("frame_view", &params)
-        .map_err(|err| actix_web::error::ErrorInternalServerError(err))?;
-
-    Ok(HttpResponse::Ok().body(body))
+        .map_err(|err| actix_web::error::ErrorInternalServerError(err))
 }
 
 fn markers_for_breakranges<'a>(
@@ -303,6 +303,19 @@ fn markers_for_breakranges<'a>(
     markers
 }
 
+#[actix_web::get("/breakpoints")]
+async fn breakpoints(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
+    let app_data = app_data.into_inner();
+    let snapshot = app_data.snapshot().await;
+
+    let body = app_data
+        .handlebars
+        .render("breakpoints", &*snapshot)
+        .map_err(|err| actix_web::error::ErrorInternalServerError(err))?;
+
+    Ok(HttpResponse::Ok().body(body))
+}
+
 #[actix_web::post("/frames/{frame_ndx}/break_range/{brange_id}/set")]
 async fn frame_set_breakpoint(
     app_data: web::Data<AppData<'static>>,
@@ -334,7 +347,10 @@ async fn frame_set_breakpoint(
 
     app_data.invalidate_snapshot();
 
-    render_frame_view(&app_data, frame_ndx, form_params.source_visible).await
+    let body = render_frame_view(&app_data, frame_ndx, form_params.source_visible).await?;
+    Ok(HttpResponse::Ok()
+        .append_header(("HX-Trigger", "breakpoints-changed"))
+        .body(body))
 }
 
 fn render_source_code(
