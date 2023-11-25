@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
             .service(events)
             .service(frame_view)
             .service(frame_set_breakpoint)
+            .service(delete_breakpoint)
             .service(sidebar)
             .app_data(data_ref.clone())
     });
@@ -353,6 +354,23 @@ async fn frame_set_breakpoint(
         .body(body))
 }
 
+#[derive(Deserialize, Debug)]
+struct DeleteBreakpointParams {
+    category: String,
+    index: usize,
+}
+
+#[actix_web::post("/sidebar/breakpoints/delete")]
+async fn delete_breakpoint(
+    params: web::Form<DeleteBreakpointParams>,
+) -> actix_web::Result<HttpResponse> {
+    let params = params.into_inner();
+
+    eprintln!("delete breakpoint request: {:?}", params);
+
+    Ok(HttpResponse::NotImplemented().body("sorry!"))
+}
+
 fn render_source_code(
     markers: &[model::break_range::Marker],
     frame_src: &model::FrameSource,
@@ -389,7 +407,7 @@ fn render_source_code(
                             x-on:click='markedBreakRange = \"{brid_str}\"'
                             hx-trigger='dblclick'
                             hx-post='/frames/{frame_ndx}/break_range/{brid_str}/set'
-                        >◯ </span>",
+                        >⚬ </span>",
                     )
                     .unwrap();
                 }
@@ -408,13 +426,13 @@ fn render_source_code(
     };
 
     let markup = html! {
-        div.grid.source-view-grid-cols {
+        div.grid."grid-cols-[1.5cm_1fr]" {
             pre x-init="$el.querySelector('.current-instr').scrollIntoView({ block: 'center' })" {
                 @for line_ndx in frame_src.start_line..frame_src.end_line {
                     @if Some(line_ndx) == frame_src.line_focus {
-                        span.current-instr { (format!("{:4}\n", line_ndx)) }
+                        span."px-2".current-instr { (format!("{:4}\n", line_ndx)) }
                     } @else {
-                        span { (format!("{:4}\n", line_ndx)) }
+                        span."px-2" { (format!("{:4}\n", line_ndx)) }
                     }
                 }
             }

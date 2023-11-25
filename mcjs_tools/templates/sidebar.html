@@ -1,9 +1,13 @@
 {{#with model}}
-<div class="flex flex-col p-0 cursor-default">
+<div
+    class="flex flex-col p-0 cursor-default"
+    x-data="{selectedBreakpoint: null}"
+    hx-target="this"
+>
     <!-- Left sidebar -->
 
     {{#if ../failure}}
-        <div class="m-2 px-4 py-2 ring-1 ring-zinc-300 dark:ring-transparent dark:text-white dark:bg-zinc-900">
+        <div class="mt-2 ml-2 px-4 py-2 ring-1 ring-zinc-300 dark:ring-transparent dark:text-white dark:bg-zinc-900">
             <p>
                 <span class="bg-rose-400 dark:bg-rose-500 px-4 px-1 text-white"><b>Interpreter failed:</b></span>
             </p>
@@ -11,8 +15,33 @@
         </div>
     {{/if}}
 
+    <div class="grid grid-cols-3 gap-3 p-3 text-center place-items-center text-xs font-medium">
+        {{#*inline "button-style"~}}
+            relative enabled
+            uppercase w-20 rounded-sm cursor-pointer
+            text-zinc-500 dark:text-zinc-500
+            [&.enabled]:text-black [&.enabled]:dark:text-white
+            [&.enabled]:hover:bg-zinc-100 dark:bg-zinc-700 [&.enabled]:hover:dark:bg-zinc-600
+            border dark:border-black shadow-[0_1px_1px_black]
+            [&.enabled]:active:shadow-none [&.enabled]:active:top-1
+        {{~/inline}}
+        <button class="{{> button-style}}">Next</button>
+        <button class="{{> button-style}}">Continue</button>
+        <button class="{{> button-style}}">Restart</button>
+        <button
+            class="{{> button-style}}"
+            x-bind:class="{'enabled': (selectedBreakpoint !== null)}"
+            hx-include="input"
+            hx-post="/sidebar/breakpoints/delete"
+        >
+            Delete
+            <input type="hidden" name="category" x-bind:value="selectedBreakpoint.category">
+            <input type="hidden" name="index" x-bind:value="selectedBreakpoint.index">
+        </button>
+    </div>
+
     <div class="text-xs text-center">
-        Double-click <span class="inline-block src-range-selected">◯ source code range</span> to set breakpoint.
+        Double-click <span class="inline-block src-range-selected">⚬ source code range</span> to set a breakpoint.
     </div>
 
     <div class="my-1">
@@ -29,8 +58,13 @@
                     class="px-1 cursor-pointer
                         hover:bg-sky-100
                         dark:bg-zinc-800 dark:hover:bg-zinc-700
+                        [&.selected]:bg-sky-200 [&.selected]:dark:bg-sky-800
                         whitespace-nowrap text-ellipsis overflow-hidden"
-                    style="direction: rtl">
+                    style="direction: rtl"
+                    @click="selectedBreakpoint = {category: 'source', index: {{@index}} }"
+                    x-bind:class="{ 'selected': (selectedBreakpoint.category == 'source' && selectedBreakpoint.index == {{@index}})  }"
+
+                >
                     {{ filename }}:{{ line }}
                 </div>
             {{/each}}
@@ -47,17 +81,20 @@
     <div>
         <div class="text-xs whitespace-nowrap">
             {{#each instr_breakpoints}}
-                <div class="
-                    px-1 cursor-pointer
-                    hover:bg-sky-100
-                    dark:bg-zinc-800 dark:hover:bg-zinc-700
-                ">
+                <div
+                    class="px-1 cursor-pointer
+                        hover:bg-sky-100
+                        dark:bg-zinc-800 dark:hover:bg-zinc-700
+                        [&.selected]:bg-sky-200 [&.selected]:dark:bg-sky-800"
+                    @click="selectedBreakpoint = {category: 'instr', index: {{@index}} }"
+                    x-bind:class="{ 'selected': (selectedBreakpoint.category == 'instr' && selectedBreakpoint.index == {{@index}})  }"
+                >
                     fn
-                    <span class="font-mono">
+                    <span class="font-bold">
                         {{this.[0].[0]}}.{{this.[0].[1]}}
                     </span>
                     ins
-                    <span class="font-mono">
+                    <span class="font-bold">
                         {{this.[1]}}
                     </span>
                 </div>

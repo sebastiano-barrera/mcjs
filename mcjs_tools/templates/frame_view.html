@@ -1,7 +1,7 @@
 {{! vim:ts=3 }}
 <div
 	id="stack-frame-{{ frame_ndx }}"
-	class="stack-frame grid stack-view-grid-rows min-w-fit pr-4 space-x-2 h-full
+	class="stack-frame grid stack-view-grid-rows min-w-fit pr-4 h-full
 		text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
 	hx-target="this"
 	hx-swap="outerHTML"
@@ -14,15 +14,18 @@
 	>
 		<!-- Top bar, above bytecode -->
 		<button 
-			class="{{#if source_visible}}active{{/if}}
+			class="relative				
+				{{#if source_visible}}on{{/if}}
 				py-0 px-2 rounded-sm ring-1 cursor-pointer
+				active:top-1
+				
 				text-zinc-500 bg-zinc-200 ring-transparent
 				hover:bg-zinc-300 
-				[&.active]:text-black [&.active]:ring-zinc-800
+				[&.on]:text-black [&.on]:ring-zinc-800
 
 				dark:text-black dark:bg-zinc-600 
 				dark:hover:bg-zinc-500 
-				[&.active]:dark:bg-zinc-900 [&.active]:dark:ring-zinc-400 [&.active]:dark:text-white"
+				[&.on]:dark:bg-zinc-900 [&.on]:dark:ring-zinc-400 [&.on]:dark:text-white"
 			hx-get="{{ self_url }}"   {{! Any better way than passing 'self_url'? }}
 			hx-vals='{"source_visible":  {{#if source_visible}}false{{else}}true{{/if}} }'
 			>
@@ -76,18 +79,19 @@
 
 	{{#with frame}}
 
-	<div class='flex flex-row px-2 overflow-y-scroll border-b border-dashed border-zinc-300'>
+	<div class='flex flex-row overflow-y-scroll border-b border-dashed border-zinc-300'>
 		<div 
 			class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
 				script--highlight-mcjs-values [&>*]:whitespace-nowrap"
 			onload="this.querySelector('.highlighted').scrollIntoView({ block: 'center' })"
 		>
 			{{#each function.bytecode}}
-				<div class="text-right rounded-sm cursor-pointer
+				<div class="text-right rounded-r-md cursor-pointer
 					{{#if (eq @index ../iid)}} highlighted {{/if}}
 					hover:bg-zinc-100 hover:dark:bg-zinc-700
-					[&.highlighted]:bg-zinc-100 [&.highlighted]:font-medium [&.highlighted]:ring-1 [&.highlighted]:ring-zinc-400
-					[&.highlighted]:dark:bg-white [&.highlighted]:dark:text-black [&.highlighted]:dark:ring-transparent
+					[&.highlighted]:font-medium
+					[&.highlighted]:bg-black [&.highlighted]:text-white
+					[&.highlighted]:dark:bg-white [&.highlighted]:dark:text-black
 				">
 					<span
 						class="font-mono px-2 border-sky-500 dark:border-white [&.highlight]:border-r-2"
@@ -106,7 +110,7 @@
 		</div>
 	</div>
 
-	<div class="overflow-y-scroll">
+	<div class="overflow-y-scroll px-1">
 		<table>
 			<tbody>
 				<tr>
@@ -119,7 +123,7 @@
 					{{#each captures}}
 						<tr>
 							<td class="text-right">{{ name }}</td>
-							<td>{{ ident }}</td>
+							<td class="px-1">{{ ident }}</td>
 							<td>{{ value }}</td>
 						</tr>
 						{{#if prev_idents}}
@@ -135,7 +139,7 @@
 					{{#each arguments}}
 						<tr>
 							<td class="text-right">{{ name }}</td>
-							<td>{{ ident }}</td>
+							<td class="px-1">{{ ident }}</td>
 							<td>{{ value }}</td>
 						</tr>
 						{{#if prev_idents}}
@@ -150,7 +154,7 @@
 					{{#each registers}}
 						<tr>
 							<td class="text-right">{{ name }}</td>
-							<td>{{ ident }}</td>
+							<td class="px-1">{{ ident }}</td>
 							<td>{{ value }}</td>
 						</tr>
 						{{#if prev_idents}}

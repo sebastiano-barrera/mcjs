@@ -1,7 +1,7 @@
 // vim:et:ts=2
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  content: ["./templates/**/*.html", "./templates/**/*.ejs"],
+  content: ["./templates/**/*.html", "./templates/**/*.ejs", "./src/**.rs"],
   safelist: [
     'bg-white',
     'text-black',

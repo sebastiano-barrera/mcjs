@@ -21,10 +21,6 @@
 	grid-template-rows: 1.2cm minmax(0, 1fr) max(40%, 3cm);
 }
 
-.source-view-grid-cols {
-	grid-template-columns: 1.2cm 1fr;
-}
-
 html {
 	font-weight: 300;
 	font-family: 'Rubik', sans-serif;
@@ -49,7 +45,7 @@ html {
 }
 
 .current-instr {
-	@apply bg-zinc-200 dark:bg-white text-black;
+	@apply bg-zinc-200 text-black dark:bg-zinc-700 rounded-r-md;
 }
 
 .src-range-selected {
