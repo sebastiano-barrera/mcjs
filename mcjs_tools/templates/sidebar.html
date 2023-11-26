@@ -36,8 +36,8 @@
             hx-post="/sidebar/breakpoints/delete"
         >
             Delete
-            <input type="hidden" name="category" x-bind:value="selectedBreakpoint.category">
-            <input type="hidden" name="index" x-bind:value="selectedBreakpoint.index">
+            <input type="hidden" name="category" x-bind:value="selectedBreakpoint ? selectedBreakpoint.category : ''">
+            <input type="hidden" name="index" x-bind:value="selectedBreakpoint ? selectedBreakpoint.index : ''">
         </button>
     </div>
 
@@ -63,7 +63,7 @@
                         whitespace-nowrap text-ellipsis overflow-hidden"
                     style="direction: rtl"
                     @click="selectedBreakpoint = {category: 'source', index: {{@index}} }"
-                    x-bind:class="{ 'selected': (selectedBreakpoint.category == 'source' && selectedBreakpoint.index == {{@index}})  }"
+                    x-bind:class="{ 'selected': (selectedBreakpoint && selectedBreakpoint.category == 'source' && selectedBreakpoint.index == {{@index}})  }"
 
                 >
                     {{ filename }}:{{ line }}
@@ -88,7 +88,7 @@
                         dark:bg-zinc-800 dark:hover:bg-zinc-700
                         [&.selected]:bg-sky-200 [&.selected]:dark:bg-sky-800"
                     @click="selectedBreakpoint = {category: 'instr', index: {{@index}} }"
-                    x-bind:class="{ 'selected': (selectedBreakpoint.category == 'instr' && selectedBreakpoint.index == {{@index}})  }"
+                    x-bind:class="{ 'selected': (selectedBreakpoint && selectedBreakpoint.category == 'instr' && selectedBreakpoint.index == {{@index}})  }"
                 >
                     fn
                     <span class="font-bold">
