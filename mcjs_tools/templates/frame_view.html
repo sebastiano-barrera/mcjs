@@ -11,6 +11,7 @@
 	<div 
 		class="flex flex-row items-center gap-2 px-2 relative"
 		x-data="{ detailsVisible: false }"
+		x-on:mouseleave="detailsVisible = false"
 	>
 		<!-- Top bar, above bytecode -->
 		<button 
@@ -54,7 +55,6 @@
 				dark:bg-slate-900 dark:ring-2 dark:ring-slate-700
 				"
 			x-show="detailsVisible"
-			x-on:mouseleave="detailsVisible = false"
 		>
 			<div class="font-bold">Source file:</div>
 			<div class="pl-2">{{ source_filename }}</div>
