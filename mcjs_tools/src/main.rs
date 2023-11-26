@@ -141,6 +141,10 @@ impl<'a> AppData<'a> {
 
 #[actix_web::get("/")]
 async fn main_screen(app_data: web::Data<AppData<'_>>) -> actix_web::Result<HttpResponse> {
+    render_main_screen(app_data.into_inner()).await
+}
+
+async fn render_main_screen(app_data: Arc<AppData<'_>>) -> actix_web::Result<HttpResponse> {
     let snapshot = app_data.snapshot().await;
     if snapshot.model.is_some() {
         let body = app_data
@@ -378,9 +382,7 @@ async fn action_restart(app_data: web::Data<AppData<'static>>) -> actix_web::Res
     let app_data = app_data.into_inner();
     app_data.intrp_handle.restart();
     app_data.invalidate_snapshot();
-    Ok(HttpResponse::SeeOther()
-        .insert_header(("Location", "/"))
-        .body(()))
+    render_main_screen(app_data).await
 }
 
 #[actix_web::post("/continue")]
@@ -388,9 +390,7 @@ async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Re
     let app_data = app_data.into_inner();
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
-    Ok(HttpResponse::SeeOther()
-        .insert_header(("Location", "/"))
-        .body(()))
+    render_main_screen(app_data).await
 }
 
 fn render_source_code(

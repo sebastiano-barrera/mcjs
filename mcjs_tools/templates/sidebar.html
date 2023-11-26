@@ -26,13 +26,8 @@
             [&.enabled]:active:shadow-none [&.enabled]:active:top-1
         {{~/inline}}
         <button class="{{> button-style}}">Next</button>
-	{{! TODO: Use htmx here rather than a regular full reload }}
-        <form method="post" action="/continue">
-		<button class="{{> button-style}}">Continue</button>
-        </form>
-        <form method="post" action="/restart">
-            <button class="{{> button-style}}">Restart</button>
-        </form>
+	<button hx-post="/continue" hx-target="body" hx-swap="outerHTML" class="{{> button-style}}">Continue</button>
+    	<button hx-post="/restart" hx-target="body" hx-swap="outerHTML" class="{{> button-style}}">Restart</button>
         
         <button
             class="{{> button-style}}"
