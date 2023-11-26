@@ -281,6 +281,10 @@ impl<'a> InterpreterError<'a> {
     pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
         Probe::attach(&mut self.interpreter)
     }
+
+    pub fn restart(self) -> Interpreter<'a> {
+        self.interpreter.restart()
+    }
 }
 impl<'a> std::fmt::Debug for InterpreterError<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -314,7 +318,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    pub fn restart(&mut self) {
+    pub fn restart(mut self) -> Self {
         self.data = {
             let bottom_frame = self.data.frames().last().unwrap();
             let root_fnid = bottom_frame.header().fn_id;
@@ -322,6 +326,8 @@ impl<'a> Interpreter<'a> {
         };
         self.iid = bytecode::IID(0);
         self.sink.clear();
+
+        self
     }
 
     #[cfg(enable_jit)]
@@ -1475,10 +1481,6 @@ pub mod debugger {
     impl<'a, 'b> Probe<'a, 'b> {
         pub fn attach(interpreter: &'a mut Interpreter<'b>) -> Self {
             Probe { interpreter }
-        }
-
-        pub fn restart(&mut self) {
-            self.interpreter.restart();
         }
 
         pub fn giid(&self) -> bytecode::GlobalIID {

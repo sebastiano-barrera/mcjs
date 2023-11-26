@@ -76,6 +76,7 @@ async fn main() -> Result<()> {
             .service(delete_breakpoint)
             .service(sidebar)
             .service(action_restart)
+            .service(action_continue)
             .app_data(data_ref.clone())
     });
 
@@ -375,12 +376,17 @@ async fn delete_breakpoint(
 #[actix_web::post("/restart")]
 async fn action_restart(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
     let app_data = app_data.into_inner();
-    app_data
-        .intrp_handle
-        .query(|state| {
-            state.probe_mut().unwrap().restart();
-        })
-        .await;
+    app_data.intrp_handle.restart();
+    app_data.invalidate_snapshot();
+    Ok(HttpResponse::SeeOther()
+        .insert_header(("Location", "/"))
+        .body(()))
+}
+
+#[actix_web::post("/continue")]
+async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
+    let app_data = app_data.into_inner();
+    app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
     Ok(HttpResponse::SeeOther()
         .insert_header(("Location", "/"))
@@ -582,17 +588,29 @@ mod interpreter_manager {
                 }
             }));
 
+            self.send(message);
+            receiver.await.unwrap()
+        }
+
+        pub fn resume(&self) {
+            self.send(Message::Continue);
+        }
+
+        pub fn restart(&self) {
+            self.send(Message::Restart);
+        }
+
+        fn send(&self, message: Message) {
             self.queue_sender
                 .send(message)
                 .expect("could not send query to interpreter main loop");
-
-            receiver.await.unwrap()
         }
     }
 
     enum Message {
         Query(Box<dyn Send + FnOnce(&mut State)>),
-        Resume,
+        Continue,
+        Restart,
     }
 
     fn interpreter_main_loop(main_path: PathBuf, queue_rx: mpsc::Receiver<Message>) -> Result<()> {
@@ -614,34 +632,44 @@ mod interpreter_manager {
             .load_import(&import_path, mcjs_vm::SCRIPT_MODULE_ID)
             .map_err(|err| anyhow!("compile error: {:?}", err))?;
 
-        // TODO Replace println! with logging
-
-        println!();
-        println!("running...");
-
-        let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
-        let mut version = 0;
-
+        enum ContinueMode {
+            Continue,
+            Resume,
+        }
         let process_messages = move |state: &mut State| loop {
             let msg = queue_rx
                 .recv()
                 .expect("bug: channel closed before terminating the interpreter");
 
             match msg {
-                Message::Resume => break,
+                Message::Continue => return ContinueMode::Resume,
+                Message::Restart => return ContinueMode::Continue,
                 Message::Query(query) => {
                     query(state);
                 }
             }
         };
 
+        // TODO Replace println! with logging
+
+        let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
+        let mut version = 0;
+
+        // Inner loop:   The state machine in it is used to let clients analyze the state of
+        // the interpreter when it is suspended.
         loop {
             version += 1;
 
-            match intrp.run() {
+            println!();
+            println!("(resuming loop)");
+
+            intrp = match intrp.run() {
                 Ok(Exit::Finished(_)) => {
                     process_messages(&mut State::Finished { version });
-                    break;
+
+                    // It doesn't really make sense to 'continue' after the interpreter is
+                    // finished.  For now, I'll just restart
+                    Interpreter::new(&mut realm, &mut loader, main_fnid)
                 }
                 Ok(Exit::Suspended(next_intrp)) => {
                     intrp = next_intrp;
@@ -652,8 +680,13 @@ mod interpreter_manager {
                     let mut state = State::Suspended { version, probe };
 
                     println!("(suspended; handling queries)");
-                    process_messages(&mut state);
-                    println!("(resuming)");
+                    let continue_mode = process_messages(&mut state);
+                    match continue_mode {
+                        // Continue with a renewed (reset) interpreter
+                        ContinueMode::Continue => intrp.restart(),
+                        // Continue with *this* interpreter
+                        ContinueMode::Resume => intrp,
+                    }
                 }
                 Err(mut err) => {
                     let error = {
@@ -675,13 +708,12 @@ mod interpreter_manager {
                     println!("(interpreter error; handling queries)");
                     process_messages(&mut state);
 
-                    break;
+                    // Always restarts, independently of the ContinueMode
+                    println!("(restarting with a reset interpreter)");
+                    err.restart()
                 }
             }
         }
-
-        println!("(main loop quitting)");
-        Ok(())
     }
 }
 
