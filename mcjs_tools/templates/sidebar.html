@@ -27,7 +27,10 @@
         {{~/inline}}
         <button class="{{> button-style}}">Next</button>
         <button class="{{> button-style}}">Continue</button>
-        <button class="{{> button-style}}">Restart</button>
+        <form method="post" action="/restart">
+            <button class="{{> button-style}}">Restart</button>
+        </form>
+        
         <button
             class="{{> button-style}}"
             x-bind:class="{'enabled': (selectedBreakpoint !== null)}"

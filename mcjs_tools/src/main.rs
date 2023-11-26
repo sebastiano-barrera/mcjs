@@ -75,6 +75,7 @@ async fn main() -> Result<()> {
             .service(frame_set_breakpoint)
             .service(delete_breakpoint)
             .service(sidebar)
+            .service(action_restart)
             .app_data(data_ref.clone())
     });
 
@@ -371,6 +372,21 @@ async fn delete_breakpoint(
     Ok(HttpResponse::NotImplemented().body("sorry!"))
 }
 
+#[actix_web::post("/restart")]
+async fn action_restart(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
+    let app_data = app_data.into_inner();
+    app_data
+        .intrp_handle
+        .query(|state| {
+            state.probe_mut().unwrap().restart();
+        })
+        .await;
+    app_data.invalidate_snapshot();
+    Ok(HttpResponse::SeeOther()
+        .insert_header(("Location", "/"))
+        .body(()))
+}
+
 fn render_source_code(
     markers: &[model::break_range::Marker],
     frame_src: &model::FrameSource,
@@ -606,18 +622,15 @@ mod interpreter_manager {
         let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
         let mut version = 0;
 
-        let process_messages = move |state: &mut State| {
-            loop {
-                let msg = queue_rx
-                    .recv()
-                    .expect("bug: channel closed before terminating the interpreter");
+        let process_messages = move |state: &mut State| loop {
+            let msg = queue_rx
+                .recv()
+                .expect("bug: channel closed before terminating the interpreter");
 
-                match msg {
-                    // "Return"
-                    Message::Resume => break,
-                    Message::Query(query) => {
-                        query(state);
-                    }
+            match msg {
+                Message::Resume => break,
+                Message::Query(query) => {
+                    query(state);
                 }
             }
         };
@@ -634,7 +647,7 @@ mod interpreter_manager {
                     intrp = next_intrp;
                     println!("interpreter suspended.  collecting snapshot");
 
-                    let mut probe = Probe::attach(&mut intrp);
+                    let probe = Probe::attach(&mut intrp);
                     // let model = Arc::new(model::VMState::snapshot(&probe));
                     let mut state = State::Suspended { version, probe };
 
@@ -726,11 +739,9 @@ mod model {
                 // TODO Refactor this elsewhere?
                 let giid = {
                     let iid = prev_return_iid.unwrap_or(probe.giid().1);
-                    // For the top frame: `iid` is the instruction to *resume* to.
-                    // For other frames: `iid` is the instruction to *return* to.
-                    // In either case: we actually want the instruction we suspended/called at,
-                    // which is the previous one.
-                    let iid = mcjs_vm::IID(iid.0 - 1);
+                    // TODO Point at the instruction that we're currently stuck at.
+                    // That would be ideal, but there is a chance that it's the first one in the
+                    // function (iid.0 == 0), and I don't want to deal with the underflow right now
                     prev_return_iid = frame.header().return_to_iid;
                     bytecode::GlobalIID(fnid, iid)
                 };

@@ -300,23 +300,9 @@ impl<'a> Interpreter<'a> {
     pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters
-        let mut data = stack::InterpreterData::new();
-        let root_fn = loader.get_function(fnid).unwrap();
-        let n_instrs = root_fn.instrs().len().try_into().unwrap();
-
-        data.push(stack::CallMeta {
-            fnid,
-            n_instrs,
-            n_captured_upvalues: 0,
-            n_args: 0,
-            this: Value::Undefined,
-            return_value_reg: None,
-            return_to_iid: None,
-        });
-
         Interpreter {
             iid: bytecode::IID(0),
-            data,
+            data: init_stack(loader, fnid),
             realm,
             loader,
             sink: Vec::new(),
@@ -326,6 +312,16 @@ impl<'a> Interpreter<'a> {
             instr_bkpts: HashSet::new(),
             source_bkpts: HashMap::new(),
         }
+    }
+
+    pub fn restart(&mut self) {
+        self.data = {
+            let bottom_frame = self.data.frames().last().unwrap();
+            let root_fnid = bottom_frame.header().fn_id;
+            init_stack(self.loader, root_fnid)
+        };
+        self.iid = bytecode::IID(0);
+        self.sink.clear();
     }
 
     #[cfg(enable_jit)]
@@ -1172,6 +1168,24 @@ impl<'a> Interpreter<'a> {
     }
 }
 
+fn init_stack(loader: &mut loader::Loader, fnid: FnId) -> stack::InterpreterData {
+    let mut data = stack::InterpreterData::new();
+    let root_fn = loader.get_function(fnid).unwrap();
+    let n_instrs = root_fn.instrs().len().try_into().unwrap();
+
+    data.push(stack::CallMeta {
+        fnid,
+        n_instrs,
+        n_captured_upvalues: 0,
+        n_args: 0,
+        this: Value::Undefined,
+        return_value_reg: None,
+        return_to_iid: None,
+    });
+
+    data
+}
+
 fn as_object_ref<'h>(value: Value, heap: &'h heap::Heap) -> Option<heap::ValueObjectRef<'h>> {
     match value {
         Value::Object(oid) => heap.get(oid).map(Into::into),
@@ -1463,6 +1477,10 @@ pub mod debugger {
             Probe { interpreter }
         }
 
+        pub fn restart(&mut self) {
+            self.interpreter.restart();
+        }
+
         pub fn giid(&self) -> bytecode::GlobalIID {
             let frame = self.interpreter.data.top();
 
@@ -1604,7 +1622,7 @@ pub mod debugger {
             // In either case: we actually want the instruction we suspended/called at,
             // which is the previous one.
 
-            let iid = bytecode::IID(iid.0 - 1);
+            let iid = bytecode::IID(iid.0);
             bytecode::GlobalIID(fnid, iid)
         }
     }
