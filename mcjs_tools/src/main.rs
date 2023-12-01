@@ -70,13 +70,13 @@ async fn main() -> Result<()> {
         App::new()
             .service(actix_files::Files::new("/assets", "./data/assets/"))
             .service(main_screen)
-            .service(events)
             .service(frame_view)
             .service(frame_set_breakpoint)
             .service(delete_breakpoint)
             .service(sidebar)
             .service(action_restart)
             .service(action_continue)
+            .service(object)
             .app_data(data_ref.clone())
     });
 
@@ -155,33 +155,6 @@ async fn render_main_screen(app_data: Arc<AppData<'_>>) -> actix_web::Result<Htt
     } else {
         Ok(HttpResponse::Ok().body("Interpreter finished successfully.  No debugging!"))
     }
-}
-
-#[actix_web::get("/events")]
-async fn events(app_data: web::Data<AppData<'static>>) -> impl Responder {
-    use actix_web_lab::sse;
-    use tokio::sync::mpsc;
-
-    async fn sender_process(app_data: web::Data<AppData<'_>>, tx: mpsc::Sender<sse::Event>) {
-        for i in 0..100 {
-            let new_body = app_data
-                .handlebars
-                .render("fragment", &json!({ "event_ndx": i }))
-                .unwrap();
-            let event = sse::Data::new(new_body).event("content").into();
-            tx.send(event).await.expect("could not send event");
-
-            let msecs = rand::random::<u8>() as u64 * 8;
-            let dur = Duration::from_millis(msecs);
-            tokio::time::sleep(dur).await;
-        }
-    }
-
-    let (tx, rx) = mpsc::channel(10);
-    tokio::spawn(sender_process(app_data.clone(), tx));
-
-    // TODO Figure out *exactly* what this means
-    sse::Sse::from_infallible_receiver(rx).with_retry_duration(Duration::from_secs(10))
 }
 
 #[derive(Deserialize)]
@@ -391,6 +364,61 @@ async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Re
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
     render_main_screen(app_data).await
+}
+
+#[actix_web::get("/objects/{object_id}")]
+async fn object(
+    app_data: web::Data<AppData<'static>>,
+    path_params: web::Path<u64>,
+) -> actix_web::Result<HttpResponse> {
+    use mcjs_vm::interpreter::debugger::ObjectId;
+    use mcjs_vm::InterpreterValue;
+
+    let object_id_ffi: u64 = path_params.into_inner();
+    let object_id: ObjectId = slotmap::KeyData::from_ffi(object_id_ffi).into();
+
+    let markup = app_data
+        .intrp_handle
+        .query(move |state| {
+            use slotmap::Key;
+        
+            let probe = state.probe()?;
+            let obj = probe.get_object(object_id)?;
+            let obj = obj.as_object();
+
+            let properties = obj.own_properties();
+
+            // Only get a shallow representation of the object, which the user/client can further expand
+            Some(html! {
+                table {
+                    tr {
+                        td { "Key" }
+                        td { "Value" }
+                    }
+
+                    @for key in properties {
+                        tr {
+                            td { (key) }
+                            td {
+                                @match obj.get_own_property(&key).unwrap() {
+                                    InterpreterValue::Object(object_id) => {
+                                        div.cursor-pointer
+                                            hx-get=(format!("/objects/{}", object_id.data().as_ffi()))
+                                            hx-swap="outerHTML"
+                                            { "<object>" }
+                                    },
+                                    value => (format!("{:?}", value)),                                    
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+        })
+        .await
+        .ok_or_else(|| actix_web::error::ErrorNotFound("no such object"))?;
+
+    Ok(HttpResponse::Ok().body(markup.into_string()))
 }
 
 fn render_source_code(
@@ -839,35 +867,19 @@ mod model {
         // function proceeds) to reconstruct the Identifier->Loc mapping at a specific
         // point of the bytecode (represented by `iid`).
 
-        let model_value = |value| format!("{:?}", value);
+        let show_value = |value| {
+            if let mcjs_vm::InterpreterValue::Object(obj_id) = value {
+                use slotmap::Key;
+                format!("Object({:?} = {})", obj_id, obj_id.data().as_ffi())
+            } else {
+                format!("{:?}", value)
+            }
+        };
+
         let mut locs_state = HashMap::new();
+        let mut locs_order = Vec::new();
 
         // Merge all 3 categories of values into a single map
-
-        for (vreg_ndx, value) in frame.results().enumerate() {
-            let loc: Loc = VReg(vreg_ndx as _).into();
-            let state = LocState {
-                name: format!("{:?}", loc),
-                value: model_value(value),
-                ident: None,
-                prev_idents: Vec::new(),
-            };
-            locs_state.insert(loc, state);
-        }
-
-        for (arg_ndx, value_opt) in frame.args().enumerate() {
-            let loc = ArgIndex(arg_ndx as _).into();
-            let state = LocState {
-                name: format!("{:?}", loc),
-                value: value_opt
-                    .map(model_value)
-                    .unwrap_or_else(|| "???".to_string()),
-                ident: None,
-                prev_idents: Vec::new(),
-            };
-            locs_state.insert(loc, state);
-        }
-
         for (cap_ndx, upv_id) in frame.captures().enumerate() {
             let loc = CaptureIndex(cap_ndx as _).into();
             let state = LocState {
@@ -877,59 +889,64 @@ mod model {
                 prev_idents: Vec::new(),
             };
             locs_state.insert(loc, state);
+            locs_order.push(loc);
+        }
+
+        for (arg_ndx, value_opt) in frame.args().enumerate() {
+            let loc = ArgIndex(arg_ndx as _).into();
+            let state = LocState {
+                name: format!("{:?}", loc),
+                value: value_opt
+                    .map(show_value)
+                    .unwrap_or_else(|| "???".to_string()),
+                ident: None,
+                prev_idents: Vec::new(),
+            };
+            locs_state.insert(loc, state);
+            locs_order.push(loc);
+        }
+
+        for (vreg_ndx, value) in frame.results().enumerate() {
+            let loc: Loc = VReg(vreg_ndx as _).into();
+            let state = LocState {
+                name: format!("{:?}", loc),
+                value: show_value(value),
+                ident: None,
+                prev_idents: Vec::new(),
+            };
+            locs_state.insert(loc, state);
+            locs_order.push(loc);
         }
 
         // Use merged map to add identifiers associations
-        let asmts = func
-            .ident_history()
-            .iter()
-            .take_while(|asmt| asmt.iid.0 <= iid.0);
-        for asmt in asmts {
-            let state = locs_state.get_mut(&asmt.loc).unwrap();
-            let prev_ident = state.ident.replace(asmt.ident.to_string());
-            if let Some(prev_ident) = prev_ident {
-                state.prev_idents.push(prev_ident);
+
+        let history = func.ident_history();
+        let history_limit = history.iter()
+            .enumerate()
+            .take_while(|(_, asmt)| asmt.iid.0 <= iid.0)
+            .last()
+            .unwrap().0 + 1;
+        for asmt in history[0..history_limit].iter().rev() {
+            let ls = locs_state.get_mut(&asmt.loc).unwrap();
+            let ident = asmt.ident.to_string();
+            if ls.ident.is_some() {
+                ls.prev_idents.push(ident);
+            } else {
+                ls.ident = Some(ident);
             }
         }
 
-        // Split by categories again for viewing
-
-        let registers: Vec<_> = (0..frame.results().len())
-            .filter_map(|vreg_ndx| {
-                let key = VReg(vreg_ndx as _);
-                locs_state.remove(&key.into())
-            })
-            .collect();
-
-        let arguments: Vec<_> = (0..frame.args().len())
-            .filter_map(|arg_ndx| {
-                let key = ArgIndex(arg_ndx as _);
-                locs_state.remove(&key.into())
-            })
-            .collect();
-
-        let captures: Vec<_> = (0..frame.captures().len())
-            .filter_map(|cap_ndx| {
-                let key = CaptureIndex(cap_ndx as _);
-                locs_state.remove(&key.into())
-            })
-            .collect();
-
-        debug_assert!(locs_state.is_empty());
-
-        let this = LocState {
+        let mut locs = Vec::new();
+        locs.push(LocState {
             name: "this".to_string(),
             value: format!("{:?}", frame.header().this),
             ident: Some("this".to_string()),
             prev_idents: Vec::new(),
-        };
-
-        Values {
-            registers,
-            arguments,
-            captures,
-            this,
-        }
+        });
+        locs.extend(locs_order.into_iter().map(|loc| locs_state.remove(&loc).unwrap()));
+        assert!(locs_state.is_empty());
+  
+        Values { locs }
     }
 
     #[derive(Clone, Serialize)]
@@ -976,10 +993,8 @@ mod model {
 
     #[derive(Clone, Serialize)]
     pub struct Values {
-        pub registers: Vec<LocState>,
-        pub captures: Vec<LocState>,
-        pub arguments: Vec<LocState>,
-        pub this: LocState,
+        // In the same order as they should be shown in the UI
+        pub locs: Vec<LocState>,
     }
 
     #[derive(Clone, Serialize)]

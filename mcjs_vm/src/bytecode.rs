@@ -5,8 +5,9 @@ use std::{
 
 use serde::Serialize;
 use strum::IntoStaticStr;
-use swc_atoms::JsWord;
 use swc_common::{Span, SourceMap, BytePos};
+
+pub use swc_atoms::JsWord;
 
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]

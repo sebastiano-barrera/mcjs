@@ -20,4 +20,5 @@ tokio = "1.33"
 anyhow = "1.0.75"
 swc_common = "~0.31.0"
 maud = { version = "0.25.0", features = ["actix-web"] }
+slotmap = "~1.0.6"
 

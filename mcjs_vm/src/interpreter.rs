@@ -1435,13 +1435,16 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 
 #[cfg(feature = "debugger")]
 pub mod debugger {
+    use std::cell::Ref;
     use std::collections::HashSet;
 
     use crate::common::Result;
-    use crate::error;
     use crate::{bytecode, InterpreterValue};
+    use crate::{error, heap};
 
     use super::{Interpreter, SourceBreakpoint};
+
+    pub use heap::ObjectId;
 
     /// The only real entry point to all the debugging features present in the
     /// Interpreter.
@@ -1626,6 +1629,10 @@ pub mod debugger {
 
             let iid = bytecode::IID(iid.0);
             bytecode::GlobalIID(fnid, iid)
+        }
+
+        pub fn get_object(&self, obj_id: heap::ObjectId) -> Option<Ref<heap::HeapObject>> {
+            self.interpreter.realm.heap.get(obj_id)
         }
     }
 }
