@@ -896,10 +896,26 @@ mod model {
         // point of the bytecode (represented by `iid`).
 
         let show_value = |value| {
-            if let InterpreterValue::Object(obj_id) = value {
-                format!("Object({:?} = {})", obj_id, obj_id.data().as_ffi())
+            match value {
+                InterpreterValue::Number(num) => format!("{}", num),
+                InterpreterValue::Undefined => "undefined".to_string(),
+                InterpreterValue::Object(obj_id) => {
+                    // A hack, but slotmap does not give us visibility into the internal structure of the ID
+                    let (ndx, version) =  {
+                        let obj_id_raw: u64 = obj_id.data().as_ffi();
+                        (obj_id_raw & 0xffff_ffff, obj_id_raw >> 32)
+                    };
+                    format!("obj@{}v{}", ndx, version)
+                },
+                _ => format!("{:?}", value),
+            }
+        };
+
+        let get_details_url =  |value: Option<InterpreterValue>| -> Option<String> {
+            if let Some(InterpreterValue::Object(obj_id)) = &value {
+                Some(format!("/objects/{}", obj_id.data().as_ffi()))
             } else {
-                format!("{:?}", value)
+                None
             }
         };
 
@@ -916,21 +932,20 @@ mod model {
                     let mut buf = String::new();
 
                     if let Some(upv_id) = upv_id {
-                        write!(buf, "{:?} → ", upv_id).unwrap();
+                        // A hack, but slotmap does not give us visibility into the internal structure of the ID
+                        let (ndx, version) =  {
+                            let id_raw: u64 = upv_id.data().as_ffi();
+                            (id_raw & 0xffff_ffff, id_raw >> 32)
+                        };
+                        write!(buf, "upv@{}v{} → ", ndx, version).unwrap();
                     }
 
                     match value {
-                        Some(value) => write!(buf, "{}", show_value(value)),
-                        None => write!(buf, "???"),
+                        Some(value) => write!(buf, "{}", show_value(value)).unwrap(),
+                        None => write!(buf, "???").unwrap(),
                     }
-                    .unwrap();
-                    buf
-                };
 
-                let details_url = if let Some(InterpreterValue::Object(obj_id)) = &value {
-                    Some(format!("/objects/{}", obj_id.data().as_ffi()))
-                } else {
-                    None
+                    buf
                 };
 
                 locs_state.insert(
@@ -940,7 +955,7 @@ mod model {
                         value: value_str,
                         ident: None,
                         prev_idents: Vec::new(),
-                        details_url,
+                        details_url: get_details_url(value),
                     },
                 );
                 locs_order.push(loc);
@@ -985,12 +1000,13 @@ mod model {
         }
 
         let mut locs = Vec::new();
+        let this_value = frame.header().this;
         locs.push(LocState {
             name: "this".to_string(),
-            value: format!("{:?}", frame.header().this),
+            value: show_value(this_value),
             ident: Some("this".to_string()),
             prev_idents: Vec::new(),
-            details_url: None,
+            details_url: get_details_url(Some(this_value)),
         });
         locs.extend(
             locs_order
@@ -1001,6 +1017,7 @@ mod model {
 
         Values { locs }
     }
+
 
     #[derive(Clone, Serialize)]
     pub struct SourceBreakpoint {
