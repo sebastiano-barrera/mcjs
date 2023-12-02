@@ -383,34 +383,59 @@ async fn object(
             let probe = state.probe()?;
             let obj = probe.get_object(object_id)?;
             let obj = obj.as_object();
-
-            let properties = obj.own_properties();
-
+            
             // Only get a shallow representation of the object, which the user/client can further expand
-            Some(html! {
-                table {
-                    tr {
-                        td { "Key" }
-                        td { "Value" }
-                    }
-
-                    @for key in properties {
-                        tr {
-                            td { (key) }
-                            td {
-                                @match obj.get_own_property(&key).unwrap() {
-                                    InterpreterValue::Object(object_id) => {
-                                        div.cursor-pointer
-                                            hx-get=(format!("/objects/{}", object_id.data().as_ffi()))
-                                            hx-swap="outerHTML"
-                                            { "<object>" }
-                                    },
-                                    value => (format!("{:?}", value)),                                    
+            let properties = obj.own_properties();
+            Some(match properties.len()  {
+                0 => html!{ div { "~ empty ~" } },
+                1 => {
+                    let key = properties.into_iter().next().unwrap();
+                    html!{
+                        table {
+                            tr {
+                                td { "{ " } 
+                                td { (format!("{}:", key)) }
+                                td {
+                                    @match obj.get_own_property(&key).unwrap() {
+                                        InterpreterValue::Object(object_id) => {
+                                            div.cursor-pointer
+                                                hx-get=(format!("/objects/{}", object_id.data().as_ffi()))
+                                                hx-swap="outerHTML"
+                                                { "<object>" }
+                                        },
+                                        value => (format!("{:?}", value)),                                    
+                                    }
+                                }
+                                td { "}" }
+                            }
+                        }
+                    } 
+                },
+                _ => html!{
+                    table {
+                        @for (index, key) in properties.iter().enumerate() {
+                            tr {
+                                td { (if index == 0 { "{ " } else { ", " }) }
+                                td { (format!("{}:", key)) }
+                                td {
+                                    @match obj.get_own_property(&key).unwrap() {
+                                        InterpreterValue::Object(object_id) => {
+                                            div.cursor-pointer
+                                                hx-get=(format!("/objects/{}", object_id.data().as_ffi()))
+                                                hx-swap="outerHTML"
+                                                { "<object>" }
+                                        },
+                                        value => (format!("{:?}", value)),                                    
+                                    }
                                 }
                             }
                         }
+
+                        tr {
+                            td { "}" }
+                        }
                     }
-                }
+                },
             })
         })
         .await
