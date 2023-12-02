@@ -1,8 +1,8 @@
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::{path::PathBuf, time::Duration};
 
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpResponse, HttpServer};
 
 use anyhow::{Error, Result};
 use handlebars::{handlebars_helper, Handlebars};
@@ -10,7 +10,6 @@ use listenfd::ListenFd;
 use mcjs_vm::bytecode;
 use mcjs_vm::interpreter::debugger::BreakRangeID;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use serde_json::Value as JsonValue;
 
 use maud::{html, Markup};
@@ -381,7 +380,6 @@ async fn object(
         .intrp_handle
         .query(move |state| {
             use slotmap::Key;
-        
             let probe = state.probe()?;
             let obj = probe.get_object(object_id)?;
             let obj = obj.as_object();
@@ -750,8 +748,13 @@ mod model {
     use std::collections::HashMap;
 
     use bytecode::{ArgIndex, CaptureIndex, VReg};
-    use mcjs_vm::{bytecode, interpreter::debugger::Probe, GlobalIID};
+    use mcjs_vm::{
+        bytecode,
+        interpreter::{debugger::Probe, UpvalueId},
+        GlobalIID, InterpreterValue,
+    };
     use serde::Serialize;
+    use slotmap::Key;
 
     /// A model (a copy, a projection) of the (suspended) interpreter's state,
     /// pre-processed and filtered for easy usage by templates.
@@ -868,8 +871,7 @@ mod model {
         // point of the bytecode (represented by `iid`).
 
         let show_value = |value| {
-            if let mcjs_vm::InterpreterValue::Object(obj_id) = value {
-                use slotmap::Key;
+            if let InterpreterValue::Object(obj_id) = value {
                 format!("Object({:?} = {})", obj_id, obj_id.data().as_ffi())
             } else {
                 format!("{:?}", value)
@@ -879,53 +881,74 @@ mod model {
         let mut locs_state = HashMap::new();
         let mut locs_order = Vec::new();
 
-        // Merge all 3 categories of values into a single map
-        for (cap_ndx, upv_id) in frame.captures().enumerate() {
-            let loc = CaptureIndex(cap_ndx as _).into();
-            let state = LocState {
-                name: format!("{:?}", loc),
-                value: format!("{:?}", upv_id),
-                ident: None,
-                prev_idents: Vec::new(),
-            };
-            locs_state.insert(loc, state);
-            locs_order.push(loc);
-        }
+        {
+            let locs_state = &mut locs_state;
+            let locs_order = &mut locs_order;
 
-        for (arg_ndx, value_opt) in frame.args().enumerate() {
-            let loc = ArgIndex(arg_ndx as _).into();
-            let state = LocState {
-                name: format!("{:?}", loc),
-                value: value_opt
-                    .map(show_value)
-                    .unwrap_or_else(|| "???".to_string()),
-                ident: None,
-                prev_idents: Vec::new(),
-            };
-            locs_state.insert(loc, state);
-            locs_order.push(loc);
-        }
+            let mut add = |loc: Loc, value: Option<InterpreterValue>, upv_id: Option<UpvalueId>| {
+                let value_str = {
+                    use std::fmt::Write;
+                    let mut buf = String::new();
 
-        for (vreg_ndx, value) in frame.results().enumerate() {
-            let loc: Loc = VReg(vreg_ndx as _).into();
-            let state = LocState {
-                name: format!("{:?}", loc),
-                value: show_value(value),
-                ident: None,
-                prev_idents: Vec::new(),
+                    if let Some(upv_id) = upv_id {
+                        write!(buf, "{:?} → ", upv_id).unwrap();
+                    }
+
+                    match value {
+                        Some(value) => write!(buf, "{}", show_value(value)),
+                        None => write!(buf, "???"),
+                    }
+                    .unwrap();
+                    buf
+                };
+
+                let details_url = if let Some(InterpreterValue::Object(obj_id)) = &value {
+                    Some(format!("/objects/{}", obj_id.data().as_ffi()))
+                } else {
+                    None
+                };
+
+                locs_state.insert(
+                    loc,
+                    LocState {
+                        name: format!("{:?}", loc),
+                        value: value_str,
+                        ident: None,
+                        prev_idents: Vec::new(),
+                        details_url,
+                    },
+                );
+                locs_order.push(loc);
             };
-            locs_state.insert(loc, state);
-            locs_order.push(loc);
+
+            for (cap_ndx, upv_id) in frame.captures().enumerate() {
+                let loc = CaptureIndex(cap_ndx as _).into();
+                // TODO: Also show the captured value
+                add(loc, None, Some(upv_id));
+            }
+
+            for (arg_ndx, value_opt) in frame.args().enumerate() {
+                let loc = ArgIndex(arg_ndx as _).into();
+                add(loc, value_opt, None);
+            }
+
+            for (vreg_ndx, value) in frame.results().enumerate() {
+                let loc = VReg(vreg_ndx as _).into();
+                add(loc, Some(value), None);
+            }
         }
 
         // Use merged map to add identifiers associations
 
         let history = func.ident_history();
-        let history_limit = history.iter()
+        let history_limit = history
+            .iter()
             .enumerate()
             .take_while(|(_, asmt)| asmt.iid.0 <= iid.0)
             .last()
-            .unwrap().0 + 1;
+            .unwrap()
+            .0
+            + 1;
         for asmt in history[0..history_limit].iter().rev() {
             let ls = locs_state.get_mut(&asmt.loc).unwrap();
             let ident = asmt.ident.to_string();
@@ -942,10 +965,15 @@ mod model {
             value: format!("{:?}", frame.header().this),
             ident: Some("this".to_string()),
             prev_idents: Vec::new(),
+            details_url: None,
         });
-        locs.extend(locs_order.into_iter().map(|loc| locs_state.remove(&loc).unwrap()));
+        locs.extend(
+            locs_order
+                .into_iter()
+                .map(|loc| locs_state.remove(&loc).unwrap()),
+        );
         assert!(locs_state.is_empty());
-  
+
         Values { locs }
     }
 
@@ -1004,6 +1032,18 @@ mod model {
         pub prev_idents: Vec<String>,
         // Just a *model* of the value
         pub value: String,
+        pub details_url: Option<String>,
+    }
+    impl LocState {
+        pub fn new(name: String) -> Self {
+            LocState {
+                name,
+                ident: None,
+                prev_idents: Vec::new(),
+                value: "???".to_string(),
+                details_url: None,
+            }
+        }
     }
 
     #[derive(Clone, Serialize)]

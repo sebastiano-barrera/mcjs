@@ -115,18 +115,50 @@
 			<tbody>
 				{{#with values}}
 					{{#each locs}}
-						<tr>
-							<td class="text-right">{{ name }}</td>
-							<td class="px-1">{{ ident }}</td>
-							<td>{{ value }}</td>
-						</tr>
-						{{#if prev_idents}}
-						<tr>
-							<td colspan="3">
-								{{prev_idents}}
+						<tr class="h-[5mm] even:bg-zinc-100 even:dark:bg-zinc-900">
+							<td class="text-right align-top">{{ name }}</td>
+							<td class="px-1 align-top">
+								<div>{{ ident }}</div>
+								{{! TODO This needs to be designed for real }}
+								{{#if prev_idents}}
+									<ul>
+										<li>{{prev_idents}}</li>
+									</ul>
+								{{/if}}
+							</td>
+							<td x-data="{detailsVisible: false}">
+								<div> {{! Value representation: header }}
+									{{#if details_url}}
+										<button
+											hx-target="next .details-box"
+											hx-swap="innerHTML"
+											hx-get="{{details_url}}"
+											x-bind:class="{checked: detailsVisible}"
+											@click="detailsVisible = !detailsVisible"
+											class="
+												relative inline-block align-middle cursor-pointer rounded-sm px-1 
+												border-b border-zinc-400 dark:border-zinc-500
+												active:border-b-0 active:mb-[1px] active:top-px
+
+												bg-zinc-200 dark:bg-zinc-600
+												text-zinc-500 dark:text-black
+												group
+											"
+										>
+											more
+											<span class="group-[&.checked]:font-bold group-[&.checked]:text-orange-500">—</span>
+										</button>
+									{{/if}}
+									<span>{{ value }}</span>
+								</div>
+
+								{{#if details_url}} {{! Value representation: details }}
+									<div class="details-box ml-2 pl-2 border-l border-l-zinc-200" x-show="detailsVisible">
+										Details here!
+									</div>
+								{{/if}}
 							</td>
 						</tr>
-						{{/if}}
 					{{/each}}
 				{{/with}}
 			</tbody>
