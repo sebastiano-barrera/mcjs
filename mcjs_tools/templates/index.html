@@ -27,12 +27,13 @@
 			</div>
 		</div>
 
-		<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
-			<!-- Main area -->
-			{{#each model.frames}}
-				<div hx-trigger="load" hx-get="/frames/{{ @index }}/view?source_visible=false" hx-swap="outerHTML"></div>
-			{{/each}}
-		</div>
+		<div 
+			id="main-area"
+			class="inset-0 w-full h-full overflow-x-scroll flex"
+			hx-get="/frames"
+			hx-trigger="load"
+		></div>
+		
 	</div>
 </body>
 

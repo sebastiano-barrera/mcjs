@@ -10,8 +10,6 @@ use mcjs_vm::interpreter::debugger::BreakRangeID;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use maud::html;
-
 handlebars_helper!(lookup_deep: |*args| {
     if args.is_empty() {
         panic!();
@@ -68,12 +66,13 @@ async fn main() -> Result<()> {
             .service(actix_files::Files::new("/assets", "./data/assets/"))
             .service(main_screen)
             .service(view_frame)
+            .service(view_stack)
             .service(frame_set_breakpoint)
             .service(delete_breakpoint)
             .service(sidebar)
             .service(action_restart)
             .service(action_continue)
-            .service(object)
+            .service(frame_view::view_object)
             .app_data(data_ref.clone())
     });
 
@@ -167,14 +166,22 @@ async fn view_frame(
 ) -> actix_web::Result<HttpResponse> {
     let (frame_ndx,) = path_params.into_inner();
     let query_params = query_params.into_inner();
-    let body = frame_view::render(&app_data, frame_ndx, query_params.source_visible).await?;
+    let body =
+        frame_view::render_frame_view(&app_data, frame_ndx, query_params.source_visible).await?;
+    Ok(HttpResponse::Ok().body(body))
+}
+
+#[actix_web::get("/frames")]
+async fn view_stack(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
+    let app_data = app_data.into_inner();
+    let body = frame_view::render_stack(&app_data).await?.into_string();
     Ok(HttpResponse::Ok().body(body))
 }
 
 mod frame_view {
     use std::{collections::HashMap, ops::Range};
 
-    use actix_web;
+    use actix_web::{self, web, HttpResponse};
     use maud::{html, Markup};
     use mcjs_vm::{
         bytecode::{self, ArgIndex, CaptureIndex, VReg},
@@ -188,7 +195,26 @@ mod frame_view {
 
     use super::AppData;
 
-    pub async fn render(
+    pub async fn render_stack(app_data: &AppData<'static>) -> actix_web::Result<Markup> {
+        let snapshot_arc = &app_data.snapshot().await;
+        let snapshot = &snapshot_arc
+            .as_ref()
+            .model
+            .as_ref()
+            .ok_or(actix_web::error::ErrorNotFound(""))?
+            .frame_view_snapshot;
+
+        Ok(html! {
+            @for (index, frame) in snapshot.frames.iter().enumerate() {
+                div {
+                    // TODO: Make this faster/simpler by directly passing the frame data (let the caller get the snapshot)
+                    (maud::PreEscaped(render_frame_view(app_data, index, false).await?))
+                }
+            }
+        })
+    }
+
+    pub async fn render_frame_view(
         app_data: &AppData<'static>,
         frame_ndx: usize,
         source_visible: bool,
@@ -197,12 +223,21 @@ mod frame_view {
         // the interpreter manager and the subsequent query (markers, frame_src)
         // takes it again
         let snapshot = app_data.snapshot().await;
-        let frame = snapshot
-            .model
-            .as_ref()
-            .and_then(move |model| model.frames.get(frame_ndx))
+        let vmstate = snapshot.model.as_ref();
+        let frame = vmstate
+            .and_then(move |model| model.frame_view_snapshot.frames.get(frame_ndx))
             .ok_or_else(|| actix_web::error::ErrorNotFound("no frame at given index"))?;
 
+        render_frame_view_ex(app_data, frame_ndx, frame, source_visible).await
+    }
+
+    // TODO Refactor this mess. No reason why the snapshot is 'fetched' so many times throughout
+    async fn render_frame_view_ex(
+        app_data: &AppData<'_>,
+        frame_ndx: usize,
+        frame: &Frame,
+        source_visible: bool,
+    ) -> Result<String, actix_web::Error> {
         let source_raw_markup = {
             let (markers, frame_src) = app_data
                 .intrp_handle
@@ -261,11 +296,107 @@ mod frame_view {
             .map_err(|err| actix_web::error::ErrorInternalServerError(err))
     }
 
+    #[actix_web::get("/objects/{object_id}")]
+    pub async fn view_object(
+        app_data: web::Data<AppData<'static>>,
+        path_params: web::Path<u64>,
+    ) -> actix_web::Result<HttpResponse> {
+        use mcjs_vm::interpreter::debugger::ObjectId;
+
+        let object_id_ffi: u64 = path_params.into_inner();
+        let object_id: ObjectId = slotmap::KeyData::from_ffi(object_id_ffi).into();
+
+        let markup = app_data
+            .intrp_handle
+            .query(move |state| {
+                let probe = state.probe()?;
+                let obj = probe.get_object(object_id)?;
+                let obj = obj.as_object();
+
+                // Only get a shallow representation of the object, which the user/client can further expand
+                let properties = obj.own_properties();
+
+                let show_value = |value| {
+                    let details_url = get_details_url(Some(value));
+                    let header = show_value_header(probe, value, None);
+                    html! {
+                        div.cursor-pointer x-data="{detailsVisible: false}"
+                        { 
+                            div {
+                                @if let Some(details_url) = details_url {
+                                    button
+                                        hx-target="next .detailsBox"
+                                        hx-swap="innerHTML"
+                                        hx-get=(details_url)
+                                        x-bind:class="{checked: detailsVisible}"
+                                        x-on:click="detailsVisible = !detailsVisible"
+                                        class="
+                                            relative inline-block align-middle cursor-pointer rounded-sm px-1 
+                                            border-b border-zinc-400 dark:border-zinc-500
+                                            active:border-b-0 active:mb-[1px] active:top-px
+
+                                            bg-zinc-200 dark:bg-zinc-600
+                                            text-zinc-500 dark:text-black
+                                            [&.checked]:font-bold [&.checked]:text-orange-500
+                                        "
+                                    { "—" }
+                                }
+
+                                (header)
+                            }
+
+                            div.detailsBox x-show="detailsVisible" {}
+                        }
+                    }
+                };
+
+                Some(match properties.len() {
+                    0 => html! { div { "~ empty ~" } },
+                    1 => {
+                        let key = properties.into_iter().next().unwrap();
+                        html! {
+                            table {
+                                tr {
+                                    td."align-top" { "{ " }
+                                    td."align-top" { (format!("{}:", key)) }
+                                    td."align-top" {
+                                        (show_value(obj.get_own_property(&key).unwrap()))
+                                    }
+                                    td."align-top" { "}" }
+                                }
+                            }
+                        }
+                    }
+                    _ => html! {
+                        table {
+                            @for (index, key) in properties.iter().enumerate() {
+                                tr {
+                                    td."align-top" { (if index == 0 { "{ " } else { ", " }) }
+                                    td."align-top" { (format!("{}:", key)) }
+                                    td."align-top" {
+                                        (show_value(obj.get_own_property(&key).unwrap()))
+                                    }
+                                }
+                            }
+
+                            tr {
+                                td."align-top" { "}" }
+                            }
+                        }
+                    },
+                })
+            })
+            .await
+            .ok_or_else(|| actix_web::error::ErrorNotFound("no such object"))?;
+
+        Ok(HttpResponse::Ok().body(markup.into_string()))
+    }
+
     pub fn snapshot(
         probe: &Probe<'_, '_>,
         loader: &mcjs_vm::Loader,
         has_breakpoint: impl Fn(GlobalIID) -> bool,
-    ) -> Vec<Frame> {
+    ) -> Snapshot {
         let mut frames = Vec::new();
         let mut prev_return_iid = None;
         for (i, frame) in probe.frames().enumerate() {
@@ -286,7 +417,7 @@ mod frame_view {
                 .and_then(|sm| get_filename(sm.files().first().unwrap()));
 
             let func = loader.get_function(fnid).unwrap();
-            let values = decode_locs_state(&frame, func, giid.1);
+            let values = decode_locs_state(probe, &frame, func, giid.1);
 
             frames.push(Frame {
                 source_filename,
@@ -314,11 +445,16 @@ mod frame_view {
             });
         }
 
-        frames
+        Snapshot { frames }
+    }
+
+    #[derive(Serialize)]
+    pub struct Snapshot {
+        frames: Vec<Frame>,
     }
 
     #[derive(Clone, Serialize)]
-    pub struct Frame {
+    struct Frame {
         source_filename: Option<String>,
 
         callID: u32,
@@ -352,8 +488,7 @@ mod frame_view {
         name: String,
         ident: Option<String>,
         prev_idents: Vec<String>,
-        // Just a *model* of the value
-        value: String,
+        value_header: String,
         details_url: Option<String>,
     }
 
@@ -476,6 +611,7 @@ mod frame_view {
     }
 
     fn decode_locs_state(
+        probe: &Probe,
         frame: &mcjs_vm::stack::Frame<'_>,
         func: &bytecode::Function,
         iid: mcjs_vm::IID,
@@ -495,13 +631,13 @@ mod frame_view {
 
             let mut add = |loc: Loc, value: Option<InterpreterValue>, upv_id: Option<UpvalueId>| {
                 let value_str = value
-                    .map(|value| show_value_header(value, upv_id))
+                    .map(|value| show_value_header(probe, value, upv_id))
                     .unwrap_or_else(|| "???".to_string());
                 locs_state.insert(
                     loc,
                     LocState {
                         name: format!("{:?}", loc),
-                        value: value_str,
+                        value_header: value_str,
                         ident: None,
                         prev_idents: Vec::new(),
                         details_url: get_details_url(value),
@@ -552,7 +688,7 @@ mod frame_view {
         let this_value = frame.header().this;
         locs.push(LocState {
             name: "this".to_string(),
-            value: show_value_header(this_value, None),
+            value_header: show_value_header(probe, this_value, None),
             ident: Some("this".to_string()),
             prev_idents: Vec::new(),
             details_url: get_details_url(Some(this_value)),
@@ -567,7 +703,7 @@ mod frame_view {
         Values { locs }
     }
 
-    fn show_value_header(value: InterpreterValue, upv_id: Option<UpvalueId>) -> String {
+    fn show_value_header(probe: &Probe, value: InterpreterValue, upv_id: Option<UpvalueId>) -> String {
         use slotmap::Key;
         use std::fmt::Write;
 
@@ -589,7 +725,20 @@ mod frame_view {
             InterpreterValue::Number(num) => write!(buf, "{}", num).unwrap(),
             InterpreterValue::Undefined => write!(buf, "undefined").unwrap(),
             InterpreterValue::Object(obj_id) => {
-                write!(buf, "<object {}>", show_keydata(obj_id.data())).unwrap()
+                let obj = probe.get_object(obj_id);
+                let obj_id = show_keydata(obj_id.data());
+
+                if let Some(obj) = obj {
+                    if let Some(str) = obj.as_str() {
+                        write!(buf, "{:?}", str).unwrap()
+                    } else if let Some(_) = obj.as_closure() {
+                        write!(buf, "<closure>").unwrap()
+                    } else {
+                        write!(buf, "<object {}>", obj_id).unwrap()
+                    }
+                } else {
+                    write!(buf, "<object {} → DANGLING REF!>", obj_id).unwrap()
+                }
             }
             _ => write!(buf, "{:?}", value).unwrap(),
         }
@@ -739,7 +888,8 @@ async fn frame_set_breakpoint(
 
     app_data.invalidate_snapshot();
 
-    let body = frame_view::render(&app_data, frame_ndx, form_params.source_visible).await?;
+    let body =
+        frame_view::render_frame_view(&app_data, frame_ndx, form_params.source_visible).await?;
     Ok(HttpResponse::Ok()
         .append_header(("HX-Trigger", "breakpoints-changed"))
         .body(body))
@@ -776,92 +926,6 @@ async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Re
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
     render_main_screen(app_data).await
-}
-
-#[actix_web::get("/objects/{object_id}")]
-async fn object(
-    app_data: web::Data<AppData<'static>>,
-    path_params: web::Path<u64>,
-) -> actix_web::Result<HttpResponse> {
-    use mcjs_vm::interpreter::debugger::ObjectId;
-    use mcjs_vm::InterpreterValue;
-
-    let object_id_ffi: u64 = path_params.into_inner();
-    let object_id: ObjectId = slotmap::KeyData::from_ffi(object_id_ffi).into();
-
-    let markup = app_data
-        .intrp_handle
-        .query(move |state| {
-            use slotmap::Key;
-            let probe = state.probe()?;
-            let obj = probe.get_object(object_id)?;
-
-            if let Some(s) = obj.as_str() {
-                Some(html! { (format!("{:?}", s)) })
-            } else if let Some(_) = obj.as_closure() {
-                Some(html! { ("<closure>".to_string()) })
-            } else {
-                let obj = obj.as_object();
-
-                // Only get a shallow representation of the object, which the user/client can further expand
-                let properties = obj.own_properties();
-
-                let show_value = |value| match value {
-                    InterpreterValue::Object(object_id) => {
-                        html! {
-                            div.cursor-pointer
-                                hx-get=(format!("/objects/{}", object_id.data().as_ffi()))
-                                hx-swap="outerHTML"
-                                hx-target="this"
-                                { "<object>" }
-                        }
-                    }
-                    value => html! { (format!("{:?}", value)) },
-                };
-
-                Some(match properties.len() {
-                    0 => html! { div { "~ empty ~" } },
-                    1 => {
-                        let key = properties.into_iter().next().unwrap();
-                        html! {
-                            table {
-                                tr {
-                                    td { "{ " }
-                                    td { (format!("{}:", key)) }
-                                    td {
-                                        @let value = obj.get_own_property(&key).unwrap();
-                                        (show_value(value))
-                                    }
-                                    td { "}" }
-                                }
-                            }
-                        }
-                    }
-                    _ => html! {
-                        table {
-                            @for (index, key) in properties.iter().enumerate() {
-                                tr {
-                                    td { (if index == 0 { "{ " } else { ", " }) }
-                                    td { (format!("{}:", key)) }
-                                    td {
-                                        @let value = obj.get_own_property(&key).unwrap();
-                                        (show_value(value));
-                                    }
-                                }
-                            }
-
-                            tr {
-                                td { "}" }
-                            }
-                        }
-                    },
-                })
-            }
-        })
-        .await
-        .ok_or_else(|| actix_web::error::ErrorNotFound("no such object"))?;
-
-    Ok(HttpResponse::Ok().body(markup.into_string()))
 }
 
 mod interpreter_manager {
@@ -1069,13 +1133,13 @@ mod model {
     /// pre-processed and filtered for easy usage by templates.
     ///
     /// It is also used directly as the template input data for the main screen template.
-    #[derive(Clone, Serialize)]
+    #[derive(Serialize)]
     pub struct VMState {
         pub source_breakpoints: Vec<SourceBreakpoint>,
         pub instr_breakpoints: Vec<GlobalIID>,
         // This module is destined to disappear in a future refactoring. The
         // awkward `super::frame_view::...`  can stay for now
-        pub frames: Vec<super::frame_view::Frame>,
+        pub frame_view_snapshot: super::frame_view::Snapshot,
     }
 
     impl VMState {
@@ -1104,12 +1168,12 @@ mod model {
             let instr_breakpoints: Vec<_> = probe.instr_breakpoints().collect();
 
             let has_breakpoint = |giid| instr_breakpoints.contains(&giid);
-            let frames = super::frame_view::snapshot(probe, loader, has_breakpoint);
+            let frame_view_snapshot = super::frame_view::snapshot(probe, loader, has_breakpoint);
 
             VMState {
                 source_breakpoints,
                 instr_breakpoints,
-                frames,
+                frame_view_snapshot,
             }
         }
     }

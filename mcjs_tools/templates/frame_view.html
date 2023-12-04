@@ -70,7 +70,7 @@
 	}}
 	{{#if source_visible}}
 		<div
-			class="source-text overflow-x-hidden overflow-y-scroll min-w-[8cm] max-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
+			class="source-text overflow-x-hidden overflow-y-scroll min-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
 		>
 			{{{ source_raw_markup }}}
 		</div>
@@ -111,58 +111,54 @@
 	</div>
 
 	<div class="overflow-y-scroll px-1">
-		<table>
-			<tbody>
-				{{#with values}}
-					{{#each locs}}
-						<tr class="h-[5mm] even:bg-zinc-100 even:dark:bg-zinc-900">
-							<td class="text-right align-top">{{ name }}</td>
-							<td class="px-1 align-top">
-								<div>{{ ident }}</div>
-								{{! TODO This needs to be designed for real }}
-								{{#if prev_idents}}
-									<ul>
-										<li>{{prev_idents}}</li>
-									</ul>
-								{{/if}}
-							</td>
-							<td x-data="{detailsVisible: false}">
-								<div> {{! Value representation: header }}
-									{{#if details_url}}
-										<button
-											hx-target="next .details-box"
-											hx-swap="innerHTML"
-											hx-get="{{details_url}}"
-											x-bind:class="{checked: detailsVisible}"
-											@click="detailsVisible = !detailsVisible"
-											class="
-												relative inline-block align-middle cursor-pointer rounded-sm px-1 
-												border-b border-zinc-400 dark:border-zinc-500
-												active:border-b-0 active:mb-[1px] active:top-px
+		{{#with values}}
+			{{#each locs}}
+				<div class="even:bg-zinc-100 even:dark:bg-zinc-800" x-data="{detailsVisible: false}">
+					<div class="inline-block text-right align-top whitespace-nowrap">
+						<span>{{ name }}</span>
+						<span>{{ ident }}</span>
+						{{! TODO This needs to be designed for real }}
+						{{#if prev_idents}}
+							<ul>
+								<li>{{prev_idents}}</li>
+							</ul>
+						{{/if}}
+						<span>=</span>
+					</div>
+					<div class="inline-block px-1 align-top">
+						<span>{{ value_header }}</span>
 
-												bg-zinc-200 dark:bg-zinc-600
-												text-zinc-500 dark:text-black
-												group
-											"
-										>
-											more
-											<span class="group-[&.checked]:font-bold group-[&.checked]:text-orange-500">—</span>
-										</button>
-									{{/if}}
-									<span>{{ value }}</span>
-								</div>
+						{{#if details_url}}
+							<button
+								hx-target="next .details-box"
+								hx-swap="innerHTML"
+								hx-get="{{details_url}}"
+								x-bind:class="{checked: detailsVisible}"
+								@click="detailsVisible = !detailsVisible"
+								class="
+									relative inline-block align-middle cursor-pointer rounded-sm px-1 
+									border-b border-zinc-400 dark:border-zinc-500
+									active:border-b-0 active:mb-[1px] active:top-px
 
-								{{#if details_url}} {{! Value representation: details }}
-									<div class="details-box ml-2 pl-2 border-l border-l-zinc-200" x-show="detailsVisible">
-										Details here!
-									</div>
-								{{/if}}
-							</td>
-						</tr>
-					{{/each}}
-				{{/with}}
-			</tbody>
-		</table>
+									bg-zinc-200 dark:bg-zinc-600
+									text-zinc-500 dark:text-black
+									group
+								"
+							>
+								more
+								<span class="group-[&.checked]:font-bold group-[&.checked]:text-orange-500">—</span>
+							</button>
+						{{/if}}
+					</div>
+
+					{{#if details_url}} {{! Value representation: details }}
+						<div class="details-box ml-2 pl-2 border-l border-l-zinc-200" x-show="detailsVisible">
+							Details here!
+						</div>
+					{{/if}}
+				</div>
+			{{/each}}
+		{{/with}}
 	</div>
 
 	{{/with}}
