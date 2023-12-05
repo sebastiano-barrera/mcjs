@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use actix_web::{web, App, HttpResponse, HttpServer};
+use actix_web::middleware::Logger;
 
 use anyhow::{Error, Result};
 use handlebars::{handlebars_helper, Handlebars};
@@ -32,6 +33,8 @@ handlebars_helper!(lookup_deep: |*args| {
 
 #[actix_web::main]
 async fn main() -> Result<()> {
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+    
     let main_path = match std::env::args().nth(1) {
         Some(path) => path,
         None => {
@@ -63,6 +66,7 @@ async fn main() -> Result<()> {
 
     let server = HttpServer::new(move || {
         App::new()
+            .wrap(Logger::default())
             .service(actix_files::Files::new("/assets", "./data/assets/"))
             .service(main_screen)
             .service(view_frame)

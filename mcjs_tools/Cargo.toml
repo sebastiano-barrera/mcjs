@@ -21,4 +21,5 @@ anyhow = "1.0.75"
 swc_common = "~0.31.0"
 maud = { version = "0.25.0", features = ["actix-web"] }
 slotmap = "~1.0.6"
+env_logger = "0.10.1"
 
