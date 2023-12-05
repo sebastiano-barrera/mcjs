@@ -153,21 +153,14 @@ async fn render_main_screen(app_data: Arc<AppData<'_>>) -> actix_web::Result<Htt
     }
 }
 
-#[derive(Deserialize)]
-struct FrameViewParams {
-    source_visible: bool,
-}
-
 #[actix_web::get("/frames/{frame_ndx}/view")]
 async fn view_frame(
     app_data: web::Data<AppData<'static>>,
     path_params: web::Path<(usize,)>,
-    query_params: web::Query<FrameViewParams>,
 ) -> actix_web::Result<HttpResponse> {
     let (frame_ndx,) = path_params.into_inner();
-    let query_params = query_params.into_inner();
     let body =
-        frame_view::render_frame_view(&app_data, frame_ndx, query_params.source_visible).await?;
+        frame_view::render_frame_view(&app_data, frame_ndx).await?;
     Ok(HttpResponse::Ok().body(body))
 }
 
@@ -208,7 +201,7 @@ mod frame_view {
             @for (index, frame) in snapshot.frames.iter().enumerate() {
                 div {
                     // TODO: Make this faster/simpler by directly passing the frame data (let the caller get the snapshot)
-                    (maud::PreEscaped(render_frame_view(app_data, index, false).await?))
+                    (maud::PreEscaped(render_frame_view(app_data, index).await?))
                 }
             }
         })
@@ -217,7 +210,6 @@ mod frame_view {
     pub async fn render_frame_view(
         app_data: &AppData<'static>,
         frame_ndx: usize,
-        source_visible: bool,
     ) -> actix_web::Result<String> {
         // TODO Possible write-after-read hazard here, after snapshot() 'releases'
         // the interpreter manager and the subsequent query (markers, frame_src)
@@ -228,7 +220,7 @@ mod frame_view {
             .and_then(move |model| model.frame_view_snapshot.frames.get(frame_ndx))
             .ok_or_else(|| actix_web::error::ErrorNotFound("no frame at given index"))?;
 
-        render_frame_view_ex(app_data, frame_ndx, frame, source_visible).await
+        render_frame_view_ex(app_data, frame_ndx, frame).await
     }
 
     // TODO Refactor this mess. No reason why the snapshot is 'fetched' so many times throughout
@@ -236,7 +228,6 @@ mod frame_view {
         app_data: &AppData<'_>,
         frame_ndx: usize,
         frame: &Frame,
-        source_visible: bool,
     ) -> Result<String, actix_web::Error> {
         let source_raw_markup = {
             let (markers, frame_src) = app_data
@@ -279,7 +270,6 @@ mod frame_view {
             frame_ndx: usize,
             self_url: String,
             source_raw_markup: String,
-            source_visible: bool,
         }
 
         let params = TmplParams {
@@ -287,7 +277,6 @@ mod frame_view {
             frame_ndx,
             self_url: format!("/frames/{frame_ndx}/view"),
             source_raw_markup,
-            source_visible,
         };
 
         app_data
@@ -861,10 +850,8 @@ async fn sidebar(app_data: web::Data<AppData<'static>>) -> actix_web::Result<Htt
 async fn frame_set_breakpoint(
     app_data: web::Data<AppData<'static>>,
     path_params: web::Path<(usize, String)>,
-    form_params: web::Form<FrameViewParams>,
 ) -> actix_web::Result<HttpResponse> {
     let (frame_ndx, brange_id_s) = path_params.into_inner();
-    let form_params = form_params.into_inner();
 
     let brange_id = BreakRangeID::parse_string(&brange_id_s)
         .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid break range ID"))?;
@@ -889,7 +876,7 @@ async fn frame_set_breakpoint(
     app_data.invalidate_snapshot();
 
     let body =
-        frame_view::render_frame_view(&app_data, frame_ndx, form_params.source_visible).await?;
+        frame_view::render_frame_view(&app_data, frame_ndx).await?;
     Ok(HttpResponse::Ok()
         .append_header(("HX-Trigger", "breakpoints-changed"))
         .body(body))
