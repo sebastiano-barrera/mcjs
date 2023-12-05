@@ -5,36 +5,15 @@ use actix_web::{web, App, HttpResponse, HttpServer};
 use actix_web::middleware::Logger;
 
 use anyhow::{Error, Result};
-use handlebars::{handlebars_helper, Handlebars};
+use handlebars::Handlebars;
 use listenfd::ListenFd;
 use mcjs_vm::interpreter::debugger::BreakRangeID;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-
-handlebars_helper!(lookup_deep: |*args| {
-    if args.is_empty() {
-        panic!();
-    }
-
-    let mut value = args[0];
-    for step in &args[1..] {
-        value = if let Some(property) = step.as_str() {
-            value.get(property).unwrap_or(&JsonValue::Null)
-        } else if let Some(index) = step.as_number() {
-            let key = index.to_string();
-            value.get(key).unwrap_or(&JsonValue::Null)
-        } else {
-            return Ok(handlebars::ScopedJson::Missing)
-        };
-    }
-
-    value.clone()
-});
 
 #[actix_web::main]
 async fn main() -> Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
-    
+
     let main_path = match std::env::args().nth(1) {
         Some(path) => path,
         None => {
@@ -51,7 +30,6 @@ async fn main() -> Result<()> {
         eprintln!("template compile error:\n\n{}", err);
         return Ok(());
     }
-    handlebars.register_helper("lookup_deep", Box::new(lookup_deep));
 
     let intrp_handle = interpreter_manager::spawn_interpreter(main_path);
 
@@ -446,6 +424,7 @@ mod frame_view {
         frames: Vec<Frame>,
     }
 
+    #[allow(non_snake_case)]
     #[derive(Clone, Serialize)]
     struct Frame {
         source_filename: Option<String>,
