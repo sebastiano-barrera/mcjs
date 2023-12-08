@@ -4,7 +4,10 @@
 		text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
 	hx-target="this"
 	hx-swap="outerHTML"
-	x-data="{sourceVisible: false, highlight: {iidStart: null, iidEnd: null}}"
+	x-data="{
+		markedBreakRange: null,
+ 		sourceVisible: false
+	}"
 >
 	<div 
 		class="flex flex-row items-center gap-2 px-2 relative"

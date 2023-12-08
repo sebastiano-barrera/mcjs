@@ -1,20 +1,29 @@
 <div 
 	class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
 		script--highlight-mcjs-values [&>*]:whitespace-nowrap"
-	onload="this.querySelector('.highlighted').scrollIntoView({ block: 'center' })"
+	onload="this.querySelector('.current-instr').scrollIntoView({ block: 'center' })"
+	x-init='$watch("markedBreakRange", (mbr) => {
+		if (!mbr) return;
+		const name = "instr-" + mbr.iidStart
+		$refs[name].scrollIntoView({ behavior: "smooth", block: "center" })
+	})'
 >
 	{{#each frame.function.bytecode}}
-		<div class="text-right rounded-r-md cursor-pointer
-			{{#if (eq @index ../iid)}} highlighted {{/if}}
-			hover:bg-zinc-100 hover:dark:bg-zinc-700
-			[&.highlighted]:font-medium
-			[&.highlighted]:bg-black [&.highlighted]:text-white
-			[&.highlighted]:dark:bg-white [&.highlighted]:dark:text-black
-		">
-			<span
-				class="font-mono px-2 border-sky-500 dark:border-white [&.highlight]:border-r-2"
-				x-bind:class="{{ @index }} >= highlight.iidStart && {{ @index }} < highlight.iidEnd && 'highlight'"
-			>
+		<div 
+			x-ref='instr-{{ @index }}'
+			class="text-right rounded-r-md cursor-pointer
+				{{#if (eq @index @root.frame.iid)}} current-instr {{/if}}
+				hover:bg-zinc-100 hover:dark:bg-zinc-700
+				[&.current-instr]:font-medium
+				[&.current-instr]:bg-black [&.current-instr]:text-white
+				[&.current-instr]:dark:bg-white [&.current-instr]:dark:text-black
+
+				[&.highlight]:dark:bg-sky-800 [&.highlight]:bg-sky-200"
+			x-bind:class="{
+				highlight: markedBreakRange?.iidStart <= {{ @index }} && {{ @index }} < markedBreakRange?.iidEnd
+			}"
+		>
+			<span class="font-mono px-2">
 				{{#if has_breakpoint}}
 					<span class="text-red-500">●</span>
 				{{/if}}

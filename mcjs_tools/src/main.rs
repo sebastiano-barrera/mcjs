@@ -524,12 +524,16 @@ mod frame_view {
                 write!(pre_escaped_code, "{}", text).unwrap();
 
                 match marker.kind {
-                    MarkerKind::Start { brid, .. } => {
+                    MarkerKind::Start {
+                        brid,
+                        iid_start,
+                        iid_end,
+                    } => {
                         write!(
-                        pre_escaped_code,
-                        "<span class='relative' x-bind:class=\"markedBreakRange == '{}' && 'src-range-selected'\">",
-                        brid.to_string(),
-                    ).unwrap();
+                            pre_escaped_code,
+                            "<span class='relative' x-bind:class=\"{{'src-range-selected': (markedBreakRange?.id === '{}')}}\">",
+                            brid.to_string(),
+                        ).unwrap();
 
                         let brid_str = brid.to_string();
                         assert!(brid_str.chars().all(|ch| ch == ',' || ch.is_numeric()));
@@ -537,11 +541,12 @@ mod frame_view {
                         write!(
                             pre_escaped_code,
                             "<span class='cursor-pointer' 
-                            x-on:click='markedBreakRange = \"{brid_str}\"'
-                            hx-trigger='dblclick'
-                            hx-post='/frames/{frame_ndx}/break_range/{brid_str}/set'
-                            hx-swap='none'
-                        >⚬ </span>",
+                                x-on:click='markedBreakRange = {{id: \"{}\", iidStart: {}, iidEnd: {}}}'
+                                hx-trigger='dblclick'
+                                hx-post='/frames/{frame_ndx}/break_range/{brid_str}/set'
+                                hx-swap='none'
+                            >⚬ </span>",
+                            brid_str, iid_start.0, iid_end.0
                         )
                         .unwrap();
                     }
@@ -572,7 +577,7 @@ mod frame_view {
                 }
 
                 div.grid {
-                    pre x-data="{ markedBreakRange: null }" {
+                    pre {
                         (pre_escaped_code)
                     }
                 }
