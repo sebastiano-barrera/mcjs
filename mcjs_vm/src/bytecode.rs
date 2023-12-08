@@ -1,11 +1,12 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet}, sync::{Arc, Mutex},
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
 };
 
 use serde::Serialize;
 use strum::IntoStaticStr;
-use swc_common::{Span, SourceMap, BytePos};
+use swc_common::{BytePos, SourceMap, Span};
 
 pub use swc_atoms::JsWord;
 
@@ -62,7 +63,7 @@ pub struct FnId(pub ModuleId, pub LocalFnId);
 
 impl std::fmt::Debug for FnId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "m{}:f{}", self.0.0, self.1.0)
+        write!(f, "m{}:f{}", self.0 .0, self.1 .0)
     }
 }
 

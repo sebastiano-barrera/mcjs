@@ -1,0 +1,29 @@
+<div 
+	class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
+		script--highlight-mcjs-values [&>*]:whitespace-nowrap"
+	onload="this.querySelector('.highlighted').scrollIntoView({ block: 'center' })"
+>
+	{{#each frame.function.bytecode}}
+		<div class="text-right rounded-r-md cursor-pointer
+			{{#if (eq @index ../iid)}} highlighted {{/if}}
+			hover:bg-zinc-100 hover:dark:bg-zinc-700
+			[&.highlighted]:font-medium
+			[&.highlighted]:bg-black [&.highlighted]:text-white
+			[&.highlighted]:dark:bg-white [&.highlighted]:dark:text-black
+		">
+			<span
+				class="font-mono px-2 border-sky-500 dark:border-white [&.highlight]:border-r-2"
+				x-bind:class="{{ @index }} >= highlight.iidStart && {{ @index }} < highlight.iidEnd && 'highlight'"
+			>
+				{{#if has_breakpoint}}
+					<span class="text-red-500">●</span>
+				{{/if}}
+				{{ @index }}⬥ 
+			</span>
+		</div>
+		<div>
+			{{ textual_repr }}
+		</div>
+	{{/each}}
+</div>
+

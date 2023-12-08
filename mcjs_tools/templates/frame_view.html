@@ -73,39 +73,16 @@
 	</div>
 
 
-	{{#with frame}}
-
-	<div class='flex flex-row overflow-y-scroll border-b border-dashed border-zinc-300'>
-		<div 
-			class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
-				script--highlight-mcjs-values [&>*]:whitespace-nowrap"
-			onload="this.querySelector('.highlighted').scrollIntoView({ block: 'center' })"
+	<div
+		class='flex flex-row overflow-y-scroll border-b border-dashed border-zinc-300'
+		hx-get="/frames/{{frame_ndx}}/bytecode"
+		hx-trigger="breakpointAdded[detail.moduleID == {{frame.moduleID}} && detail.functionID == {{frame.functionID}}] from:body"
+		hx-swap="innerHTML" hx-target="this"
 		>
-			{{#each function.bytecode}}
-				<div class="text-right rounded-r-md cursor-pointer
-					{{#if (eq @index ../iid)}} highlighted {{/if}}
-					hover:bg-zinc-100 hover:dark:bg-zinc-700
-					[&.highlighted]:font-medium
-					[&.highlighted]:bg-black [&.highlighted]:text-white
-					[&.highlighted]:dark:bg-white [&.highlighted]:dark:text-black
-				">
-					<span
-						class="font-mono px-2 border-sky-500 dark:border-white [&.highlight]:border-r-2"
-						x-bind:class="{{ @index }} >= highlight.iidStart && {{ @index }} < highlight.iidEnd && 'highlight'"
-					>
-						{{#if has_breakpoint}}
-							<span class="text-red-500">●</span>
-						{{/if}}
-						{{ @index }}⬥ 
-					</span>
-				</div>
-				<div>
-					{{ textual_repr }}
-				</div>
-			{{/each}}
-		</div>
+		{{>function_bytecode}}
 	</div>
 
+	{{#with frame}}
 	<div class="overflow-y-scroll px-1">
 		{{#with values}}
 			{{#each locs}}

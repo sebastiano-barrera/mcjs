@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use actix_web::{web, App, HttpResponse, HttpServer};
 use actix_web::middleware::Logger;
+use actix_web::{web, App, HttpResponse, HttpServer};
 
 use anyhow::{Error, Result};
 use handlebars::Handlebars;
 use listenfd::ListenFd;
+use mcjs_vm::bytecode::{self, LocalFnId};
 use mcjs_vm::interpreter::debugger::BreakRangeID;
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +48,6 @@ async fn main() -> Result<()> {
             .wrap(Logger::default())
             .service(actix_files::Files::new("/assets", "./data/assets/"))
             .service(main_screen)
-            .service(view_frame)
             .service(view_stack)
             .service(frame_set_breakpoint)
             .service(delete_breakpoint)
@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
             .service(action_restart)
             .service(action_continue)
             .service(frame_view::view_object)
+            .service(frame_view::view_function_bytecode)
             .app_data(data_ref.clone())
     });
 
@@ -133,17 +134,6 @@ async fn render_main_screen(app_data: Arc<AppData<'_>>) -> actix_web::Result<Htt
     } else {
         Ok(HttpResponse::Ok().body("Interpreter finished successfully.  No debugging!"))
     }
-}
-
-#[actix_web::get("/frames/{frame_ndx}/view")]
-async fn view_frame(
-    app_data: web::Data<AppData<'static>>,
-    path_params: web::Path<(usize,)>,
-) -> actix_web::Result<HttpResponse> {
-    let (frame_ndx,) = path_params.into_inner();
-    let body =
-        frame_view::render_frame_view(&app_data, frame_ndx).await?;
-    Ok(HttpResponse::Ok().body(body))
 }
 
 #[actix_web::get("/frames")]
@@ -250,14 +240,12 @@ mod frame_view {
         struct TmplParams<'a> {
             frame: &'a Frame,
             frame_ndx: usize,
-            self_url: String,
             source_raw_markup: String,
         }
 
         let params = TmplParams {
             frame,
             frame_ndx,
-            self_url: format!("/frames/{frame_ndx}/view"),
             source_raw_markup,
         };
 
@@ -290,9 +278,8 @@ mod frame_view {
                 let show_value = |value| {
                     let details_url = get_details_url(Some(value));
                     let header = show_value_header(probe, value, None);
-                    html! {
-                        div.cursor-pointer x-data="{detailsVisible: false}"
-                        { 
+                    html!{
+                        div.cursor-pointer x-data="{detailsVisible: false}" { 
                             div {
                                 @if let Some(details_url) = details_url {
                                     button
@@ -361,6 +348,27 @@ mod frame_view {
             .ok_or_else(|| actix_web::error::ErrorNotFound("no such object"))?;
 
         Ok(HttpResponse::Ok().body(markup.into_string()))
+    }
+
+    #[actix_web::get("/frames/{frame_ndx}/bytecode")]
+    async fn view_function_bytecode(
+        app_data: web::Data<AppData<'static>>,
+        path_params: web::Path<usize>,
+    ) -> actix_web::Result<String> {
+        let frame_ndx = path_params.into_inner();
+
+        let app_data = app_data.into_inner();
+        let snapshot = app_data.snapshot().await;
+        let vmstate = snapshot.model.as_ref();
+        let frame = vmstate
+            .and_then(move |model| model.frame_view_snapshot.frames.get(frame_ndx))
+            .ok_or_else(|| actix_web::error::ErrorNotFound("no frame at given index"))?;
+
+        let params = serde_json::json!({ "frame": &frame });
+        app_data
+            .handlebars
+            .render("function_bytecode", &params)
+            .map_err(|err| actix_web::error::ErrorInternalServerError(err))
     }
 
     pub fn snapshot(
@@ -532,6 +540,7 @@ mod frame_view {
                             x-on:click='markedBreakRange = \"{brid_str}\"'
                             hx-trigger='dblclick'
                             hx-post='/frames/{frame_ndx}/break_range/{brid_str}/set'
+                            hx-swap='none'
                         >⚬ </span>",
                         )
                         .unwrap();
@@ -675,7 +684,11 @@ mod frame_view {
         Values { locs }
     }
 
-    fn show_value_header(probe: &Probe, value: InterpreterValue, upv_id: Option<UpvalueId>) -> String {
+    fn show_value_header(
+        probe: &Probe,
+        value: InterpreterValue,
+        upv_id: Option<UpvalueId>,
+    ) -> String {
         use slotmap::Key;
         use std::fmt::Write;
 
@@ -840,9 +853,9 @@ async fn frame_set_breakpoint(
         .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid break range ID"))?;
 
     let app_data = app_data.into_inner();
-    app_data
+    let giid = app_data
         .intrp_handle
-        .query(move |state| -> std::result::Result<(), &'static str> {
+        .query(move |state| -> std::result::Result<_, &'static str> {
             let probe = state
                 .probe_mut()
                 .ok_or_else(|| "interpreter is finished; can't set a breakpoint in this state")?;
@@ -851,18 +864,43 @@ async fn frame_set_breakpoint(
                 .set_source_breakpoint(brange_id)
                 .map_err(|err| err.message())?;
 
-            Ok(())
+            let break_range: &bytecode::BreakRange = probe
+                .loader()
+                .get_break_range(brange_id)
+                // This would have failed in set_source_breakpoint
+                .unwrap();
+
+            let giid = bytecode::GlobalIID(
+                bytecode::FnId(brange_id.module_id(), break_range.local_fnid),
+                break_range.iid_start,
+            );
+            Ok(giid)
         })
         .await
         .map_err(|err_msg| actix_web::error::ErrorBadRequest(err_msg))?;
 
     app_data.invalidate_snapshot();
 
-    let body =
-        frame_view::render_frame_view(&app_data, frame_ndx).await?;
+    let event = BreakpointAddedEvent {
+        moduleID: giid.0 .0 .0,
+        functionID: giid.0 .1 .0,
+        iid: giid.1 .0,
+    };
+    let events_payload = serde_json::json!({
+        "breakpointAdded": event,
+    })
+    .to_string();
     Ok(HttpResponse::Ok()
-        .append_header(("HX-Trigger", "breakpoints-changed"))
-        .body(body))
+        .append_header(("HX-Trigger", events_payload))
+        .body(""))
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize)]
+struct BreakpointAddedEvent {
+    moduleID: u16,
+    functionID: u16,
+    iid: u16,
 }
 
 #[derive(Deserialize, Debug)]
