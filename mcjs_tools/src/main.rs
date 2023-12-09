@@ -9,6 +9,7 @@ use handlebars::Handlebars;
 use listenfd::ListenFd;
 use mcjs_vm::bytecode::{self, LocalFnId};
 use mcjs_vm::interpreter::debugger::BreakRangeID;
+use mcjs_vm::interpreter::Fuel;
 use serde::{Deserialize, Serialize};
 
 #[actix_web::main]
@@ -54,6 +55,7 @@ async fn main() -> Result<()> {
             .service(sidebar)
             .service(action_restart)
             .service(action_continue)
+            .service(action_next)
             .service(frame_view::view_object)
             .service(frame_view::view_function_bytecode)
             .app_data(data_ref.clone())
@@ -936,6 +938,22 @@ async fn action_restart(app_data: web::Data<AppData<'static>>) -> actix_web::Res
 #[actix_web::post("/continue")]
 async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
     let app_data = app_data.into_inner();
+    app_data.intrp_handle.resume();
+    app_data.invalidate_snapshot();
+    render_main_screen(app_data).await
+}
+
+#[actix_web::post("/next")]
+async fn action_next(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
+    let app_data = app_data.into_inner();
+    app_data
+        .intrp_handle
+        .query(|state| {
+            // TODO Replace this unwrap with proper error handling
+            let probe = state.probe_mut().unwrap();
+            probe.set_fuel(Fuel::Limited(1));
+        })
+        .await;
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
     render_main_screen(app_data).await

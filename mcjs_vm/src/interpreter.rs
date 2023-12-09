@@ -206,14 +206,18 @@ pub struct Interpreter<'a> {
     /// Each source breakpoint corresponds to exactly to one instruction breakpoint, which is
     /// added/deleted together with it.
     source_bkpts: HashMap<BreakRangeID, SourceBreakpoint>,
+
+    /// This special flag can be used to cause the interpreter to suspend
+    /// after N instructions. It's conceptually similar to a breakpoint that
+    /// automatically follows call/return.
+    ///
+    /// See the type, `Fuel`.
+    fuel: Fuel,
 }
 
-struct FuncBreakpoints {
-    /// bkpt_active[i] === whether a breakpoint has been placed on the i-th instruction.
-    ///
-    /// A bool is used because it's explicitly forbidden to place multiple breakpoints on the same
-    /// instuction.
-    bkpt_active: Box<[bool]>,
+pub enum Fuel {
+    Limited(usize),
+    Unlimited,
 }
 
 // There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
@@ -315,6 +319,7 @@ impl<'a> Interpreter<'a> {
             jitting: None,
             instr_bkpts: HashSet::new(),
             source_bkpts: HashMap::new(),
+            fuel: Fuel::Unlimited,
         }
     }
 
@@ -956,13 +961,26 @@ impl<'a> Interpreter<'a> {
 
             // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
             let giid = bytecode::GlobalIID(fnid, self.iid);
-            if self.instr_bkpts.contains(&giid) {
-                // Gotta increase IID, or we'll be back here on resume
-                self.iid.0 = next_ndx;
+            let out_of_fuel = match &mut self.fuel {
+                Fuel::Limited(count) => {
+                    assert!(*count > 0);
+                    *count -= 1;
+                    if *count == 0 {
+                        self.fuel = Fuel::Unlimited;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Fuel::Unlimited => false,
+            };
+
+            // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
+            self.iid.0 = next_ndx;
+
+            if out_of_fuel || self.instr_bkpts.contains(&giid) {
                 return Ok(ExitInternal::Suspended);
             }
-
-            self.iid.0 = next_ndx;
         }
 
         Ok(ExitInternal::Finished)
@@ -1442,7 +1460,7 @@ pub mod debugger {
     use crate::{bytecode, InterpreterValue};
     use crate::{error, heap};
 
-    use super::{Interpreter, SourceBreakpoint};
+    use super::{Fuel, Interpreter, SourceBreakpoint};
 
     pub use heap::ObjectId;
 
@@ -1494,6 +1512,10 @@ pub mod debugger {
 
         pub fn sink(&self) -> &[InterpreterValue] {
             self.interpreter.sink.as_slice()
+        }
+
+        pub fn set_fuel(&mut self, fuel: Fuel) {
+            self.interpreter.fuel = fuel;
         }
 
         /// Set a breakpoint at the specified instruction.

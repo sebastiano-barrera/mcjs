@@ -15,7 +15,10 @@
         </div>
     {{/if}}
 
-    <div class="grid grid-cols-3 gap-3 p-3 text-center place-items-center text-xs font-medium">
+    <div
+        class="grid grid-cols-3 gap-3 p-3 text-center place-items-center text-xs font-medium"
+        hx-target="body" hx-swap="outerHTML" 
+    >
         {{#*inline "button-style"~}}
             relative enabled
             uppercase w-20 rounded-sm cursor-pointer
@@ -25,9 +28,9 @@
             border dark:border-black shadow-[0_1px_1px_black]
             [&.enabled]:active:shadow-none [&.enabled]:active:top-1
         {{~/inline}}
-        <button class="{{> button-style}}">Next</button>
-	<button hx-post="/continue" hx-target="body" hx-swap="outerHTML" class="{{> button-style}}">Continue</button>
-    	<button hx-post="/restart" hx-target="body" hx-swap="outerHTML" class="{{> button-style}}">Restart</button>
+        <button hx-post="/next" class="{{> button-style}}">Next</button>
+        <button hx-post="/continue" class="{{> button-style}}">Continue</button>
+        <button hx-post="/restart" class="{{> button-style}}">Restart</button>
         
         <button
             class="{{> button-style}}"
