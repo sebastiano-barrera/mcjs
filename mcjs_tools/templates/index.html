@@ -13,7 +13,7 @@
 
 <body class="w-full h-full dark:bg-zinc-800 dark:text-white text-black">
 	<div class="grid grid-cols-[minmax(0,7cm)_1cm_1fr] inset-0 w-full h-full">
-		<div class="p-0" hx-get="/sidebar" hx-trigger="load, breakpointAdded from:body">
+		<div class="p-0" hx-get="/sidebar" hx-trigger="load, breakpointAdded from:body, vmStateChanged from:body">
 			Loading...
 		</div>
 
@@ -31,7 +31,7 @@
 			id="main-area"
 			class="inset-0 w-full h-full overflow-x-scroll flex"
 			hx-get="/frames"
-			hx-trigger="load"
+			hx-trigger="load, vmStateChanged[!detail.onlyTopFrameChanged] from:body"
 		></div>
 		
 	</div>

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use actix_web::http::header::{HeaderName, HeaderValue};
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer};
 
@@ -434,6 +435,21 @@ mod frame_view {
         frames: Vec<Frame>,
     }
 
+    #[derive(PartialEq, Eq)]
+    pub struct StackFingerprint {
+        func_ids: Vec<(u16, u16)>,
+    }
+    impl Snapshot {
+        pub fn fingerprint(&self) -> StackFingerprint {
+            let func_ids = self
+                .frames
+                .iter()
+                .map(|frame| (frame.moduleID, frame.functionID))
+                .collect();
+            StackFingerprint { func_ids }
+        }
+    }
+
     #[allow(non_snake_case)]
     #[derive(Clone, Serialize)]
     struct Frame {
@@ -659,9 +675,8 @@ mod frame_view {
             .enumerate()
             .take_while(|(_, asmt)| asmt.iid.0 <= iid.0)
             .last()
-            .unwrap()
-            .0
-            + 1;
+            .map(|(ndx, _)| ndx + 1)
+            .unwrap_or(0);
         for asmt in history[0..history_limit].iter().rev() {
             let ls = locs_state.get_mut(&asmt.loc).unwrap();
             let ident = asmt.ident.to_string();
@@ -910,6 +925,12 @@ struct BreakpointAddedEvent {
     iid: u16,
 }
 
+#[allow(non_snake_case)]
+#[derive(Serialize)]
+struct VMStateChangedEvent {
+    onlyTopFrameChanged: bool,
+}
+
 #[derive(Deserialize, Debug)]
 struct DeleteBreakpointParams {
     category: String,
@@ -946,6 +967,16 @@ async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Re
 #[actix_web::post("/next")]
 async fn action_next(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
     let app_data = app_data.into_inner();
+
+    let pre_fingerprint = {
+        let snapshot = app_data.snapshot().await;
+        snapshot
+            .as_ref()
+            .model
+            .as_ref()
+            .map(|model| model.frame_view_snapshot.fingerprint())
+    };
+
     app_data
         .intrp_handle
         .query(|state| {
@@ -956,7 +987,25 @@ async fn action_next(app_data: web::Data<AppData<'static>>) -> actix_web::Result
         .await;
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
-    render_main_screen(app_data).await
+
+    let post_fingerprint = {
+        let snapshot = app_data.snapshot().await;
+        snapshot
+            .as_ref()
+            .model
+            .as_ref()
+            .map(|model| model.frame_view_snapshot.fingerprint())
+    };
+
+    let events_payload = serde_json::json!({
+        "vmStateChanged": VMStateChangedEvent {
+            onlyTopFrameChanged: (pre_fingerprint == post_fingerprint),
+        },
+    })
+    .to_string();
+    Ok(HttpResponse::Ok()
+        .append_header(("HX-Trigger", events_payload))
+        .body(""))
 }
 
 mod interpreter_manager {

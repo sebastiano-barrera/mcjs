@@ -79,7 +79,12 @@
 	<div
 		class='flex flex-row overflow-y-scroll border-b border-dashed border-zinc-300'
 		hx-get="/frames/{{frame_ndx}}/bytecode"
-		hx-trigger="breakpointAdded[detail.moduleID == {{frame.moduleID}} && detail.functionID == {{frame.functionID}}] from:body"
+		hx-trigger="
+			breakpointAdded[detail.moduleID == {{frame.moduleID}} && detail.functionID == {{frame.functionID}}] from:body,
+			{{#if (eq frame_ndx 0)}}  {{! Top frame: sometimes we can just reload this bit if the stack hasn't radically changed }}
+				vmStateChanged[detail.onlyTopFrameChanged] from:body
+			{{/if}}
+		"
 		hx-swap="innerHTML" hx-target="this"
 		>
 		{{>function_bytecode}}
