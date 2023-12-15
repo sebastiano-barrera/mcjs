@@ -564,6 +564,10 @@ video {
   bottom: 2lh;
 }
 
+.left-\[100\%\] {
+  left: 100%;
+}
+
 .col-start-2 {
   grid-column-start: 2;
 }
@@ -968,6 +972,10 @@ video {
 
 .align-middle {
   vertical-align: middle;
+}
+
+.align-bottom {
+  vertical-align: bottom;
 }
 
 .font-mono {
