@@ -1,14 +1,13 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use actix_web::http::header::{HeaderName, HeaderValue};
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer};
 
 use anyhow::{Error, Result};
 use handlebars::Handlebars;
 use listenfd::ListenFd;
-use mcjs_vm::bytecode::{self, LocalFnId};
+use mcjs_vm::bytecode;
 use mcjs_vm::interpreter::debugger::BreakRangeID;
 use mcjs_vm::interpreter::Fuel;
 use serde::{Deserialize, Serialize};
@@ -153,101 +152,6 @@ mod frame_view {
 
     use super::AppData;
 
-    pub async fn render_stack(app_data: &AppData<'static>) -> actix_web::Result<Markup> {
-        let snapshot_arc = &app_data.snapshot().await;
-        let snapshot = &snapshot_arc
-            .as_ref()
-            .model
-            .as_ref()
-            .ok_or(actix_web::error::ErrorNotFound(""))?
-            .frame_view_snapshot;
-
-        Ok(html! {
-            @for (index, frame) in snapshot.frames.iter().enumerate() {
-                div {
-                    // TODO: Make this faster/simpler by directly passing the frame data (let the caller get the snapshot)
-                    (maud::PreEscaped(render_frame_view(app_data, index).await?))
-                }
-            }
-        })
-    }
-
-    pub async fn render_frame_view(
-        app_data: &AppData<'static>,
-        frame_ndx: usize,
-    ) -> actix_web::Result<String> {
-        // TODO Possible write-after-read hazard here, after snapshot() 'releases'
-        // the interpreter manager and the subsequent query (markers, frame_src)
-        // takes it again
-        let snapshot = app_data.snapshot().await;
-        let vmstate = snapshot.model.as_ref();
-        let frame = vmstate
-            .and_then(move |model| model.frame_view_snapshot.frames.get(frame_ndx))
-            .ok_or_else(|| actix_web::error::ErrorNotFound("no frame at given index"))?;
-
-        render_frame_view_ex(app_data, frame_ndx, frame).await
-    }
-
-    // TODO Refactor this mess. No reason why the snapshot is 'fetched' so many times throughout
-    async fn render_frame_view_ex(
-        app_data: &AppData<'_>,
-        frame_ndx: usize,
-        frame: &Frame,
-    ) -> Result<String, actix_web::Error> {
-        let source_raw_markup = {
-            let (markers, frame_src) = app_data
-                .intrp_handle
-                .query(move |state| {
-                    let probe = state.probe()?;
-                    let loader = probe.loader();
-
-                    let giid = probe.frame_giid(frame_ndx as usize);
-                    let fnid = giid.0;
-
-                    let source_map = loader.get_source_map(fnid.0)?;
-
-                    let break_ranges = loader.function_breakranges(fnid).unwrap();
-                    let markers: Vec<_> = markers_for_breakranges(break_ranges);
-                    if markers.is_empty() {
-                        return None;
-                    }
-
-                    let offset_range = {
-                        let offset_min = markers.iter().map(|m| m.offset).min().unwrap();
-                        let offset_max = markers.iter().map(|m| m.offset).max().unwrap();
-                        offset_min..offset_max
-                    };
-
-                    let frame_src = extract_frame_source(source_map, loader, giid, offset_range)?;
-                    Some((markers, frame_src))
-                })
-                .await
-                .ok_or_else(|| actix_web::error::ErrorNotFound("Source code not available"))?;
-
-            render_source_code(&markers, &frame_src, frame_ndx)
-                .map(|pre_escaped| pre_escaped.into_string())
-                .unwrap_or(String::new())
-        };
-
-        #[derive(Serialize)]
-        struct TmplParams<'a> {
-            frame: &'a Frame,
-            frame_ndx: usize,
-            source_raw_markup: String,
-        }
-
-        let params = TmplParams {
-            frame,
-            frame_ndx,
-            source_raw_markup,
-        };
-
-        app_data
-            .handlebars
-            .render("frame_view", &params)
-            .map_err(|err| actix_web::error::ErrorInternalServerError(err))
-    }
-
     #[actix_web::get("/objects/{object_id}")]
     pub async fn view_object(
         app_data: web::Data<AppData<'static>>,
@@ -370,7 +274,7 @@ mod frame_view {
             let func = loader.get_function(fnid).unwrap();
             let values = decode_locs_state(probe, &frame, func, giid.1);
             let source_raw_markup =
-                fetch_source_code(probe, giid, frame_ndx).unwrap_or_else(|| "???".to_string());
+                fetch_source_code(probe, giid).unwrap_or_else(|| "???".to_string());
 
             frames.push(Frame {
                 source_filename,
@@ -402,11 +306,7 @@ mod frame_view {
         Snapshot { frames }
     }
 
-    fn fetch_source_code(
-        probe: &Probe,
-        giid: bytecode::GlobalIID,
-        frame_ndx: usize,
-    ) -> Option<String> {
+    fn fetch_source_code(probe: &Probe, giid: bytecode::GlobalIID) -> Option<String> {
         let fnid = giid.0;
 
         let loader = probe.loader();
@@ -425,7 +325,7 @@ mod frame_view {
 
         let frame_src = extract_frame_source(source_map, loader, giid, offset_range)?;
 
-        let raw_markup = render_source_code(&markers, &frame_src, frame_ndx)
+        let raw_markup = render_source_code(&markers, &frame_src)
             .map(|pre_escaped| pre_escaped.into_string())
             .unwrap_or(String::new());
         Some(raw_markup)
@@ -527,7 +427,6 @@ mod frame_view {
     fn render_source_code(
         markers: &[break_range::Marker],
         frame_src: &FrameSource,
-        frame_ndx: usize,
     ) -> actix_web::Result<Markup> {
         let pre_escaped_code = {
             use break_range::MarkerKind;
@@ -563,7 +462,7 @@ mod frame_view {
                             "<span class='cursor-pointer' 
                                 x-on:click='markedBreakRange = {{id: \"{}\", iidStart: {}, iidEnd: {}}}'
                                 hx-trigger='dblclick'
-                                hx-post='/frames/{frame_ndx}/break_ranges/{brid_str}/set'
+                                hx-post='/break_ranges/{brid_str}/set'
                                 hx-swap='none'
                             >⚬ </span>",
                             brid_str, iid_start.0, iid_end.0
@@ -851,13 +750,12 @@ mod frame_view {
     }
 }
 
-#[actix_web::post("/frames/{frame_ndx}/break_ranges/{brange_id}/set")]
+#[actix_web::post("/break_ranges/{brange_id}/set")]
 async fn action_set_breakpoint(
     app_data: web::Data<AppData<'static>>,
-    path_params: web::Path<(usize, String)>,
+    path_params: web::Path<String>,
 ) -> actix_web::Result<HttpResponse> {
-    let (frame_ndx, brange_id_s) = path_params.into_inner();
-
+    let brange_id_s = path_params.into_inner();
     let brange_id = BreakRangeID::parse_string(&brange_id_s)
         .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid break range ID"))?;
 

@@ -2,8 +2,6 @@
 <div
 	class="stack-frame grid stack-view-grid-rows min-w-fit pr-4 h-full
 		text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
-	hx-target="this"
-	hx-swap="outerHTML"
 	x-data="{
 		markedBreakRange: null,
  		sourceVisible: false
@@ -15,24 +13,6 @@
 		x-on:mouseleave="detailsVisible = false"
 	>
 		<!-- Top bar, above bytecode -->
-		<button 
-			class="relative
-				py-0 px-2 rounded-sm ring-1 cursor-pointer
-				active:top-1
-				
-				text-zinc-500 bg-zinc-200 ring-transparent
-				hover:bg-zinc-300 
-				[&.on]:text-black [&.on]:ring-zinc-800
-
-				dark:text-black dark:bg-zinc-600 
-				dark:hover:bg-zinc-500 
-				[&.on]:dark:bg-zinc-900 [&.on]:dark:ring-zinc-400 [&.on]:dark:text-white"
-			x-bind:class="{'on': sourceVisible}"
-			x-on:click="sourceVisible = ! sourceVisible"
-			>
-			JS
-		</button>
-
 		<div>
 			<span class="">fn</span>
 			<span class="font-mono">{{ moduleID }}.{{ functionID }}</span>
