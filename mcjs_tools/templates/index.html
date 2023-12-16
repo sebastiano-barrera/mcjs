@@ -11,10 +11,16 @@
 	<script defer src="/assets/htmx-1.9.6.js"></script>
 </head>
 
-<body class="w-full h-full dark:bg-zinc-800 dark:text-white text-black">
+<body 
+	class="w-full h-full dark:bg-zinc-800 dark:text-white text-black"
+	hx-target="this"
+	hx-swap="outerHTML"
+	hx-trigger="breakpointAdded"
+	hx-get="/"
+>
 	<div class="grid grid-cols-[minmax(0,7cm)_1cm_1fr] inset-0 w-full h-full">
-		<div class="p-0" hx-get="/sidebar" hx-trigger="load, breakpointAdded from:body, vmStateChanged from:body">
-			Loading...
+		<div class="p-0">
+			{{> sidebar }}
 		</div>
 
 		<div id="main-area-labels" class="grid stack-view-grid-rows inset-0">
@@ -27,12 +33,16 @@
 			</div>
 		</div>
 
-		<div 
-			id="main-area"
-			class="inset-0 w-full h-full overflow-x-scroll flex"
-			hx-get="/frames"
-			hx-trigger="load, vmStateChanged[!detail.onlyTopFrameChanged] from:body"
-		></div>
+		<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
+			{{#if model}}
+				{{#with model.frame_view_snapshot.frames.[0]}}
+					{{> frame_view }}
+				{{/with}}
+			{{else}}
+				{{! TODO do some actual design here }}
+				<span>the interpreter has exited or has not been started yet</span>
+			{{/if}}
+		</div>
 		
 	</div>
 </body>

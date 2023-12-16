@@ -564,10 +564,6 @@ video {
   bottom: 2lh;
 }
 
-.left-\[100\%\] {
-  left: 100%;
-}
-
 .col-start-2 {
   grid-column-start: 2;
 }

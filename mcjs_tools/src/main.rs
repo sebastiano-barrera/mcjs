@@ -49,16 +49,13 @@ async fn main() -> Result<()> {
         App::new()
             .wrap(Logger::default())
             .service(actix_files::Files::new("/assets", "./data/assets/"))
-            .service(main_screen)
-            .service(view_stack)
-            .service(frame_set_breakpoint)
-            .service(delete_breakpoint)
-            .service(sidebar)
+            .service(view_main)
+            .service(action_set_breakpoint)
+            .service(action_delete_breakpoint)
             .service(action_restart)
             .service(action_continue)
             .service(action_next)
             .service(frame_view::view_object)
-            .service(frame_view::view_function_bytecode)
             .app_data(data_ref.clone())
     });
 
@@ -122,7 +119,7 @@ impl<'a> AppData<'a> {
 }
 
 #[actix_web::get("/")]
-async fn main_screen(app_data: web::Data<AppData<'_>>) -> actix_web::Result<HttpResponse> {
+async fn view_main(app_data: web::Data<AppData<'_>>) -> actix_web::Result<HttpResponse> {
     render_main_screen(app_data.into_inner()).await
 }
 
@@ -137,13 +134,6 @@ async fn render_main_screen(app_data: Arc<AppData<'_>>) -> actix_web::Result<Htt
     } else {
         Ok(HttpResponse::Ok().body("Interpreter finished successfully.  No debugging!"))
     }
-}
-
-#[actix_web::get("/frames")]
-async fn view_stack(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
-    let app_data = app_data.into_inner();
-    let body = frame_view::render_stack(&app_data).await?.into_string();
-    Ok(HttpResponse::Ok().body(body))
 }
 
 mod frame_view {
@@ -234,7 +224,7 @@ mod frame_view {
                 .await
                 .ok_or_else(|| actix_web::error::ErrorNotFound("Source code not available"))?;
 
-            render_source_code(&markers, &frame_src, frame_ndx as usize)
+            render_source_code(&markers, &frame_src, frame_ndx)
                 .map(|pre_escaped| pre_escaped.into_string())
                 .unwrap_or(String::new())
         };
@@ -353,27 +343,6 @@ mod frame_view {
         Ok(HttpResponse::Ok().body(markup.into_string()))
     }
 
-    #[actix_web::get("/frames/{frame_ndx}/bytecode")]
-    async fn view_function_bytecode(
-        app_data: web::Data<AppData<'static>>,
-        path_params: web::Path<usize>,
-    ) -> actix_web::Result<String> {
-        let frame_ndx = path_params.into_inner();
-
-        let app_data = app_data.into_inner();
-        let snapshot = app_data.snapshot().await;
-        let vmstate = snapshot.model.as_ref();
-        let frame = vmstate
-            .and_then(move |model| model.frame_view_snapshot.frames.get(frame_ndx))
-            .ok_or_else(|| actix_web::error::ErrorNotFound("no frame at given index"))?;
-
-        let params = serde_json::json!({ "frame": &frame });
-        app_data
-            .handlebars
-            .render("function_bytecode", &params)
-            .map_err(|err| actix_web::error::ErrorInternalServerError(err))
-    }
-
     pub fn snapshot(
         probe: &Probe<'_, '_>,
         loader: &mcjs_vm::Loader,
@@ -381,7 +350,7 @@ mod frame_view {
     ) -> Snapshot {
         let mut frames = Vec::new();
         let mut prev_return_iid = None;
-        for (i, frame) in probe.frames().enumerate() {
+        for (frame_ndx, frame) in probe.frames().enumerate() {
             let fnid = frame.header().fn_id;
             let bytecode::FnId(mod_id, lfnid) = fnid;
             // TODO Refactor this elsewhere?
@@ -400,11 +369,14 @@ mod frame_view {
 
             let func = loader.get_function(fnid).unwrap();
             let values = decode_locs_state(probe, &frame, func, giid.1);
+            let source_raw_markup =
+                fetch_source_code(probe, giid, frame_ndx).unwrap_or_else(|| "???".to_string());
 
             frames.push(Frame {
                 source_filename,
+                source_raw_markup,
                 // TODO Remove the damn call ID
-                callID: i.try_into().unwrap(),
+                callID: frame_ndx.try_into().unwrap(),
                 moduleID: mod_id.0,
                 functionID: lfnid.0,
                 iid: giid.1 .0,
@@ -428,6 +400,35 @@ mod frame_view {
         }
 
         Snapshot { frames }
+    }
+
+    fn fetch_source_code(
+        probe: &Probe,
+        giid: bytecode::GlobalIID,
+        frame_ndx: usize,
+    ) -> Option<String> {
+        let fnid = giid.0;
+
+        let loader = probe.loader();
+        let source_map = loader.get_source_map(fnid.0)?;
+        let break_ranges = loader.function_breakranges(fnid).unwrap();
+        let markers: Vec<_> = markers_for_breakranges(break_ranges);
+        if markers.is_empty() {
+            return None;
+        }
+
+        let offset_range = {
+            let offset_min = markers.iter().map(|m| m.offset).min().unwrap();
+            let offset_max = markers.iter().map(|m| m.offset).max().unwrap();
+            offset_min..offset_max
+        };
+
+        let frame_src = extract_frame_source(source_map, loader, giid, offset_range)?;
+
+        let raw_markup = render_source_code(&markers, &frame_src, frame_ndx)
+            .map(|pre_escaped| pre_escaped.into_string())
+            .unwrap_or(String::new());
+        Some(raw_markup)
     }
 
     #[derive(Serialize)]
@@ -454,6 +455,7 @@ mod frame_view {
     #[derive(Clone, Serialize)]
     struct Frame {
         source_filename: Option<String>,
+        source_raw_markup: String,
 
         callID: u32,
         moduleID: u16,
@@ -561,7 +563,7 @@ mod frame_view {
                             "<span class='cursor-pointer' 
                                 x-on:click='markedBreakRange = {{id: \"{}\", iidStart: {}, iidEnd: {}}}'
                                 hx-trigger='dblclick'
-                                hx-post='/frames/{frame_ndx}/break_range/{brid_str}/set'
+                                hx-post='/frames/{frame_ndx}/break_ranges/{brid_str}/set'
                                 hx-swap='none'
                             >⚬ </span>",
                             brid_str, iid_start.0, iid_end.0
@@ -584,20 +586,18 @@ mod frame_view {
 
         let markup = html! {
             div.grid."grid-cols-[1.5cm_1fr]" {
-                pre x-init="$el.querySelector('.current-instr').scrollIntoView({ block: 'center' })" {
+                ul.font-mono x-init="$el.querySelector('.current-instr').scrollIntoView({ block: 'center' })" {
                     @for line_ndx in frame_src.start_line..frame_src.end_line {
                         @if Some(line_ndx) == frame_src.line_focus {
-                            span."px-2".current-instr { (format!("{:4}\n", line_ndx)) }
+                            li.current-instr { (format!("{:4}", line_ndx)) }
                         } @else {
-                            span."px-2" { (format!("{:4}\n", line_ndx)) }
+                            li { (format!("{:4}", line_ndx)) }
                         }
                     }
                 }
 
-                div.grid {
-                    pre {
-                        (pre_escaped_code)
-                    }
+                pre {
+                    (pre_escaped_code)
                 }
             }
         };
@@ -851,21 +851,8 @@ mod frame_view {
     }
 }
 
-#[actix_web::get("/sidebar")]
-async fn sidebar(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
-    let app_data = app_data.into_inner();
-    let snapshot = app_data.snapshot().await;
-
-    let body = app_data
-        .handlebars
-        .render("sidebar", &*snapshot)
-        .map_err(|err| actix_web::error::ErrorInternalServerError(err))?;
-
-    Ok(HttpResponse::Ok().body(body))
-}
-
-#[actix_web::post("/frames/{frame_ndx}/break_range/{brange_id}/set")]
-async fn frame_set_breakpoint(
+#[actix_web::post("/frames/{frame_ndx}/break_ranges/{brange_id}/set")]
+async fn action_set_breakpoint(
     app_data: web::Data<AppData<'static>>,
     path_params: web::Path<(usize, String)>,
 ) -> actix_web::Result<HttpResponse> {
@@ -938,7 +925,7 @@ struct DeleteBreakpointParams {
 }
 
 #[actix_web::post("/sidebar/breakpoints/delete")]
-async fn delete_breakpoint(
+async fn action_delete_breakpoint(
     params: web::Form<DeleteBreakpointParams>,
 ) -> actix_web::Result<HttpResponse> {
     let params = params.into_inner();

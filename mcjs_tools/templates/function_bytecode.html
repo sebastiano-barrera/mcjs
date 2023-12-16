@@ -8,7 +8,7 @@
 		$refs[name].scrollIntoView({ behavior: "smooth", block: "center" })
 	})'
 >
-	{{#each frame.function.bytecode}}
+	{{#each function.bytecode}}
 		<div 
 			x-ref='instr-{{ @index }}'
 			class="text-right rounded-r-md cursor-pointer
