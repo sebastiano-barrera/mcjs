@@ -117,17 +117,34 @@ impl<'a> AppData<'a> {
     }
 }
 
-#[actix_web::get("/")]
-async fn view_main(app_data: web::Data<AppData<'_>>) -> actix_web::Result<HttpResponse> {
-    render_main_screen(app_data.into_inner()).await
+#[derive(Deserialize)]
+struct MainViewParams {
+    frame_ndx: Option<usize>,
 }
 
-async fn render_main_screen(app_data: Arc<AppData<'_>>) -> actix_web::Result<HttpResponse> {
+#[actix_web::get("/")]
+async fn view_main(
+    app_data: web::Data<AppData<'_>>,
+    query_params: web::Query<MainViewParams>,
+) -> actix_web::Result<HttpResponse> {
+    let query_params = query_params.into_inner();
+    let frame_ndx = query_params.frame_ndx.unwrap_or(0);
+    render_main_screen(app_data.into_inner(), frame_ndx).await
+}
+
+async fn render_main_screen(
+    app_data: Arc<AppData<'_>>,
+    frame_ndx: usize,
+) -> actix_web::Result<HttpResponse> {
     let snapshot = app_data.snapshot().await;
     if snapshot.model.is_some() {
+        let params = serde_json::json!({
+            "snapshot": &*snapshot,
+            "frame_ndx": frame_ndx,
+        });
         let body = app_data
             .handlebars
-            .render("index", &*snapshot)
+            .render("index", &params)
             .map_err(actix_web::error::ErrorInternalServerError)?;
         Ok(HttpResponse::Ok().body(body))
     } else {
@@ -838,7 +855,7 @@ async fn action_restart(app_data: web::Data<AppData<'static>>) -> actix_web::Res
     let app_data = app_data.into_inner();
     app_data.intrp_handle.restart();
     app_data.invalidate_snapshot();
-    render_main_screen(app_data).await
+    render_main_screen(app_data, 0).await
 }
 
 #[actix_web::post("/continue")]
@@ -846,7 +863,7 @@ async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Re
     let app_data = app_data.into_inner();
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
-    render_main_screen(app_data).await
+    render_main_screen(app_data, 0).await
 }
 
 #[actix_web::post("/next")]

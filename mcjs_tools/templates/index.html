@@ -34,8 +34,8 @@
 		</div>
 
 		<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
-			{{#if model}}
-				{{#with model.frame_view_snapshot.frames.[0]}}
+			{{#if snapshot.model}}
+				{{#with snapshot.model.frame_view_snapshot.frames.[0]}}
 					{{> frame_view }}
 				{{/with}}
 			{{else}}

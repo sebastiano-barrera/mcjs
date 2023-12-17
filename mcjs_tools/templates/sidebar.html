@@ -1,4 +1,4 @@
-{{#with model}}
+{{#with snapshot.model}}
 <div
     class="flex flex-col p-0 cursor-default"
     x-data="{selectedBreakpoint: null}"
@@ -6,12 +6,12 @@
 >
     <!-- Left sidebar -->
 
-    {{#if ../failure}}
+    {{#if @root.snapshot.failure}}
         <div class="mt-2 ml-2 px-4 py-2 ring-1 ring-zinc-300 dark:ring-transparent dark:text-white dark:bg-zinc-900">
             <p>
                 <span class="bg-rose-400 dark:bg-rose-500 px-4 px-1 text-white"><b>Interpreter failed:</b></span>
             </p>
-            {{../failure}}
+            {{@root.snapshot.failure}}
         </div>
     {{/if}}
 
@@ -57,7 +57,7 @@
 
     <div>
         <div class="text-xs whitespace-nowrap">
-            {{#each source_breakpoints}}
+            {{#each snapshot.model.source_breakpoints}}
                 <div 
                     class="px-1 cursor-pointer
                         hover:bg-sky-100
@@ -84,7 +84,7 @@
 
     <div>
         <div class="text-xs whitespace-nowrap">
-            {{#each instr_breakpoints}}
+            {{#each snapshot.model.instr_breakpoints}}
                 <div
                     class="px-1 cursor-pointer
                         hover:bg-sky-100
@@ -122,10 +122,20 @@
                         [&.selected]:bg-sky-200 [&.selected]:dark:bg-sky-800"
                     x-data="{detailsVisible: false}"
                     x-on:mouseleave="detailsVisible = false"
+                    hx-get="/?frame_ndx={{@index}}"
+                    hx-target="body"
+                    hx-push-url="true"
                  >
-                    fn
-                    <span class="font-mono">{{ moduleID }}.{{ functionID }}</span>
+                    {{#if (eq @root.frame_ndx @index)}}
+                        <span>🞂</span>
+                    {{/if}}
 
+                    fn
+                    <span class="font-bold">{{ moduleID }}.{{ functionID }}</span>
+
+                    ins
+                    <span class="font-bold">{{ iid }}</span>
+                    
                 		<div
                 			class="max-w-[5cm] inline-block text-ellipsis overflow-hidden align-bottom"
                 			style="direction: rtl"
