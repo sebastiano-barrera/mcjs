@@ -525,13 +525,13 @@ mod frame_view {
         Ok(markup)
     }
 
-    fn line_number_of_giid(
+    fn line_index_of_giid(
         loader: &mcjs_vm::Loader,
         giid: mcjs_vm::GlobalIID,
         source_file: &swc_common::SourceFile,
     ) -> Option<usize> {
         let (_, break_range) = loader.breakrange_at_giid(giid)?;
-        Some(source_file.lookup_line(break_range.lo).unwrap())
+        source_file.lookup_line(break_range.lo)
     }
 
     fn decode_locs_state(
@@ -697,7 +697,7 @@ mod frame_view {
         let files = source_map.files();
         let source_file = files.first().unwrap();
 
-        let line_focus = line_number_of_giid(loader, giid, source_file);
+        let line_focus = line_index_of_giid(loader, giid, source_file);
 
         // Snap offset_range to line boundaries
         let start = max(0, offset_range.start - 150);
