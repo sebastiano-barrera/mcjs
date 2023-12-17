@@ -1,45 +1,12 @@
 {{! vim:ts=3 }}
 <div
-	class="stack-frame grid stack-view-grid-rows min-w-fit pr-4 h-full
+	class="stack-frame grid stack-view-grid-rows min-w-fit pt-2 h-full 
 		text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
 	x-data="{
 		markedBreakRange: null,
  		sourceVisible: false
 	}"
 >
-	<div 
-		class="flex flex-row items-center gap-2 px-2 relative"
-		x-data="{ detailsVisible: false }"
-		x-on:mouseleave="detailsVisible = false"
-	>
-		<!-- Top bar, above bytecode -->
-		<div>
-			<span class="">fn</span>
-			<span class="font-mono">{{ moduleID }}.{{ functionID }}</span>
-		</div>
-
-		<!-- TODO add tooltip -->
-		<div
-			class="max-w-[5cm] inline-block whitespace-nowrap text-ellipsis overflow-hidden
-				cursor-default"
-			style="direction: rtl"
-			x-on:mouseenter="detailsVisible = true"
-		>
-			{{ source_filename }}
-		</div>
-
-		<div
-			class="absolute p-2 mt-[2.8cm] max-w-[9cm]
-				rounded-md bg-slate-100 ring-1 ring-slate-200
-				dark:bg-slate-900 dark:ring-2 dark:ring-slate-700
-				"
-			x-show="detailsVisible"
-		>
-			<div class="font-bold">Source file:</div>
-			<div class="pl-2">{{ source_filename }}</div>
-		</div>
-	</div>
-
 	{{!
 		Why overflow-x-hidden: There is a bug (I think in Firefox) that scrolls the
 		view of a little bit in the X direction when the window gains or loses focus
