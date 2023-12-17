@@ -26,6 +26,10 @@ async fn main() -> Result<()> {
     let main_path = PathBuf::from(main_path).canonicalize().unwrap();
 
     let mut handlebars = Handlebars::new();
+    // Important: we use several nested partials, and they contain <pre> tags.
+    // Skipping this setting causes handlebars to add a bunch of extra indentation at
+    // the beginning of each line of source code while rendering the template.
+    handlebars.set_prevent_indent(true);
 
     // TODO Make it independent from the cwd
     if let Err(err) = handlebars.register_templates_directory(".html", "./templates") {
