@@ -34,7 +34,7 @@
 
 		<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
 			{{#if snapshot.model}}
-				{{#with snapshot.model.frame_view_snapshot.frames.[0]}}
+				{{#with (lookup snapshot.model.frame_view_snapshot.frames [frame_ndx])}}
 					{{> frame_view }}
 				{{/with}}
 			{{else}}

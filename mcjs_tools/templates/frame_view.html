@@ -16,14 +16,14 @@
 	<div 
 		class="source-text overflow-x-hidden overflow-y-scroll min-w-[12cm] row-span-full col-start-2 text-xs font-mono whitespace-pre"
 		{{! TODO Use the real frame index }}
-	>{{{ snapshot.model.source_raw_markup }}}</div>
+	>{{{ source_raw_markup }}}</div>
 
 	<div class='flex flex-row overflow-y-scroll border-b border-dashed border-zinc-300'>
 		{{> function_bytecode }}
 	</div>
 
 	<div class="overflow-y-scroll px-1">
-		{{#with snapshot.model.values}}
+		{{#with values}}
 			{{#each locs}}
 				<div class="even:bg-zinc-100 even:dark:bg-zinc-800" x-data="{detailsVisible: false}">
 					<div class="inline-block text-right align-top whitespace-nowrap">
