@@ -320,6 +320,11 @@ mod frame_view {
                             }
                         })
                         .collect(),
+                    consts: func
+                        .consts()
+                        .iter()
+                        .map(|konst| show_literal(konst))
+                        .collect(),
                 },
             });
         }
@@ -389,6 +394,7 @@ mod frame_view {
 
     #[derive(Clone, Serialize)]
     struct Function {
+        consts: Vec<String>,
         bytecode: Vec<Instruction>,
     }
 
@@ -672,6 +678,17 @@ mod frame_view {
         }
 
         buf
+    }
+
+    fn show_literal(lit: &mcjs_vm::Literal) -> String {
+        match lit {
+            mcjs_vm::Literal::Number(num) => format!("{}", num),
+            mcjs_vm::Literal::String(s) => format!("{:?}", s),
+            mcjs_vm::Literal::Bool(b) => format!("{}", b),
+            mcjs_vm::Literal::Null => "null".to_string(),
+            mcjs_vm::Literal::Undefined => "undefined".to_string(),
+            mcjs_vm::Literal::SelfFunction => "<self function>".to_string(),
+        }
     }
 
     fn get_details_url(value: Option<InterpreterValue>) -> Option<String> {

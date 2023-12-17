@@ -13,6 +13,15 @@
 		setTimeout(() => scrollTo({{iid}}), 20)
 	'
 >
+	{{#each function.consts}}
+		<div class="text-right">
+			k{{@index}}
+		</div>
+		<div>
+			{{ this }}
+		</div>
+	{{/each}}
+
 	{{#each function.bytecode}}
 		<div 
 			x-ref='instr-{{ @index }}'
