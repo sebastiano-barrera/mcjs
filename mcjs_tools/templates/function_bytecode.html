@@ -12,7 +12,7 @@
 		<div 
 			x-ref='instr-{{ @index }}'
 			class="text-right rounded-r-md cursor-pointer
-				{{#if (eq @index @root.frame.iid)}} current-instr {{/if}}
+				{{#if (eq @index ../iid)}} current-instr {{/if}}
 				hover:bg-zinc-100 hover:dark:bg-zinc-700
 				[&.current-instr]:font-medium
 				[&.current-instr]:bg-black [&.current-instr]:text-white
