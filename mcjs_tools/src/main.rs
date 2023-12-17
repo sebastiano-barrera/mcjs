@@ -573,7 +573,8 @@ mod frame_view {
             for (cap_ndx, upv_id) in frame.captures().enumerate() {
                 let loc = CaptureIndex(cap_ndx as _).into();
                 // TODO: Also show the captured value
-                add(loc, None, Some(upv_id));
+                let value_opt = frame.deref_upvalue(upv_id);
+                add(loc, value_opt, Some(upv_id));
             }
 
             for (arg_ndx, value_opt) in frame.args().enumerate() {

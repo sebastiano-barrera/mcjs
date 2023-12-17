@@ -156,6 +156,10 @@ impl<'a> Frame<'a> {
             self.get_capture(capndx)
         })
     }
+
+    pub fn deref_upvalue(&self, upv_id: UpvalueId) -> Option<Value> {
+        self.upv_alloc.get(upv_id).copied()
+    }
 }
 
 impl<'a> FrameMut<'a> {
