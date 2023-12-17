@@ -1,7 +1,7 @@
 <div 
+	id="function_bytecode"
 	class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start
 		script--highlight-mcjs-values [&>*]:whitespace-nowrap"
-	onload="this.querySelector('.current-instr').scrollIntoView({ block: 'center' })"
 	x-init='
 		const scrollTo = (iid) => {
 			const name = "instr-" + iid
@@ -10,8 +10,15 @@
 		$watch("markedBreakRange", (mbr) => {
 			if (mbr) scrollTo(mbr.iidStart)
 		})
-		setTimeout(() => scrollTo({{iid}}), 20)
+		{{#if @root.focus_current_instr}}
+			setTimeout(() => scrollTo({{iid}}), 20)
+		{{/if}}
 	'
+	hx-get="/"
+	hx-vals='{"frame_ndx": {{@root.frame_ndx}}, "focus_current_instr": false}'
+	hx-trigger="breakpointAdded from:body"
+	hx-select="#function_bytecode"
+	hx-swap="outerHTML"
 >
 	{{#each function.consts}}
 		<div class="text-right">

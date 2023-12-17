@@ -124,6 +124,15 @@ impl<'a> AppData<'a> {
 #[derive(Deserialize)]
 struct MainViewParams {
     frame_ndx: Option<usize>,
+    focus_current_instr: Option<bool>,
+}
+impl Default for MainViewParams {
+    fn default() -> Self {
+        MainViewParams {
+            frame_ndx: Some(0),
+            focus_current_instr: None,
+        }
+    }
 }
 
 #[actix_web::get("/")]
@@ -131,20 +140,20 @@ async fn view_main(
     app_data: web::Data<AppData<'_>>,
     query_params: web::Query<MainViewParams>,
 ) -> actix_web::Result<HttpResponse> {
-    let query_params = query_params.into_inner();
-    let frame_ndx = query_params.frame_ndx.unwrap_or(0);
-    render_main_screen(app_data.into_inner(), frame_ndx).await
+    let params = query_params.into_inner();
+    render_main_screen(app_data.into_inner(), &params).await
 }
 
 async fn render_main_screen(
     app_data: Arc<AppData<'_>>,
-    frame_ndx: usize,
+    params: &MainViewParams,
 ) -> actix_web::Result<HttpResponse> {
     let snapshot = app_data.snapshot().await;
     if snapshot.model.is_some() {
         let params = serde_json::json!({
             "snapshot": &*snapshot,
-            "frame_ndx": frame_ndx,
+            "frame_ndx": params.frame_ndx.unwrap_or(0),
+            "focus_current_instr": params.focus_current_instr.unwrap_or(true),
         });
         let body = app_data
             .handlebars
@@ -877,7 +886,7 @@ async fn action_restart(app_data: web::Data<AppData<'static>>) -> actix_web::Res
     let app_data = app_data.into_inner();
     app_data.intrp_handle.restart();
     app_data.invalidate_snapshot();
-    render_main_screen(app_data, 0).await
+    render_main_screen(app_data, &Default::default()).await
 }
 
 #[actix_web::post("/continue")]
@@ -885,7 +894,7 @@ async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Re
     let app_data = app_data.into_inner();
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
-    render_main_screen(app_data, 0).await
+    render_main_screen(app_data, &Default::default()).await
 }
 
 #[actix_web::post("/next")]
