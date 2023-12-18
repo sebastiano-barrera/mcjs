@@ -333,7 +333,7 @@ impl Loader {
         &'a self,
         module_id: bytecode::ModuleId,
         byte_pos: swc_common::BytePos,
-    ) -> Result<Vec<&'a bytecode::BreakRange>> {
+    ) -> Result<Vec<(BreakRangeID, &'a bytecode::BreakRange)>> {
         if module_id == bytecode::SCRIPT_MODULE_ID {
             return Err(error!("breakpoints can't be put on script code"));
         }
@@ -344,7 +344,9 @@ impl Loader {
         Ok(module
             .breakable_ranges
             .iter()
-            .filter(|brange| brange.lo <= byte_pos && byte_pos <= brange.hi)
+            .enumerate()
+            .map(|(ndx, brange)| (BreakRangeID(module_id, ndx), brange))
+            .filter(|(_, brange)| brange.lo <= byte_pos && byte_pos <= brange.hi)
             .collect())
     }
 
@@ -356,7 +358,7 @@ impl Loader {
 
         // TODO We expect there to be at most 1 range matching the filter.  Any better mechanism?
         self.function_breakranges(fnid)?
-            .find(|(ndx, brange)| brange.iid_start <= iid && iid < brange.iid_end)
+            .find(|(_, brange)| brange.iid_start <= iid && iid < brange.iid_end)
     }
 
     pub fn function_breakranges(

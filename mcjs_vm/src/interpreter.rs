@@ -28,8 +28,6 @@ use crate::{
 
 pub use crate::common::Error;
 
-use self::debugger::Probe;
-
 macro_rules! tprintln {
     ($($args:expr),*) => {
         #[cfg(test)]
@@ -199,7 +197,7 @@ pub struct Interpreter<'a> {
     opts: Options,
 
     /// Instruction breakpoints
-    instr_bkpts: HashSet<GlobalIID>,
+    instr_bkpts: HashMap<GlobalIID, InstrBreakpoint>,
 
     /// Source breakpoints, indexed by their ID.
     ///
@@ -223,6 +221,10 @@ pub enum Fuel {
 // There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
 // enough (but some addtional parameters might have to be includede here later)
 pub struct SourceBreakpoint;
+
+struct InstrBreakpoint {
+    src_bkpt: Option<BreakRangeID>,
+}
 
 // TODO Probably going to be changed or even replaced once I resume working on the JIT.
 // TODO(performance) monomorphize get_operand?
@@ -282,8 +284,9 @@ pub struct InterpreterError<'a> {
     interpreter: Interpreter<'a>,
 }
 impl<'a> InterpreterError<'a> {
+    #[cfg(any(test, feature = "debugger"))]
     pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
-        Probe::attach(&mut self.interpreter)
+        debugger::Probe::attach(&mut self.interpreter)
     }
 
     pub fn restart(self) -> Interpreter<'a> {
@@ -317,7 +320,7 @@ impl<'a> Interpreter<'a> {
             opts: Default::default(),
             #[cfg(enable_jit)]
             jitting: None,
-            instr_bkpts: HashSet::new(),
+            instr_bkpts: HashMap::new(),
             source_bkpts: HashMap::new(),
             fuel: Fuel::Unlimited,
         }
@@ -978,7 +981,7 @@ impl<'a> Interpreter<'a> {
             // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
             self.iid.0 = next_ndx;
 
-            if out_of_fuel || self.instr_bkpts.contains(&giid) {
+            if out_of_fuel || self.instr_bkpts.contains_key(&giid) {
                 return Ok(ExitInternal::Suspended);
             }
         }
@@ -1451,7 +1454,7 @@ impl From<std::cmp::Ordering> for ValueOrdering {
     }
 }
 
-#[cfg(feature = "debugger")]
+#[cfg(any(test, feature = "debugger"))]
 pub mod debugger {
     use std::cell::Ref;
     use std::collections::HashSet;
@@ -1460,7 +1463,7 @@ pub mod debugger {
     use crate::{bytecode, InterpreterValue};
     use crate::{error, heap};
 
-    use super::{Fuel, Interpreter, SourceBreakpoint};
+    use super::{Fuel, InstrBreakpoint, Interpreter, SourceBreakpoint};
 
     pub use heap::ObjectId;
 
@@ -1483,6 +1486,7 @@ pub mod debugger {
 
     pub use crate::loader::BreakRangeID;
 
+    #[derive(Debug)]
     pub enum BreakpointError {
         /// Breakpoint already set at the given location (can't have more than 1 at the same
         /// location).
@@ -1527,34 +1531,38 @@ pub mod debugger {
             &mut self,
             brange_id: BreakRangeID,
         ) -> std::result::Result<(), BreakpointError> {
-            let module_id = brange_id.module_id();
+            if self.interpreter.source_bkpts.contains_key(&brange_id) {
+                return Err(BreakpointError::AlreadyThere);
+            }
 
-            let break_range: &bytecode::BreakRange = self
-                .interpreter
-                .loader
-                .get_break_range(brange_id)
-                .ok_or(BreakpointError::InvalidLocation)?;
-            let giid = bytecode::GlobalIID(
-                bytecode::FnId(module_id, break_range.local_fnid),
-                break_range.iid_start,
-            );
-
-            self.set_instr_breakpoint(giid)?;
+            let giid = self.giid_of_break_range(brange_id)?;
+            let bkpt = InstrBreakpoint {
+                src_bkpt: Some(brange_id),
+            };
+            self.add_instr_bkpt(giid, bkpt)?;
 
             let prev = self
                 .interpreter
                 .source_bkpts
                 .insert(brange_id, SourceBreakpoint);
-            let ret = match prev {
-                Some(_) => Err(BreakpointError::AlreadyThere),
-                None => Ok(()),
-            };
+            assert!(prev.is_none());
 
-            if ret.is_err() {
-                self.clear_instr_breakpoint(giid);
-            }
+            Ok(())
+        }
 
-            ret
+        fn giid_of_break_range(
+            &mut self,
+            brange_id: BreakRangeID,
+        ) -> std::result::Result<bytecode::GlobalIID, BreakpointError> {
+            let break_range: &bytecode::BreakRange = self
+                .interpreter
+                .loader
+                .get_break_range(brange_id)
+                .ok_or(BreakpointError::InvalidLocation)?;
+            Ok(bytecode::GlobalIID(
+                bytecode::FnId(brange_id.module_id(), break_range.local_fnid),
+                break_range.iid_start,
+            ))
         }
 
         ///
@@ -1566,28 +1574,20 @@ pub mod debugger {
             &mut self,
             brange_id: BreakRangeID,
         ) -> std::result::Result<bool, BreakpointError> {
-            if self.interpreter.source_bkpts.remove(&brange_id).is_some() {
-                let break_range = self
-                    .interpreter
-                    .loader
-                    .get_break_range(brange_id)
-                    .ok_or(BreakpointError::InvalidLocation)?;
-                let giid = bytecode::GlobalIID(
-                    bytecode::FnId(brange_id.module_id(), break_range.local_fnid),
-                    break_range.iid_start,
-                );
-                let was_there = self.clear_instr_breakpoint(giid);
-                assert!(was_there);
-
-                Ok(true)
-            } else {
-                Ok(false)
+            if !self.interpreter.source_bkpts.contains_key(&brange_id) {
+                return Ok(false);
             }
+
+            let giid = self.giid_of_break_range(brange_id)?;
+            let was_there = self.clear_instr_breakpoint(giid);
+            assert!(was_there);
+
+            Ok(true)
         }
 
         pub fn source_breakpoints(
             &self,
-        ) -> impl Iterator<Item = (BreakRangeID, &SourceBreakpoint)> {
+        ) -> impl ExactSizeIterator<Item = (BreakRangeID, &SourceBreakpoint)> {
             self.interpreter.source_bkpts.iter().map(|(k, v)| (*k, v))
         }
 
@@ -1595,20 +1595,35 @@ pub mod debugger {
             &mut self,
             giid: bytecode::GlobalIID,
         ) -> std::result::Result<(), BreakpointError> {
-            let new_insert = self.interpreter.instr_bkpts.insert(giid);
-            if new_insert {
-                Ok(())
-            } else {
-                Err(BreakpointError::AlreadyThere)
+            let bkpt = InstrBreakpoint { src_bkpt: None };
+            self.add_instr_bkpt(giid, bkpt)
+        }
+
+        fn add_instr_bkpt(
+            &mut self,
+            giid: bytecode::GlobalIID,
+            bkpt: InstrBreakpoint,
+        ) -> std::result::Result<(), BreakpointError> {
+            let new_insert = self.interpreter.instr_bkpts.insert(giid, bkpt);
+            match new_insert {
+                None => Ok(()),
+                Some(_) => Err(BreakpointError::AlreadyThere),
             }
         }
 
         pub fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
-            self.interpreter.instr_bkpts.remove(&giid)
+            let ibkpt = self.interpreter.instr_bkpts.remove(&giid);
+            if let Some(ibkpt) = &ibkpt {
+                if let Some(brid) = &ibkpt.src_bkpt {
+                    self.interpreter.source_bkpts.remove(brid).unwrap();
+                }
+            }
+
+            ibkpt.is_some()
         }
 
-        pub fn instr_breakpoints(&self) -> impl '_ + Iterator<Item = bytecode::GlobalIID> {
-            self.interpreter.instr_bkpts.iter().copied()
+        pub fn instr_breakpoints(&self) -> impl '_ + ExactSizeIterator<Item = bytecode::GlobalIID> {
+            self.interpreter.instr_bkpts.keys().copied()
         }
 
         pub fn loader(&self) -> &crate::loader::Loader {
@@ -1666,15 +1681,8 @@ mod tests {
 
     fn quick_run(code: &str) -> FinishedData {
         let res = std::panic::catch_unwind(|| {
-            let filename = "<input>".to_string();
-
-            let mut loader = loader::Loader::new(None);
-            let chunk_fnid = loader
-                .load_script(Some(filename), code.to_string())
-                .expect("couldn't compile test script");
-
-            let mut realm = Realm::new();
-            let vm = Interpreter::new(&mut realm, &mut loader, chunk_fnid);
+            let mut prereq = prepare_vm(code);
+            let vm = prereq.make_vm();
             vm.run().unwrap().expect_finished()
         });
 
@@ -1682,6 +1690,30 @@ mod tests {
             println!("quick_run: error: {:?}", err);
         }
         res.unwrap()
+    }
+
+    fn prepare_vm(code: &str) -> VMPrereq {
+        let filename = "<input>".to_string();
+        let mut loader = loader::Loader::new(None);
+        let chunk_fnid = loader
+            .load_script(Some(filename), code.to_string())
+            .expect("couldn't compile test script");
+        VMPrereq {
+            loader,
+            root_fnid: chunk_fnid,
+            realm: Realm::new(),
+        }
+    }
+
+    struct VMPrereq {
+        loader: loader::Loader,
+        root_fnid: FnId,
+        realm: Realm,
+    }
+    impl VMPrereq {
+        fn make_vm(&mut self) -> Interpreter {
+            Interpreter::new(&mut self.realm, &mut self.loader, self.root_fnid)
+        }
     }
 
     #[test]
