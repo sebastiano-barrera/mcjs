@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
         cached_snapshot: Mutex::new(Arc::new(Snapshot {
             failure: None,
             model: None,
+            version: rand::random(),
         })),
     });
 
@@ -82,35 +83,40 @@ struct AppData<'a> {
 struct Snapshot {
     failure: Option<String>,
     model: Option<model::VMState>,
+
+    /// A number that is increased at every update of this snapshot.  Starts at a random value.
+    version: usize,
 }
 
 impl<'a> AppData<'a> {
     async fn snapshot(&self) -> Arc<Snapshot> {
         let mut cached_snapshot = self.cached_snapshot.lock().unwrap();
 
-        if cached_snapshot.model.is_some() {
-            return Arc::clone(&cached_snapshot);
+        if cached_snapshot.model.is_none() {
+            let (failure, model) = self
+                .intrp_handle
+                .query(|state| match state {
+                    interpreter_manager::State::Finished { version: _ } => (None, None),
+                    interpreter_manager::State::Suspended { version: _, probe } => {
+                        (None, Some(model::VMState::snapshot(probe)))
+                    }
+                    interpreter_manager::State::Failed {
+                        version: _,
+                        probe,
+                        error,
+                    } => (Some(error.clone()), Some(model::VMState::snapshot(probe))),
+                })
+                .await;
+
+            let version = cached_snapshot.version + 1;
+            *cached_snapshot = Arc::new(Snapshot {
+                failure,
+                model,
+                version,
+            });
         }
 
-        let (failure, model) = self
-            .intrp_handle
-            .query(|state| match state {
-                interpreter_manager::State::Finished { version: _ } => (None, None),
-                interpreter_manager::State::Suspended { version: _, probe } => {
-                    (None, Some(model::VMState::snapshot(probe)))
-                }
-                interpreter_manager::State::Failed {
-                    version: _,
-                    probe,
-                    error,
-                } => (Some(error.clone()), Some(model::VMState::snapshot(probe))),
-            })
-            .await;
-
-        let snapshot = Arc::new(Snapshot { model, failure });
-        *cached_snapshot = Arc::clone(&snapshot);
-
-        snapshot
+        Arc::clone(&cached_snapshot)
     }
 
     fn invalidate_snapshot(&self) {
@@ -118,6 +124,7 @@ impl<'a> AppData<'a> {
         *cached_snapshot = Arc::new(Snapshot {
             failure: None,
             model: None,
+            version: cached_snapshot.version,
         });
     }
 }
@@ -139,18 +146,28 @@ impl Default for MainViewParams {
 #[actix_web::get("/")]
 async fn view_main(
     app_data: web::Data<AppData<'_>>,
+    etag_header: web::Header<actix_web::http::header::IfNoneMatch>,
     query_params: web::Query<MainViewParams>,
 ) -> actix_web::Result<HttpResponse> {
     let params = query_params.into_inner();
-    render_main_screen(app_data.into_inner(), &params).await
-}
 
-async fn render_main_screen(
-    app_data: Arc<AppData<'_>>,
-    params: &MainViewParams,
-) -> actix_web::Result<HttpResponse> {
+    let app_data = app_data.into_inner();
+    let params = &params;
+
     let snapshot = app_data.snapshot().await;
     if snapshot.model.is_some() {
+        use actix_web::http::header::IfNoneMatch;
+        eprintln!("if-none-match: {:?}", etag_header);
+        if let IfNoneMatch::Items(tags) = etag_header.0 {
+            for tag in tags {
+                let tag = tag.tag();
+                eprintln!("etag: {}", tag);
+                if tag.parse().ok() == Some(snapshot.version) {
+                    return Ok(HttpResponse::NotModified().body(""));
+                }
+            }
+        }
+
         let params = serde_json::json!({
             "snapshot": &*snapshot,
             "frame_ndx": params.frame_ndx.unwrap_or(0),
@@ -160,7 +177,9 @@ async fn render_main_screen(
             .handlebars
             .render("index", &params)
             .map_err(actix_web::error::ErrorInternalServerError)?;
-        Ok(HttpResponse::Ok().body(body))
+        Ok(HttpResponse::Ok()
+            .append_header(("ETag", format!("\"{}\"", snapshot.version)))
+            .body(body))
     } else {
         Ok(HttpResponse::Ok().body("Interpreter finished successfully.  No debugging!"))
     }
