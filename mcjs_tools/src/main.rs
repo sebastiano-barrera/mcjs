@@ -4,14 +4,13 @@ use std::sync::{Arc, Mutex};
 use actix_web::http::header::{HeaderName, HeaderValue, TryIntoHeaderPair};
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer};
-
 use anyhow::{Error, Result};
 use handlebars::Handlebars;
 use listenfd::ListenFd;
-use mcjs_vm::bytecode;
+use serde::{Deserialize, Serialize};
+
 use mcjs_vm::interpreter::debugger::BreakRangeID;
 use mcjs_vm::interpreter::Fuel;
-use serde::{Deserialize, Serialize};
 
 #[actix_web::main]
 async fn main() -> Result<()> {
@@ -809,7 +808,7 @@ async fn action_set_breakpoint(
         .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid break range ID"))?;
 
     let app_data = app_data.into_inner();
-    let giid = app_data
+    app_data
         .intrp_handle
         .query(move |state| -> std::result::Result<_, &'static str> {
             let probe = state
@@ -820,34 +819,15 @@ async fn action_set_breakpoint(
                 .set_source_breakpoint(brange_id)
                 .map_err(|err| err.message())?;
 
-            let break_range: &bytecode::BreakRange = probe
-                .loader()
-                .get_break_range(brange_id)
-                // This would have failed in set_source_breakpoint
-                .unwrap();
-
-            let giid = bytecode::GlobalIID(
-                bytecode::FnId(brange_id.module_id(), break_range.local_fnid),
-                break_range.iid_start,
-            );
-            Ok(giid)
+            Ok(())
         })
         .await
         .map_err(|err_msg| actix_web::error::ErrorBadRequest(err_msg))?;
 
     app_data.invalidate_snapshot();
 
-    let event = BreakpointAddedEvent {
-        moduleID: giid.0 .0 .0,
-        functionID: giid.0 .1 .0,
-        iid: giid.1 .0,
-    };
-    let events_payload = serde_json::json!({
-        "breakpointAdded": event,
-    })
-    .to_string();
     Ok(HttpResponse::Ok()
-        .append_header(("HX-Trigger", events_payload))
+        .append_header(hx_trigger(&BreakpointAddedEvent))
         .body(""))
 }
 
@@ -855,12 +835,22 @@ trait Event: serde::Serialize {
     fn event_name() -> &'static str;
 }
 
-#[allow(non_snake_case)]
 #[derive(Serialize)]
-struct BreakpointAddedEvent {
-    moduleID: u16,
-    functionID: u16,
-    iid: u16,
+struct BreakpointAddedEvent;
+
+impl Event for BreakpointAddedEvent {
+    fn event_name() -> &'static str {
+        "breakpointAdded"
+    }
+}
+
+#[derive(Serialize)]
+struct BreakpointDeletedEvent;
+
+impl Event for BreakpointDeletedEvent {
+    fn event_name() -> &'static str {
+        "breakpointDeleted"
+    }
 }
 
 #[allow(non_snake_case)]
@@ -900,13 +890,71 @@ struct DeleteBreakpointParams {
 
 #[actix_web::post("/sidebar/breakpoints/delete")]
 async fn action_delete_breakpoint(
+    app_data: web::Data<AppData<'static>>,
     params: web::Form<DeleteBreakpointParams>,
 ) -> actix_web::Result<HttpResponse> {
+    // TODO Manage the error cases.  This function is full of unwrap's that should be proper HTTP errors
+
     let params = params.into_inner();
 
     eprintln!("delete breakpoint request: {:?}", params);
+    let was_there = match params.category.as_str() {
+        "source" => {
+            let res = app_data
+                .intrp_handle
+                .query(move |state| {
+                    let probe = state.probe_mut().unwrap();
+                    // TODO Susceptible of "read after write" (ID changing meaning)
+                    let (brange_id, _) = probe
+                        .source_breakpoints()
+                        .nth(params.index)
+                        .expect("no such breakpoint");
+                    probe.clear_source_breakpoint(brange_id)
+                })
+                .await;
 
-    Ok(HttpResponse::NotImplemented().body("sorry!"))
+            match res {
+                Ok(was_there) => was_there,
+                Err(err) => {
+                    return Err(actix_web::error::ErrorInternalServerError(format!(
+                        "debugger error: {:?}",
+                        err
+                    )))
+                }
+            }
+        }
+        "instr" => {
+            app_data
+                .intrp_handle
+                .query(move |state| {
+                    // TODO Manage the None case
+                    let probe = state.probe_mut().unwrap();
+                    let giid = probe
+                        .instr_breakpoints()
+                        .nth(params.index)
+                        .expect("no such breakpoint");
+
+                    probe.clear_instr_breakpoint(giid)
+                })
+                .await
+        }
+        other => {
+            return Err(actix_web::error::ErrorBadRequest(format!(
+                "invalid 'category': '{}' (allowed: source, instr)",
+                other,
+            )))
+        }
+    };
+
+    // Otherwise the UI wouldn't change, even after a reload
+    app_data.invalidate_snapshot();
+
+    match was_there {
+        true => Ok(HttpResponse::Ok()
+            .append_header(hx_trigger(&BreakpointDeletedEvent))
+            .body("")),
+        false => Ok(HttpResponse::Ok().body("(nothing deleted; breakpoint did not exist.)")),
+    }
 }
 
 #[actix_web::post("/restart")]

@@ -22,7 +22,7 @@
 	'
 	hx-get="/"
 	hx-vals='{"frame_ndx": {{@root.frame_ndx}}, "focus_current_instr": false}'
-	hx-trigger="breakpointAdded from:body"
+	hx-trigger="breakpointAdded from:body, breakpointDeleted from:body"
 	hx-select="#function_bytecode"
 	hx-swap="outerHTML"
 >
