@@ -1,8 +1,8 @@
 {{#with snapshot.model}}
 <div
+    id="sidebar"
     class="flex flex-col p-0 cursor-default"
     x-data="{selectedBreakpoint: null}"
-    hx-target="this"
 >
     <!-- Left sidebar -->
 
@@ -15,9 +15,13 @@
         </div>
     {{/if}}
 
-    <div
+    <div 
         class="grid grid-cols-3 gap-3 p-3 text-center place-items-center text-xs font-medium"
-         
+        {{! All buttons in this section just send a POST request, which triggers
+            event from the backend.  We only swap/reload upon those events, not from the
+            POST response.
+        }}
+        hx-swap="none"
     >
         {{#*inline "button-style"~}}
             relative enabled
@@ -28,9 +32,9 @@
             border dark:border-black shadow-[0_1px_1px_black]
             [&.enabled]:active:shadow-none [&.enabled]:active:top-1
         {{~/inline}}
-        <button hx-post="/next" hx-swap="none" class="{{> button-style}}">Next</button>
-        <button hx-post="/continue" hx-target="body" hx-swap="outerHTML" class="{{> button-style}}">Continue</button>
-        <button hx-post="/restart" hx-target="body" hx-swap="outerHTML" class="{{> button-style}}">Restart</button>
+        <button hx-post="/next" class="{{> button-style}}">Next</button>
+        <button hx-post="/continue" class="{{> button-style}}">Continue</button>
+        <button hx-post="/restart" class="{{> button-style}}">Restart</button>
         
         <button
             class="{{> button-style}}"
@@ -57,7 +61,7 @@
 
     <div>
         <div class="text-xs whitespace-nowrap">
-            {{#each snapshot.model.source_breakpoints}}
+            {{#each source_breakpoints}}
                 <div 
                     class="px-1 cursor-pointer
                         hover:bg-sky-100
@@ -84,7 +88,7 @@
 
     <div>
         <div class="text-xs whitespace-nowrap">
-            {{#each snapshot.model.instr_breakpoints}}
+            {{#each instr_breakpoints}}
                 <div
                     class="px-1 cursor-pointer
                         hover:bg-sky-100
@@ -122,7 +126,8 @@
                         [&.selected]:bg-sky-200 [&.selected]:dark:bg-sky-800"
                     x-data="{detailsVisible: false}"
                     x-on:mouseleave="detailsVisible = false"
-                    hx-get="/?frame_ndx={{@index}}"
+                    hx-get="/"
+                    hx-vals='{"frame_ndx": {{@index}}}'
                     hx-target="body"
                     hx-push-url="true"
                  >

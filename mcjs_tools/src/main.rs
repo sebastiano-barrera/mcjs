@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use actix_web::http::header::{HeaderName, HeaderValue, TryIntoHeaderPair};
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer};
 
@@ -850,6 +851,10 @@ async fn action_set_breakpoint(
         .body(""))
 }
 
+trait Event: serde::Serialize {
+    fn event_name() -> &'static str;
+}
+
 #[allow(non_snake_case)]
 #[derive(Serialize)]
 struct BreakpointAddedEvent {
@@ -862,6 +867,29 @@ struct BreakpointAddedEvent {
 #[derive(Serialize)]
 struct VMStateChangedEvent {
     onlyTopFrameChanged: bool,
+}
+
+impl Default for VMStateChangedEvent {
+    fn default() -> Self {
+        VMStateChangedEvent {
+            onlyTopFrameChanged: false,
+        }
+    }
+}
+
+impl Event for VMStateChangedEvent {
+    fn event_name() -> &'static str {
+        "vmStateChanged"
+    }
+}
+
+fn hx_trigger<E: Event>(event: &E) -> (HeaderName, HeaderValue) {
+    let name = E::event_name();
+    let events_payload = serde_json::json!({
+        name: event,
+    })
+    .to_string();
+    ("HX-Trigger", events_payload).try_into_pair().unwrap()
 }
 
 #[derive(Deserialize, Debug)]
@@ -886,7 +914,9 @@ async fn action_restart(app_data: web::Data<AppData<'static>>) -> actix_web::Res
     let app_data = app_data.into_inner();
     app_data.intrp_handle.restart();
     app_data.invalidate_snapshot();
-    render_main_screen(app_data, &Default::default()).await
+    Ok(HttpResponse::Ok()
+        .append_header(hx_trigger(&VMStateChangedEvent::default()))
+        .body(""))
 }
 
 #[actix_web::post("/continue")]
@@ -894,7 +924,9 @@ async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Re
     let app_data = app_data.into_inner();
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
-    render_main_screen(app_data, &Default::default()).await
+    Ok(HttpResponse::Ok()
+        .append_header(hx_trigger(&VMStateChangedEvent::default()))
+        .body(""))
 }
 
 #[actix_web::post("/next")]
@@ -930,14 +962,10 @@ async fn action_next(app_data: web::Data<AppData<'static>>) -> actix_web::Result
             .map(|model| model.frame_view_snapshot.fingerprint())
     };
 
-    let events_payload = serde_json::json!({
-        "vmStateChanged": VMStateChangedEvent {
-            onlyTopFrameChanged: (pre_fingerprint == post_fingerprint),
-        },
-    })
-    .to_string();
     Ok(HttpResponse::Ok()
-        .append_header(("HX-Trigger", events_payload))
+        .append_header(hx_trigger(&VMStateChangedEvent {
+            onlyTopFrameChanged: (pre_fingerprint == post_fingerprint),
+        }))
         .body(""))
 }
 
