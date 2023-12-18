@@ -53,7 +53,8 @@ async fn main() -> Result<()> {
             .wrap(Logger::default())
             .service(actix_files::Files::new("/assets", "./data/assets/"))
             .service(view_main)
-            .service(action_set_breakpoint)
+            .service(action_set_src_breakpoint)
+            .service(action_set_instr_breakpoint)
             .service(action_delete_breakpoint)
             .service(action_restart)
             .service(action_continue)
@@ -799,7 +800,7 @@ mod frame_view {
 }
 
 #[actix_web::post("/break_ranges/{brange_id}/set")]
-async fn action_set_breakpoint(
+async fn action_set_src_breakpoint(
     app_data: web::Data<AppData<'static>>,
     path_params: web::Path<String>,
 ) -> actix_web::Result<HttpResponse> {
@@ -817,6 +818,39 @@ async fn action_set_breakpoint(
 
             probe
                 .set_source_breakpoint(brange_id)
+                .map_err(|err| err.message())?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|err_msg| actix_web::error::ErrorBadRequest(err_msg))?;
+
+    app_data.invalidate_snapshot();
+
+    Ok(HttpResponse::Ok()
+        .append_header(hx_trigger(&BreakpointAddedEvent))
+        .body(""))
+}
+
+#[actix_web::post("/instrs/{giid}/set_breakpoint")]
+async fn action_set_instr_breakpoint(
+    app_data: web::Data<AppData<'static>>,
+    path_params: web::Path<String>,
+) -> actix_web::Result<HttpResponse> {
+    let giid_s = path_params.into_inner();
+    let giid = mcjs_vm::GlobalIID::parse_string(&giid_s)
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("invalid global IID"))?;
+
+    let app_data = app_data.into_inner();
+    app_data
+        .intrp_handle
+        .query(move |state| -> std::result::Result<_, &'static str> {
+            let probe = state
+                .probe_mut()
+                .ok_or_else(|| "interpreter is finished; can't set a breakpoint in this state")?;
+
+            probe
+                .set_instr_breakpoint(giid)
                 .map_err(|err| err.message())?;
 
             Ok(())

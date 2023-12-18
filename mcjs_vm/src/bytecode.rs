@@ -76,6 +76,19 @@ impl std::fmt::Debug for GlobalIID {
     }
 }
 
+impl GlobalIID {
+    pub fn parse_string(s: &str) -> Option<Self> {
+        let (mod_id_s, s) = s.split_once('.')?;
+        let (lfnid_s, iid_s) = s.split_once('.')?;
+
+        let mod_id: u16 = mod_id_s.parse().ok()?;
+        let lfnid: u16 = lfnid_s.parse().ok()?;
+        let iid: u16 = iid_s.parse().ok()?;
+
+        Some(GlobalIID(FnId(ModuleId(mod_id), LocalFnId(lfnid)), IID(iid)))
+    }
+}
+
 #[derive(Clone, Copy, Serialize)]
 pub struct ConstIndex(pub u16);
 

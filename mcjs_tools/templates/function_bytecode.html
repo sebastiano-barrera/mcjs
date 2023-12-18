@@ -50,7 +50,12 @@
 				highlight: markedBreakRange?.iidStart <= {{ @index }} && {{ @index }} < markedBreakRange?.iidEnd
 			}"
 		>
-			<span class="font-mono px-2">
+			<span 
+				class="font-mono px-2"
+				hx-trigger="dblclick"
+				hx-post="/instrs/{{../moduleID}}.{{../functionID}}.{{@index}}/set_breakpoint"
+				hx-swap="none"
+			>
 				{{#if has_breakpoint}}
 					<span class="text-red-500">●</span>
 				{{/if}}
