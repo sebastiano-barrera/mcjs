@@ -1,11 +1,17 @@
 {{! vim:ts=3 }}
 <div
+	id="frame-view"
 	class="stack-frame grid stack-view-grid-rows min-w-fit pt-2 h-full 
 		text-xs border-l border-zinc-300 dark:border-zinc-600 dark:odd:bg-zinc-900"
 	x-data="{
 		markedBreakRange: null,
  		sourceVisible: false
 	}"
+	hx-get="/"
+	hx-select="#frame-view"
+	hx-vals='{"frame_ndx": 0}'
+	hx-trigger="vmStateChanged"
+	hx-push-url="true"
 >
 	{{!
 		Why overflow-x-hidden: There is a bug (I think in Firefox) that scrolls the

@@ -3,6 +3,9 @@
     id="sidebar"
     class="flex flex-col p-0 cursor-default"
     x-data="{selectedBreakpoint: null}"
+    hx-trigger="breakpointAdded from:body, breakpointDeleted from:body"
+    hx-get="/"
+    hx-select="#sidebar"
 >
     <!-- Left sidebar -->
 
@@ -120,17 +123,14 @@
     <div>
         <ul class="text-xs whitespace-nowrap">
             {{#each frame_view_snapshot.frames}}
-                <li class="px-1 cursor-pointer relative
+                <a class="list-item px-1 cursor-pointer relative
                         hover:bg-sky-100
                         dark:bg-zinc-800 dark:hover:bg-zinc-700
                         [&.selected]:bg-sky-200 [&.selected]:dark:bg-sky-800"
-                    x-data="{detailsVisible: false}"
-                    x-on:mouseleave="detailsVisible = false"
-                    hx-get="/"
-                    hx-vals='{"frame_ndx": {{@index}}}'
-                    hx-target="body"
-                    hx-push-url="true"
-                 >
+                   x-data="{detailsVisible: false}"
+                   x-on:mouseleave="detailsVisible = false"
+                   href="/?frame_ndx={{@index}}"
+                >
                     {{#if (eq @root.frame_ndx @index)}}
                         <span>🞂</span>
                     {{/if}}
@@ -161,7 +161,7 @@
                 			<div class="font-bold">Source file:</div>
                 			<div class="pl-2">{{ source_filename }}</div>
                 		</div>
-                </li>
+                </a>
             {{/each}}
         </ul>
     </div>
