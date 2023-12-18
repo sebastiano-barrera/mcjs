@@ -33,7 +33,7 @@
             [&.enabled]:text-black [&.enabled]:dark:text-white
             [&.enabled]:hover:bg-zinc-100 dark:bg-zinc-700 [&.enabled]:hover:dark:bg-zinc-600
             border dark:border-black shadow-[0_1px_1px_black]
-            [&.enabled]:active:shadow-none [&.enabled]:active:top-1
+            [&.enabled]:active:shadow-none [&.enabled]:active:top-px
         {{~/inline}}
         <button hx-post="/next" class="{{> button-style}}">Next</button>
         <button hx-post="/continue" class="{{> button-style}}">Continue</button>
