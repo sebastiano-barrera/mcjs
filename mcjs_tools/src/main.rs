@@ -157,12 +157,9 @@ async fn view_main(
     let snapshot = app_data.snapshot().await;
     if snapshot.model.is_some() {
         use actix_web::http::header::IfNoneMatch;
-        eprintln!("if-none-match: {:?}", etag_header);
         if let IfNoneMatch::Items(tags) = etag_header.0 {
             for tag in tags {
-                let tag = tag.tag();
-                eprintln!("etag: {}", tag);
-                if tag.parse().ok() == Some(snapshot.version) {
+                if tag.tag().parse().ok() == Some(snapshot.version) {
                     return Ok(HttpResponse::NotModified().body(""));
                 }
             }
