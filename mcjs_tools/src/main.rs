@@ -86,6 +86,12 @@ fn parse_args() -> Result<interpreter_manager::StartupParams> {
         }
     }
 
+    if params.main_directory.is_none() && params.scripts.len() == 1 {
+        params.main_directory = params.scripts[0]
+            .parent()
+            .map(|p| p.to_path_buf().canonicalize().unwrap());
+    }
+
     Ok(params)
 }
 
