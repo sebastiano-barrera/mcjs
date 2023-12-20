@@ -19,24 +19,21 @@ fn main() {
         test262_root.join("test/language/function-code/10.4.3-1-1-s.js"),
     ];
 
-    let mut chunk_fnids = Vec::with_capacity(chunk_paths.len());
+    let mut realm = mcjs_vm::Realm::new();
+
     for file_path in chunk_paths {
         let file_path_str = file_path.to_string_lossy().into_owned();
-        eprintln!(" (..) reading {}", file_path_str);
+        eprintln!(" (**) file: {}", file_path_str);
+
+        eprintln!("   (..) reading");
         let content = std::fs::read_to_string(file_path).expect("read_to_string");
 
-        eprintln!(" (..) loading {}", file_path_str);
+        eprintln!("   (..) loading");
         let chunk_fnid: mcjs_vm::bytecode::FnId =
             loader.load_script(Some(file_path_str), content).unwrap();
 
-        chunk_fnids.push(chunk_fnid);
-    }
-
-    let mut realm = mcjs_vm::Realm::new();
-
-    for fnid in chunk_fnids {
-        eprintln!(" (..) running chunk {:?}", fnid);
-        mcjs_vm::Interpreter::new(&mut realm, &mut loader, fnid)
+        eprintln!("   (..) running chunk ({:?})", chunk_fnid);
+        mcjs_vm::Interpreter::new(&mut realm, &mut loader, chunk_fnid)
             .run()
             .expect("run");
     }
