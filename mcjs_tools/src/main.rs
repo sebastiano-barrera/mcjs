@@ -1214,8 +1214,11 @@ mod interpreter_manager {
 
         let mut realm = Realm::new();
         let mut loader = Loader::new(params.main_directory);
+        let mut version = 0;
 
         for filename in params.scripts {
+            println!("now running: {}", filename.to_string_lossy());
+
             let script_text = std::fs::read_to_string(filename.clone())
                 .map_err(|err| anyhow!("read error: {:?}: {:?}", filename, err))?;
 
@@ -1227,11 +1230,10 @@ mod interpreter_manager {
             // TODO Replace println! with logging
 
             let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
-            let mut version = 0;
 
             // Inner loop:   The state machine in it is used to let clients analyze the state of
             // the interpreter when it is suspended.
-            loop {
+            'inner: loop {
                 version += 1;
 
                 println!();
@@ -1239,8 +1241,7 @@ mod interpreter_manager {
 
                 intrp = match intrp.run() {
                     Ok(Exit::Finished(_)) => {
-                        process_messages(&mut State::Finished { version });
-                        break;
+                        break 'inner;
                     }
                     Ok(Exit::Suspended(next_intrp)) => {
                         intrp = next_intrp;
@@ -1286,6 +1287,8 @@ mod interpreter_manager {
                 }
             }
         }
+
+        process_messages(&mut State::Finished { version });
 
         Ok(())
     }
