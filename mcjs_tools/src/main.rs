@@ -16,14 +16,8 @@ use mcjs_vm::interpreter::Fuel;
 async fn main() -> Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
-    let main_path = match std::env::args().nth(1) {
-        Some(path) => path,
-        None => {
-            eprintln!("Usage: mcjs_tools <filename>   (loader base path is cwd)");
-            return Ok(());
-        }
-    };
-    let main_path = PathBuf::from(main_path).canonicalize().unwrap();
+    let params = parse_args().expect("cli error");
+    eprintln!("params = {:?}", params);
 
     let mut handlebars = Handlebars::new();
     // Important: we use several nested partials, and they contain <pre> tags.
@@ -37,7 +31,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let intrp_handle = interpreter_manager::spawn_interpreter(main_path);
+    let intrp_handle = interpreter_manager::spawn_interpreter(params);
 
     let data_ref = web::Data::new(AppData {
         handlebars,
@@ -71,6 +65,28 @@ async fn main() -> Result<()> {
     };
 
     server.run().await.map_err(Error::from)
+}
+
+fn parse_args() -> Result<interpreter_manager::StartupParams> {
+    let mut params = interpreter_manager::StartupParams {
+        main_directory: None,
+        scripts: Vec::new(),
+    };
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "-b" && arg == "--base-path" {
+            let path = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("-b|--base-path requires an argument"))?;
+            let path = PathBuf::from(path);
+            params.main_directory = Some(path);
+        } else {
+            params.scripts.push(arg.into());
+        }
+    }
+
+    Ok(params)
 }
 
 struct AppData<'a> {
@@ -1112,10 +1128,10 @@ mod interpreter_manager {
     }
 
     // TODO Remove model_tx?
-    pub fn spawn_interpreter(main_path: PathBuf) -> Handle {
+    pub fn spawn_interpreter(params: StartupParams) -> Handle {
         let (queue_sender, queue_recver) = mpsc::channel();
         // TODO Need the JoinHandle?
-        std::thread::spawn(move || interpreter_main_loop(main_path, queue_recver));
+        std::thread::spawn(move || interpreter_main_loop(params, queue_recver).unwrap());
         Handle { queue_sender }
     }
 
@@ -1159,24 +1175,18 @@ mod interpreter_manager {
         Restart,
     }
 
-    fn interpreter_main_loop(main_path: PathBuf, queue_rx: mpsc::Receiver<Message>) -> Result<()> {
+    #[derive(Debug)]
+    pub struct StartupParams {
+        pub main_directory: Option<PathBuf>,
+        pub scripts: Vec<PathBuf>,
+    }
+
+    fn interpreter_main_loop(
+        params: StartupParams,
+        queue_rx: mpsc::Receiver<Message>,
+    ) -> Result<()> {
         use mcjs_vm::interpreter::Exit;
         use mcjs_vm::{Interpreter, Loader, Realm};
-
-        let base_path = main_path.parent().unwrap();
-        let filename = main_path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .expect("can't convert main filename to UTF-8");
-        let import_path = format!("./{}", filename);
-
-        let mut realm = Realm::new();
-        let mut loader = Loader::new(Some(base_path.to_owned()));
-
-        let main_fnid = loader
-            .load_import(&import_path, mcjs_vm::SCRIPT_MODULE_ID)
-            .map_err(|err| anyhow!("compile error: {:?}", err))?;
 
         enum ContinueMode {
             Continue,
@@ -1196,70 +1206,82 @@ mod interpreter_manager {
             }
         };
 
-        // TODO Replace println! with logging
+        let mut realm = Realm::new();
+        let mut loader = Loader::new(params.main_directory);
 
-        let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
-        let mut version = 0;
+        for filename in params.scripts {
+            let script_text = std::fs::read_to_string(filename.clone())
+                .map_err(|err| anyhow!("read error: {:?}: {:?}", filename, err))?;
 
-        // Inner loop:   The state machine in it is used to let clients analyze the state of
-        // the interpreter when it is suspended.
-        loop {
-            version += 1;
+            let filename = Some(filename.to_string_lossy().into_owned());
+            let main_fnid = loader
+                .load_script(filename.clone(), script_text)
+                .map_err(|err| anyhow!("compile error: {:?}: {:?}", filename, err))?;
 
-            println!();
-            println!("(resuming loop)");
+            // TODO Replace println! with logging
 
-            intrp = match intrp.run() {
-                Ok(Exit::Finished(_)) => {
-                    process_messages(&mut State::Finished { version });
+            let mut intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
+            let mut version = 0;
 
-                    // It doesn't really make sense to 'continue' after the interpreter is
-                    // finished.  For now, I'll just restart
-                    Interpreter::new(&mut realm, &mut loader, main_fnid)
-                }
-                Ok(Exit::Suspended(next_intrp)) => {
-                    intrp = next_intrp;
-                    println!("interpreter suspended.  collecting snapshot");
+            // Inner loop:   The state machine in it is used to let clients analyze the state of
+            // the interpreter when it is suspended.
+            loop {
+                version += 1;
 
-                    let probe = Probe::attach(&mut intrp);
-                    // let model = Arc::new(model::VMState::snapshot(&probe));
-                    let mut state = State::Suspended { version, probe };
+                println!();
+                println!("(resuming loop)");
 
-                    println!("(suspended; handling queries)");
-                    let continue_mode = process_messages(&mut state);
-                    match continue_mode {
-                        // Continue with a renewed (reset) interpreter
-                        ContinueMode::Continue => intrp.restart(),
-                        // Continue with *this* interpreter
-                        ContinueMode::Resume => intrp,
+                intrp = match intrp.run() {
+                    Ok(Exit::Finished(_)) => {
+                        process_messages(&mut State::Finished { version });
+                        break;
                     }
-                }
-                Err(mut err) => {
-                    let error = {
-                        let mut message = String::new();
-                        for msg in err.error.messages() {
-                            use std::fmt::Write;
-                            writeln!(message, " - {}", msg).unwrap();
+                    Ok(Exit::Suspended(next_intrp)) => {
+                        intrp = next_intrp;
+                        println!("interpreter suspended.  collecting snapshot");
+
+                        let probe = Probe::attach(&mut intrp);
+                        // let model = Arc::new(model::VMState::snapshot(&probe));
+                        let mut state = State::Suspended { version, probe };
+
+                        println!("(suspended; handling queries)");
+                        let continue_mode = process_messages(&mut state);
+                        match continue_mode {
+                            // Continue with a renewed (reset) interpreter
+                            ContinueMode::Continue => intrp.restart(),
+                            // Continue with *this* interpreter
+                            ContinueMode::Resume => intrp,
                         }
+                    }
+                    Err(mut err) => {
+                        let error = {
+                            let mut message = String::new();
+                            for msg in err.error.messages() {
+                                use std::fmt::Write;
+                                writeln!(message, " - {}", msg).unwrap();
+                            }
 
-                        message
-                    };
+                            message
+                        };
 
-                    let mut state = State::Failed {
-                        version,
-                        probe: err.probe(),
-                        error,
-                    };
+                        let mut state = State::Failed {
+                            version,
+                            probe: err.probe(),
+                            error,
+                        };
 
-                    println!("(interpreter error; handling queries)");
-                    process_messages(&mut state);
+                        println!("(interpreter error; handling queries)");
+                        process_messages(&mut state);
 
-                    // Always restarts, independently of the ContinueMode
-                    println!("(restarting with a reset interpreter)");
-                    err.restart()
+                        // Always restarts, independently of the ContinueMode
+                        println!("(restarting with a reset interpreter)");
+                        err.restart()
+                    }
                 }
             }
         }
+
+        Ok(())
     }
 }
 
