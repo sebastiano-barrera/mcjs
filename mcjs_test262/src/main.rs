@@ -11,14 +11,12 @@ fn main() {
         }
     };
 
-    let filename = Path::new("test/language/function-code/10.4.3-1-1-s.js");
-
     let mut loader = mcjs_vm::Loader::new(None);
 
     let chunk_paths = [
-        test262_root.join(Path::new("harness/assert.js")),
-        test262_root.join(Path::new("harness/sta.js")),
-        filename.to_path_buf(),
+        test262_root.join("harness/assert.js"),
+        test262_root.join("harness/sta.js"),
+        test262_root.join("test/language/function-code/10.4.3-1-1-s.js"),
     ];
 
     let mut chunk_fnids = Vec::with_capacity(chunk_paths.len());
@@ -37,7 +35,7 @@ fn main() {
     let mut realm = mcjs_vm::Realm::new();
 
     for fnid in chunk_fnids {
-        eprintln!(" (..) running {:?}", fnid);
+        eprintln!(" (..) running chunk {:?}", fnid);
         mcjs_vm::Interpreter::new(&mut realm, &mut loader, fnid)
             .run()
             .expect("run");
