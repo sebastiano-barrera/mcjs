@@ -259,8 +259,9 @@ pub enum Instr {
 
     ImportModule(VReg, VReg),
 
-    // TODO exceptions are completely unimplemented yet, lol
     Throw(VReg),
+    PopExcHandler,
+    PushExcHandler(IID),
 
     Breakpoint,
 }
@@ -365,6 +366,8 @@ impl Instr {
             Instr::ImportModule(dest, mod_spec) => { an.write_vreg(*dest); an.read_vreg(*mod_spec); }
             Instr::Throw(arg) => { an.read_vreg(*arg); }
             Instr::Breakpoint => {},
+            Instr::PopExcHandler => {},
+            Instr::PushExcHandler(iid) => { an.jump_target(*iid) },
         };
 
         an.end(self)

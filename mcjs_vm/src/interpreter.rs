@@ -916,8 +916,6 @@ impl<'a> Interpreter<'a> {
                 Instr::IteratorAdvance { iter: _ } => todo!(),
                 Instr::JmpIfIteratorFinished { iter: _, dest: _ } => todo!(),
 
-                Instr::Throw(_) => todo!(),
-
                 Instr::StrCreateEmpty(dest) => {
                     let oid = self.realm.heap.new_string(String::new());
                     self.data.top_mut().set_result(*dest, Value::Object(oid));
@@ -947,6 +945,10 @@ impl<'a> Interpreter<'a> {
                     self.iid.0 = next_ndx;
                     return Ok(ExitInternal::Suspended);
                 }
+
+                Instr::Throw(_exc_value) => todo!(),
+                Instr::PopExcHandler => {}
+                Instr::PushExcHandler(_target) => {}
             }
 
             tprintln!();

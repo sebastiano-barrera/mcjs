@@ -731,16 +731,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
     let mut builder = builder.with_span(&stmt.span());
 
     match stmt {
-        Stmt::Block(block) => {
-            builder.cur_fnb().push_scope();
-
-            let stmts = &block.stmts;
-
-            compile_block(&mut builder, stmts)?;
-
-            builder.cur_fnb().pop_scope();
-            Ok(())
-        }
+        Stmt::Block(block) => compile_block_scoped(&mut builder, block),
         // Stmt::Empty(_) => todo!(),
         Stmt::Debugger(_) => {
             builder.emit(Instr::Breakpoint);
@@ -826,7 +817,31 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             Ok(())
         }
 
-        // Stmt::Try(_) => todo!(),
+        Stmt::Try(try_stmt) => {
+            // TODO Allow the catch clause to access the exception object
+            // We reunite the cases by *always* having a catch clause (it will run the finalizer) that there is *always*
+            let push_handler_instr = builder.reserve();
+            compile_block_scoped(&mut builder, &try_stmt.block)?;
+            builder.emit(Instr::PopExcHandler);
+            let jmp_after_try = builder.reserve();
+
+            let handler_start = builder.peek_iid();
+            if let Some(handler) = &try_stmt.handler {
+                compile_block_scoped(&mut builder, &handler.body)?;
+            }
+            let jmp_after_catch = builder.reserve();
+
+            let finalizer_start = builder.peek_iid();
+            if let Some(finalizer) = &try_stmt.finalizer {
+                compile_block_scoped(&mut builder, finalizer)?;
+            }
+
+            *builder.get_mut(push_handler_instr).unwrap() = Instr::PushExcHandler(handler_start);
+            *builder.get_mut(jmp_after_try).unwrap() = Instr::Jmp(finalizer_start);
+            *builder.get_mut(jmp_after_catch).unwrap() = Instr::Jmp(finalizer_start);
+            Ok(())
+        }
+
         Stmt::While(while_stmt) => {
             let while_header_iid = builder.peek_iid();
 
@@ -1076,6 +1091,20 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         }
         other => unsupported_node!(other),
     }
+}
+
+fn compile_block_scoped(
+    builder: &mut BuilderWithBreakRange<'_>,
+    block: &swc_ecma_ast::BlockStmt,
+) -> std::result::Result<(), Error> {
+    builder.cur_fnb().push_scope();
+
+    let stmts = &block.stmts;
+
+    compile_block(builder, stmts)?;
+
+    builder.cur_fnb().pop_scope();
+    Ok(())
 }
 
 fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Result<()> {
