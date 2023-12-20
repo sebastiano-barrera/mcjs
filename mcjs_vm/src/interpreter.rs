@@ -696,15 +696,15 @@ impl<'a> Interpreter<'a> {
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = self.get_operand_object(*obj)?;
                     let key = self.get_operand(*key);
-                    let key = Self::value_to_index_or_key(&self.realm.heap, &key)
-                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+                    let key = Self::value_to_index_or_key(&self.realm.heap, &key);
 
                     let value = match key {
-                        heap::IndexOrKey::Index(ndx) => obj.as_object().get_element(ndx),
-                        heap::IndexOrKey::Key(key) => self
+                        Some(heap::IndexOrKey::Index(ndx)) => obj.as_object().get_element(ndx),
+                        Some(heap::IndexOrKey::Key(key)) => self
                             .realm
                             .heap
                             .get_property_chained(obj.as_object(), key.deref()),
+                        None => None,
                     }
                     .unwrap_or(Value::Undefined);
 
@@ -2119,6 +2119,34 @@ mod tests {
         assert_eq!(
             &output.sink,
             &[Some(Literal::String("Hello, I'm 123.45!".into())),],
+        );
+    }
+
+    #[test]
+    fn test_array_access() {
+        let output = quick_run(
+            r#"
+            const xs = ['a', 'b', 'c'];
+
+            sink(xs[-1])
+            sink(xs[0])
+            sink(xs[1])
+            sink(xs[2])
+            sink(xs[3])
+            sink(xs.length)
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Undefined),
+                Some(Literal::String("a".to_string())),
+                Some(Literal::String("b".to_string())),
+                Some(Literal::String("c".to_string())),
+                Some(Literal::Undefined),
+                Some(Literal::Number(3.0)),
+            ],
         );
     }
 }

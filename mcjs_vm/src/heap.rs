@@ -322,6 +322,10 @@ impl Object for OrdObject {
         if key == "__proto__" {
             // TODO Delete
             return self.proto_id.map(Value::Object);
+        } else if let Some(array_part) = &self.array_part {
+            if key == "length" {
+                return Some(Value::Number(array_part.len() as f64));
+            }
         }
         self.properties.get(key).copied()
     }
