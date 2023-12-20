@@ -259,7 +259,10 @@ impl Loader {
         })?;
 
         // TODO Remove this impedance mismatch between PathBufs and Strings
-        let flags = bytecode_compiler::CompileFlags::default();
+        let flags = bytecode_compiler::CompileFlags {
+            min_fnid: 1,
+            source_type: bytecode_compiler::SourceType::Module,
+        };
         let bytecode_compiler::CompiledChunk {
             root_fnid,
             functions,
@@ -268,7 +271,7 @@ impl Loader {
         } = bytecode_compiler::compile_file(
             module_path.to_string_lossy().into_owned(),
             content,
-            &flags,
+            flags,
         )?;
 
         let module = Module {
@@ -314,14 +317,15 @@ impl Loader {
         content: String,
     ) -> Result<bytecode::FnId> {
         let filename = filename.unwrap_or_else(|| "<input>".to_string());
-        let flags = bytecode_compiler::CompileFlags {
-            min_fnid: Some(self.script.max_fnid + 1),
-        };
-        let compiled = bytecode_compiler::compile_file(filename, content, &flags)?;
+        let min_fnid = self.script.max_fnid + 1;
 
-        if let Some(min_fnid) = flags.min_fnid {
-            assert!(compiled.functions.keys().all(|lfnid| lfnid.0 >= min_fnid));
-        }
+        let flags = bytecode_compiler::CompileFlags {
+            min_fnid,
+            source_type: bytecode_compiler::SourceType::Script,
+        };
+        let compiled = bytecode_compiler::compile_file(filename, content, flags)?;
+
+        assert!(compiled.functions.keys().all(|lfnid| lfnid.0 >= min_fnid));
         if let Some(cur_max_fnid) = compiled.functions.keys().max() {
             self.script.max_fnid = cur_max_fnid.0;
         } else {

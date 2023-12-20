@@ -30,6 +30,7 @@ struct Builder {
     next_fnid: u16,
     breakable_ranges: Vec<bytecode::BreakRange>,
     brange_stack: Vec<bytecode::BreakRange>,
+    flags: CompileFlags,
 }
 
 impl Builder {
@@ -43,14 +44,16 @@ impl Builder {
     ///
     /// `source_map` is used to generate the spans where breakpoints can be set
     /// (`breakable_ranges`).
-    fn new(min_fnid: u16) -> Self {
-        assert!(min_fnid >= 1);
+    fn new(flags: CompileFlags) -> Self {
+        let next_fnid = flags.min_fnid;
+        assert!(next_fnid >= 1);
         Builder {
             fns: HashMap::new(),
             fn_stack: Vec::new(),
-            next_fnid: min_fnid,
+            next_fnid,
             breakable_ranges: Vec::new(),
             brange_stack: Vec::new(),
+            flags,
         }
     }
 
@@ -101,13 +104,17 @@ pub struct CompiledChunk {
 }
 
 pub struct CompileFlags {
-    pub min_fnid: Option<u16>,
+    pub min_fnid: u16,
+    pub source_type: SourceType,
 }
 
-impl Default for CompileFlags {
-    fn default() -> Self {
-        CompileFlags { min_fnid: None }
-    }
+/// Whether we're compiling an actual module or a 'classic script'.
+///
+/// Influences the way that declarations work in the toplevel.  The distinction
+/// is made largely at compile time, so we have to know here.
+pub enum SourceType {
+    Script,
+    Module,
 }
 
 /// Compile the given chunk of source code into executable bytecode.
@@ -121,16 +128,14 @@ impl Default for CompileFlags {
 pub fn compile_file(
     filename: String,
     content: String,
-    flags: &CompileFlags,
+    flags: CompileFlags,
 ) -> Result<CompiledChunk> {
     use crate::common::Context;
-
-    let min_fnid = flags.min_fnid.unwrap_or(1);
 
     let (source_map, ast_module) = parse_file(filename.clone(), content)
         .with_context(error!("while parsing file: {filename}"))?;
 
-    let compiled_mod = compile_module(&ast_module, min_fnid).with_context(
+    let compiled_mod = compile_module(&ast_module, flags).with_context(
         error!("while compiling module: {filename}").with_source_map(Lrc::clone(&source_map)),
     )?;
 
@@ -484,10 +489,13 @@ struct CompiledModule {
     breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
-fn compile_module(ast_module: &swc_ecma_ast::Module, min_fnid: u16) -> Result<CompiledModule> {
+fn compile_module(
+    ast_module: &swc_ecma_ast::Module,
+    flags: CompileFlags,
+) -> Result<CompiledModule> {
     use swc_ecma_ast::{ExportDecl, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
 
-    let mut builder = Builder::new(min_fnid);
+    let mut builder = Builder::new(flags);
     builder.start_function(None, &[]);
 
     let lit_named = builder.new_vreg();
@@ -709,7 +717,7 @@ fn compile_module(ast_module: &swc_ecma_ast::Module, min_fnid: u16) -> Result<Co
     // nothing.  Otherwise, we have a bug.
     assert!(builder.fns.get(&root_fnid).unwrap().captures.is_empty());
     for fnid in builder.fns.keys() {
-        assert!(fnid.0 >= min_fnid);
+        assert!(fnid.0 >= builder.flags.min_fnid);
     }
 
     let functions = builder
@@ -2019,7 +2027,10 @@ mod tests {
                 aFunction: function(pt) { return 42; }
             })"
             .to_string(),
-            &CompileFlags::default(),
+            CompileFlags {
+                min_fnid: 1,
+                source_type: SourceType::Script,
+            },
         )
         .unwrap();
 
