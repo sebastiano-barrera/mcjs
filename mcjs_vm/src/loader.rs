@@ -319,6 +319,15 @@ impl Loader {
         };
         let compiled = bytecode_compiler::compile_file(filename, content, &flags)?;
 
+        if let Some(min_fnid) = flags.min_fnid {
+            assert!(compiled.functions.keys().all(|lfnid| lfnid.0 >= min_fnid));
+        }
+        if let Some(cur_max_fnid) = compiled.functions.keys().max() {
+            self.script.max_fnid = cur_max_fnid.0;
+        } else {
+            // No change if no function was compiled
+        }
+
         // Note that we discard everything other than the functions (e.g.
         // source_map, breakable_ranges)
         self.add_functions(compiled.functions.into_iter(), bytecode::SCRIPT_MODULE_ID);
