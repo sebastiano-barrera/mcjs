@@ -861,6 +861,8 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         }
 
         Stmt::For(stmt) => {
+            builder.cur_fnb().push_scope();
+
             if let Some(init) = &stmt.init {
                 use swc_ecma_ast::VarDeclOrExpr;
                 match init {
@@ -907,11 +909,12 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                     dest: loop_end,
                 }
             } else {
-                Instr::Jmp(loop_end)
+                Instr::Nop
             };
             builder.resolve_break_to(loop_end);
             builder.resolve_continue_to(continue_target);
 
+            builder.cur_fnb().pop_scope();
             Ok(())
         }
 
