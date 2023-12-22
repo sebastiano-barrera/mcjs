@@ -405,12 +405,8 @@ impl<'a> Interpreter<'a> {
                 n_instrs
             );
             if self.iid.0 as usize == n_instrs {
-                if let Some(return_to_iid) = self.exit_function(None) {
-                    self.iid = return_to_iid;
-                    continue;
-                } else {
-                    return Ok(ExitInternal::Finished);
-                }
+                self.exit_function(None);
+                continue;
             }
 
             let instr = func.instrs()[self.iid.0 as usize];
@@ -538,12 +534,8 @@ impl<'a> Interpreter<'a> {
                     next_ndx = *dest_ndx;
                 }
                 Instr::Return(value) => {
-                    if let Some(return_to_iid) = self.exit_function(Some(*value)) {
-                        self.iid = return_to_iid;
-                        continue;
-                    } else {
-                        return Ok(ExitInternal::Finished);
-                    }
+                    self.exit_function(Some(*value));
+                    continue;
                 }
                 Instr::Call {
                     callee,
@@ -615,32 +607,24 @@ impl<'a> Interpreter<'a> {
                                 // TODO Actually, we just need to allocate enough space for
                                 // *variables*, not for instructions.  However, this is OK for now,
                                 // as n_instrs is always >= n_variables.
-                                n_instrs: callee_func.instrs().len().try_into().unwrap(),
-                                n_captured_upvalues: closure.upvalues.len().try_into().unwrap(),
-                                n_args: n_params,
+                                n_regs: callee_func.instrs().len().try_into().unwrap(),
+                                captures: &closure.upvalues,
                                 this,
-                                return_value_reg: Some(*return_value),
-                                return_to_iid: Some(return_to_iid),
                             };
+
+                            self.data
+                                .top_mut()
+                                .set_return_target(return_to_iid, *return_value);
 
                             tprintln!();
                             self.print_indent();
                             tprintln!(
                                 "-- fn {:?} [{} captures]",
-                                call_meta.fnid.0,
-                                call_meta.n_captured_upvalues
+                                call_meta.fnid,
+                                call_meta.captures.len()
                             );
 
                             self.data.push(call_meta);
-                            for (capndx, capture) in closure.upvalues.iter().enumerate() {
-                                let capndx = bytecode::CaptureIndex(
-                                    capndx.try_into().expect("too many captures!"),
-                                );
-                                self.print_indent();
-                                tprintln!("    capture[{}] = {:?}", capndx.0, capture);
-                                self.data.top_mut().set_capture(capndx, *capture);
-                                assert_eq!(self.data.top().get_capture(capndx), *capture);
-                            }
                             for (i, arg) in arg_vals.into_iter().enumerate() {
                                 self.data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
                             }
@@ -861,13 +845,13 @@ impl<'a> Interpreter<'a> {
 
                         let call_meta = stack::CallMeta {
                             fnid: root_fnid,
-                            n_instrs,
-                            n_captured_upvalues: 0,
-                            n_args: 0,
+                            n_regs: n_instrs,
+                            captures: &[],
                             this: Value::Undefined,
-                            return_value_reg: Some(*dest),
-                            return_to_iid: Some(IID(self.iid.0 + 1)),
                         };
+                        self.data
+                            .top_mut()
+                            .set_return_target(IID(self.iid.0 + 1), *dest);
 
                         self.print_indent();
                         tprintln!("-- loading module {:?}", root_fnid.0);
@@ -1017,28 +1001,26 @@ impl<'a> Interpreter<'a> {
         FinishedData { sink }
     }
 
-    fn exit_function(&mut self, callee_retval_reg: Option<VReg>) -> Option<IID> {
+    fn exit_function(&mut self, callee_retval_reg: Option<VReg>) {
         let return_value = callee_retval_reg
             .map(|vreg| self.get_operand(vreg))
             .unwrap_or(Value::Undefined);
-        let header = self.data.top().header();
-        let caller_retval_reg = header.return_value_vreg;
-        let return_to_iid = header.return_to_iid;
+
         self.data.pop();
+        if self.data.len() >= 1 {
+            let (tgt_iid, tgt_vreg) = self.data.top_mut().take_return_target();
+            self.data.top_mut().set_result(tgt_vreg, return_value);
 
-        // XXX This is a bug.  Get the top frame again.  But the compiler should say something
-        // first!
+            #[cfg(enable_jit)]
+            if let Some(jitting) = &mut self.jitting {
+                jitting.builder.exit_function(callee_retval_reg);
+            }
 
-        if let Some(vreg) = caller_retval_reg {
-            self.data.top_mut().set_result(vreg, return_value);
+            self.iid = tgt_iid;
+        } else {
+            // The stack is now empty, so execution can't continue
+            // This instance of Interpreter must be decommissioned
         }
-
-        #[cfg(enable_jit)]
-        if let Some(jitting) = &mut self.jitting {
-            jitting.builder.exit_function(callee_retval_reg);
-        }
-
-        return_to_iid
     }
 
     fn with_numbers<F>(&mut self, dest: VReg, a: VReg, b: VReg, op: F)
@@ -1194,12 +1176,9 @@ fn init_stack(loader: &mut loader::Loader, fnid: FnId) -> stack::InterpreterData
 
     data.push(stack::CallMeta {
         fnid,
-        n_instrs,
-        n_captured_upvalues: 0,
-        n_args: 0,
+        n_regs: n_instrs,
+        captures: &[],
         this: Value::Undefined,
-        return_value_reg: None,
-        return_to_iid: None,
     });
 
     data
@@ -1632,23 +1611,22 @@ pub mod debugger {
         ///
         /// Panics if `frame_ndx` is invalid.
         pub fn frame_giid(&self, frame_ndx: usize) -> bytecode::GlobalIID {
-            // This function is necessary because we actually store the
-            // "instruction pointer" for the i-th frame in the (i - 1)-frame,
-            // (the topmost frame's is stored in the interpreter's state)
+            // `frame_ndx` is top-first (0 = top)
+            // the stack API is bottom first (0 = bottom), so convert first
+            let frame = self
+                .interpreter
+                .data
+                .nth_frame(self.interpreter.data.len() - frame_ndx - 1);
+            let fnid = frame.header().fn_id;
 
-            let mut frames = self.frames();
-            let (fnid, iid) = if frame_ndx == 0 {
-                let iid = self.interpreter.iid;
-                let fnid = frames.next().unwrap().header().fn_id;
-                (fnid, iid)
+            let iid = if frame_ndx == 0 {
+                // Top frame
+                self.interpreter.iid
             } else {
-                let frame_above = frames.nth(frame_ndx - 1).unwrap();
-                let frame = frames.next().unwrap();
-
-                let fnid = frame.header().fn_id;
-                let iid = frame_above.header().return_to_iid.unwrap();
-
-                (fnid, iid)
+                frame
+                    .return_target()
+                    .expect("non-top stack frame has no return target!")
+                    .0
             };
 
             // For the top frame: `iid` is the instruction to *resume* to.
@@ -1656,7 +1634,6 @@ pub mod debugger {
             // In either case: we actually want the instruction we suspended/called at,
             // which is the previous one.
 
-            let iid = bytecode::IID(iid.0);
             bytecode::GlobalIID(fnid, iid)
         }
 

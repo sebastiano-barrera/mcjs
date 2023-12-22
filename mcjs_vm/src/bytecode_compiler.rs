@@ -188,7 +188,8 @@ impl FnBuilder {
             consts: Vec::new(),
             trace_anchors: HashMap::new(),
             captures: Vec::new(),
-            next_vreg: 0,
+            // See doc comment for bytecode::ARGS_COUNT_MAX
+            next_vreg: bytecode::ARGS_COUNT_MAX,
             n_params: bytecode::ArgIndex(0),
             pending_break_instrs: Vec::new(),
             pending_continue_instrs: Vec::new(),

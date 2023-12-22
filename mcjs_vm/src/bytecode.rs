@@ -95,6 +95,18 @@ pub struct ConstIndex(pub u16);
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 pub struct ArgIndex(pub u8);
 
+/// Maximum number of (inline) arguments that can be passed to a function
+///
+/// The first few arguments are passed directly in the first few registers of
+/// the callee stack frame. These first registers are reserved for this used,
+/// and they must not be used for temporary values or local variables. This
+/// guarantee is provided by the bytecode compiler.
+/// 
+/// NOTE: The interpreter currently won't allow calls with more than this number
+/// of arguments.  In the future (hopefully not too far later) extra arguments
+/// will be passed via an array on the heap.
+pub const ARGS_COUNT_MAX: u8 = 8;
+
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 pub struct CaptureIndex(pub u16);
 

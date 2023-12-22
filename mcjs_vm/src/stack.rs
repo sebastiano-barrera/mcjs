@@ -1,6 +1,6 @@
 use std::{cell::Cell, marker::PhantomData, sync::atomic::AtomicUsize};
 
-use crate::bytecode::{self, VReg, IID};
+use crate::bytecode::{self, VReg, ARGS_COUNT_MAX, IID};
 use crate::interpreter::{self, UpvalueId, Value};
 
 /// The interpreter's stack.
@@ -20,27 +20,21 @@ pub(crate) enum Slot {
     Upvalue(UpvalueId),
 }
 
-const ARGS_MAX_COUNT: usize = 8;
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameHeader {
     pub regs_offset: u32,
     pub regs_count: u32,
     pub fn_id: bytecode::FnId,
     pub this: Value,
-    pub return_value_vreg: Option<VReg>,
-    pub return_to_iid: Option<IID>,
+    pub return_target: Option<(IID, VReg)>,
 }
 
 #[derive(Clone)]
-pub(crate) struct CallMeta {
+pub(crate) struct CallMeta<'a> {
     pub fnid: bytecode::FnId,
-    pub n_instrs: u32,
-    pub n_captured_upvalues: u16,
-    pub n_args: u8,
+    pub n_regs: u32,
+    pub captures: &'a [UpvalueId],
     pub this: Value,
-    pub return_value_reg: Option<bytecode::VReg>,
-    pub return_to_iid: Option<bytecode::IID>,
 }
 
 impl InterpreterData {
@@ -60,28 +54,16 @@ impl InterpreterData {
     }
 
     pub(crate) fn push(&mut self, call_meta: CallMeta) {
-        assert!(
-            call_meta.n_args as usize <= ARGS_MAX_COUNT,
-            "calls with more than {} arguments are not implemented yet",
-            ARGS_MAX_COUNT
-        );
         let frame_hdr = FrameHeader {
             regs_offset: self.values.len().try_into().unwrap(),
-            regs_count: call_meta.n_instrs + call_meta.n_args as u32,
-            this: call_meta.this,
-            return_value_vreg: call_meta.return_value_reg,
-            return_to_iid: call_meta.return_to_iid,
+            regs_count: call_meta.n_regs + ARGS_COUNT_MAX as u32,
             fn_id: call_meta.fnid,
+            this: call_meta.this,
+            return_target: None,
         };
 
         #[cfg(test)]
-        eprintln!(
-            "  (allocated frame for {} args, {} captures, {} instrs -> {} values)",
-            call_meta.n_args,
-            call_meta.n_captured_upvalues,
-            call_meta.n_instrs,
-            frame_hdr.regs_count
-        );
+        eprintln!("  (allocated frame: {:?})", frame_hdr);
 
         self.headers.push(frame_hdr);
         for _ in 0..frame_hdr.regs_count {
@@ -95,7 +77,7 @@ impl InterpreterData {
         // TODO Turn into debug_asserts?
 
         for (ndx, hdr) in self.headers.iter().enumerate() {
-            assert!(hdr.regs_count as usize >= ARGS_MAX_COUNT);
+            assert!(hdr.regs_count >= ARGS_COUNT_MAX as u32);
             if ndx > 0 {
                 let prev = &self.headers[ndx - 1];
                 assert_eq!(hdr.regs_offset, prev.regs_offset + prev.regs_count);
@@ -113,7 +95,7 @@ impl InterpreterData {
         self.check_invariants();
     }
 
-    fn nth_frame(&self, ndx: usize) -> Frame {
+    pub(crate) fn nth_frame(&self, ndx: usize) -> Frame {
         let header = &self.headers[ndx];
         let regs_offset = header.regs_offset as usize;
         let regs_count = header.regs_count as usize;
@@ -138,17 +120,17 @@ impl InterpreterData {
     }
 
     pub fn top(&self) -> Frame {
-        self.nth_frame(0)
+        self.nth_frame(self.headers.len() - 1)
     }
     pub fn top_mut(&mut self) -> FrameMut {
-        self.nth_frame_mut(0)
+        self.nth_frame_mut(self.headers.len() - 1)
     }
 
     /// Returns the sequence of stack frames in the form of an iterator, ordered top to
     /// bottom.
     pub fn frames(&self) -> impl ExactSizeIterator<Item = Frame> {
         let n_frames = self.headers.len();
-        (0..n_frames).map(|ndx| self.nth_frame(ndx))
+        (0..n_frames).rev().map(|ndx| self.nth_frame(ndx))
     }
 
     pub(crate) fn capture_to_var(
@@ -195,17 +177,18 @@ impl<'a> Frame<'a> {
     }
 
     pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Option<Value> {
-        todo!(
-            "delete this function: arguments are now located in the first {} registers",
-            ARGS_MAX_COUNT
-        )
+        // TODO to support more than ARGS_MAX_COUNT arguments, the plan is to
+        // have an external array of 'extra arguments', managed as part of the
+        // FrameHeader
+        assert!(
+            argndx.0 < ARGS_COUNT_MAX,
+            "not yet implemented: call with >= {}",
+            ARGS_COUNT_MAX
+        );
+        Some(self.get_result(bytecode::VReg(argndx.0)))
     }
     pub fn args<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = Option<Value>> {
-        todo!(
-            "delete this function: arguments are now located in the first {} registers",
-            ARGS_MAX_COUNT
-        );
-        std::iter::empty()
+        (0..ARGS_COUNT_MAX).map(|i| self.get_arg(bytecode::ArgIndex(i)))
     }
 
     pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
@@ -224,10 +207,14 @@ impl<'a> Frame<'a> {
     pub fn deref_upvalue(&self, upv_id: UpvalueId) -> Option<Value> {
         self.upv_alloc.get(upv_id).copied()
     }
+
+    pub fn return_target(&self) -> Option<(IID, VReg)> {
+        self.header.return_target
+    }
 }
 
 impl<'a> FrameMut<'a> {
-    pub(crate) fn set_result(mut self, vreg: bytecode::VReg, value: Value) {
+    pub(crate) fn set_result(&mut self, vreg: bytecode::VReg, value: Value) {
         let slot = &mut self.values[vreg.0 as usize];
         match slot {
             Slot::Inline(slot_value) => {
@@ -243,14 +230,17 @@ impl<'a> FrameMut<'a> {
         };
     }
 
-    pub(crate) fn set_arg(mut self, argndx: bytecode::ArgIndex, value: Value) {
-        todo!(
-            "delete this function: arguments are now located in the first {} registers",
-            ARGS_MAX_COUNT
-        )
+    pub(crate) fn set_arg(&mut self, argndx: bytecode::ArgIndex, value: Value) {
+        // Check comment in `Frame::get_arg`
+        assert!(
+            argndx.0 < ARGS_COUNT_MAX,
+            "not yet implemented: call with >= {}",
+            ARGS_COUNT_MAX
+        );
+        self.set_result(bytecode::VReg(argndx.0), value)
     }
 
-    pub(crate) fn ensure_in_upvalue(self, var: bytecode::VReg) -> UpvalueId {
+    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {
         let slot = &mut self.values[var.0 as usize];
         match slot {
             Slot::Inline(value) => {
@@ -262,7 +252,11 @@ impl<'a> FrameMut<'a> {
         }
     }
 
-    pub(crate) fn set_capture(self, capture_ndx: bytecode::CaptureIndex, capture: UpvalueId) {
-        todo!("move this operation to InterpreterData::push()?")
+    pub(crate) fn set_return_target(&mut self, iid: IID, reg: VReg) {
+        self.header.return_target = Some((iid, reg));
+    }
+
+    pub(crate) fn take_return_target(&mut self) -> (IID, VReg) {
+        self.header.return_target.take().unwrap()
     }
 }

@@ -321,27 +321,20 @@ mod frame_view {
         loader: &mcjs_vm::Loader,
         has_breakpoint: impl Fn(GlobalIID) -> bool,
     ) -> Snapshot {
+        use bytecode::FnId;
+
         let mut frames = Vec::new();
-        let mut prev_return_iid = None;
         for (frame_ndx, frame) in probe.frames().enumerate() {
-            let fnid = frame.header().fn_id;
-            let bytecode::FnId(mod_id, lfnid) = fnid;
-            // TODO Refactor this elsewhere?
-            let giid = {
-                let iid = prev_return_iid.unwrap_or(probe.giid().1);
-                // TODO oint at the instruction that we're currently stuck at.
-                // That would be ideal, but there is a chance that it's the first one in the
-                // function (iid.0 == 0), and I don't want to deal with the underflow right now
-                prev_return_iid = frame.header().return_to_iid;
-                bytecode::GlobalIID(fnid, iid)
-            };
+            let giid = probe.frame_giid(frame_ndx);
+            let GlobalIID(fnid, iid) = giid;
+            let FnId(mod_id, lfnid) = fnid;
 
             let source_filename = loader
                 .get_source_map(mod_id)
                 .and_then(|sm| get_filename(sm.files().first().unwrap()));
 
             let func = loader.get_function(fnid).unwrap();
-            let values = decode_locs_state(probe, &frame, func, giid.1);
+            let values = decode_locs_state(probe, &frame, func, iid);
             let source_raw_markup =
                 fetch_source_code(probe, giid).unwrap_or_else(|| "???".to_string());
 
