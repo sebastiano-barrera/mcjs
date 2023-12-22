@@ -136,10 +136,7 @@ pub enum Instr {
         dst: VReg,
         src: VReg,
     },
-    GetGlobal {
-        dest: VReg,
-        key: VReg,
-    },
+    GetGlobalThis(VReg),
 
     BoolNot {
         dest: VReg,
@@ -309,7 +306,7 @@ impl Instr {
             Instr::LoadArg(dest, argndx) => { an.write_vreg(*dest); an.load_arg(*argndx); },
             Instr::LoadThis(dest) => { an.write_vreg(*dest); an.load_this(); },
             Instr::Copy { dst, src } => { an.write_vreg(*dst); an.read_vreg(*src); },
-            Instr::GetGlobal { dest, key } => { an.write_vreg(*dest); an.read_vreg(*key); },
+            Instr::GetGlobalThis (dest) => { an.write_vreg(*dest); },
             Instr::BoolNot { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
             Instr::UnaryMinus { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
             Instr::ArithAdd(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
@@ -443,11 +440,12 @@ pub struct IdentAsmt {
 
 /// Represents the location where a certain variable's value is stored.  This location
 /// determines the correct instruction to use to read/write the variable.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum Loc {
     VReg(VReg),
     Arg(ArgIndex),
     Capture(CaptureIndex),
+    Global(String),
 }
 
 impl From<VReg> for Loc {
@@ -473,6 +471,7 @@ impl std::fmt::Debug for Loc {
             Loc::VReg(vreg) => write!(f, "{:?}", vreg),
             Loc::Arg(arg_ndx) => write!(f, "{:?}", arg_ndx),
             Loc::Capture(cap_ndx) => write!(f, "{:?}", cap_ndx),
+            Loc::Global(name) => write!(f, "globalThis[{}]", name),
         }
     }
 }

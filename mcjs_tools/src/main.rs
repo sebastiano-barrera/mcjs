@@ -612,7 +612,7 @@ mod frame_view {
                     .map(|value| show_value_header(probe, value, upv_id))
                     .unwrap_or_else(|| "???".to_string());
                 locs_state.insert(
-                    loc,
+                    loc.clone(),
                     LocState {
                         name: format!("{:?}", loc),
                         value_header: value_str,

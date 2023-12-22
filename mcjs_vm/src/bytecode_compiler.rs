@@ -112,6 +112,7 @@ pub struct CompileFlags {
 ///
 /// Influences the way that declarations work in the toplevel.  The distinction
 /// is made largely at compile time, so we have to know here.
+#[derive(PartialEq, Eq)]
 pub enum SourceType {
     Script,
     Module,
@@ -286,14 +287,14 @@ impl FnBuilder {
             .first_mut()
             .unwrap()
             .vars
-            .insert(name.clone(), loc);
+            .insert(name.clone(), loc.clone());
         if prev.is_some() {
             // definition of var $name shadows previous definition
         }
 
         self.ident_history.push(IdentAsmt {
             iid: self.peek_iid(),
-            loc,
+            loc: loc.clone(),
             ident: name,
         });
 
@@ -305,7 +306,7 @@ impl FnBuilder {
             .iter()
             .rev()
             .find_map(|scope| scope.vars.get(name))
-            .copied()
+            .cloned()
     }
 
     fn define_var(&mut self, name: JsWord, loc: Loc) {
@@ -316,7 +317,7 @@ impl FnBuilder {
         }
 
         let scope = self.inner_scope_mut();
-        let prev = scope.vars.insert(name.clone(), loc);
+        let prev = scope.vars.insert(name.clone(), loc.clone());
         if prev.is_some() {
             // definition of var $name shadows previous definition
         }
@@ -392,18 +393,15 @@ impl Builder {
             .rev()
             .enumerate()
             .find_map(|(ndx, fnb)| fnb.get_var(sym).map(|vreg| (ndx, vreg)))
-            .or_else(|| {
-                let vreg = self.new_vreg();
-                self.set_const(vreg, Literal::String(sym.to_string()));
-                self.emit(Instr::GetGlobal {
-                    dest: vreg,
-                    key: vreg,
-                });
-                Some((0, Loc::VReg(vreg)))
-            })
     }
 
     fn get_var(&mut self, sym: &JsWord) -> Result<Loc> {
+        if sym == "globalThis" {
+            let reg = self.new_vreg();
+            self.emit(Instr::GetGlobalThis(reg));
+            return Ok(Loc::VReg(reg));
+        }
+
         match self.find_vreg(sym) {
             // Hell yeah, found it in the current function, we have a "simple" IID
             Some((0, vreg)) => Ok(vreg),
@@ -419,26 +417,48 @@ impl Builder {
 
                 Ok(vreg)
             }
-            None => Err(error!("unbound symbol: {}", sym)),
+            None => Ok(Loc::Global(sym.to_string())),
         }
     }
 
     fn read_var(&mut self, sym: &JsWord) -> Result<VReg> {
         let loc = self.get_var(sym)?;
-        let vreg = match loc {
-            Loc::VReg(vreg) => vreg,
+        Ok(self.read_loc(&loc))
+    }
+
+    fn read_loc(&mut self, loc: &Loc) -> VReg {
+        match loc {
+            Loc::VReg(vreg) => *vreg,
             Loc::Arg(arg_ndx) => {
                 let vreg = self.new_vreg();
-                self.emit(Instr::LoadArg(vreg, arg_ndx));
+                self.emit(Instr::LoadArg(vreg, *arg_ndx));
                 vreg
             }
             Loc::Capture(cap_ndx) => {
                 let vreg = self.new_vreg();
-                self.emit(Instr::LoadCapture(vreg, cap_ndx));
+                self.emit(Instr::LoadCapture(vreg, *cap_ndx));
                 vreg
             }
-        };
-        Ok(vreg)
+            Loc::Global(name) => self.load_global(name),
+        }
+    }
+
+    fn load_global(&mut self, name: &str) -> VReg {
+        // TODO Avoid fetching globalThis multiple times into multiple registers
+        let global_this = self.new_vreg();
+        self.emit(Instr::GetGlobalThis(global_this));
+
+        let key = self.new_vreg();
+        self.set_const(key, Literal::String(name.to_string()));
+
+        let dest = self.new_vreg();
+        self.emit(Instr::ObjGet {
+            dest,
+            obj: global_this,
+            key,
+        });
+
+        dest
     }
 
     fn new_vreg(&mut self) -> VReg {
@@ -1146,10 +1166,20 @@ fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Resu
 fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) {
     for decl in &var_decl.decls {
         let name = get_var_decl_name(decl);
-        // Yet-unassigned vregs are implicitly initialized to Undefined, so no
-        // explicit instruction is required here.
-        let vreg = builder.new_vreg();
-        builder.define_var(name, Loc::VReg(vreg));
+
+        // TODO Repeat this change in fn_decl_namedef
+        let is_script_global =
+            builder.fn_stack.len() == 1 && builder.flags.source_type == SourceType::Script;
+        let loc = if is_script_global {
+            Loc::Global(name.to_string())
+        } else {
+            // Yet-unassigned vregs are implicitly initialized to Undefined, so no
+            // explicit instruction is required here.
+            let vreg = builder.new_vreg();
+            Loc::VReg(vreg)
+        };
+
+        builder.define_var(name, loc);
     }
 }
 
@@ -1171,20 +1201,20 @@ fn compile_var_decl_assignment(
             .as_ident()
             .unwrap_or_else(|| unsupported_node!(decl));
         let name: JsWord = ident.id.to_id().0;
-        let vreg = builder
-            .read_var(&name)
+        let loc = builder
+            .get_var(&name)
             .with_context(error!("resolving identifier").with_span(ident.span))?;
 
-        if let Some(expr) = &decl.init {
-            let value = compile_expr(builder, expr)?;
-            // TODO Remove this instruction.
-            builder.emit(Instr::Copy {
-                dst: vreg,
-                src: value,
-            });
+        let value = if let Some(expr) = &decl.init {
+            compile_expr(builder, expr)?
         } else {
-            builder.set_const(vreg, Literal::Undefined);
-        }
+            // TODO waste: Extra register
+            let reg = builder.new_vreg();
+            builder.set_const(reg, Literal::Undefined);
+            reg
+        };
+
+        compile_assignment_rhs(builder, AssignOp::Assign, &loc, value)?;
     }
 
     Ok(())
@@ -1600,9 +1630,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
 
             let array = builder.new_vreg();
 
-            let constructor = builder
-                .read_var(&JsWord::from("Array"))
-                .expect("undefined native constructor: Array");
+            let constructor = builder.load_global("Array");
             compile_new(&mut builder, constructor, array, &[]);
 
             for elem in arr_expr.elems.iter() {
@@ -1865,18 +1893,18 @@ fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) ->
     if let Some(ident) = asmt.left.as_ident() {
         let rhs = compile_expr(builder, &asmt.right)?;
 
-        let var = builder
-            .read_var(&ident.sym)
+        let loc = builder
+            .get_var(&ident.sym)
             .with_context(error!("resolving identifier").with_span(ident.span))?;
-        compile_assignment_rhs(builder, asmt.op, var, rhs)?;
-        Ok(var)
+        compile_assignment_rhs(builder, asmt.op, &loc, rhs)?;
+        Ok(rhs)
     } else if let Some(target_expr) = asmt.left.as_expr() {
         match target_expr {
             Expr::Member(member_expr) => {
                 let rhs = compile_expr(builder, &asmt.right)?;
 
                 let MemberAccess { obj, key, value } = compile_member_access(builder, member_expr)?;
-                compile_assignment_rhs(builder, asmt.op, value, rhs)?;
+                compile_assignment_rhs(builder, asmt.op, &Loc::VReg(value), rhs)?;
                 builder.emit(Instr::ObjSet { obj, key, value });
                 Ok(value)
             }
@@ -1940,15 +1968,23 @@ fn compile_obj_member_prop(
 fn compile_assignment_rhs(
     builder: &mut Builder,
     assign_op: swc_ecma_ast::AssignOp,
-    lhs: VReg,
+    lhs: &Loc,
     rhs: VReg,
 ) -> Result<()> {
-    match assign_op {
-        AssignOp::Assign => builder.emit(Instr::Copy { dst: lhs, src: rhs }),
-        AssignOp::AddAssign => builder.emit(Instr::ArithAdd(lhs, lhs, rhs)),
-        AssignOp::SubAssign => builder.emit(Instr::ArithSub(lhs, lhs, rhs)),
-        AssignOp::MulAssign => builder.emit(Instr::ArithMul(lhs, lhs, rhs)),
-        AssignOp::DivAssign => builder.emit(Instr::ArithDiv(lhs, lhs, rhs)),
+    type InstrCons = fn(VReg, VReg, VReg) -> Instr;
+    let mut gen_value = |lhs: &Loc, rhs: VReg, cons: InstrCons| {
+        let lhs_value = builder.read_loc(lhs);
+        let tmp = builder.new_vreg();
+        builder.emit(cons(tmp, lhs_value, rhs));
+        tmp
+    };
+
+    let value = match assign_op {
+        AssignOp::Assign => rhs,
+        AssignOp::AddAssign => gen_value(&lhs, rhs, Instr::ArithAdd),
+        AssignOp::SubAssign => gen_value(&lhs, rhs, Instr::ArithSub),
+        AssignOp::MulAssign => gen_value(&lhs, rhs, Instr::ArithMul),
+        AssignOp::DivAssign => gen_value(&lhs, rhs, Instr::ArithDiv),
         // AssignOp::ModAssign => todo!(),
         // AssignOp::LShiftAssign => todo!(),
         // AssignOp::RShiftAssign => todo!(),
@@ -1962,6 +1998,28 @@ fn compile_assignment_rhs(
         // AssignOp::NullishAssign => todo!(),
         other => unsupported_node!(other),
     };
+
+    match lhs {
+        Loc::VReg(_) | Loc::Arg(_) | Loc::Capture(_) => {
+            let dst = builder.read_loc(&lhs);
+            builder.emit(Instr::Copy { dst, src: value });
+        }
+        Loc::Global(name) => {
+            // TODO Avoid fetching globalThis multiple times into multiple registers
+            let global_this = builder.new_vreg();
+            builder.emit(Instr::GetGlobalThis(global_this));
+
+            let key = builder.new_vreg();
+            builder.set_const(key, Literal::String(name.clone()));
+
+            builder.emit(Instr::ObjSet {
+                obj: global_this,
+                key,
+                value,
+            });
+        }
+    }
+
     Ok(())
 }
 

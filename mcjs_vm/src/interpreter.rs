@@ -925,17 +925,8 @@ impl<'a> Interpreter<'a> {
                     self.data.top_mut().set_result(*buf_reg, value);
                 }
 
-                Instr::GetGlobal { dest, key } => {
-                    let key = self.get_operand(*key);
-                    let key = Self::value_to_index_or_key(&self.realm.heap, &key)
-                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-
-                    let gobj = self.realm.heap.get(self.realm.global_obj).unwrap();
-
-                    let value = gobj
-                        .as_object()
-                        .get_own_element_or_property(key)
-                        .unwrap_or(Value::Undefined);
+                Instr::GetGlobalThis(dest) => {
+                    let value = Value::Object(self.realm.global_obj);
                     self.data.top_mut().set_result(*dest, value);
                 }
 
@@ -1853,22 +1844,25 @@ mod tests {
     fn test_capture() {
         let output = quick_run(
             "
-            let counter = 0;
+            // wrapping into iife makes sure that the shared variable is not a global
+            (function() {
+                let counter = 0;
 
-            function f() {
-                function g() {
-                    counter++;
+                function f() {
+                    function g() {
+                        counter++;
+                    }
+                    g();
+                    g();
+                    sink(counter);
                 }
-                g();
-                g();
-                sink(counter);
-            }
 
-            f();
-            f();
-            f();
-            counter -= 5;
-            sink(counter);
+                f();
+                f();
+                f();
+                counter -= 5;
+                sink(counter);
+            })();
             ",
         );
 
@@ -2148,6 +2142,31 @@ mod tests {
                 Some(Literal::String("c".to_string())),
                 Some(Literal::Undefined),
                 Some(Literal::Number(3.0)),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_script_global() {
+        let output = quick_run(
+            r#"
+            var x = 55
+            sink(globalThis.x)
+            sink(x)
+
+            globalThis.x = 222
+            sink(x)
+            sink(globalThis.x)
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Number(55.0)),
+                Some(Literal::Number(55.0)),
+                Some(Literal::Number(222.0)),
+                Some(Literal::Number(222.0)),
             ],
         );
     }
