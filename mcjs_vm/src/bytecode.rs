@@ -427,7 +427,6 @@ pub struct BreakRange {
 pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
-    n_params: ArgIndex,
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
     ident_history: Vec<IdentAsmt>,
@@ -454,7 +453,6 @@ impl Function {
     pub(crate) fn new(
         instrs: Box<[Instr]>,
         consts: Box<[Literal]>,
-        n_params: ArgIndex,
         ident_history: Vec<IdentAsmt>,
         trace_anchors: HashMap<IID, TraceAnchor>,
     ) -> Function {
@@ -465,7 +463,6 @@ impl Function {
         Function {
             instrs,
             consts,
-            n_params,
             loop_heads,
             ident_history,
             trace_anchors,
@@ -496,10 +493,6 @@ impl Function {
         self.trace_anchors
             .get(&iid)
             .map(|tanch| tanch.trace_id.as_str())
-    }
-
-    pub fn n_params(&self) -> ArgIndex {
-        self.n_params
     }
 }
 

@@ -156,7 +156,6 @@ struct FnBuilder {
     span: Option<swc_common::Span>,
     trace_anchors: HashMap<IID, bytecode::TraceAnchor>,
     next_vreg: u8,
-    n_params: bytecode::ArgIndex,
     // Places where a break instruction must be placed when the break target is finally "written"
     // by the compiler.
     pending_break_instrs: Vec<IID>,
@@ -204,7 +203,6 @@ impl FnBuilder {
             captures: Vec::new(),
             // See doc comment for bytecode::ARGS_COUNT_MAX
             next_vreg: bytecode::ARGS_COUNT_MAX,
-            n_params: bytecode::ArgIndex(0),
             pending_break_instrs: Vec::new(),
             pending_continue_instrs: Vec::new(),
             span: None,
@@ -220,7 +218,6 @@ impl FnBuilder {
         bytecode::Function::new(
             self.instrs.into_boxed_slice(),
             self.consts.into_boxed_slice(),
-            self.n_params,
             self.ident_history,
             self.trace_anchors,
         )

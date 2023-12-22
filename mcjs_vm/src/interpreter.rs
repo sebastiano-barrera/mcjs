@@ -588,19 +588,20 @@ impl<'a> Interpreter<'a> {
                             }
 
                             let callee_func = self.loader.get_function(closure.fnid).unwrap();
-                            let n_params = callee_func.n_params().0;
-                            arg_vals.truncate(n_params as usize);
-                            arg_vals.resize(n_params as usize, Value::Undefined);
+                            let n_params = bytecode::ARGS_COUNT_MAX as usize;
+                            arg_vals.truncate(n_params);
+                            arg_vals.resize(n_params, Value::Undefined);
                             assert_eq!(arg_vals.len(), n_params as usize);
-                            tprintln!("     - call with {} params", n_params);
-                            for (i, arg) in arg_vals.iter().enumerate() {
-                                tprintln!("     - call arg[{}]: {:?}", i, arg);
-                            }
 
                             let this = closure
                                 .forced_this
                                 .clone()
                                 .unwrap_or_else(|| self.get_operand(*this));
+
+                            tprintln!("\n     - call with {} params", n_params);
+                            for (i, arg) in arg_vals.iter().enumerate() {
+                                tprintln!("     - call arg[{}]: {:?}", i, arg);
+                            }
 
                             let call_meta = stack::CallMeta {
                                 fnid: closure.fnid,
@@ -1027,11 +1028,21 @@ impl<'a> Interpreter<'a> {
     where
         F: FnOnce(f64, f64) -> f64,
     {
-        let a = self.get_operand(a).expect_num().unwrap();
-        let b = self.get_operand(b).expect_num().unwrap();
-        self.data
-            .top_mut()
-            .set_result(dest, Value::Number(op(a, b)));
+        let a = self.get_operand(a).expect_num();
+        let b = self.get_operand(b).expect_num();
+        match (a, b) {
+            (Ok(a), Ok(b)) => {
+                self.data
+                    .top_mut()
+                    .set_result(dest, Value::Number(op(a, b)));
+            }
+            (a, b) => {
+                eprintln!(
+                    ">>>> WARNING: failed number op: {:?}, {:?}, {:?}",
+                    dest, a, b
+                );
+            }
+        }
     }
 
     fn compare(&mut self, dest: VReg, a: VReg, b: VReg, test: impl Fn(ValueOrdering) -> bool) {
