@@ -20,13 +20,15 @@ pub(crate) enum Slot {
     Upvalue(UpvalueId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug)]
 pub struct FrameHeader {
     pub regs_offset: u32,
     pub regs_count: u32,
     pub fn_id: bytecode::FnId,
     pub this: Value,
     pub return_target: Option<(IID, VReg)>,
+    // TODO Avoid this heap alloc?
+    pub captures: Box<[UpvalueId]>,
 }
 
 #[derive(Clone)]
@@ -60,15 +62,16 @@ impl InterpreterData {
             fn_id: call_meta.fnid,
             this: call_meta.this,
             return_target: None,
+            captures: call_meta.captures.to_owned().into_boxed_slice(),
         };
 
         #[cfg(test)]
         eprintln!("  (allocated frame: {:?})", frame_hdr);
 
-        self.headers.push(frame_hdr);
         for _ in 0..frame_hdr.regs_count {
             self.values.push(Slot::Inline(Value::Undefined));
         }
+        self.headers.push(frame_hdr);
 
         self.check_invariants();
     }
@@ -193,15 +196,14 @@ impl<'a> Frame<'a> {
 
     pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
         // another/better approach: add N slots to the header and use them as cache for the closure's captures.
-        todo!(
-            "get_capture [get closure ID from header; get closure from closure heap; get capture]"
-        )
+        self.header
+            .captures
+            .get(capture_ndx.0 as usize)
+            .copied()
+            .expect("capture index is out of range")
     }
     pub fn captures<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = UpvalueId> {
-        todo!(
-            "get_capture [get closure ID from header; get closure from closure heap; get capture]"
-        );
-        std::iter::empty()
+        self.header.captures.iter().copied()
     }
 
     pub fn deref_upvalue(&self, upv_id: UpvalueId) -> Option<Value> {
