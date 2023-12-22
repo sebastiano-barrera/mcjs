@@ -98,7 +98,7 @@ pub struct ArgIndex(pub u8);
 /// Maximum number of (inline) arguments that can be passed to a function
 ///
 /// The first few arguments are passed directly in the first few registers of
-/// the callee stack frame. These first registers are reserved for this used,
+/// the callee stack frame. These first registers are reserved for this use,
 /// and they must not be used for temporary values or local variables. This
 /// guarantee is provided by the bytecode compiler.
 /// 
@@ -446,46 +446,8 @@ pub struct LoopInfo {
 #[derive(Debug)]
 pub struct IdentAsmt {
     pub iid: IID,
-    pub loc: Loc,
+    pub reg: VReg,
     pub ident: JsWord,
-}
-
-/// Represents the location where a certain variable's value is stored.  This location
-/// determines the correct instruction to use to read/write the variable.
-#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
-pub enum Loc {
-    VReg(VReg),
-    Arg(ArgIndex),
-    Capture(CaptureIndex),
-    Global(String),
-}
-
-impl From<VReg> for Loc {
-    fn from(value: VReg) -> Self {
-        Loc::VReg(value)
-    }
-}
-impl From<ArgIndex> for Loc {
-    fn from(value: ArgIndex) -> Self {
-        Loc::Arg(value)
-    }
-}
-impl From<CaptureIndex> for Loc {
-    fn from(value: CaptureIndex) -> Self {
-        Loc::Capture(value)
-    }
-}
-
-impl std::fmt::Debug for Loc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Each variant's Debug impl is specific enough
-        match self {
-            Loc::VReg(vreg) => write!(f, "{:?}", vreg),
-            Loc::Arg(arg_ndx) => write!(f, "{:?}", arg_ndx),
-            Loc::Capture(cap_ndx) => write!(f, "{:?}", cap_ndx),
-            Loc::Global(name) => write!(f, "globalThis[{}]", name),
-        }
-    }
 }
 
 impl Function {
