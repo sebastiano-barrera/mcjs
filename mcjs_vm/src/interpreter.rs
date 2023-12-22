@@ -22,7 +22,6 @@ use crate::{
     loader::{self, BreakRangeID},
     // jit::{self, InterpreterStep},
     stack,
-    stack_access,
     util::Mask,
 };
 

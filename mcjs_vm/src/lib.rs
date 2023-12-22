@@ -11,7 +11,6 @@ mod loader;
 mod heap;
 pub mod interpreter;
 pub mod stack;
-mod stack_access;
 
 mod util;
 
