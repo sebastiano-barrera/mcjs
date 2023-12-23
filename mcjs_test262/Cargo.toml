@@ -8,5 +8,7 @@ edition = "2021"
 [dependencies]
 mcjs_vm = { path = "../mcjs_vm" }
 anyhow = "1.0"
+serde = "1.0"
+serde_yaml = "0.9.29"
 
 
