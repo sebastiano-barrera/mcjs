@@ -1310,6 +1310,12 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
         builder.emit(Instr::ClosureAddCapture(vreg));
     }
 
+    let proto = builder.new_vreg();
+    let key = builder.new_vreg();
+    builder.set_const(key, Literal::String("prototype".to_string()));
+    builder.emit(Instr::ObjCreateEmpty(proto));
+    builder.emit(Instr::ObjSet{ obj: dest, key, value: proto });
+
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
     Ok(dest)
 }

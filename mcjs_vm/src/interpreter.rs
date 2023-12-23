@@ -2157,4 +2157,25 @@ mod tests {
             ],
         );
     }
+
+    #[test]
+    fn test_constructor_prototype() {
+        let output = quick_run(
+            r#"
+                function Test262Error(message) {
+                  this.message = message || "";
+                }
+
+                Test262Error.prototype.toString = function () {
+                  return "Test262Error: " + this.message;
+                };
+
+                Test262Error.thrower = function (message) {
+                  throw new Test262Error(message);
+                };
+            "#,
+        );
+
+        
+    }
 }
