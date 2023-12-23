@@ -1,5 +1,6 @@
 use std::{
     fs::File,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -28,14 +29,11 @@ fn main() {
     let tests_count = config.testFiles.len();
     for (ndx, file_path) in config.testFiles.iter().enumerate() {
         eprintln!("test {}/{}", ndx, tests_count);
-        let chunk_paths = vec![
-            test262_root.join("harness/assert.js"),
-            test262_root.join("harness/sta.js"),
-            test262_root.join(file_path),
-        ];
 
-        let params = TestParams { chunk_paths };
-        let outcome = run_test(params);
+        let outcome = run_test(TestParams {
+            test262_root: &test262_root,
+            file_path: &Path::new(file_path),
+        });
         outcomes.push(outcome);
     }
 
@@ -52,13 +50,36 @@ struct ConfigFile {
 }
 
 fn run_test(params: TestParams) -> TestOutcome {
-    let paths = &params.chunk_paths;
+    let full_path = params.test262_root.join(params.file_path);
+
+    let metadata = {
+        let mut f = File::open(&full_path).unwrap();
+        let mut content = String::new();
+        f.read_to_string(&mut content).unwrap();
+        match metadata::parse_header(&content) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                let message = format!("{:?}", err);
+                return TestOutcome {
+                    file_path: full_path,
+                    error: Some(TestError::HeaderParse(message)),
+                };
+            }
+        }
+    };
+
+    let paths = [
+        params.test262_root.join("harness/assert.js"),
+        params.test262_root.join("harness/sta.js"),
+        full_path,
+    ];
+
     let res = std::panic::catch_unwind(move || {
         let mut loader = mcjs_vm::Loader::new(None);
         let mut realm = mcjs_vm::Realm::new();
 
         for file_path in paths {
-            process_file(file_path, &mut realm, &mut loader)?;
+            process_file(&file_path, &mut realm, &mut loader)?;
         }
         Ok(())
     });
@@ -77,7 +98,7 @@ fn run_test(params: TestParams) -> TestOutcome {
     };
 
     TestOutcome {
-        params,
+        file_path: params.file_path.to_owned(),
         error: res.err(),
     }
 }
@@ -101,19 +122,20 @@ fn process_file(
     Ok(())
 }
 
-#[derive(Serialize)]
-struct TestParams {
-    chunk_paths: Vec<PathBuf>,
+struct TestParams<'a> {
+    test262_root: &'a Path,
+    file_path: &'a Path,
 }
 
 #[derive(Serialize)]
 struct TestOutcome {
-    params: TestParams,
+    file_path: PathBuf,
     error: Option<TestError>,
 }
 
 #[derive(Debug)]
 enum TestError {
+    HeaderParse(String),
     Read(std::io::Error),
     Load(mcjs_vm::Error),
     Run(mcjs_vm::Error),
@@ -132,6 +154,7 @@ impl Serialize for TestError {
             TestError::Load(err) => ("load", err.message()),
             TestError::Run(err) => ("run", err.message()),
             TestError::Panic(err) => ("panic", err.to_string()),
+            TestError::HeaderParse(msg) => ("header_parse", msg.clone()),
         };
 
         let mut struct_ser = serializer.serialize_struct("TestError", 2)?;
@@ -144,4 +167,82 @@ impl Serialize for TestError {
 #[derive(Serialize)]
 struct OutputFile {
     outcomes: Vec<TestOutcome>,
+}
+
+mod metadata {
+    use serde::Deserialize;
+
+    #[derive(Debug)]
+    pub enum Error {
+        Select,
+        Parse(String),
+        Io(std::io::Error),
+    }
+
+    pub fn parse_header(content: &str) -> Result<Metadata, Error> {
+        let (_, after_start) = content.split_once("/*---").ok_or(Error::Select)?;
+        let (payload, _) = after_start.split_once("---*/").ok_or(Error::Select)?;
+
+        let header: FileHeader =
+            serde_yaml::from_str(payload).map_err(|err| Error::Parse(err.to_string()))?;
+
+        let (is_strict, is_nostrict) = match (
+            header.flags.contains(&Flag::OnlyStrict),
+            header.flags.contains(&Flag::NoStrict),
+        ) {
+            (true, true) => (true, true),
+            (true, false) => (true, false),
+            (false, true) => (false, true),
+            (false, false) => (true, true),
+        };
+
+        Ok(Metadata {
+            description: header.description,
+            is_module: header.flags.contains(&Flag::Module),
+            is_nostrict,
+            is_strict,
+            negative_test: header.negative,
+        })
+    }
+
+    pub struct Metadata {
+        pub description: String,
+        pub is_module: bool,
+        pub is_nostrict: bool,
+        pub is_strict: bool,
+        pub negative_test: Option<NegativeTest>,
+    }
+
+    #[derive(Deserialize)]
+    struct FileHeader {
+        description: String,
+        negative: Option<NegativeTest>,
+        #[serde(default)]
+        flags: Vec<Flag>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct NegativeTest {
+        pub phase: Phase,
+        #[serde(rename = "type")]
+        pub type_: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Phase {
+        Parse,
+        Syntax,
+        Runtime,
+    }
+
+    #[derive(Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "camelCase")]
+    enum Flag {
+        NoStrict,
+        OnlyStrict,
+        Module,
+        Generated,
+        Raw,
+    }
 }
