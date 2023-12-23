@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 fn main() {
     let config: ConfigFile = {
@@ -23,10 +23,11 @@ fn main() {
         );
     }
 
+    let mut outcomes = Vec::new();
+
     let tests_count = config.testFiles.len();
     for (ndx, file_path) in config.testFiles.iter().enumerate() {
-        println!(" [{:5}/{:5}] {}", ndx + 1, tests_count, file_path);
-
+        eprintln!("test {}/{}", ndx, tests_count);
         let chunk_paths = vec![
             test262_root.join("harness/assert.js"),
             test262_root.join("harness/sta.js"),
@@ -35,12 +36,12 @@ fn main() {
 
         let params = TestParams { chunk_paths };
         let outcome = run_test(params);
-        if let Some(error) = outcome.error {
-            println!("    !! {:?}", error);
-        } else {
-            println!("OK");
-        }
+        outcomes.push(outcome);
     }
+
+    eprintln!("writing output...");
+    let stdout = std::io::stdout().lock();
+    serde_yaml::to_writer(stdout, &outcomes).unwrap();
 }
 
 #[allow(non_snake_case)]
@@ -67,8 +68,10 @@ fn run_test(params: TestParams) -> TestOutcome {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(err)) => Err(err),
         Err(panic_value) => {
-            let string: &String = panic_value.downcast_ref().unwrap();
-            let message = format!("{}", string);
+            let message = match panic_value.downcast_ref::<String>() {
+                Some(s) => format!("{}", s),
+                None => "<not a string>".to_string(),
+            };
             Err(TestError::Panic(message))
         }
     };
@@ -98,10 +101,12 @@ fn process_file(
     Ok(())
 }
 
+#[derive(Serialize)]
 struct TestParams {
     chunk_paths: Vec<PathBuf>,
 }
 
+#[derive(Serialize)]
 struct TestOutcome {
     params: TestParams,
     error: Option<TestError>,
@@ -113,4 +118,30 @@ enum TestError {
     Load(mcjs_vm::Error),
     Run(mcjs_vm::Error),
     Panic(String),
+}
+
+impl Serialize for TestError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let (category, message) = match self {
+            TestError::Read(err) => ("read", err.to_string()),
+            TestError::Load(err) => ("load", err.message()),
+            TestError::Run(err) => ("run", err.message()),
+            TestError::Panic(err) => ("panic", err.to_string()),
+        };
+
+        let mut struct_ser = serializer.serialize_struct("TestError", 2)?;
+        struct_ser.serialize_field("category", category)?;
+        struct_ser.serialize_field("message", &message)?;
+        struct_ser.end()
+    }
+}
+
+#[derive(Serialize)]
+struct OutputFile {
+    outcomes: Vec<TestOutcome>,
 }
