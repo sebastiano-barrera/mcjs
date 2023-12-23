@@ -780,7 +780,10 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
     match stmt {
         Stmt::Block(block) => compile_block_scoped(&mut builder, block),
-        // Stmt::Empty(_) => todo!(),
+        Stmt::Empty(_) => {
+            // no code needs to be emitted
+            Ok(())
+        },
         Stmt::Debugger(_) => {
             builder.emit(Instr::Breakpoint);
             Ok(())

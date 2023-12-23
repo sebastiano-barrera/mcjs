@@ -1,10 +1,10 @@
-Success (general): 138/1710 (8.1%)
+Success (general): 144/1541 (9.3%)
      6/    69   8.7% /home/sebastiano/src/test262/./test/language/expressions/function
      0/   186   0.0% /home/sebastiano/src/test262/./test/language/expressions/function/dstr
      0/     4   0.0% /home/sebastiano/src/test262/./test/language/expressions/function/early-errors
      0/     2   0.0% /home/sebastiano/src/test262/./test/language/expressions/function/forbidden-ext/b1
      0/     3   0.0% /home/sebastiano/src/test262/./test/language/expressions/function/forbidden-ext/b2
-     5/    69   7.2% /home/sebastiano/src/test262/./test/language/statements/if
+     7/    69  10.1% /home/sebastiano/src/test262/./test/language/statements/if
      0/    24   0.0% /home/sebastiano/src/test262/./test/language/statements/labeled
      1/    21   4.8% /home/sebastiano/src/test262/./test/language/statements/let
      0/    93   0.0% /home/sebastiano/src/test262/./test/language/statements/let/dstr
@@ -15,10 +15,9 @@ Success (general): 138/1710 (8.1%)
      0/    14   0.0% /home/sebastiano/src/test262/./test/language/statements/throw
      3/   108   2.8% /home/sebastiano/src/test262/./test/language/statements/try
      0/    93   0.0% /home/sebastiano/src/test262/./test/language/statements/try/dstr
-     7/    81   8.6% /home/sebastiano/src/test262/./test/language/statements/variable
+    10/    81  12.3% /home/sebastiano/src/test262/./test/language/statements/variable
      0/    97   0.0% /home/sebastiano/src/test262/./test/language/statements/variable/dstr
      3/    38   7.9% /home/sebastiano/src/test262/./test/language/statements/while
-     0/   169   0.0% /home/sebastiano/src/test262/./test/language/statements/with
     40/    67  59.7% /home/sebastiano/src/test262/./test/language/white-space
     10/    23  43.5% /home/sebastiano/src/test262/./test/language/comments
      5/    29  17.2% /home/sebastiano/src/test262/./test/language/comments/hashbang
@@ -29,4 +28,4 @@ Success (general): 138/1710 (8.1%)
      2/     7  28.6% /home/sebastiano/src/test262/./test/language/block-scope/syntax/function-declarations
      3/     3 100.0% /home/sebastiano/src/test262/./test/language/block-scope/syntax/redeclaration-global
      3/    95   3.2% /home/sebastiano/src/test262/./test/language/block-scope/syntax/redeclaration
-    37/   217  17.1% /home/sebastiano/src/test262/./test/language/function-code
+    38/   217  17.5% /home/sebastiano/src/test262/./test/language/function-code
