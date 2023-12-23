@@ -210,7 +210,7 @@ mod frame_view {
     use actix_web::{self, web, HttpResponse};
     use maud::{html, Markup};
     use mcjs_vm::{
-        bytecode::{self, ArgIndex, CaptureIndex, VReg},
+        bytecode::{self, VReg},
         interpreter::{
             debugger::{BreakRangeID, Probe},
             UpvalueId,
@@ -587,8 +587,6 @@ mod frame_view {
         func: &bytecode::Function,
         iid: mcjs_vm::IID,
     ) -> Values {
-        use bytecode::Loc;
-
         // We use `ident_history` (the history of how the Identifier->Loc mappings change as the
         // function proceeds) to reconstruct the Identifier->Loc mapping at a specific
         // point of the bytecode (represented by `iid`).
@@ -600,7 +598,7 @@ mod frame_view {
             let locs_state = &mut locs_state;
             let locs_order = &mut locs_order;
 
-            let mut add = |loc: Loc, value: Option<InterpreterValue>, upv_id: Option<UpvalueId>| {
+            let mut add = |loc: VReg, value: Option<InterpreterValue>, upv_id: Option<UpvalueId>| {
                 let value_str = value
                     .map(|value| show_value_header(probe, value, upv_id))
                     .unwrap_or_else(|| "???".to_string());
@@ -616,18 +614,8 @@ mod frame_view {
                 );
                 locs_order.push(loc);
             };
-
-            for (cap_ndx, upv_id) in frame.captures().enumerate() {
-                let loc = CaptureIndex(cap_ndx as _).into();
-                // TODO: Also show the captured value
-                let value_opt = frame.deref_upvalue(upv_id);
-                add(loc, value_opt, Some(upv_id));
-            }
-
-            for (arg_ndx, value_opt) in frame.args().enumerate() {
-                let loc = ArgIndex(arg_ndx as _).into();
-                add(loc, value_opt, None);
-            }
+            
+            // TODO Reinstate showing captures?
 
             for (vreg_ndx, value) in frame.results().enumerate() {
                 let loc = VReg(vreg_ndx as _).into();
@@ -646,7 +634,7 @@ mod frame_view {
             .map(|(ndx, _)| ndx + 1)
             .unwrap_or(0);
         for asmt in history[0..history_limit].iter().rev() {
-            let ls = locs_state.get_mut(&asmt.loc).unwrap();
+            let ls = locs_state.get_mut(&asmt.reg).unwrap();
             let ident = asmt.ident.to_string();
             if ls.ident.is_some() {
                 ls.prev_idents.push(ident);
