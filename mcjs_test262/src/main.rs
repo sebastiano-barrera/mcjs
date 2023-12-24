@@ -13,7 +13,7 @@ fn main() {
             .next()
             .expect("usage: mcjs_test262 <path/to/tests.yml>");
         let rdr = File::open(filename).expect("could not open config file");
-        serde_yaml::from_reader(rdr).expect("could not parse config file")
+        serde_json::from_reader(rdr).expect("could not parse config file")
     };
 
     let test262_root = PathBuf::from(config.test262Root);
@@ -39,7 +39,7 @@ fn main() {
 
     eprintln!("writing output...");
     let stdout = std::io::stdout().lock();
-    serde_yaml::to_writer(stdout, &outcomes).unwrap();
+    serde_json::to_writer(stdout, &outcomes).unwrap();
 }
 
 #[allow(non_snake_case)]
