@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -24,7 +24,7 @@ fn main() {
         );
     }
 
-    let mut outcomes = Vec::new();
+    let mut stdout = std::io::stdout().lock();
 
     let tests_count = config.testFiles.len();
     for (ndx, file_path) in config.testFiles.iter().enumerate() {
@@ -34,12 +34,11 @@ fn main() {
             test262_root: &test262_root,
             file_path: &Path::new(file_path),
         });
-        outcomes.push(outcome);
-    }
 
-    eprintln!("writing output...");
-    let stdout = std::io::stdout().lock();
-    serde_json::to_writer(stdout, &outcomes).unwrap();
+        // one json per line
+        serde_json::to_writer(&mut stdout, &outcome).unwrap();
+        stdout.write(b"\n").unwrap();
+    }
 }
 
 #[allow(non_snake_case)]

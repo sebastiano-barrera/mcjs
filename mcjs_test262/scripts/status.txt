@@ -1,31 +1,34 @@
-Success (general): 144/1541 (9.3%)
-     6/    69   8.7% /home/sebastiano/src/test262/./test/language/expressions/function
-     0/   186   0.0% /home/sebastiano/src/test262/./test/language/expressions/function/dstr
-     0/     4   0.0% /home/sebastiano/src/test262/./test/language/expressions/function/early-errors
-     0/     2   0.0% /home/sebastiano/src/test262/./test/language/expressions/function/forbidden-ext/b1
-     0/     3   0.0% /home/sebastiano/src/test262/./test/language/expressions/function/forbidden-ext/b2
-     7/    69  10.1% /home/sebastiano/src/test262/./test/language/statements/if
-     0/    24   0.0% /home/sebastiano/src/test262/./test/language/statements/labeled
-     1/    21   4.8% /home/sebastiano/src/test262/./test/language/statements/let
-     0/    93   0.0% /home/sebastiano/src/test262/./test/language/statements/let/dstr
-     4/    31  12.9% /home/sebastiano/src/test262/./test/language/statements/let/syntax
-     2/    16  12.5% /home/sebastiano/src/test262/./test/language/statements/return
-     6/    47  12.8% /home/sebastiano/src/test262/./test/language/statements/switch
-     1/    64   1.6% /home/sebastiano/src/test262/./test/language/statements/switch/syntax/redeclaration
-     0/    14   0.0% /home/sebastiano/src/test262/./test/language/statements/throw
-     3/   108   2.8% /home/sebastiano/src/test262/./test/language/statements/try
-     0/    93   0.0% /home/sebastiano/src/test262/./test/language/statements/try/dstr
-    10/    81  12.3% /home/sebastiano/src/test262/./test/language/statements/variable
-     0/    97   0.0% /home/sebastiano/src/test262/./test/language/statements/variable/dstr
-     3/    38   7.9% /home/sebastiano/src/test262/./test/language/statements/while
-    40/    67  59.7% /home/sebastiano/src/test262/./test/language/white-space
-    10/    23  43.5% /home/sebastiano/src/test262/./test/language/comments
-     5/    29  17.2% /home/sebastiano/src/test262/./test/language/comments/hashbang
-     0/    15   0.0% /home/sebastiano/src/test262/./test/language/block-scope/leave
-     0/     2   0.0% /home/sebastiano/src/test262/./test/language/block-scope/return-from
-     0/    15   0.0% /home/sebastiano/src/test262/./test/language/block-scope/shadowing
-     0/     8   0.0% /home/sebastiano/src/test262/./test/language/block-scope/syntax/for-in
-     2/     7  28.6% /home/sebastiano/src/test262/./test/language/block-scope/syntax/function-declarations
-     3/     3 100.0% /home/sebastiano/src/test262/./test/language/block-scope/syntax/redeclaration-global
-     3/    95   3.2% /home/sebastiano/src/test262/./test/language/block-scope/syntax/redeclaration
-    38/   217  17.5% /home/sebastiano/src/test262/./test/language/function-code
+┌────────────────────────────────────────────────────────┬────┬──────┬──────────────────┐
+│                          dir                           │ ok │ fail │     progress     │
+├────────────────────────────────────────────────────────┼────┼──────┼──────────────────┤
+│ test/language/block-scope/leave                        │    │ 15   │                  │
+│ test/language/block-scope/return-from                  │    │ 2    │                  │
+│ test/language/block-scope/shadowing                    │    │ 15   │                  │
+│ test/language/block-scope/syntax/for-in                │    │ 8    │                  │
+│ test/language/block-scope/syntax/function-declarations │ 2  │ 5    │ 28.5714285714286 │
+│ test/language/block-scope/syntax/redeclaration         │ 3  │ 92   │ 3.15789473684211 │
+│ test/language/block-scope/syntax/redeclaration-global  │ 3  │      │                  │
+│ test/language/comments                                 │ 10 │ 13   │ 43.4782608695652 │
+│ test/language/comments/hashbang                        │ 5  │ 24   │ 17.2413793103448 │
+│ test/language/expressions/function                     │ 6  │ 63   │ 8.69565217391304 │
+│ test/language/expressions/function/dstr                │    │ 186  │                  │
+│ test/language/expressions/function/early-errors        │    │ 4    │                  │
+│ test/language/expressions/function/forbidden-ext/b1    │    │ 2    │                  │
+│ test/language/expressions/function/forbidden-ext/b2    │    │ 3    │                  │
+│ test/language/function-code                            │ 38 │ 179  │ 17.5115207373272 │
+│ test/language/statements/if                            │ 7  │ 62   │ 10.1449275362319 │
+│ test/language/statements/labeled                       │    │ 24   │                  │
+│ test/language/statements/let                           │ 1  │ 20   │ 4.76190476190476 │
+│ test/language/statements/let/dstr                      │    │ 93   │                  │
+│ test/language/statements/let/syntax                    │ 4  │ 27   │ 12.9032258064516 │
+│ test/language/statements/return                        │ 2  │ 14   │ 12.5             │
+│ test/language/statements/switch                        │ 6  │ 41   │ 12.7659574468085 │
+│ test/language/statements/switch/syntax/redeclaration   │ 1  │ 63   │ 1.5625           │
+│ test/language/statements/throw                         │    │ 14   │                  │
+│ test/language/statements/try                           │ 3  │ 105  │ 2.77777777777778 │
+│ test/language/statements/try/dstr                      │    │ 93   │                  │
+│ test/language/statements/variable                      │ 10 │ 71   │ 12.3456790123457 │
+│ test/language/statements/variable/dstr                 │    │ 97   │                  │
+│ test/language/statements/while                         │ 3  │ 35   │ 7.89473684210526 │
+│ test/language/white-space                              │ 40 │ 27   │ 59.7014925373134 │
+└────────────────────────────────────────────────────────┴────┴──────┴──────────────────┘
