@@ -1873,6 +1873,13 @@ fn compile_new(builder: &mut Builder, constructor: VReg, ret: VReg, args: &[VReg
         key,
         value: constructor,
     });
+
+    builder.set_const(key, Literal::String("constructor".into()));
+    builder.emit(Instr::ObjSet {
+        obj: ret,
+        key,
+        value: constructor,
+    });
 }
 
 fn compile_value_update(builder: &mut Builder, op: swc_ecma_ast::UpdateOp, arg: VReg) {
