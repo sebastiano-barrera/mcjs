@@ -33,7 +33,8 @@ from outcome o
 	left join expected_error on (o.file_path = expected_error.file_path)
 '
 
-sqlite3 -box tests.db "$(cat <<-EOF
+sqlite3 tests.db "$(cat <<-EOF
+create view status as
 with q as (
 	select dir
 	, success
@@ -53,6 +54,8 @@ select *
 , cast(ok as real) * 100 / (ok + fail) as progress
 from q2
 EOF
-)" | tee status.txt
+)"
+
+sqlite3 -box tests.db "select * from status" | tee status.txt
 
 
