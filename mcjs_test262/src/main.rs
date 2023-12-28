@@ -86,7 +86,16 @@ fn run_test(params: TestParams) -> TestOutcome {
     // Flatten a panic into a regular TestError
     let res = match res {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(err)) => Err(err),
+        Ok(Err(err)) => match (&metadata.negative_test, err) {
+            (
+                Some(metadata::NegativeTest {
+                    phase: metadata::Phase::Parse,
+                    ..
+                }),
+                TestError::Load(_),
+            ) => Ok(()),
+            (_, err) => Err(err),
+        },
         Err(panic_value) => {
             let message = match panic_value.downcast_ref::<String>() {
                 Some(s) => format!("{}", s),
@@ -231,7 +240,7 @@ mod metadata {
     #[serde(rename_all = "lowercase")]
     pub enum Phase {
         Parse,
-        Syntax,
+        Resolution,
         Runtime,
     }
 

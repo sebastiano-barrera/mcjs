@@ -2027,7 +2027,7 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
     let source_map: Lrc<SourceMap> = Default::default();
     let err_handler = Handler::with_emitter(
         true, // can_emit_warnings
-        true, // treat_err_as_bug
+        false, // treat_err_as_bug
         Box::new(EmitterWriter::new(
             Box::new(std::io::stderr()),
             Some(source_map.clone()),
