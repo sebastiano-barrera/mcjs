@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use mcjs_vm::interpreter::{Fuel, debugger::Probe};
 use serde::{Deserialize, Serialize};
 
 fn main() {
@@ -159,7 +160,11 @@ fn process_file(
         .load_script(Some(file_path_str), content)
         .map_err(|vm_err| TestError::Load(vm_err))?;
 
-    mcjs_vm::Interpreter::new(realm, loader, chunk_fnid)
+    let mut interpreter = mcjs_vm::Interpreter::new(realm, loader, chunk_fnid);
+    let mut probe = Probe::attach(&mut interpreter);
+    probe.set_fuel(Fuel::Limited(200_000));
+
+    interpreter
         .run()
         .map_err(|intrp_err| TestError::Run(intrp_err.error))?;
 
