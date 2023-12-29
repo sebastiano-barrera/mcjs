@@ -15,7 +15,7 @@
 | /home/sebastiano/src/test262/test/language/expressions/function/early-errors        |    | 4    |                  |
 | /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b1    |    | 2    |                  |
 | /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b2    |    | 3    |                  |
-| /home/sebastiano/src/test262/test/language/function-code                            | 38 | 179  | 17.5115207373272 |
+| /home/sebastiano/src/test262/test/language/function-code                            | 56 | 161  | 25.8064516129032 |
 | /home/sebastiano/src/test262/test/language/statements/if                            | 19 | 50   | 27.536231884058  |
 | /home/sebastiano/src/test262/test/language/statements/labeled                       | 7  | 17   | 29.1666666666667 |
 | /home/sebastiano/src/test262/test/language/statements/let                           | 2  | 19   | 9.52380952380952 |
