@@ -7,12 +7,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 fn main() {
+    let opts = parse_options();
     let config: ConfigFile = {
-        let filename = std::env::args()
-            .skip(1)
-            .next()
-            .expect("usage: mcjs_test262 <path/to/tests.yml>");
-        let rdr = File::open(filename).expect("could not open config file");
+        let rdr = File::open(opts.config_filename).expect("could not open config file");
         serde_json::from_reader(rdr).expect("could not parse config file")
     };
 
@@ -28,6 +25,10 @@ fn main() {
 
     let tests_count = config.testFiles.len();
     for (ndx, file_path) in config.testFiles.iter().enumerate() {
+        if !file_path.contains(&opts.filter) {
+            continue;
+        }
+
         eprintln!("test {}/{}", ndx, tests_count);
 
         let outcome = run_test(TestParams {
@@ -39,6 +40,41 @@ fn main() {
         serde_json::to_writer(&mut stdout, &outcome).unwrap();
         stdout.write(b"\n").unwrap();
     }
+}
+
+struct CliOptions {
+    config_filename: String,
+    filter: String,
+}
+
+impl Default for CliOptions {
+    fn default() -> Self {
+        CliOptions {
+            config_filename: String::new(),
+            filter: String::new(),
+        }
+    }
+}
+
+fn parse_options() -> CliOptions {
+    let mut opts: CliOptions = CliOptions::default();
+    let mut args = std::env::args().skip(1);
+
+    while let Some(arg) = args.next() {
+        if arg == "--filter" {
+            opts.filter = args.next().expect("--filter requires an argument");
+        } else if opts.config_filename.is_empty() {
+            opts.config_filename = arg;
+        } else {
+            panic!("multiple arguments for config filename");
+        }
+    }
+
+    if opts.config_filename.is_empty() {
+        panic!("usage: mcjs_test262 [--filter FILTER] <path/to/tests.yml>");
+    }
+
+    opts
 }
 
 #[allow(non_snake_case)]
