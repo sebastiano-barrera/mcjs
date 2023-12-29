@@ -70,7 +70,7 @@ fn run_test(params: TestParams) -> TestOutcome {
     let paths = [
         params.test262_root.join("harness/assert.js"),
         params.test262_root.join("harness/sta.js"),
-        full_path,
+        full_path.clone(),
     ];
 
     let res = std::panic::catch_unwind(move || {
@@ -106,7 +106,7 @@ fn run_test(params: TestParams) -> TestOutcome {
     };
 
     TestOutcome {
-        file_path: params.file_path.to_owned(),
+        file_path: full_path,
         error: res.err(),
     }
 }

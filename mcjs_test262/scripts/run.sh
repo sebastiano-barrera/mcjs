@@ -3,5 +3,6 @@
 here="$(dirname "$0")"
 cd "$here"
 
-cargo run --release -- tests.json > out.json
+mkdir -p ../out
+cargo run --release -- tests.json > ../out/runs.json
 
