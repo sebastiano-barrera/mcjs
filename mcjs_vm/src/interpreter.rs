@@ -192,6 +192,9 @@ pub struct Interpreter<'a> {
     // know
     loader: &'a mut loader::Loader,
 
+    current_exc: Option<Value>,
+    exc_handler_stack: Vec<ExcHandler>,
+
     sink: Vec<Value>,
     opts: Options,
 
@@ -210,6 +213,17 @@ pub struct Interpreter<'a> {
     ///
     /// See the type, `Fuel`.
     fuel: Fuel,
+}
+
+struct ExcHandler {
+    /// Size/length/height of the stack at the time when the exception handler
+    /// was installed. This is used to pop the correct amount of stack frames as
+    /// we unwind it during handling.
+    stack_height: usize,
+
+    /// IID to jump to.  The instruction is assumed to be in the same function where the exception
+    /// handler was installed (tracked via stack_height).
+    target_iid: IID,
 }
 
 pub enum Fuel {
@@ -311,17 +325,19 @@ impl<'a> Interpreter<'a> {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters
         Interpreter {
+            realm,
             iid: bytecode::IID(0),
             data: init_stack(loader, fnid),
-            realm,
             loader,
+            current_exc: None,
+            exc_handler_stack: Vec::new(),
             sink: Vec::new(),
             opts: Default::default(),
-            #[cfg(enable_jit)]
-            jitting: None,
             instr_bkpts: HashMap::new(),
             source_bkpts: HashMap::new(),
             fuel: Fuel::Unlimited,
+            #[cfg(enable_jit)]
+            jitting: None,
         }
     }
 
@@ -921,9 +937,36 @@ impl<'a> Interpreter<'a> {
                     return Ok(ExitInternal::Suspended);
                 }
 
-                Instr::Throw(_exc_value) => todo!(),
-                Instr::PopExcHandler => {}
-                Instr::PushExcHandler(_target) => {}
+                Instr::Throw(exc_value) => {
+                    self.current_exc = Some(self.get_operand(*exc_value));
+                    let handler = self
+                        .exc_handler_stack
+                        .pop()
+                        .ok_or_else(|| error!("unhandled exception: {:?}", exc_value))?;
+
+                    assert!(handler.stack_height <= self.data.len());
+                    while handler.stack_height < self.data.len() {
+                        // like return, but ignore the return value
+                        self.data.pop();
+                        let (tgt_iid, _) = self.data.top_mut().take_return_target();
+                        self.iid = tgt_iid;
+                    }
+                    assert_eq!(handler.stack_height, self.data.len());
+
+                    self.iid = handler.target_iid;
+                    continue;
+                }
+                Instr::PopExcHandler => {
+                    let handler = self
+                        .exc_handler_stack
+                        .pop()
+                        .ok_or_else(|| error!("compiler bug: no exception handler to pop!"))?;
+                    assert_eq!(handler.stack_height, self.data.len());
+                }
+                Instr::PushExcHandler(target_iid) => self.exc_handler_stack.push(ExcHandler {
+                    stack_height: self.data.len(),
+                    target_iid: *target_iid,
+                }),
             }
 
             tprintln!();
@@ -2175,7 +2218,5 @@ mod tests {
                 };
             "#,
         );
-
-        
     }
 }

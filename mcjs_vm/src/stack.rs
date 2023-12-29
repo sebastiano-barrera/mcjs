@@ -22,8 +22,8 @@ pub(crate) enum Slot {
 
 #[derive(Debug)]
 pub struct FrameHeader {
-    pub regs_offset: u32,
-    pub regs_count: u32,
+    regs_offset: u32,
+    regs_count: u32,
     pub fn_id: bytecode::FnId,
     pub this: Value,
     pub return_target: Option<(IID, VReg)>,

@@ -783,7 +783,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::Empty(_) => {
             // no code needs to be emitted
             Ok(())
-        },
+        }
         Stmt::Debugger(_) => {
             builder.emit(Instr::Breakpoint);
             Ok(())
@@ -870,7 +870,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
         Stmt::Try(try_stmt) => {
             // TODO Allow the catch clause to access the exception object
-            // We reunite the cases by *always* having a catch clause (it will run the finalizer) that there is *always*
+            // We reunite the cases by *always* having a catch clause (it will run the finalizer)
             let push_handler_instr = builder.reserve();
             compile_block_scoped(&mut builder, &try_stmt.block)?;
             builder.emit(Instr::PopExcHandler);
@@ -1317,7 +1317,11 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     let key = builder.new_vreg();
     builder.set_const(key, Literal::String("prototype".to_string()));
     builder.emit(Instr::ObjCreateEmpty(proto));
-    builder.emit(Instr::ObjSet{ obj: dest, key, value: proto });
+    builder.emit(Instr::ObjSet {
+        obj: dest,
+        key,
+        value: proto,
+    });
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
     Ok(dest)
@@ -2026,7 +2030,7 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
 
     let source_map: Lrc<SourceMap> = Default::default();
     let err_handler = Handler::with_emitter(
-        true, // can_emit_warnings
+        true,  // can_emit_warnings
         false, // treat_err_as_bug
         Box::new(EmitterWriter::new(
             Box::new(std::io::stderr()),
