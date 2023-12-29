@@ -324,10 +324,11 @@ impl<'a> Interpreter<'a> {
     pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters
+        let data = init_stack(loader, realm, fnid);
         Interpreter {
             realm,
             iid: bytecode::IID(0),
-            data: init_stack(loader, fnid),
+            data,
             loader,
             current_exc: None,
             exc_handler_stack: Vec::new(),
@@ -345,7 +346,7 @@ impl<'a> Interpreter<'a> {
         self.data = {
             let bottom_frame = self.data.frames().last().unwrap();
             let root_fnid = bottom_frame.header().fn_id;
-            init_stack(self.loader, root_fnid)
+            init_stack(self.loader, self.realm, root_fnid)
         };
         self.iid = bytecode::IID(0);
         self.sink.clear();
@@ -1223,16 +1224,22 @@ impl<'a> Interpreter<'a> {
     }
 }
 
-fn init_stack(loader: &mut loader::Loader, fnid: FnId) -> stack::InterpreterData {
+fn init_stack(
+    loader: &mut loader::Loader,
+    realm: &mut Realm,
+    fnid: FnId,
+) -> stack::InterpreterData {
     let mut data = stack::InterpreterData::new();
     let root_fn = loader.get_function(fnid).unwrap();
     let n_instrs = root_fn.instrs().len().try_into().unwrap();
+
+    let global_this = Value::Object(realm.global_obj);
 
     data.push(stack::CallMeta {
         fnid,
         n_regs: n_instrs,
         captures: &[],
-        this: Value::Undefined,
+        this: global_this,
     });
 
     data
