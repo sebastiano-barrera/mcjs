@@ -428,13 +428,16 @@ impl<'a> Interpreter<'a> {
 
             let instr = func.instrs()[self.iid.0 as usize];
 
-            self.print_indent();
-            tprint!("{:<4}  {:?}", self.iid.0, instr);
-            if let Instr::LoadConst(_, const_ndx) = instr {
-                let lit = &func.consts()[const_ndx.0 as usize];
-                tprint!(" = ({:?})", lit);
+            #[cfg(test)]
+            {
+                self.print_indent();
+                tprint!("{:<4}  {:?}", self.iid.0, instr);
+                if let Instr::LoadConst(_, const_ndx) = instr {
+                    let lit = &func.consts()[const_ndx.0 as usize];
+                    tprint!(" = ({:?})", lit);
+                }
+                tprint!("    ");
             }
-            tprint!("    ");
 
             let mut next_ndx = self.iid.0 + 1;
 
@@ -616,6 +619,7 @@ impl<'a> Interpreter<'a> {
                                 .unwrap_or_else(|| self.get_operand(*this));
 
                             tprintln!("\n     - call with {} params", n_params);
+                            #[cfg(test)]
                             for (i, arg) in arg_vals.iter().enumerate() {
                                 tprintln!("     - call arg[{}]: {:?}", i, arg);
                             }

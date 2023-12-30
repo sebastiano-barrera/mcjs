@@ -205,7 +205,7 @@ async fn view_main(
 }
 
 mod frame_view {
-    use std::{collections::HashMap, ops::Range, rc::Rc};
+    use std::collections::HashMap;
 
     use actix_web::{self, web, HttpResponse};
     use maud::{html, Markup};
@@ -393,13 +393,7 @@ mod frame_view {
             return None;
         }
 
-        let offset_range = {
-            let offset_min = markers.iter().map(|m| m.offset).min().unwrap();
-            let offset_max = markers.iter().map(|m| m.offset).max().unwrap();
-            offset_min..offset_max
-        };
-
-        let frame_src = extract_frame_source(source_map, loader, giid, &*source_file);
+        let frame_src = extract_frame_source(&*source_file, loader, giid);
         let raw_markup = render_source_code(&markers, &frame_src)
             .map(|pre_escaped| pre_escaped.into_string())
             .unwrap_or(String::new());
@@ -736,10 +730,9 @@ mod frame_view {
     }
 
     fn extract_frame_source(
-        source_map: &swc_common::SourceMap,
+        source_file: &swc_common::SourceFile,
         loader: &mcjs_vm::Loader,
         giid: mcjs_vm::GlobalIID,
-        source_file: &swc_common::SourceFile,
     ) -> FrameSource {
         FrameSource {
             text: source_file.src.to_string(),

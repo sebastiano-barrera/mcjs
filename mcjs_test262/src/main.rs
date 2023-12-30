@@ -225,7 +225,6 @@ mod metadata {
     pub enum Error {
         Select,
         Parse(String),
-        Io(std::io::Error),
     }
 
     pub fn parse_header(content: &str) -> Result<Metadata, Error> {
