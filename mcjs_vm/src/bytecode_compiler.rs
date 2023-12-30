@@ -2091,11 +2091,11 @@ mod tests {
                 aFunction: function(pt) { return 42; }
             })"
             .to_string(),
+            Rc::new(Default::default()),
             CompileFlags {
                 min_fnid: 1,
                 source_type: SourceType::Script,
             },
-            Rc::new(Default::default()),
         )
         .unwrap();
 
