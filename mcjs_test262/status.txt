@@ -1,7 +1,7 @@
 +-------------------------------------------------------------------------------------+----+------+------------------+
 |                                       dirname                                       | ok | fail |     progress     |
 +-------------------------------------------------------------------------------------+----+------+------------------+
-| /home/sebastiano/src/test262/test/language/block-scope/leave                        | 12 | 18   | 40.0             |
+| /home/sebastiano/src/test262/test/language/block-scope/leave                        | 9  | 21   | 30.0             |
 | /home/sebastiano/src/test262/test/language/block-scope/return-from                  | 4  |      |                  |
 | /home/sebastiano/src/test262/test/language/block-scope/shadowing                    | 14 | 16   | 46.6666666666667 |
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/for-in                | 6  | 10   | 37.5             |
@@ -9,13 +9,13 @@
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration         | 6  | 183  | 3.17460317460317 |
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration-global  | 6  |      |                  |
 | /home/sebastiano/src/test262/test/language/comments                                 | 36 | 10   | 78.2608695652174 |
-| /home/sebastiano/src/test262/test/language/comments/hashbang                        | 42 | 16   | 72.4137931034483 |
+| /home/sebastiano/src/test262/test/language/comments/hashbang                        | 37 | 21   | 63.7931034482759 |
 | /home/sebastiano/src/test262/test/language/expressions/function                     | 13 | 86   | 13.1313131313131 |
 | /home/sebastiano/src/test262/test/language/expressions/function/dstr                | 12 | 360  | 3.2258064516129  |
 | /home/sebastiano/src/test262/test/language/expressions/function/early-errors        |    | 8    |                  |
 | /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b1    |    | 2    |                  |
 | /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b2    |    | 3    |                  |
-| /home/sebastiano/src/test262/test/language/function-code                            | 41 | 240  | 14.5907473309609 |
+| /home/sebastiano/src/test262/test/language/function-code                            | 38 | 243  | 13.5231316725979 |
 | /home/sebastiano/src/test262/test/language/statements/if                            | 36 | 89   | 28.8             |
 | /home/sebastiano/src/test262/test/language/statements/labeled                       | 12 | 27   | 30.7692307692308 |
 | /home/sebastiano/src/test262/test/language/statements/let                           | 4  | 37   | 9.75609756097561 |
