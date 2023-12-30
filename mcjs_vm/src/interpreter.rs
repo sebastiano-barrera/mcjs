@@ -123,10 +123,10 @@ impl std::fmt::Debug for Closure {
 slotmap::new_key_type! { pub struct UpvalueId; }
 
 pub struct Options {
-    pub debug_dump_module: bool,
-    pub indent_level: u8,
+    #[cfg(enable_jit)]
     pub jit_mode: JitMode,
 }
+#[cfg(enable_jit)]
 #[derive(Clone, Copy, Debug)]
 pub enum JitMode {
     Compile,
@@ -136,8 +136,7 @@ pub enum JitMode {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            debug_dump_module: false,
-            indent_level: 0,
+            #[cfg(enable_jit)]
             jit_mode: JitMode::UseTraces,
         }
     }
