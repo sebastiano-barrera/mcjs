@@ -22,25 +22,83 @@ fn main() {
         );
     }
 
-    let mut stdout = std::io::stdout().lock();
-
     let tests_count = config.testFiles.len();
     for (ndx, file_path) in config.testFiles.iter().enumerate() {
         if !file_path.contains(&opts.filter) {
             continue;
         }
-
         eprintln!("test {}/{}", ndx, tests_count);
 
-        let outcome = run_test(TestParams {
-            test262_root: &test262_root,
-            file_path: Path::new(file_path),
-        });
+        let full_path = &test262_root.join(file_path);
+        let metadata = match parse_metadata(full_path) {
+            // TODO Try instead!
+            Ok(metadata) => metadata,
+            Err(err) => {
+                write_outcome(TestOutcome {
+                    file_path: full_path.to_path_buf(),
+                    error: Some(err),
+                    is_strict: false,
+                });
+                continue;
+            }
+        };
 
-        // one json per line
-        serde_json::to_writer(&mut stdout, &outcome).unwrap();
-        stdout.write_all(b"\n").unwrap();
+        let negative_test = &metadata.negative_test;
+
+        if metadata.is_strict {
+            let params = TestParams {
+                test262_root: &test262_root,
+                file_path: Path::new(file_path),
+                is_strict: true,
+            };
+            run_and_write(&params, negative_test);
+        }
+
+        if metadata.is_nostrict {
+            let params = TestParams {
+                test262_root: &test262_root,
+                file_path: Path::new(file_path),
+                is_strict: false,
+            };
+            run_and_write(&params, negative_test);
+        }
     }
+}
+
+fn run_and_write(params: &TestParams, negative_test: &Option<metadata::NegativeTest>) {
+    let test_error = run_test(&params).err();
+    let test_error = filter_expected_error(negative_test, test_error);
+    let outcome = TestOutcome {
+        file_path: params.test262_root.join(params.file_path),
+        error: test_error,
+        is_strict: params.is_strict,
+    };
+    write_outcome(outcome);
+}
+
+fn write_outcome(outcome: TestOutcome) {
+    // one json per line
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &outcome).unwrap();
+    stdout.write_all(b"\n").unwrap();
+}
+
+// Turn expected errors into Ok's
+fn filter_expected_error(
+    negative_test: &Option<metadata::NegativeTest>,
+    test_error: Option<TestError>,
+) -> Option<TestError> {
+    let test_error = match (negative_test, test_error) {
+        (
+            Some(metadata::NegativeTest {
+                phase: metadata::Phase::Parse,
+                ..
+            }),
+            Some(TestError::Load(_)),
+        ) => None,
+        (_, err) => err,
+    };
+    test_error
 }
 
 #[derive(Default)]
@@ -77,24 +135,8 @@ struct ConfigFile {
     testFiles: Vec<String>,
 }
 
-fn run_test(params: TestParams) -> TestOutcome {
+fn run_test(params: &TestParams) -> Result<(), TestError> {
     let full_path = params.test262_root.join(params.file_path);
-
-    let metadata = {
-        let mut f = File::open(&full_path).unwrap();
-        let mut content = String::new();
-        f.read_to_string(&mut content).unwrap();
-        match metadata::parse_header(&content) {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                let message = format!("{:?}", err);
-                return TestOutcome {
-                    file_path: full_path,
-                    error: Some(TestError::HeaderParse(message)),
-                };
-            }
-        }
-    };
 
     let paths = [
         params.test262_root.join("harness/assert.js"),
@@ -102,29 +144,23 @@ fn run_test(params: TestParams) -> TestOutcome {
         full_path.clone(),
     ];
 
+    let options = mcjs_vm::Options {
+        strict: params.is_strict,
+    };
     let res = std::panic::catch_unwind(move || {
         let mut loader = mcjs_vm::Loader::new(None);
         let mut realm = mcjs_vm::Realm::new();
 
         for file_path in paths {
-            process_file(&file_path, &mut realm, &mut loader)?;
+            process_file(&file_path, options.clone(), &mut realm, &mut loader)?;
         }
         Ok(())
     });
 
     // Flatten a panic into a regular TestError
-    let res = match res {
+    match res {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(err)) => match (&metadata.negative_test, err) {
-            (
-                Some(metadata::NegativeTest {
-                    phase: metadata::Phase::Parse,
-                    ..
-                }),
-                TestError::Load(_),
-            ) => Ok(()),
-            (_, err) => Err(err),
-        },
+        Ok(Err(err)) => Err(err),
         Err(panic_value) => {
             let message = match panic_value.downcast_ref::<String>() {
                 Some(s) => s.to_string(),
@@ -132,16 +168,24 @@ fn run_test(params: TestParams) -> TestOutcome {
             };
             Err(TestError::Panic(message))
         }
-    };
-
-    TestOutcome {
-        file_path: full_path,
-        error: res.err(),
     }
+}
+
+fn parse_metadata(full_path: &PathBuf) -> Result<metadata::Metadata, TestError> {
+    let mut f = File::open(full_path).unwrap();
+    let mut content = String::new();
+    f.read_to_string(&mut content).unwrap();
+
+    let metadata = metadata::parse_header(&content).map_err(|err| {
+        let message = format!("{:?}", err);
+        TestError::HeaderParse(message)
+    })?;
+    Ok(metadata)
 }
 
 fn process_file(
     file_path: &Path,
+    options: mcjs_vm::Options,
     realm: &mut mcjs_vm::Realm,
     loader: &mut mcjs_vm::Loader,
 ) -> Result<(), TestError> {
@@ -152,7 +196,7 @@ fn process_file(
         .load_script(Some(file_path_str), content)
         .map_err(TestError::Load)?;
 
-    let mut interpreter = mcjs_vm::Interpreter::new(realm, loader, chunk_fnid);
+    let mut interpreter = mcjs_vm::Interpreter::with_options(options, realm, loader, chunk_fnid);
     let mut probe = Probe::attach(&mut interpreter);
     probe.set_fuel(Fuel::Limited(200_000));
 
@@ -166,12 +210,14 @@ fn process_file(
 struct TestParams<'a> {
     test262_root: &'a Path,
     file_path: &'a Path,
+    is_strict: bool,
 }
 
 #[derive(Serialize)]
 struct TestOutcome {
     file_path: PathBuf,
     error: Option<TestError>,
+    is_strict: bool,
 }
 
 #[derive(Debug)]

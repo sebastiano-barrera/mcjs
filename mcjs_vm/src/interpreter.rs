@@ -122,7 +122,9 @@ impl std::fmt::Debug for Closure {
 
 slotmap::new_key_type! { pub struct UpvalueId; }
 
+#[derive(Clone)]
 pub struct Options {
+    pub strict: bool,
     #[cfg(enable_jit)]
     pub jit_mode: JitMode,
 }
@@ -136,6 +138,7 @@ pub enum JitMode {
 impl Default for Options {
     fn default() -> Self {
         Options {
+            strict: true,
             #[cfg(enable_jit)]
             jit_mode: JitMode::UseTraces,
         }
@@ -322,6 +325,16 @@ struct Jitting {
 
 impl<'a> Interpreter<'a> {
     pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
+        let opts = Default::default();
+        Self::with_options(opts, realm, loader, fnid)
+    }
+
+    pub fn with_options(
+        opts: Options,
+        realm: &'a mut Realm,
+        loader: &'a mut loader::Loader,
+        fnid: bytecode::FnId,
+    ) -> Self {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters
         let data = init_stack(loader, realm, fnid);
@@ -333,7 +346,7 @@ impl<'a> Interpreter<'a> {
             current_exc: None,
             exc_handler_stack: Vec::new(),
             sink: Vec::new(),
-            opts: Default::default(),
+            opts,
             instr_bkpts: HashMap::new(),
             source_bkpts: HashMap::new(),
             fuel: Fuel::Unlimited,
@@ -616,6 +629,16 @@ impl<'a> Interpreter<'a> {
                             let this = closure
                                 .forced_this
                                 .unwrap_or_else(|| self.get_operand(*this));
+                            // "this" substitution: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
+                            // If I understand this correctly, we don't need to box anything right
+                            // now.  We just pass the value, and the callee will box it when
+                            // needed.
+                            let this = match (self.opts.strict, this) {
+                                (false, Value::Null | Value::Undefined) => {
+                                    Value::Object(self.realm.global_obj)
+                                }
+                                (_, other) => other,
+                            };
 
                             tprintln!("\n     - call with {} params", n_params);
                             #[cfg(test)]

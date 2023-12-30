@@ -65,6 +65,7 @@ TESTCASES = TableSchema.new 'testcases', {
 
 RUNS = TableSchema.new 'runs', {
   :path => Field.new(type: 'varchar'),
+  :is_strict => Field.new(type: 'boolean'),
   :error_category => Field.new(type: 'varchar'),
   :error_message => Field.new(type: 'varchar'),
 }

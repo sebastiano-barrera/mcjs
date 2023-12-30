@@ -31,6 +31,7 @@ db.transaction do
   runs.each do |run|
     record = {
       :path => run["file_path"],
+      :is_strict => run["is_strict"] ? 1 : 0,
       :error_category => run.deep_get("error", "category"),
       :error_message => run.deep_get("error", "message"),
     }
