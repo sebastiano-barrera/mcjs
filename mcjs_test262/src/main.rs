@@ -152,7 +152,7 @@ fn run_test(params: &TestParams) -> Result<(), TestError> {
             let file_path_str = (&file_path).to_string_lossy().into_owned();
             let mut content = std::fs::read_to_string(&file_path).map_err(TestError::Read)?;
             if params.is_strict {
-                content.insert_str(0, "\"use strict\"\n");
+                content.insert_str(0, "\"use strict\";");
             }
 
             let chunk_fnid = loader
