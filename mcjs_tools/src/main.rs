@@ -205,7 +205,7 @@ async fn view_main(
 }
 
 mod frame_view {
-    use std::{collections::HashMap, ops::Range};
+    use std::{collections::HashMap, ops::Range, rc::Rc};
 
     use actix_web::{self, web, HttpResponse};
     use maud::{html, Markup};
@@ -378,8 +378,17 @@ mod frame_view {
 
         let loader = probe.loader();
         let source_map = loader.get_source_map(fnid.0)?;
-        let break_ranges = loader.function_breakranges(fnid).unwrap();
-        let markers: Vec<_> = markers_for_breakranges(break_ranges);
+        let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
+
+        // All break ranges must belong to the same file, so we just peek one and use it to get a
+        // ptr to that swc_common::SourceFile.
+        // Then we use source file's offset in the source map to make sure that the markers are
+        // expressed in file-local offsets.
+        let (_, brange) = break_ranges.peek()?;
+        let source_file = source_map.lookup_byte_offset(brange.lo).sf;
+        let file_start = source_file.start_pos.0;
+
+        let markers: Vec<_> = markers_for_breakranges(break_ranges, file_start);
         if markers.is_empty() {
             return None;
         }
@@ -390,8 +399,7 @@ mod frame_view {
             offset_min..offset_max
         };
 
-        let frame_src = extract_frame_source(source_map, loader, giid, offset_range)?;
-
+        let frame_src = extract_frame_source(source_map, loader, giid, &*source_file);
         let raw_markup = render_source_code(&markers, &frame_src)
             .map(|pre_escaped| pre_escaped.into_string())
             .unwrap_or(String::new());
@@ -464,9 +472,7 @@ mod frame_view {
     struct FrameSource {
         text: String,
         start_line: usize,
-        start_offset: swc_common::BytePos,
         end_line: usize,
-        end_offset: swc_common::BytePos,
         line_focus: Option<usize>,
     }
 
@@ -502,12 +508,11 @@ mod frame_view {
 
             let mut pre_escaped_code = String::new();
 
-            let offset = frame_src.start_offset.0 as usize;
-            let mut prev_end = offset;
+            let mut prev_end = 0;
 
             for marker in markers {
                 let mkr_offset = marker.offset as usize;
-                let text = &frame_src.text[prev_end - offset..mkr_offset - offset];
+                let text = &frame_src.text[prev_end..mkr_offset];
                 write!(pre_escaped_code, "{}", text).unwrap();
 
                 match marker.kind {
@@ -545,7 +550,7 @@ mod frame_view {
                 prev_end = mkr_offset;
             }
 
-            let text_tail = &frame_src.text[prev_end as usize - offset..];
+            let text_tail = &frame_src.text[prev_end..];
             write!(pre_escaped_code, "{}", text_tail).unwrap();
 
             maud::PreEscaped(pre_escaped_code)
@@ -734,46 +739,19 @@ mod frame_view {
         source_map: &swc_common::SourceMap,
         loader: &mcjs_vm::Loader,
         giid: mcjs_vm::GlobalIID,
-        offset_range: Range<u32>,
-    ) -> Option<FrameSource> {
-        use std::cmp::{max, min};
-        use swc_common::BytePos;
-
-        // NOTE We're making a distinct source map per file, but the API clearly
-        // supports a single source map for multiple files.  Should I use it?
-        let files = source_map.files();
-        let source_file = files.first().unwrap();
-
-        let line_focus = line_index_of_giid(loader, giid, source_file);
-
-        // Snap offset_range to line boundaries
-        let start = max(0, offset_range.start - 150);
-        let start_line = source_file.lookup_line(BytePos(start)).unwrap();
-        let (start_offset, _) = source_file.line_bounds(start_line);
-        let start_offset0 = start_offset.0 as usize - 1;
-
-        let end = min(
-            (source_file.src.len() - 1).try_into().unwrap(),
-            offset_range.end + 150,
-        );
-        let end_line = source_file.lookup_line(BytePos(end)).unwrap();
-        let (_, end_offset) = source_file.line_bounds(end_line);
-        let end_offset0 = end_offset.0 as usize - 1;
-
-        let text = &source_file.src[start_offset0..end_offset0];
-
-        Some(FrameSource {
-            text: text.to_string(),
-            line_focus,
-            start_line,
-            start_offset,
-            end_line,
-            end_offset,
-        })
+        source_file: &swc_common::SourceFile,
+    ) -> FrameSource {
+        FrameSource {
+            text: source_file.src.to_string(),
+            line_focus: line_index_of_giid(loader, giid, &source_file),
+            start_line: 0,
+            end_line: source_file.count_lines(),
+        }
     }
 
     fn markers_for_breakranges<'a>(
         break_ranges: impl Iterator<Item = (BreakRangeID, &'a bytecode::BreakRange)>,
+        file_start: u32,
     ) -> Vec<break_range::Marker> {
         use break_range::*;
 
@@ -784,8 +762,8 @@ mod frame_view {
                 iid_start, iid_end, ..
             } = *brange;
 
-            let lo = brange.lo.0;
-            let hi = brange.hi.0;
+            let lo = brange.lo.0 - file_start;
+            let hi = brange.hi.0 - file_start;
 
             markers.push(Marker {
                 kind: MarkerKind::Start {
@@ -810,7 +788,6 @@ mod frame_view {
 
     fn get_filename(source_file: &swc_common::SourceFile) -> Option<String> {
         let file_name = &source_file.name;
-        eprintln!("sourceFile <- {:?}", file_name);
         match file_name {
             swc_common::FileName::Real(path) => Some(path.to_string_lossy().into_owned()),
             _ => None,

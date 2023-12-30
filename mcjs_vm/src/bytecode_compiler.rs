@@ -22,8 +22,8 @@ macro_rules! unsupported_node {
 }
 
 /// The state we need to track to compile a single module.  Among other things,
-/// this includes things like tracking lexical scopes (which are resolved
-/// simple, scope-independent IDs), FnId generation.
+/// this includes things like tracking lexical scopes (so that variables are
+/// resolved to simple, scope-independent IDs), FnId generation.
 struct Builder {
     fns: HashMap<LocalFnId, FnBuilder>,
     fn_stack: Vec<FnBuilder>,
@@ -129,11 +129,12 @@ pub enum SourceType {
 pub fn compile_file(
     filename: String,
     content: String,
+    source_map: Lrc<SourceMap>,
     flags: CompileFlags,
 ) -> Result<CompiledChunk> {
     use crate::common::Context;
 
-    let (source_map, ast_module) = parse_file(filename.clone(), content)
+    let ast_module = parse_file(filename.clone(), content, Lrc::clone(&source_map))
         .with_context(error!("while parsing file: {filename}"))?;
 
     let compiled_mod = compile_module(&ast_module, flags).with_context(
@@ -2028,7 +2029,11 @@ fn compile_assignment_rhs(
     builder.write_var(&lhs, lhs_value);
 }
 
-fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_ecma_ast::Module)> {
+fn parse_file(
+    filename: String,
+    content: String,
+    source_map: Lrc<SourceMap>,
+) -> Result<swc_ecma_ast::Module> {
     use swc_common::{
         errors::{emitter::EmitterWriter, Handler},
         sync::Lrc,
@@ -2037,7 +2042,6 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
     use swc_ecma_ast::EsVersion;
     use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
-    let source_map: Lrc<SourceMap> = Default::default();
     let err_handler = Handler::with_emitter(
         true,  // can_emit_warnings
         false, // treat_err_as_bug
@@ -2065,13 +2069,10 @@ fn parse_file(filename: String, content: String) -> Result<(Lrc<SourceMap>, swc_
         e.into_diagnostic(&err_handler).emit();
     }
 
-    match parser.parse_module() {
-        Ok(ast_module) => Ok((source_map, ast_module)),
-        Err(e) => {
-            e.into_diagnostic(&err_handler).emit();
-            Err(error!("parse error"))
-        }
-    }
+    parser.parse_module().map_err(|e| {
+        e.into_diagnostic(&err_handler).emit();
+        error!("parse error")
+    })
 }
 
 #[cfg(test)]
@@ -2094,6 +2095,7 @@ mod tests {
                 min_fnid: 1,
                 source_type: SourceType::Script,
             },
+            Rc::new(Default::default()),
         )
         .unwrap();
 

@@ -78,6 +78,11 @@ struct Package {
 
 struct Script {
     max_fnid: u16,
+    // In order to share a single set of breakable ranges among all script chunks, we need to
+    // have a single source map (and a single module ID, but we have bytecode::SCRIPT_MODULE_ID
+    // already).
+    source_map: Rc<swc_common::SourceMap>,
+    breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
 /// Represent where an import statement comes from (i.e., from a specific module or a
@@ -103,7 +108,11 @@ impl Loader {
             base_path,
             next_module_id: 1,
             next_package_id: 1,
-            script: Script { max_fnid: 0 },
+            script: Script {
+                max_fnid: 0,
+                source_map: Rc::new(swc_common::SourceMap::default()),
+                breakable_ranges: Vec::new(),
+            },
             functions: HashMap::new(),
             modules: HashMap::new(),
             packages: HashMap::new(),
@@ -258,7 +267,7 @@ impl Loader {
             ))
         })?;
 
-        // TODO Remove this impedance mismatch between PathBufs and Strings
+        let source_map = Rc::new(Default::default());
         let flags = bytecode_compiler::CompileFlags {
             min_fnid: 1,
             source_type: bytecode_compiler::SourceType::Module,
@@ -271,6 +280,7 @@ impl Loader {
         } = bytecode_compiler::compile_file(
             module_path.to_string_lossy().into_owned(),
             content,
+            source_map,
             flags,
         )?;
 
@@ -319,22 +329,27 @@ impl Loader {
         let filename = filename.unwrap_or_else(|| "<input>".to_string());
         let min_fnid = self.script.max_fnid + 1;
 
+        let source_map = Rc::clone(&self.script.source_map);
         let flags = bytecode_compiler::CompileFlags {
             min_fnid,
             source_type: bytecode_compiler::SourceType::Script,
         };
-        let compiled = bytecode_compiler::compile_file(filename, content, flags)?;
+        let compiled = bytecode_compiler::compile_file(filename, content, source_map, flags)?;
 
         assert!(compiled.functions.keys().all(|lfnid| lfnid.0 >= min_fnid));
         if let Some(cur_max_fnid) = compiled.functions.keys().max() {
             self.script.max_fnid = cur_max_fnid.0;
         } else {
             // No change if no function was compiled
+            debug_assert!(compiled.breakable_ranges.is_empty());
         }
 
         // Note that we discard everything other than the functions (e.g.
         // source_map, breakable_ranges)
         self.add_functions(compiled.functions.into_iter(), bytecode::SCRIPT_MODULE_ID);
+        self.script
+            .breakable_ranges
+            .extend(compiled.breakable_ranges.into_iter());
 
         Ok(bytecode::FnId(
             bytecode::SCRIPT_MODULE_ID,
@@ -347,15 +362,10 @@ impl Loader {
         module_id: bytecode::ModuleId,
         byte_pos: swc_common::BytePos,
     ) -> Result<Vec<(BreakRangeID, &'a bytecode::BreakRange)>> {
-        if module_id == bytecode::SCRIPT_MODULE_ID {
-            return Err(error!("breakpoints can't be put on script code"));
-        }
-
-        let module = self.get_module(module_id)?;
         // TODO Scanning the whole set every time resolve_loc is called may not be ideal. Interval
         // tree?
-        Ok(module
-            .breakable_ranges
+        Ok(self
+            .module_breakranges(module_id)?
             .iter()
             .enumerate()
             .map(|(ndx, brange)| (BreakRangeID(module_id, ndx), brange))
@@ -380,12 +390,9 @@ impl Loader {
     ) -> Option<impl Iterator<Item = (BreakRangeID, &bytecode::BreakRange)>> {
         let bytecode::FnId(mod_id, lfnid) = fnid;
 
-        let module = self.get_module(mod_id).ok()?;
-        // TODO We scan the whole vector every time.  This can be solved by segregating
-        // breakable_ranges by function, or with an index data structure.  But for now, I can't be
-        // bothered
-        let branges = module
-            .breakable_ranges
+        let branges = self
+            .module_breakranges(mod_id)
+            .ok()?
             .iter()
             .enumerate()
             .filter(move |(_, brange)| brange.local_fnid == lfnid)
@@ -393,10 +400,26 @@ impl Loader {
         Some(branges)
     }
 
+    fn module_breakranges(&self, mod_id: crate::ModuleId) -> Result<&Vec<bytecode::BreakRange>> {
+        if mod_id == bytecode::SCRIPT_MODULE_ID {
+            Ok(&self.script.breakable_ranges)
+        } else {
+            let module = self.get_module(mod_id)?;
+            // TODO We scan the whole vector every time.  This can be solved by segregating
+            // breakable_ranges by function, or with an index data structure.  But for now, I can't be
+            // bothered
+            Ok(&module.breakable_ranges)
+        }
+    }
+
     pub fn get_break_range(&self, brange_id: BreakRangeID) -> Option<&bytecode::BreakRange> {
         let BreakRangeID(mod_id, ndx) = brange_id;
-        let module = self.get_module(mod_id).ok()?;
-        module.breakable_ranges.get(ndx)
+        if mod_id == bytecode::SCRIPT_MODULE_ID {
+            self.script.breakable_ranges.get(ndx)
+        } else {
+            let module = self.get_module(mod_id).ok()?;
+            module.breakable_ranges.get(ndx)
+        }
     }
 
     /// Resolve the given path to a module ID.
@@ -425,8 +448,12 @@ impl Loader {
     }
 
     pub fn get_source_map(&self, module_id: bytecode::ModuleId) -> Option<&swc_common::SourceMap> {
-        let module = self.modules.get(&module_id)?;
-        Some(Rc::as_ref(&module.source_map))
+        let source_map_rc = if module_id == bytecode::SCRIPT_MODULE_ID {
+            &self.script.source_map
+        } else {
+            &self.modules.get(&module_id)?.source_map
+        };
+        Some(Rc::as_ref(source_map_rc))
     }
 
     // TODO(performance) Does it make sense to mmap the input file?
