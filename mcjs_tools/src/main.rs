@@ -1220,17 +1220,13 @@ mod model {
             let source_breakpoints = probe
                 .source_breakpoints()
                 .map(|(brid, _)| {
-                    let filename = loader
-                        .get_abs_path(brid.module_id())
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned();
                     let brange = loader.get_break_range(brid).unwrap();
 
                     // TODO Reduce number of calls to get_source_map
                     // (Ideally reduce everything to a single source map)
                     let source_map = loader.get_source_map(brid.module_id()).unwrap();
                     let loc = source_map.lookup_char_pos(brange.lo);
+                    let filename = loc.file.name.to_string();
                     let line = loc.line.try_into().unwrap();
                     SourceBreakpoint { line, filename }
                 })
