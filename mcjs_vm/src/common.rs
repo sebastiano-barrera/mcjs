@@ -90,7 +90,7 @@ impl std::fmt::Debug for Error {
 macro_rules! error {
     ($($args:expr),+) => {{
         let message = format!($($args),*);
-        crate::common::Error::new(message, file!().to_owned(), line!())
+        $crate::common::Error::new(message, file!().to_owned(), line!())
     }}
 }
 
@@ -140,7 +140,7 @@ impl Error {
         buf
     }
 
-    pub fn messages<'a>(&'a self) -> impl 'a + Iterator<Item = String> {
+    pub fn messages(&self) -> impl '_ + Iterator<Item = String> {
         std::iter::once(&self.head)
             .chain(self.chain.iter())
             .map(|item| {

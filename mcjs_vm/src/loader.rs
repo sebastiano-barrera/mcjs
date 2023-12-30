@@ -51,13 +51,15 @@ struct Module {
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub struct BreakRangeID(bytecode::ModuleId, usize);
 
+impl std::fmt::Display for BreakRangeID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{},{}", self.0 .0, self.1)
+    }
+}
+
 impl BreakRangeID {
     pub fn module_id(&self) -> bytecode::ModuleId {
         self.0
-    }
-
-    pub fn to_string(&self) -> String {
-        format!("{},{}", self.0 .0, self.1)
     }
 
     pub fn parse_string(s: &str) -> Option<Self> {
@@ -172,9 +174,8 @@ impl Loader {
         // The starting point is the module's parent package
         let base_path = match import_site {
             bytecode::SCRIPT_MODULE_ID =>
-                self.base_path.as_ref()
-                .map(|pb| pb.as_path())
-                .ok_or_else(|| error!("imports not allowed in script context, because no base path configured for this Loader"))?,
+                self.base_path.as_deref()
+                    .ok_or_else(|| error!("imports not allowed in script context, because no base path configured for this Loader"))?,
 
             import_site => self.get_module(import_site)?
                 .abs_path
@@ -187,9 +188,9 @@ impl Loader {
             let import_path = Path::new(&import_path);
             debug_assert!(import_path.is_relative());
             base_path.join(import_path)
-        } else if is_valid_package_name(&import_path) {
+        } else if is_valid_package_name(import_path) {
             // Package name ("bare import specifier")
-            let pkg_id = self.resolve_package_import(&base_path, &import_path)?;
+            let pkg_id = self.resolve_package_import(&base_path, import_path)?;
             let pkg = self.packages.get(&pkg_id).unwrap();
             let mod_path = pkg.root_path.join(&pkg.main_filename);
 
@@ -223,7 +224,7 @@ impl Loader {
 
         eprintln!("resolving package import {}", pkg_name);
         let pkg_id = 'cycle: loop {
-            let pkg_dir = cur_dir.join("node_modules").join(&pkg_name);
+            let pkg_dir = cur_dir.join("node_modules").join(pkg_name);
             eprintln!(" - checking in {}", pkg_dir.to_string_lossy());
             if let Some(pkg_id) = self.pkg_of_path.get(&pkg_dir) {
                 break 'cycle *pkg_id;
@@ -260,7 +261,7 @@ impl Loader {
             return Ok(bytecode::FnId(*mod_id, module.root_fnid));
         }
 
-        let content = std::fs::read_to_string(&module_path).map_err(|err| {
+        let content = std::fs::read_to_string(module_path).map_err(|err| {
             Error::from(err).with_context(error!(
                 "while loading module `{}`",
                 module_path.to_string_lossy()
@@ -349,7 +350,7 @@ impl Loader {
         self.add_functions(compiled.functions.into_iter(), bytecode::SCRIPT_MODULE_ID);
         self.script
             .breakable_ranges
-            .extend(compiled.breakable_ranges.into_iter());
+            .extend(compiled.breakable_ranges);
 
         Ok(bytecode::FnId(
             bytecode::SCRIPT_MODULE_ID,
@@ -357,11 +358,11 @@ impl Loader {
         ))
     }
 
-    pub fn resolve_break_loc<'a>(
-        &'a self,
+    pub fn resolve_break_loc(
+        &self,
         module_id: bytecode::ModuleId,
         byte_pos: swc_common::BytePos,
-    ) -> Result<Vec<(BreakRangeID, &'a bytecode::BreakRange)>> {
+    ) -> Result<Vec<(BreakRangeID, &bytecode::BreakRange)>> {
         // TODO Scanning the whole set every time resolve_loc is called may not be ideal. Interval
         // tree?
         Ok(self
@@ -485,7 +486,7 @@ fn resolve_path_by_suffix<'a>(
 fn is_valid_package_name(import_path: &str) -> bool {
     import_path
         .chars()
-        .all(|ch| ch.is_alphabetic() || ch.is_digit(10) || ch == '-' || ch == '_')
+        .all(|ch| ch.is_alphabetic() || ch.is_ascii_digit() || ch == '-' || ch == '_')
 }
 
 // Private: packages are only loaded as part of the  'import' implementation (load_import)

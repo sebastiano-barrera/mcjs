@@ -60,7 +60,7 @@ where
     {
         let mut arr = [None; N];
         for (i, item) in iter.enumerate() {
-            arr[i] = Some(item.clone());
+            arr[i] = Some(item);
         }
         LimVec(arr)
     }

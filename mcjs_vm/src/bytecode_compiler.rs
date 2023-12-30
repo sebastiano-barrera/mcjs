@@ -319,7 +319,7 @@ impl FnBuilder {
 
     fn define_var(&mut self, name: JsWord, reg: VReg) {
         let scope = self.inner_scope_mut();
-        let prev = scope.vars.insert(name.clone(), reg.clone());
+        let prev = scope.vars.insert(name.clone(), reg);
         if prev.is_some() {
             // definition of var $name shadows previous definition
         }
@@ -672,7 +672,7 @@ fn compile_module(
                     Decl::Fn(_) => {}
                     // Only do assignment part
                     Decl::Var(var_decl) => {
-                        compile_var_decl_assignment(&mut builder, &*var_decl)?;
+                        compile_var_decl_assignment(&mut builder, var_decl)?;
                     }
                     Decl::Class(_)
                     | Decl::TsInterface(_)
@@ -686,16 +686,16 @@ fn compile_module(
                     swc_ecma_ast::DefaultDecl::Class(_) => todo!("export default class"),
                     swc_ecma_ast::DefaultDecl::Fn(fn_expr) => {
                         let name = fn_expr.ident.as_ref().map(|ident| ident.sym.clone());
-                        let vreg = compile_function(&mut builder, name, &*fn_expr.function)?;
+                        let vreg = compile_function(&mut builder, name, &fn_expr.function)?;
                         mod_default_export = Some(vreg);
                     }
                     swc_ecma_ast::DefaultDecl::TsInterfaceDecl(ts_decl) => eprintln!(
                         "warning: discarded TypeScript interface export: {}",
-                        ts_decl.id.to_string()
+                        ts_decl.id
                     ),
                 },
                 ModuleDecl::ExportDefaultExpr(decl) => {
-                    let vreg = compile_expr(&mut builder, &*decl.expr)?;
+                    let vreg = compile_expr(&mut builder, &decl.expr)?;
                     mod_default_export = Some(vreg);
                 }
                 ModuleDecl::ExportAll(_) => todo!("export all"),
@@ -864,7 +864,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         }
 
         Stmt::Throw(throw_stmt) => {
-            let exception = compile_expr(&mut builder, &*throw_stmt.arg)?;
+            let exception = compile_expr(&mut builder, &throw_stmt.arg)?;
             builder.emit(Instr::Throw(exception));
             Ok(())
         }
@@ -918,8 +918,8 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
         Stmt::DoWhile(stmt) => {
             let loop_start = builder.peek_iid();
-            compile_stmt(&mut builder, &*stmt.body)?;
-            let cond = compile_expr(&mut builder, &*stmt.test)?;
+            compile_stmt(&mut builder, &stmt.body)?;
+            let cond = compile_expr(&mut builder, &stmt.test)?;
             builder.emit(Instr::JmpIf {
                 cond,
                 dest: loop_start,
@@ -936,11 +936,11 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                     VarDeclOrExpr::VarDecl(var_decl) => {
                         // This one we don't need to hoist really.  The for statement has its own
                         // scope.
-                        compile_var_decl_namedef(&mut builder, &var_decl);
-                        compile_var_decl_assignment(&mut builder, &var_decl)?;
+                        compile_var_decl_namedef(&mut builder, var_decl);
+                        compile_var_decl_assignment(&mut builder, var_decl)?;
                     }
                     VarDeclOrExpr::Expr(expr) => {
-                        compile_expr(&mut builder, &expr)?;
+                        compile_expr(&mut builder, expr)?;
                     }
                 }
             }
@@ -948,7 +948,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             let loop_start = builder.peek_iid();
             let not_cond = match &stmt.test {
                 Some(test) => {
-                    let cond = compile_expr(&mut builder, &*test)?;
+                    let cond = compile_expr(&mut builder, test)?;
                     let not_cond = builder.new_vreg();
                     builder.emit(Instr::BoolNot {
                         dest: not_cond,
@@ -964,7 +964,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
             let continue_target = builder.peek_iid();
             if let Some(update) = &stmt.update {
-                compile_expr(&mut builder, &*update)?;
+                compile_expr(&mut builder, update)?;
             }
 
             builder.emit(Instr::Jmp(loop_start));
@@ -1110,7 +1110,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         // Function declarations are be processed in a dedicated phase, not here.
         // The assignment part of variable declarations is evaluated here instead.
         // See [#hoisting]
-        Stmt::Decl(Decl::Var(var_decl)) => compile_var_decl_assignment(&mut builder, &var_decl),
+        Stmt::Decl(Decl::Var(var_decl)) => compile_var_decl_assignment(&mut builder, var_decl),
         Stmt::Decl(Decl::Fn(_)) => Ok(()),
 
         Stmt::Expr(expr) => {
@@ -1367,7 +1367,7 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
             compile_block(builder, &block.stmts)?;
         }
         swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
-            compile_expr(builder, &*expr)?;
+            compile_expr(builder, expr)?;
         }
     }
 
@@ -1468,14 +1468,14 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             let (this, callee) = match callee.as_ref() {
                 Expr::Member(member_expr) => {
                     let MemberAccess { obj, key: _, value } =
-                        compile_member_access(&mut builder, &member_expr)?;
+                        compile_member_access(&mut builder, member_expr)?;
                     (obj, value)
                 }
                 other_expr => {
                     let this = builder.new_vreg();
                     builder.set_const(this, bytecode::Literal::Undefined);
 
-                    let callee_func = compile_expr(&mut builder, &other_expr)?;
+                    let callee_func = compile_expr(&mut builder, other_expr)?;
                     (this, callee_func)
                 }
             };
@@ -1616,7 +1616,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                             builder.set_const(key, name);
 
                             let value =
-                                compile_function(&mut builder, None, &*method_prop.function)?;
+                                compile_function(&mut builder, None, &method_prop.function)?;
 
                             builder.emit(Instr::ObjSet { obj, key, value });
                         }
@@ -1809,7 +1809,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             }
 
             let ret = builder.new_vreg();
-            let callee = compile_expr(&mut builder, &*new_expr.callee)?;
+            let callee = compile_expr(&mut builder, &new_expr.callee)?;
             compile_new(&mut builder, callee, ret, &arg_regs);
             Ok(ret)
         }
@@ -1998,7 +1998,7 @@ fn compile_assignment_rhs(
     lhs: &Var,
     rhs: VReg,
 ) {
-    let lhs_value = builder.read_var(&lhs);
+    let lhs_value = builder.read_var(lhs);
 
     type InstrCons = fn(VReg, VReg, VReg) -> Instr;
     let mut xform_value = |lhs_value: VReg, rhs: VReg, cons: InstrCons| {
@@ -2026,7 +2026,7 @@ fn compile_assignment_rhs(
         other => unsupported_node!(other),
     };
 
-    builder.write_var(&lhs, lhs_value);
+    builder.write_var(lhs, lhs_value);
 }
 
 fn parse_file(

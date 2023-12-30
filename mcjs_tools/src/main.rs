@@ -298,7 +298,7 @@ mod frame_view {
                                     td."align-top" { (if index == 0 { "{ " } else { ", " }) }
                                     td."align-top" { (format!("{}:", key)) }
                                     td."align-top" {
-                                        (show_value(obj.get_own_property(&key).unwrap()))
+                                        (show_value(obj.get_own_property(key).unwrap()))
                                     }
                                 }
                             }
@@ -361,11 +361,7 @@ mod frame_view {
                             }
                         })
                         .collect(),
-                    consts: func
-                        .consts()
-                        .iter()
-                        .map(|konst| show_literal(konst))
-                        .collect(),
+                    consts: func.consts().iter().map(show_literal).collect(),
                 },
             });
         }
@@ -393,10 +389,10 @@ mod frame_view {
             return None;
         }
 
-        let frame_src = extract_frame_source(&*source_file, loader, giid);
+        let frame_src = extract_frame_source(&source_file, loader, giid);
         let raw_markup = render_source_code(&markers, &frame_src)
             .map(|pre_escaped| pre_escaped.into_string())
-            .unwrap_or(String::new());
+            .unwrap_or_default();
         Some(raw_markup)
     }
 
@@ -408,16 +404,6 @@ mod frame_view {
     #[derive(PartialEq, Eq)]
     pub struct StackFingerprint {
         func_ids: Vec<(u16, u16)>,
-    }
-    impl Snapshot {
-        pub fn fingerprint(&self) -> StackFingerprint {
-            let func_ids = self
-                .frames
-                .iter()
-                .map(|frame| (frame.moduleID, frame.functionID))
-                .collect();
-            StackFingerprint { func_ids }
-        }
     }
 
     #[allow(non_snake_case)]
@@ -518,7 +504,7 @@ mod frame_view {
                         write!(
                             pre_escaped_code,
                             "<span class='relative' x-bind:class=\"{{'src-range-selected': (markedBreakRange?.id === '{}')}}\">",
-                            brid.to_string(),
+                            brid,
                         ).unwrap();
 
                         let brid_str = brid.to_string();
@@ -604,7 +590,7 @@ mod frame_view {
                 let upv_id = None;
                 let value_str = show_value_header(probe, value, upv_id);
                 locs_state.insert(
-                    loc.clone(),
+                    loc,
                     LocState {
                         name: format!("{:?}", loc),
                         value_header: value_str,
@@ -688,7 +674,7 @@ mod frame_view {
                 if let Some(obj) = obj {
                     if let Some(str) = obj.as_str() {
                         write!(buf, "{:?}", str).unwrap()
-                    } else if let Some(_) = obj.as_closure() {
+                    } else if obj.as_closure().is_some() {
                         write!(buf, "<closure>").unwrap()
                     } else {
                         write!(buf, "<object {}>", obj_id).unwrap()
@@ -730,7 +716,7 @@ mod frame_view {
     ) -> FrameSource {
         FrameSource {
             text: source_file.src.to_string(),
-            line_focus: line_index_of_giid(loader, giid, &source_file),
+            line_focus: line_index_of_giid(loader, giid, source_file),
             start_line: 0,
             end_line: source_file.count_lines(),
         }
@@ -797,7 +783,7 @@ async fn action_set_src_breakpoint(
         .query(move |state| -> std::result::Result<_, &'static str> {
             let probe = state
                 .probe_mut()
-                .ok_or_else(|| "interpreter is finished; can't set a breakpoint in this state")?;
+                .ok_or("interpreter is finished; can't set a breakpoint in this state")?;
 
             probe
                 .set_source_breakpoint(brange_id)
@@ -806,7 +792,7 @@ async fn action_set_src_breakpoint(
             Ok(())
         })
         .await
-        .map_err(|err_msg| actix_web::error::ErrorBadRequest(err_msg))?;
+        .map_err(actix_web::error::ErrorBadRequest)?;
 
     app_data.invalidate_snapshot();
 
@@ -830,7 +816,7 @@ async fn action_set_instr_breakpoint(
         .query(move |state| -> std::result::Result<_, &'static str> {
             let probe = state
                 .probe_mut()
-                .ok_or_else(|| "interpreter is finished; can't set a breakpoint in this state")?;
+                .ok_or("interpreter is finished; can't set a breakpoint in this state")?;
 
             probe
                 .set_instr_breakpoint(giid)
@@ -839,7 +825,7 @@ async fn action_set_instr_breakpoint(
             Ok(())
         })
         .await
-        .map_err(|err_msg| actix_web::error::ErrorBadRequest(err_msg))?;
+        .map_err(actix_web::error::ErrorBadRequest)?;
 
     app_data.invalidate_snapshot();
 
@@ -872,17 +858,7 @@ impl Event for BreakpointDeletedEvent {
 
 #[allow(non_snake_case)]
 #[derive(Serialize)]
-struct VMStateChangedEvent {
-    onlyTopFrameChanged: bool,
-}
-
-impl Default for VMStateChangedEvent {
-    fn default() -> Self {
-        VMStateChangedEvent {
-            onlyTopFrameChanged: false,
-        }
-    }
-}
+struct VMStateChangedEvent;
 
 impl Event for VMStateChangedEvent {
     fn event_name() -> &'static str {
@@ -980,7 +956,7 @@ async fn action_restart(app_data: web::Data<AppData<'static>>) -> actix_web::Res
     app_data.intrp_handle.restart();
     app_data.invalidate_snapshot();
     Ok(HttpResponse::Ok()
-        .append_header(hx_trigger(&VMStateChangedEvent::default()))
+        .append_header(hx_trigger(&VMStateChangedEvent))
         .body(""))
 }
 
@@ -990,22 +966,13 @@ async fn action_continue(app_data: web::Data<AppData<'static>>) -> actix_web::Re
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
     Ok(HttpResponse::Ok()
-        .append_header(hx_trigger(&VMStateChangedEvent::default()))
+        .append_header(hx_trigger(&VMStateChangedEvent))
         .body(""))
 }
 
 #[actix_web::post("/next")]
 async fn action_next(app_data: web::Data<AppData<'static>>) -> actix_web::Result<HttpResponse> {
     let app_data = app_data.into_inner();
-
-    let pre_fingerprint = {
-        let snapshot = app_data.snapshot().await;
-        snapshot
-            .as_ref()
-            .model
-            .as_ref()
-            .map(|model| model.frame_view_snapshot.fingerprint())
-    };
 
     app_data
         .intrp_handle
@@ -1018,19 +985,8 @@ async fn action_next(app_data: web::Data<AppData<'static>>) -> actix_web::Result
     app_data.intrp_handle.resume();
     app_data.invalidate_snapshot();
 
-    let post_fingerprint = {
-        let snapshot = app_data.snapshot().await;
-        snapshot
-            .as_ref()
-            .model
-            .as_ref()
-            .map(|model| model.frame_view_snapshot.fingerprint())
-    };
-
     Ok(HttpResponse::Ok()
-        .append_header(hx_trigger(&VMStateChangedEvent {
-            onlyTopFrameChanged: (pre_fingerprint == post_fingerprint),
-        }))
+        .append_header(hx_trigger(&VMStateChangedEvent))
         .body(""))
 }
 
@@ -1096,7 +1052,7 @@ mod interpreter_manager {
 
             let message = Message::Query(Box::new(move |state| {
                 let ret_val = thunk(state);
-                if let Err(_) = sender.send(ret_val) {
+                if sender.send(ret_val).is_err() {
                     panic!("could not send query result from interpreter main loop");
                 }
             }));

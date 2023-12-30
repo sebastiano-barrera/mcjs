@@ -34,27 +34,19 @@ fn main() {
 
         let outcome = run_test(TestParams {
             test262_root: &test262_root,
-            file_path: &Path::new(file_path),
+            file_path: Path::new(file_path),
         });
 
         // one json per line
         serde_json::to_writer(&mut stdout, &outcome).unwrap();
-        stdout.write(b"\n").unwrap();
+        stdout.write_all(b"\n").unwrap();
     }
 }
 
+#[derive(Default)]
 struct CliOptions {
     config_filename: String,
     filter: String,
-}
-
-impl Default for CliOptions {
-    fn default() -> Self {
-        CliOptions {
-            config_filename: String::new(),
-            filter: String::new(),
-        }
-    }
 }
 
 fn parse_options() -> CliOptions {
@@ -135,7 +127,7 @@ fn run_test(params: TestParams) -> TestOutcome {
         },
         Err(panic_value) => {
             let message = match panic_value.downcast_ref::<String>() {
-                Some(s) => format!("{}", s),
+                Some(s) => s.to_string(),
                 None => "<not a string>".to_string(),
             };
             Err(TestError::Panic(message))
@@ -154,11 +146,11 @@ fn process_file(
     loader: &mut mcjs_vm::Loader,
 ) -> Result<(), TestError> {
     let file_path_str = file_path.to_string_lossy().into_owned();
-    let content = std::fs::read_to_string(file_path).map_err(|io_err| TestError::Read(io_err))?;
+    let content = std::fs::read_to_string(file_path).map_err(TestError::Read)?;
 
     let chunk_fnid: mcjs_vm::bytecode::FnId = loader
         .load_script(Some(file_path_str), content)
-        .map_err(|vm_err| TestError::Load(vm_err))?;
+        .map_err(TestError::Load)?;
 
     let mut interpreter = mcjs_vm::Interpreter::new(realm, loader, chunk_fnid);
     let mut probe = Probe::attach(&mut interpreter);

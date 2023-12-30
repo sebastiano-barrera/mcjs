@@ -23,7 +23,7 @@ pub trait Object {
 
     // I know, inefficient, but so, *so* simple, and enum_dispatch-able.
     // TODO: make it slightly better, return a Cow<'static, str>
-    fn own_properties<'a>(&'a self) -> Vec<String>;
+    fn own_properties(&self) -> Vec<String>;
 
     fn len(&self) -> usize;
     fn get_element(&self, index: usize) -> Option<Value>;
@@ -226,54 +226,54 @@ impl Heap {
 }
 
 pub enum HeapObject {
-    OrdObject(OrdObject),
-    StringObject(StringObject),
-    ClosureObject(ClosureObject),
+    Ord(OrdObject),
+    String(StringObject),
+    Closure(ClosureObject),
 }
 impl HeapObject {
     pub fn as_object(&self) -> &dyn Object {
         match self {
-            HeapObject::OrdObject(oo) => oo as &dyn Object,
-            HeapObject::StringObject(so) => so as &dyn Object,
-            HeapObject::ClosureObject(co) => co as &dyn Object,
+            HeapObject::Ord(oo) => oo as &dyn Object,
+            HeapObject::String(so) => so as &dyn Object,
+            HeapObject::Closure(co) => co as &dyn Object,
         }
     }
 
     pub fn as_object_mut(&mut self) -> &mut dyn Object {
         match self {
-            HeapObject::OrdObject(oo) => oo as &mut dyn Object,
-            HeapObject::StringObject(so) => so as &mut dyn Object,
-            HeapObject::ClosureObject(co) => co as &mut dyn Object,
+            HeapObject::Ord(oo) => oo as &mut dyn Object,
+            HeapObject::String(so) => so as &mut dyn Object,
+            HeapObject::Closure(co) => co as &mut dyn Object,
         }
     }
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            HeapObject::StringObject(so) => Some(so.0.as_str()),
+            HeapObject::String(so) => Some(so.0.as_str()),
             _ => None,
         }
     }
 
     pub fn as_closure(&self) -> Option<&Closure> {
         match self {
-            HeapObject::ClosureObject(ClosureObject { closure, .. }) => Some(closure),
+            HeapObject::Closure(ClosureObject { closure, .. }) => Some(closure),
             _ => None,
         }
     }
 }
 impl From<OrdObject> for HeapObject {
     fn from(inner: OrdObject) -> Self {
-        HeapObject::OrdObject(inner)
+        HeapObject::Ord(inner)
     }
 }
 impl From<StringObject> for HeapObject {
     fn from(inner: StringObject) -> Self {
-        HeapObject::StringObject(inner)
+        HeapObject::String(inner)
     }
 }
 impl From<ClosureObject> for HeapObject {
     fn from(inner: ClosureObject) -> Self {
-        HeapObject::ClosureObject(inner)
+        HeapObject::Closure(inner)
     }
 }
 
@@ -426,7 +426,7 @@ impl Object for ClosureObject {
         self.properties.remove(key);
     }
 
-    fn own_properties<'a>(&'a self) -> Vec<String> {
+    fn own_properties(&self) -> Vec<String> {
         Vec::new()
     }
 
@@ -480,7 +480,7 @@ impl Object for StringObject {
         // Nop
     }
 
-    fn own_properties<'s>(&'s self) -> Vec<String> {
+    fn own_properties(&self) -> Vec<String> {
         vec!["length".to_string()]
     }
 
@@ -531,7 +531,7 @@ impl Object for NumberObject {
         // Nop
     }
 
-    fn own_properties<'a>(&'a self) -> Vec<String> {
+    fn own_properties(&self) -> Vec<String> {
         Vec::new()
     }
 
@@ -578,7 +578,7 @@ impl Object for BoolObject {
         // Nop
     }
 
-    fn own_properties<'a>(&'a self) -> Vec<String> {
+    fn own_properties(&self) -> Vec<String> {
         Vec::new()
     }
 
@@ -618,74 +618,72 @@ impl Object for BoolObject {
 // borrowed ref of a heap-allocated object, and release it correctly when it's
 // time.
 pub enum ValueObjectRef<'h> {
-    NumberObject(NumberObject),
-    BoolObject(BoolObject),
-    HeapObject(Ref<'h, HeapObject>),
+    Number(NumberObject),
+    Bool(BoolObject),
+    Heap(Ref<'h, HeapObject>),
 }
 impl<'h> ValueObjectRef<'h> {
     pub fn as_object(&self) -> &dyn Object {
         match self {
-            ValueObjectRef::NumberObject(no) => no as &dyn Object,
-            ValueObjectRef::BoolObject(bo) => bo as &dyn Object,
-            ValueObjectRef::HeapObject(ho) => ho.as_object(),
+            ValueObjectRef::Number(no) => no as &dyn Object,
+            ValueObjectRef::Bool(bo) => bo as &dyn Object,
+            ValueObjectRef::Heap(ho) => ho.as_object(),
         }
     }
 
-    pub fn as_str(self) -> Result<Ref<'h, str>, Self> {
+    pub fn into_str(self) -> Result<Ref<'h, str>, Self> {
         // This is a bit contorted because Ref::filter_map consumes self, and may return a part of
         // it, or return self back whole as it was.  Then we have to pack it back in its initial
         // form.
         match self {
-            Self::HeapObject(horef) => {
-                Ref::filter_map(horef, |hobj| hobj.as_str()).map_err(|hobj| Self::HeapObject(hobj))
-            }
+            Self::Heap(horef) => Ref::filter_map(horef, |hobj| hobj.as_str()).map_err(Self::Heap),
             _ => Err(self),
         }
     }
 }
 impl<'h> From<NumberObject> for ValueObjectRef<'h> {
     fn from(value: NumberObject) -> Self {
-        Self::NumberObject(value)
+        Self::Number(value)
     }
 }
 impl<'h> From<BoolObject> for ValueObjectRef<'h> {
     fn from(value: BoolObject) -> Self {
-        Self::BoolObject(value)
+        Self::Bool(value)
     }
 }
 impl<'h> From<Ref<'h, HeapObject>> for ValueObjectRef<'h> {
     fn from(value: Ref<'h, HeapObject>) -> Self {
-        Self::HeapObject(value)
+        Self::Heap(value)
     }
 }
 
 pub enum ValueObjectMut<'h> {
-    NumberObject(NumberObject),
-    BoolObject(BoolObject),
-    HeapObject(RefMut<'h, HeapObject>),
+    Number(NumberObject),
+    Bool(BoolObject),
+    Heap(RefMut<'h, HeapObject>),
 }
 impl<'h> ValueObjectMut<'h> {
     pub fn as_object_mut(&mut self) -> &mut dyn Object {
         match self {
-            ValueObjectMut::NumberObject(no) => no as &mut dyn Object,
-            ValueObjectMut::BoolObject(bo) => bo as &mut dyn Object,
-            ValueObjectMut::HeapObject(ho) => ho.as_object_mut(),
+            ValueObjectMut::Number(no) => no as &mut dyn Object,
+            ValueObjectMut::Bool(bo) => bo as &mut dyn Object,
+            ValueObjectMut::Heap(ho) => ho.as_object_mut(),
         }
     }
 }
 impl<'h> From<NumberObject> for ValueObjectMut<'h> {
     fn from(value: NumberObject) -> Self {
-        Self::NumberObject(value)
+        Self::Number(value)
     }
 }
 impl<'h> From<BoolObject> for ValueObjectMut<'h> {
     fn from(value: BoolObject) -> Self {
-        Self::BoolObject(value)
+        Self::Bool(value)
     }
 }
 impl<'h> From<RefMut<'h, HeapObject>> for ValueObjectMut<'h> {
     fn from(value: RefMut<'h, HeapObject>) -> Self {
-        Self::HeapObject(value)
+        Self::Heap(value)
     }
 }
 

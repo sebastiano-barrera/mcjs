@@ -156,6 +156,7 @@ pub struct Realm {
     global_obj: heap::ObjectId,
 }
 
+#[allow(clippy::new_without_default)]
 impl Realm {
     pub fn new() -> Realm {
         let mut heap = heap::Heap::new();
@@ -407,7 +408,7 @@ impl<'a> Interpreter<'a> {
     /// control to the caller, ensuring the correct type of access to the
     /// interpreter.
     fn run_internal(&mut self) -> Result<ExitInternal> {
-        while self.data.len() != 0 {
+        while !self.data.is_empty() {
             // TODO Avoid calling get_function at each instructions
             let fnid = self.data.top().header().fn_id;
 
@@ -569,7 +570,7 @@ impl<'a> Interpreter<'a> {
                         .get(oid)
                         .ok_or_else(|| error!("invalid function (object is not callable)"))?;
                     let closure: &Closure =
-                        if let heap::HeapObject::ClosureObject(cobj) = heap_object.deref() {
+                        if let heap::HeapObject::Closure(cobj) = heap_object.deref() {
                             cobj.closure()
                         } else {
                             // TODO Generalize to other types of callable objects?
@@ -611,11 +612,10 @@ impl<'a> Interpreter<'a> {
                             let n_params = bytecode::ARGS_COUNT_MAX as usize;
                             arg_vals.truncate(n_params);
                             arg_vals.resize(n_params, Value::Undefined);
-                            assert_eq!(arg_vals.len(), n_params as usize);
+                            assert_eq!(arg_vals.len(), n_params);
 
                             let this = closure
                                 .forced_this
-                                .clone()
                                 .unwrap_or_else(|| self.get_operand(*this));
 
                             tprintln!("\n     - call with {} params", n_params);
@@ -715,7 +715,7 @@ impl<'a> Interpreter<'a> {
 
                     tprint!("  -> {:?}", value);
                     drop(obj);
-                    self.data.top_mut().set_result(*dest, value.clone());
+                    self.data.top_mut().set_result(*dest, value);
                 }
                 Instr::ObjGetKeys { dest, obj } => {
                     // TODO Something more efficient?
@@ -1041,7 +1041,7 @@ impl<'a> Interpreter<'a> {
 
     fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<str>> {
         self.get_operand_object(vreg)?
-            .as_str()
+            .into_str()
             .map_err(|_| error!("expected string, but got another type"))
     }
 
@@ -1056,7 +1056,7 @@ impl<'a> Interpreter<'a> {
             .unwrap_or(Value::Undefined);
 
         self.data.pop();
-        if self.data.len() >= 1 {
+        if !self.data.is_empty() {
             let (tgt_iid, tgt_vreg) = self.data.top_mut().take_return_target();
             self.data.top_mut().set_result(tgt_vreg, return_value);
 
@@ -1109,10 +1109,9 @@ impl<'a> Interpreter<'a> {
                 let a = self.realm.heap.get(*a);
                 let b = self.realm.heap.get(*b);
                 match (a.as_deref(), b.as_deref()) {
-                    (
-                        Some(heap::HeapObject::StringObject(a)),
-                        Some(heap::HeapObject::StringObject(b)),
-                    ) => a.string().cmp(b.string()).into(),
+                    (Some(heap::HeapObject::String(a)), Some(heap::HeapObject::String(b))) => {
+                        a.string().cmp(b.string()).into()
+                    }
                     _ => ValueOrdering::Incomparable,
                 }
             }
@@ -1199,7 +1198,7 @@ impl<'a> Interpreter<'a> {
             Value::Object(oid) => {
                 let obj = heap.get(*oid)?;
                 Ref::filter_map(obj, |hobj| hobj.as_str())
-                    .map(|s| heap::IndexOrKey::Key(s))
+                    .map(heap::IndexOrKey::Key)
                     .ok()
             }
             _ => None,
@@ -1214,9 +1213,9 @@ impl<'a> Interpreter<'a> {
             Value::Bool(bool_val) => bool_val,
             Value::Number(num) => num != 0.0,
             Value::Object(oid) => match self.realm.heap.get(oid).unwrap().deref() {
-                heap::HeapObject::OrdObject(_) => true,
-                heap::HeapObject::ClosureObject(_) => true,
-                heap::HeapObject::StringObject(sobj) => !sobj.string().is_empty(),
+                heap::HeapObject::Ord(_) => true,
+                heap::HeapObject::Closure(_) => true,
+                heap::HeapObject::String(sobj) => !sobj.string().is_empty(),
             },
             Value::Null => false,
             Value::Undefined => false,
@@ -1249,7 +1248,7 @@ fn init_stack(
     data
 }
 
-fn as_object_ref<'h>(value: Value, heap: &'h heap::Heap) -> Option<heap::ValueObjectRef<'h>> {
+fn as_object_ref(value: Value, heap: &heap::Heap) -> Option<heap::ValueObjectRef> {
     match value {
         Value::Object(oid) => heap.get(oid).map(Into::into),
         Value::Number(num) => Some(heap::NumberObject(num).into()),
@@ -1258,7 +1257,7 @@ fn as_object_ref<'h>(value: Value, heap: &'h heap::Heap) -> Option<heap::ValueOb
     }
 }
 
-fn as_object_mut<'h>(value: Value, heap: &'h heap::Heap) -> Option<heap::ValueObjectMut<'h>> {
+fn as_object_mut(value: Value, heap: &heap::Heap) -> Option<heap::ValueObjectMut> {
     match value {
         Value::Object(oid) => heap.get_mut(oid).map(Into::into),
         Value::Number(num) => Some(heap::NumberObject(num).into()),
@@ -1269,7 +1268,7 @@ fn as_object_mut<'h>(value: Value, heap: &'h heap::Heap) -> Option<heap::ValueOb
 
 fn try_values_to_literals(vec: &[Value], heap: &heap::Heap) -> Vec<Option<bytecode::Literal>> {
     vec.iter()
-        .map(|value| try_value_to_literal(*value, &heap))
+        .map(|value| try_value_to_literal(*value, heap))
         .collect()
 }
 
@@ -1297,7 +1296,7 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
         Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
         Value::Object(oid) => {
             let hobj = heap.get(oid)?;
-            if let heap::HeapObject::StringObject(sobj) = hobj.deref() {
+            if let heap::HeapObject::String(sobj) = hobj.deref() {
                 let s = sobj.string().to_owned();
                 Some(bytecode::Literal::String(s.to_owned()))
             } else {
@@ -1379,7 +1378,7 @@ fn nf_Array_isArray(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> R
             .heap
             .get(*oid)
             .ok_or_else(|| error!("no such object!"))?;
-        if let heap::HeapObject::OrdObject(obj) = obj.deref() {
+        if let heap::HeapObject::Ord(obj) = obj.deref() {
             obj.is_array()
         } else {
             false
@@ -1397,7 +1396,7 @@ fn nf_Array_push(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Resul
     let oid = this.expect_obj().unwrap();
     let mut arr = intrp.realm.heap.get_mut(oid).unwrap();
     let len = arr.as_object().len();
-    let value = args.get(0).unwrap().clone();
+    let value = *args.get(0).unwrap();
     arr.as_object_mut().set_element(len, value);
     Ok(Value::Undefined)
 }
@@ -1450,9 +1449,9 @@ fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<V
         Some(Value::Bool(true)) => "true".into(),
         Some(Value::Bool(false)) => "false".into(),
         Some(Value::Object(oid)) => match intrp.realm.heap.get(*oid).unwrap().deref() {
-            heap::HeapObject::OrdObject(_) => "<object>".to_owned(),
-            heap::HeapObject::StringObject(sobj) => sobj.string().clone(),
-            heap::HeapObject::ClosureObject(_) => "<closure>".to_owned(),
+            heap::HeapObject::Ord(_) => "<object>".to_owned(),
+            heap::HeapObject::String(sobj) => sobj.string().clone(),
+            heap::HeapObject::Closure(_) => "<closure>".to_owned(),
         },
         Some(Value::Null) => "null".into(),
         Some(Value::Undefined) => "undefined".into(),
@@ -1663,7 +1662,7 @@ pub mod debugger {
         }
 
         pub fn loader(&self) -> &crate::loader::Loader {
-            &self.interpreter.loader
+            self.interpreter.loader
         }
 
         /// Returns the sequence of stack frames in the form of an iterator, ordered top

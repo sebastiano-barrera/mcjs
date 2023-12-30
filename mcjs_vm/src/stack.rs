@@ -55,6 +55,10 @@ impl InterpreterData {
         self.headers.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub(crate) fn push(&mut self, call_meta: CallMeta) {
         let frame_hdr = FrameHeader {
             regs_offset: self.values.len().try_into().unwrap(),
@@ -172,7 +176,7 @@ impl<'a> Frame<'a> {
                 .expect("gc bug: value deleted but still referenced by stack"),
         }
     }
-    pub fn results<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = Value> {
+    pub fn results(&self) -> impl '_ + ExactSizeIterator<Item = Value> {
         (0..self.values.len()).map(|i| {
             let vreg = bytecode::VReg(i.try_into().unwrap());
             self.get_result(vreg)
@@ -190,7 +194,7 @@ impl<'a> Frame<'a> {
         );
         Some(self.get_result(bytecode::VReg(argndx.0)))
     }
-    pub fn args<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = Option<Value>> {
+    pub fn args(&self) -> impl '_ + ExactSizeIterator<Item = Option<Value>> {
         (0..ARGS_COUNT_MAX).map(|i| self.get_arg(bytecode::ArgIndex(i)))
     }
 
@@ -202,7 +206,7 @@ impl<'a> Frame<'a> {
             .copied()
             .expect("capture index is out of range")
     }
-    pub fn captures<'s>(&'s self) -> impl 's + ExactSizeIterator<Item = UpvalueId> {
+    pub fn captures(&self) -> impl '_ + ExactSizeIterator<Item = UpvalueId> {
         self.header.captures.iter().copied()
     }
 
