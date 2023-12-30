@@ -505,7 +505,7 @@ impl Function {
             .map(|tanch| tanch.trace_id.as_str())
     }
 
-    pub(crate) fn is_strict_mode(&self) -> bool {
+    pub fn is_strict_mode(&self) -> bool {
         self.is_strict_mode
     }
 }

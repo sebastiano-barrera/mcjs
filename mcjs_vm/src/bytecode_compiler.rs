@@ -229,7 +229,8 @@ impl FnBuilder {
             ident_history: self.ident_history,
             trace_anchors: self.trace_anchors,
             is_strict_mode: self.is_strict_mode,
-        }.build()
+        }
+        .build()
     }
 
     fn get_mut(&mut self, iid: IID) -> Option<&mut Instr> {
@@ -497,7 +498,13 @@ impl Builder {
         let fnid = LocalFnId(self.next_fnid);
         self.next_fnid += 1;
 
-        self.fn_stack.push(FnBuilder::new(fnid));
+        let mut fnb = FnBuilder::new(fnid);
+        fnb.is_strict_mode = self
+            .fn_stack
+            .last()
+            .map(|fnb| fnb.is_strict_mode)
+            .unwrap_or(false);
+        self.fn_stack.push(fnb);
 
         for (param_ndx, param) in params.iter().enumerate() {
             let param_ndx = TryFrom::try_from(param_ndx).expect("too many parameters!");
@@ -542,7 +549,7 @@ fn compile_module(
     ast_module: &swc_ecma_ast::Module,
     flags: CompileFlags,
 ) -> Result<CompiledModule> {
-    use swc_ecma_ast::{ExportDecl, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
+    use swc_ecma_ast::{ExportDecl, Expr, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
 
     let mut builder = Builder::new(flags);
     builder.start_function(None, &[]);
@@ -564,8 +571,19 @@ fn compile_module(
 
     // We have to handle hoisting here like we do for blocks.  See [#hoisting].
 
+    // Since we compile every nested function's body here, we have to handle 'use strict' here,
+    // so that we can pass it onto those nested functions.
+
     for item in &ast_module.body {
         match item {
+            ModuleItem::Stmt(Stmt::Expr(expr_stmt)) => {
+                if let Some(Lit::Str(ref lit_str)) = expr_stmt.expr.as_lit() {
+                    if lit_str.value.as_bytes() == b"use strict" {
+                        builder.cur_fnb().enable_strict_mode();
+                    }
+                }
+            }
+
             ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl)))
             | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
                 decl: Decl::Var(var_decl),
@@ -1122,20 +1140,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::Decl(Decl::Fn(_)) => Ok(()),
 
         Stmt::Expr(expr) => {
-            // adapted from swc_ecma_utils::IsDirective::is_use_strict
-            let is_use_strict = match *expr.expr {
-                swc_ecma_ast::Expr::Lit(Lit::Str(ref lit_str)) => {
-                    matches!(&lit_str.raw, Some(s) if s == "\"use strict\"" || s == "'use strict'")
-                }
-                _ => false,
-            };
-
-            if is_use_strict {
-                builder.cur_fnb().enable_strict_mode();
-            } else {
-                compile_expr(&mut builder, &expr.expr)?;
-            }
-
+            compile_expr(&mut builder, &expr.expr)?;
             Ok(())
         }
 
