@@ -242,7 +242,7 @@ mod frame_view {
                 let properties = obj.own_properties();
 
                 let show_value = |value| {
-                    let details_url = get_details_url(Some(value));
+                    let details_url = get_details_url(value);
                     let header = show_value_header(probe, value, None);
                     html!{
                         div.cursor-pointer x-data="{detailsVisible: false}" { 
@@ -597,10 +597,12 @@ mod frame_view {
             let locs_state = &mut locs_state;
             let locs_order = &mut locs_order;
 
-            let mut add = |loc: VReg, value: Option<InterpreterValue>, upv_id: Option<UpvalueId>| {
-                let value_str = value
-                    .map(|value| show_value_header(probe, value, upv_id))
-                    .unwrap_or_else(|| "???".to_string());
+            // TODO Reinstate showing captures?
+
+            for (vreg_ndx, value) in frame.results().enumerate() {
+                let loc = VReg(vreg_ndx as _);
+                let upv_id = None;
+                let value_str = show_value_header(probe, value, upv_id);
                 locs_state.insert(
                     loc.clone(),
                     LocState {
@@ -612,13 +614,6 @@ mod frame_view {
                     },
                 );
                 locs_order.push(loc);
-            };
-            
-            // TODO Reinstate showing captures?
-
-            for (vreg_ndx, value) in frame.results().enumerate() {
-                let loc = VReg(vreg_ndx as _).into();
-                add(loc, Some(value), None);
             }
         }
 
@@ -649,7 +644,7 @@ mod frame_view {
             value_header: show_value_header(probe, this_value, None),
             ident: Some("this".to_string()),
             prev_idents: Vec::new(),
-            details_url: get_details_url(Some(this_value)),
+            details_url: get_details_url(this_value),
         });
         locs.extend(
             locs_order
@@ -719,10 +714,9 @@ mod frame_view {
         }
     }
 
-    fn get_details_url(value: Option<InterpreterValue>) -> Option<String> {
+    fn get_details_url(value: InterpreterValue) -> Option<String> {
         use slotmap::Key;
-
-        if let Some(InterpreterValue::Object(obj_id)) = &value {
+        if let InterpreterValue::Object(obj_id) = value {
             Some(format!("/objects/{}", obj_id.data().as_ffi()))
         } else {
             None

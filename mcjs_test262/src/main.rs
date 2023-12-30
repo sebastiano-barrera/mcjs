@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use mcjs_vm::interpreter::{Fuel, debugger::Probe};
+use mcjs_vm::interpreter::{debugger::Probe, Fuel};
 use serde::{Deserialize, Serialize};
 
 fn main() {

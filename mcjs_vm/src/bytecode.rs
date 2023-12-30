@@ -85,7 +85,10 @@ impl GlobalIID {
         let lfnid: u16 = lfnid_s.parse().ok()?;
         let iid: u16 = iid_s.parse().ok()?;
 
-        Some(GlobalIID(FnId(ModuleId(mod_id), LocalFnId(lfnid)), IID(iid)))
+        Some(GlobalIID(
+            FnId(ModuleId(mod_id), LocalFnId(lfnid)),
+            IID(iid),
+        ))
     }
 }
 
@@ -101,7 +104,7 @@ pub struct ArgIndex(pub u8);
 /// the callee stack frame. These first registers are reserved for this use,
 /// and they must not be used for temporary values or local variables. This
 /// guarantee is provided by the bytecode compiler.
-/// 
+///
 /// NOTE: The interpreter currently won't allow calls with more than this number
 /// of arguments.  In the future (hopefully not too far later) extra arguments
 /// will be passed via an array on the heap.
@@ -344,7 +347,7 @@ impl Instr {
                 return_value,
                 this,
                 callee,
-            } => { 
+            } => {
                 an.write_vreg(*return_value);
                 an.read_vreg_labeled(*this, Some("this".to_owned()));
                 an.read_vreg_labeled(*callee, Some("callee".to_owned()));
