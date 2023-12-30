@@ -144,15 +144,28 @@ fn run_test(params: &TestParams) -> Result<(), TestError> {
         full_path.clone(),
     ];
 
-    let options = mcjs_vm::Options {
-        strict: params.is_strict,
-    };
     let res = std::panic::catch_unwind(move || {
         let mut loader = mcjs_vm::Loader::new(None);
         let mut realm = mcjs_vm::Realm::new();
 
         for file_path in paths {
-            process_file(&file_path, options.clone(), &mut realm, &mut loader)?;
+            let file_path_str = (&file_path).to_string_lossy().into_owned();
+            let mut content = std::fs::read_to_string(&file_path).map_err(TestError::Read)?;
+            if params.is_strict {
+                content.insert_str(0, "\"use strict\"\n");
+            }
+
+            let chunk_fnid = loader
+                .load_script(Some(file_path_str), content)
+                .map_err(TestError::Load)?;
+
+            let mut interpreter = mcjs_vm::Interpreter::new(&mut realm, &mut loader, chunk_fnid);
+            let mut probe = Probe::attach(&mut interpreter);
+            probe.set_fuel(Fuel::Limited(200_000));
+
+            interpreter
+                .run()
+                .map_err(|intrp_err| TestError::Run(intrp_err.error))?;
         }
         Ok(())
     });
@@ -181,30 +194,6 @@ fn parse_metadata(full_path: &PathBuf) -> Result<metadata::Metadata, TestError> 
         TestError::HeaderParse(message)
     })?;
     Ok(metadata)
-}
-
-fn process_file(
-    file_path: &Path,
-    options: mcjs_vm::Options,
-    realm: &mut mcjs_vm::Realm,
-    loader: &mut mcjs_vm::Loader,
-) -> Result<(), TestError> {
-    let file_path_str = file_path.to_string_lossy().into_owned();
-    let content = std::fs::read_to_string(file_path).map_err(TestError::Read)?;
-
-    let chunk_fnid: mcjs_vm::bytecode::FnId = loader
-        .load_script(Some(file_path_str), content)
-        .map_err(TestError::Load)?;
-
-    let mut interpreter = mcjs_vm::Interpreter::with_options(options, realm, loader, chunk_fnid);
-    let mut probe = Probe::attach(&mut interpreter);
-    probe.set_fuel(Fuel::Limited(200_000));
-
-    interpreter
-        .run()
-        .map_err(|intrp_err| TestError::Run(intrp_err.error))?;
-
-    Ok(())
 }
 
 struct TestParams<'a> {

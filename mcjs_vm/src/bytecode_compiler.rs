@@ -163,6 +163,7 @@ struct FnBuilder {
     pending_continue_instrs: Vec<IID>,
     captures: Vec<String>,
     ident_history: Vec<IdentAsmt>,
+    is_strict_mode: bool,
 }
 
 enum Var {
@@ -208,7 +209,12 @@ impl FnBuilder {
             pending_continue_instrs: Vec::new(),
             span: None,
             ident_history: Vec::new(),
+            is_strict_mode: false,
         }
+    }
+
+    fn enable_strict_mode(&mut self) {
+        self.is_strict_mode = true;
     }
 
     fn build(self) -> bytecode::Function {
@@ -216,12 +222,14 @@ impl FnBuilder {
             self.pending_break_instrs.is_empty(),
             "bytecode compiler bug: the function is over, but some break instructions were not placed yet"
         );
-        bytecode::Function::new(
-            self.instrs.into_boxed_slice(),
-            self.consts.into_boxed_slice(),
-            self.ident_history,
-            self.trace_anchors,
-        )
+
+        bytecode::FunctionBuilder {
+            instrs: self.instrs.into_boxed_slice(),
+            consts: self.consts.into_boxed_slice(),
+            ident_history: self.ident_history,
+            trace_anchors: self.trace_anchors,
+            is_strict_mode: self.is_strict_mode,
+        }.build()
     }
 
     fn get_mut(&mut self, iid: IID) -> Option<&mut Instr> {
@@ -1114,7 +1122,20 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::Decl(Decl::Fn(_)) => Ok(()),
 
         Stmt::Expr(expr) => {
-            compile_expr(&mut builder, &expr.expr)?;
+            // adapted from swc_ecma_utils::IsDirective::is_use_strict
+            let is_use_strict = match *expr.expr {
+                swc_ecma_ast::Expr::Lit(Lit::Str(ref lit_str)) => {
+                    matches!(&lit_str.raw, Some(s) if s == "\"use strict\"" || s == "'use strict'")
+                }
+                _ => false,
+            };
+
+            if is_use_strict {
+                builder.cur_fnb().enable_strict_mode();
+            } else {
+                compile_expr(&mut builder, &expr.expr)?;
+            }
+
             Ok(())
         }
 

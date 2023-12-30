@@ -434,6 +434,7 @@ pub struct Function {
     loop_heads: HashMap<IID, LoopInfo>,
     ident_history: Vec<IdentAsmt>,
     trace_anchors: HashMap<IID, TraceAnchor>,
+    is_strict_mode: bool,
 }
 pub struct TraceAnchor {
     pub trace_id: String,
@@ -452,26 +453,32 @@ pub struct IdentAsmt {
     pub ident: JsWord,
 }
 
-impl Function {
-    pub(crate) fn new(
-        instrs: Box<[Instr]>,
-        consts: Box<[Literal]>,
-        ident_history: Vec<IdentAsmt>,
-        trace_anchors: HashMap<IID, TraceAnchor>,
-    ) -> Function {
+pub struct FunctionBuilder {
+    pub instrs: Box<[Instr]>,
+    pub consts: Box<[Literal]>,
+    pub ident_history: Vec<IdentAsmt>,
+    pub trace_anchors: HashMap<IID, TraceAnchor>,
+    pub is_strict_mode: bool,
+}
+
+impl FunctionBuilder {
+    pub(crate) fn build(self) -> Function {
         #[cfg(to_be_rewritten)]
         let loop_heads = find_loop_heads(&instrs[..]);
         #[cfg(not(to_be_rewritten))]
         let loop_heads = HashMap::new();
         Function {
-            instrs,
-            consts,
+            instrs: self.instrs,
+            consts: self.consts,
             loop_heads,
-            ident_history,
-            trace_anchors,
+            ident_history: self.ident_history,
+            trace_anchors: self.trace_anchors,
+            is_strict_mode: self.is_strict_mode,
         }
     }
+}
 
+impl Function {
     pub fn instrs(&self) -> &[Instr] {
         self.instrs.as_ref()
     }
@@ -496,6 +503,10 @@ impl Function {
         self.trace_anchors
             .get(&iid)
             .map(|tanch| tanch.trace_id.as_str())
+    }
+
+    pub(crate) fn is_strict_mode(&self) -> bool {
+        self.is_strict_mode
     }
 }
 
