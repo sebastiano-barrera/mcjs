@@ -578,7 +578,8 @@ impl<'a> Interpreter<'a> {
                         .realm
                         .heap
                         .get(oid)
-                        .ok_or_else(|| error!("invalid function (object is not callable)"))?.borrow();
+                        .ok_or_else(|| error!("invalid function (object is not callable)"))?
+                        .borrow();
                     let closure: &Closure = ho_ref
                         .as_closure()
                         .ok_or_else(|| error!("can't call non-closure"))?;
@@ -1377,6 +1378,12 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let cash_print = heap.new_function(Closure::Native(nf_cash_print), HashMap::new());
     global.insert("$print".to_string(), Value::Object(cash_print));
 
+    let func_bind = heap.new_function(Closure::Native(nf_Function_bind), HashMap::new());
+    {
+        let mut func_proto = heap.get(heap.func_proto()).unwrap().borrow_mut();
+        func_proto.set_own_element_or_property("bind".into(), Value::Object(func_bind));
+    }
+
     // builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
     // builtins.insert("Object".into(), NativeFnId::ObjectNew as u32);
     // builtins.insert("parseInt".into(), NativeFnId::ParseInt as u32);
@@ -1502,6 +1509,34 @@ fn nf_cash_print(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Resu
         }
     }
     Ok(Value::Undefined)
+}
+
+#[allow(non_snake_case)]
+fn nf_Function_bind(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
+    let js_closure = {
+        let obj_id = this.expect_obj()?;
+        let obj = intrp
+            .realm
+            .heap
+            .get(obj_id)
+            .ok_or_else(|| error!("no such object"))?
+            .borrow();
+        let closure = obj.as_closure().ok_or_else(|| error!("not a function"))?;
+        match closure {
+            Closure::Native(_) => return Err(error!("can't bind a native function (yet)")),
+            Closure::JS(jsc) => jsc.clone(),
+        }
+    };
+
+    let forced_this = Some(args.get(0).copied().unwrap_or(Value::Undefined));
+
+    let new_closure = Closure::JS(JSClosure {
+        forced_this,
+        ..js_closure
+    });
+
+    let new_obj_id = intrp.realm.heap.new_function(new_closure, HashMap::new());
+    Ok(Value::Object(new_obj_id))
 }
 
 #[derive(PartialEq, Eq)]
