@@ -1378,6 +1378,9 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let Boolean = heap.new_function(Closure::Native(nf_Boolean), HashMap::new());
     global.insert("Boolean".to_string(), Value::Object(Boolean));
 
+    let cash_print = heap.new_function(Closure::Native(nf_cash_print), HashMap::new());
+    global.insert("$print".to_string(), Value::Object(cash_print));
+
     // builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
     // builtins.insert("Object".into(), NativeFnId::ObjectNew as u32);
     // builtins.insert("parseInt".into(), NativeFnId::ParseInt as u32);
@@ -1489,6 +1492,29 @@ fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<V
 #[allow(non_snake_case)]
 fn nf_Boolean(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
     Ok(Value::Bool(false))
+}
+
+#[allow(non_snake_case)]
+fn nf_cash_print(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
+    for arg in args {
+        if let Value::Object(obj_id) = arg {
+            let obj = intrp.realm.heap.get(*obj_id).unwrap();
+            if let Some(s) = obj.as_str() {
+                println!("  {:?}", s);
+            } else {
+                let obj = obj.as_object();
+                println!("{:?} [{} properties]", obj_id, obj.len());
+
+                for prop in obj.own_properties() {
+                    let value = obj.get_own_property(&prop);
+                    println!("  - {:?} = {:?}", prop, value);
+                }
+            }
+        } else {
+            println!("{:?}", arg);
+        }
+    }
+    Ok(Value::Undefined)
 }
 
 #[derive(PartialEq, Eq)]
