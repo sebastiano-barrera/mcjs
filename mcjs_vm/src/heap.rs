@@ -1,5 +1,3 @@
-#![allow(unused_variables)]
-
 use std::{
     borrow::{Borrow, Cow},
     cell::{Ref, RefCell, RefMut},
@@ -17,21 +15,15 @@ use crate::interpreter::{Closure, Value};
 /// prototype.  For that, you need use a `Heap` and its methods.
 // TODO Will this design work even though this trait is not object-safe?
 pub trait Object {
-    fn get_own_property(&self, key: &str) -> Option<Value>;
-    fn set_own_property(&mut self, key: String, value: Value);
-    fn delete_own_property(&mut self, key: &str);
+    fn get_own_element_or_property(&self, index_or_key: IndexOrKey) -> Option<Value>;
+    fn set_own_element_or_property(&mut self, index_or_key: IndexOrKey, value: Value);
+    fn delete_own_element_or_property(&mut self, index_or_key: IndexOrKey);
 
     // I know, inefficient, but so, *so* simple, and enum_dispatch-able.
     // TODO: make it slightly better, return a Cow<'static, str>
     fn own_properties(&self) -> Vec<String>;
 
-    fn len(&self) -> usize;
-    fn get_element(&self, index: usize) -> Option<Value>;
-    fn set_element(&mut self, index: usize, value: Value);
-    fn delete_element(&mut self, index: usize);
-
     fn type_of(&self) -> Typeof;
-
     fn proto(&self, heap: &Heap) -> Option<ObjectId>;
     fn set_proto(&mut self, proto_id: Option<ObjectId>);
 }
@@ -45,56 +37,34 @@ pub enum Typeof {
     Boolean,
 }
 
-pub trait ObjectExt {
-    fn get_own_element_or_property<S: Deref<Target = str>>(
-        &self,
-        index_or_key: IndexOrKey<S>,
-    ) -> Option<Value>;
-    fn set_own_element_or_property<S: Deref<Target = str>>(
-        &mut self,
-        index_or_key: IndexOrKey<S>,
-        value: Value,
-    );
-    fn delete_own_element_or_property<S: Deref<Target = str>>(
-        &mut self,
-        index_or_key: IndexOrKey<S>,
-    );
-}
-
-impl<O: ?Sized + Object> ObjectExt for O {
-    fn get_own_element_or_property<S: Deref<Target = str>>(
-        &self,
-        index_or_key: IndexOrKey<S>,
-    ) -> Option<Value> {
-        match index_or_key {
-            IndexOrKey::Index(ndx) => self.get_element(ndx),
-            IndexOrKey::Key(key) => self.get_own_property(key.as_ref()),
-        }
-    }
-    fn set_own_element_or_property<S: Deref<Target = str>>(
-        &mut self,
-        index_or_key: IndexOrKey<S>,
-        value: Value,
-    ) {
-        match index_or_key {
-            IndexOrKey::Index(ndx) => self.set_element(ndx, value),
-            IndexOrKey::Key(key) => self.set_own_property(key.to_owned(), value),
-        }
-    }
-    fn delete_own_element_or_property<S: Deref<Target = str>>(
-        &mut self,
-        index_or_key: IndexOrKey<S>,
-    ) {
-        match index_or_key {
-            IndexOrKey::Index(ndx) => self.delete_element(ndx),
-            IndexOrKey::Key(key) => self.delete_own_property(&key),
-        }
-    }
-}
-
-pub enum IndexOrKey<S: Deref<Target = str>> {
+#[derive(PartialEq, Eq)]
+pub enum IndexOrKey<'a> {
     Index(usize),
-    Key(S),
+    Key(&'a str),
+}
+impl<'a> From<&'a str> for IndexOrKey<'a> {
+    fn from(value: &'a str) -> Self {
+        IndexOrKey::Key(value)
+    }
+}
+impl<'a> From<usize> for IndexOrKey<'a> {
+    fn from(value: usize) -> Self {
+        IndexOrKey::Index(value)
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub enum IndexOrKeyOwned {
+    Index(usize),
+    Key(String),
+}
+impl IndexOrKeyOwned {
+    pub fn to_ref(&self) -> IndexOrKey {
+        match self {
+            IndexOrKeyOwned::Index(ndx) => IndexOrKey::Index(*ndx),
+            IndexOrKeyOwned::Key(key) => IndexOrKey::Key(&key),
+        }
+    }
 }
 
 //
@@ -106,6 +76,7 @@ slotmap::new_key_type! { pub struct ObjectId; }
 pub struct Heap {
     objects: slotmap::SlotMap<ObjectId, RefCell<HeapObject>>,
 
+    object_proto: ObjectId,
     number_proto: ObjectId,
     string_proto: ObjectId,
     func_proto: ObjectId,
@@ -115,15 +86,23 @@ pub struct Heap {
 
 impl Heap {
     pub(crate) fn new() -> Heap {
+        let new_ordinary = || HeapObject {
+            proto_id: None,
+            properties: HashMap::new(),
+            exotic_part: Exotic::None,
+        };
+
         let mut objects = slotmap::SlotMap::with_key();
-        let number_proto = objects.insert(RefCell::new(OrdObject::new(HashMap::new()).into()));
-        let string_proto = objects.insert(RefCell::new(OrdObject::new(HashMap::new()).into()));
-        let func_proto = objects.insert(RefCell::new(OrdObject::new(HashMap::new()).into()));
-        let bool_proto = objects.insert(RefCell::new(OrdObject::new(HashMap::new()).into()));
-        let array_proto = objects.insert(RefCell::new(OrdObject::new(HashMap::new()).into()));
+        let object_proto = objects.insert(RefCell::new(new_ordinary()));
+        let number_proto = objects.insert(RefCell::new(new_ordinary()));
+        let string_proto = objects.insert(RefCell::new(new_ordinary()));
+        let func_proto = objects.insert(RefCell::new(new_ordinary()));
+        let bool_proto = objects.insert(RefCell::new(new_ordinary()));
+        let array_proto = objects.insert(RefCell::new(new_ordinary()));
 
         Heap {
             objects,
+            object_proto,
             number_proto,
             string_proto,
             array_proto,
@@ -149,28 +128,36 @@ impl Heap {
     }
 
     pub(crate) fn new_ordinary_object(&mut self, properties: HashMap<String, Value>) -> ObjectId {
-        self.objects
-            .insert(RefCell::new(OrdObject::new(properties).into()))
+        self.objects.insert(RefCell::new(HeapObject {
+            proto_id: Some(self.object_proto),
+            properties,
+            exotic_part: Exotic::None,
+        }))
     }
     pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectId {
-        let mut obj = OrdObject::new_array(elements);
-        obj.proto_id = Some(self.array_proto);
-        self.objects.insert(RefCell::new(obj.into()))
+        self.objects.insert(RefCell::new(HeapObject {
+            proto_id: Some(self.array_proto),
+            properties: HashMap::new(),
+            exotic_part: Exotic::Array { elements },
+        }))
     }
     pub(crate) fn new_function(
         &mut self,
         closure: Closure,
         properties: HashMap<String, Value>,
     ) -> ObjectId {
-        let cobj = ClosureObject {
-            closure,
+        self.objects.insert(RefCell::new(HeapObject {
+            proto_id: Some(self.func_proto),
             properties,
-        };
-        self.objects.insert(RefCell::new(cobj.into()))
+            exotic_part: Exotic::Function { closure },
+        }))
     }
     pub(crate) fn new_string(&mut self, string: String) -> ObjectId {
-        self.objects
-            .insert(RefCell::new(StringObject(string).into()))
+        self.objects.insert(RefCell::new(HeapObject {
+            proto_id: Some(self.string_proto),
+            properties: HashMap::new(),
+            exotic_part: Exotic::String { string },
+        }))
     }
 
     pub fn is_instance_of<O: ?Sized + Object>(&self, obj: &O, sup_oid: ObjectId) -> bool {
@@ -184,7 +171,7 @@ impl Heap {
         let mut trace = vec![];
 
         while let Some(proto) = cur_proto {
-            match proto.as_object().proto(self) {
+            match proto.proto(self) {
                 Some(proto_id) if proto_id == sup_oid => return true,
                 Some(proto_id) => {
                     #[cfg(test)]
@@ -212,68 +199,16 @@ impl Heap {
     }
 
     pub fn get_property_chained<O: ?Sized + Object>(&self, obj: &O, key: &str) -> Option<Value> {
-        let value = obj.get_own_property(key);
+        let value = obj.get_own_element_or_property(IndexOrKey::Key(key));
 
         if value.is_some() {
             value
         } else if let Some(proto_id) = obj.proto(self) {
             let proto = self.get(proto_id)?;
-            self.get_property_chained(proto.deref().as_object(), key)
+            self.get_property_chained(proto.deref(), key)
         } else {
             None
         }
-    }
-}
-
-pub enum HeapObject {
-    Ord(OrdObject),
-    String(StringObject),
-    Closure(ClosureObject),
-}
-impl HeapObject {
-    pub fn as_object(&self) -> &dyn Object {
-        match self {
-            HeapObject::Ord(oo) => oo as &dyn Object,
-            HeapObject::String(so) => so as &dyn Object,
-            HeapObject::Closure(co) => co as &dyn Object,
-        }
-    }
-
-    pub fn as_object_mut(&mut self) -> &mut dyn Object {
-        match self {
-            HeapObject::Ord(oo) => oo as &mut dyn Object,
-            HeapObject::String(so) => so as &mut dyn Object,
-            HeapObject::Closure(co) => co as &mut dyn Object,
-        }
-    }
-
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            HeapObject::String(so) => Some(so.0.as_str()),
-            _ => None,
-        }
-    }
-
-    pub fn as_closure(&self) -> Option<&Closure> {
-        match self {
-            HeapObject::Closure(ClosureObject { closure, .. }) => Some(closure),
-            _ => None,
-        }
-    }
-}
-impl From<OrdObject> for HeapObject {
-    fn from(inner: OrdObject) -> Self {
-        HeapObject::Ord(inner)
-    }
-}
-impl From<StringObject> for HeapObject {
-    fn from(inner: StringObject) -> Self {
-        HeapObject::String(inner)
-    }
-}
-impl From<ClosureObject> for HeapObject {
-    fn from(inner: ClosureObject) -> Self {
-        HeapObject::Closure(inner)
     }
 }
 
@@ -283,331 +218,178 @@ impl From<ClosureObject> for HeapObject {
 /// It stores key-value pairs where keys ("properties") are strings, and any JS value can
 /// be stored as value.
 #[derive(Debug, Clone)]
-pub struct OrdObject {
+pub struct HeapObject {
     proto_id: Option<ObjectId>,
     properties: HashMap<String, Value>,
-
-    // TODO Move this to a specific Array object type?
-    array_part: Option<Vec<Value>>,
+    exotic_part: Exotic,
 }
-
-impl OrdObject {
-    fn new(properties: HashMap<String, Value>) -> Self {
-        OrdObject {
-            proto_id: None,
-            properties,
-            array_part: None,
+impl HeapObject {
+    pub(crate) fn as_str(&self) -> Option<&str> {
+        match &self.exotic_part {
+            Exotic::String { string } => Some(string),
+            _ => None,
         }
     }
 
-    fn new_array(elements: Vec<Value>) -> Self {
-        OrdObject {
-            proto_id: None,
-            properties: HashMap::new(),
-            array_part: Some(elements),
+    pub(crate) fn as_closure(&self) -> Option<&Closure> {
+        match &self.exotic_part {
+            Exotic::Function { closure } => Some(closure),
+            _ => None,
         }
     }
 
-    pub(crate) fn is_array(&self) -> bool {
-        self.array_part.is_some()
-    }
-}
-
-impl Object for OrdObject {
-    fn type_of(&self) -> Typeof {
-        Typeof::Object
+    pub(crate) fn array_elements(&self) -> Option<&[Value]> {
+        match &self.exotic_part {
+            Exotic::Array { elements } => Some(elements),
+            _ => None,
+        }
     }
 
-    fn get_own_property(&self, key: &str) -> Option<Value> {
-        if key == "__proto__" {
-            // TODO Delete
-            return self.proto_id.map(Value::Object);
-        } else if let Some(array_part) = &self.array_part {
-            if key == "length" {
-                return Some(Value::Number(array_part.len() as f64));
+    pub(crate) fn array_push(&mut self, value: Value) -> bool {
+        match &mut self.exotic_part {
+            Exotic::Array { elements } => {
+                elements.push(value);
+                true
             }
+            _ => false,
         }
-        self.properties.get(key).copied()
     }
-    fn set_own_property(&mut self, key: String, value: Value) {
-        if key == "__proto__" {
-            // TODO Delete
+
+    pub(crate) fn to_boolean(&self) -> bool {
+        match &self.exotic_part {
+            Exotic::None | Exotic::Array { .. } | Exotic::Function { .. } => true,
+            Exotic::String { string } => !string.is_empty(),
+        }
+    }
+
+    pub(crate) fn js_to_string(&self) -> String {
+        match &self.exotic_part {
+            Exotic::Array { .. } | Exotic::None => "<object>".to_owned(),
+            Exotic::String { string } => string.clone(),
+            Exotic::Function { .. } => "<closure>".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Exotic {
+    /// An ordinary object
+    None,
+    Array {
+        elements: Vec<Value>,
+    },
+    String {
+        string: String,
+    },
+    Function {
+        closure: Closure,
+    },
+}
+
+impl Object for HeapObject {
+    fn type_of(&self) -> Typeof {
+        match self.exotic_part {
+            Exotic::None => Typeof::Object,
+            Exotic::Array { .. } => Typeof::Object,
+            Exotic::String { .. } => Typeof::String,
+            Exotic::Function { .. } => Typeof::Function,
+        }
+    }
+
+    fn get_own_element_or_property<'a>(&self, index_or_key: IndexOrKey<'a>) -> Option<Value> {
+        if index_or_key == IndexOrKey::Key("__proto__") {
+            return self.proto_id.map(Value::Object);
+        }
+
+        match (&self.exotic_part, index_or_key) {
+            (Exotic::Array { elements }, IndexOrKey::Key("length")) => {
+                Some(Value::Number(elements.len() as f64))
+            }
+            (Exotic::Array { elements }, IndexOrKey::Index(index)) => elements.get(index).copied(),
+            (Exotic::String { string }, IndexOrKey::Key("length")) => {
+                Some(Value::Number(string.len() as f64))
+            }
+            (_, IndexOrKey::Key(key)) => self.properties.get(key).copied(),
+            (_, IndexOrKey::Index(_)) => None,
+        }
+    }
+    fn set_own_element_or_property<'a>(&mut self, index_or_key: IndexOrKey<'a>, value: Value) {
+        if index_or_key == IndexOrKey::Key("__proto__") {
             if let Value::Object(new_proto_id) = value {
                 self.proto_id = Some(new_proto_id);
             } else {
                 // Apparently this is simply a nop in V8?
             }
-        } else {
-            self.properties.insert(key, value);
+            return;
+        }
+
+        match (&mut self.exotic_part, index_or_key) {
+            (Exotic::None, IndexOrKey::Index(ndx)) => {
+                let new_key = ndx.to_string();
+                let new_key = IndexOrKey::Key(&new_key);
+                self.set_own_element_or_property(new_key, value)
+            }
+            (Exotic::Array { elements }, IndexOrKey::Index(ndx)) => {
+                if elements.len() < ndx + 1 {
+                    elements.resize(ndx + 1, Value::Undefined);
+                }
+                elements[ndx] = value;
+            }
+            (Exotic::String { .. } | Exotic::Function { .. }, IndexOrKey::Index(_)) => {
+                // do nothing
+            }
+            (_, IndexOrKey::Key(key)) => {
+                self.properties.insert(key.to_owned(), value);
+            }
         }
     }
-    fn delete_own_property(&mut self, key: &str) {
-        self.properties.remove(key);
+    fn delete_own_element_or_property(&mut self, index_or_key: IndexOrKey) {
+        if index_or_key == IndexOrKey::Key("__proto__") {
+            return;
+        }
+
+        match (&mut self.exotic_part, index_or_key) {
+            (Exotic::Array { .. } | Exotic::String { .. }, IndexOrKey::Key("length")) => {
+                // do nothing
+            }
+            (Exotic::Array { elements }, IndexOrKey::Index(index)) => {
+                if index < elements.len() {
+                    elements[index] = Value::Undefined;
+
+                    let mut new_len: usize = elements.len();
+                    while new_len > 0 && elements[new_len - 1] == Value::Undefined {
+                        new_len -= 1;
+                    }
+                    elements.truncate(new_len);
+                }
+            }
+            (_, IndexOrKey::Index(_)) => {
+                // do nothing
+            }
+            (_, IndexOrKey::Key(key)) => {
+                self.properties.remove(key);
+            }
+        }
     }
 
     fn own_properties(&self) -> Vec<String> {
-        self.properties.keys().cloned().collect()
-    }
+        let mut props: Vec<_> = self.properties.keys().cloned().collect();
 
-    fn set_element(&mut self, ndx: usize, value: Value) {
-        match &mut self.array_part {
-            Some(arrp) => {
-                if arrp.len() < ndx + 1 {
-                    arrp.resize(ndx + 1, Value::Undefined);
-                }
-                arrp[ndx] = value;
-            }
-            None => {
-                let ndx_str = format!("{}", ndx);
-                self.set_own_property(ndx_str, value)
+        match self.exotic_part {
+            Exotic::None | Exotic::Function { .. } => {}
+            Exotic::Array { .. } | Exotic::String { .. } => {
+                props.push("length".to_owned());
             }
         }
-    }
-    fn get_element(&self, ndx: usize) -> Option<Value> {
-        match &self.array_part {
-            Some(arrp) => arrp.get(ndx).cloned(),
-            None => {
-                let ndx_str = format!("{}", ndx);
-                self.get_own_property(&ndx_str)
-            }
-        }
-    }
-    fn delete_element(&mut self, ndx: usize) {
-        match &mut self.array_part {
-            Some(arrp) => {
-                // TODO Shorten the array if the tail is all Undefined's?
-                arrp[ndx] = Value::Undefined;
-            }
-            None => {
-                let ndx_str = ndx.to_string();
-                self.set_own_property(ndx_str, Value::Undefined);
-            }
-        }
+
+        props
     }
 
-    fn len(&self) -> usize {
-        self.array_part.as_ref().map(|arrp| arrp.len()).unwrap_or(0)
-    }
-
-    fn proto(&self, heap: &Heap) -> Option<ObjectId> {
+    fn proto(&self, _heap: &Heap) -> Option<ObjectId> {
         self.proto_id
     }
-
     fn set_proto(&mut self, proto_id: Option<ObjectId>) {
         self.proto_id = proto_id;
-    }
-}
-
-//
-// Closures
-//
-
-pub struct ClosureObject {
-    closure: Closure,
-    properties: HashMap<String, Value>,
-}
-
-impl ClosureObject {
-    pub fn closure(&self) -> &Closure {
-        &self.closure
-    }
-}
-
-impl Object for ClosureObject {
-    fn get_own_property(&self, key: &str) -> Option<Value> {
-        self.properties.get(key).copied()
-    }
-
-    fn set_own_property(&mut self, key: String, value: Value) {
-        self.properties.insert(key, value);
-    }
-
-    fn delete_own_property(&mut self, key: &str) {
-        self.properties.remove(key);
-    }
-
-    fn own_properties(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn len(&self) -> usize {
-        0
-    }
-
-    fn get_element(&self, index: usize) -> Option<Value> {
-        None
-    }
-
-    fn set_element(&mut self, index: usize, value: Value) {}
-
-    fn delete_element(&mut self, index: usize) {}
-
-    fn type_of(&self) -> Typeof {
-        Typeof::Function
-    }
-
-    fn proto(&self, heap: &Heap) -> Option<ObjectId> {
-        Some(heap.func_proto())
-    }
-
-    fn set_proto(&mut self, proto_id: Option<ObjectId>) {
-        // Nop
-    }
-}
-
-pub struct StringObject(String);
-impl StringObject {
-    pub fn string(&self) -> &String {
-        &self.0
-    }
-    pub fn string_mut(&mut self) -> &mut String {
-        &mut self.0
-    }
-}
-impl Object for StringObject {
-    fn get_own_property(&self, key: &str) -> Option<Value> {
-        match key {
-            "length" => Some(Value::Number(self.0.len() as f64)),
-            _ => None,
-        }
-    }
-
-    fn set_own_property(&mut self, key: String, value: Value) {
-        // Nop
-    }
-
-    fn delete_own_property(&mut self, key: &str) {
-        // Nop
-    }
-
-    fn own_properties(&self) -> Vec<String> {
-        vec!["length".to_string()]
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    // TODO Right now, this would need to allocate a string on the heap, to represent a
-    // 1-char-long substring of self.0.  Such a waste! Instead, because it should be
-    // possible to have some sort of StrObject representing a *read-only* string or portion of
-    // it. Maybe it could even replace the current StringObject
-    fn get_element(&self, index: usize) -> Option<Value> {
-        None
-    }
-
-    fn set_element(&mut self, index: usize, value: Value) {
-        // Nop
-    }
-
-    fn delete_element(&mut self, index: usize) {
-        // Nop
-    }
-
-    fn type_of(&self) -> Typeof {
-        Typeof::String
-    }
-
-    fn proto(&self, heap: &Heap) -> Option<ObjectId> {
-        Some(heap.string_proto())
-    }
-
-    fn set_proto(&mut self, proto_id: Option<ObjectId>) {
-        // Nop
-    }
-}
-
-pub struct NumberObject(pub f64);
-impl Object for NumberObject {
-    fn get_own_property(&self, key: &str) -> Option<Value> {
-        None
-    }
-
-    fn set_own_property(&mut self, key: String, value: Value) {
-        // Nop
-    }
-
-    fn delete_own_property(&mut self, key: &str) {
-        // Nop
-    }
-
-    fn own_properties(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn len(&self) -> usize {
-        0
-    }
-
-    fn get_element(&self, index: usize) -> Option<Value> {
-        None
-    }
-
-    fn set_element(&mut self, index: usize, value: Value) {
-        // Nop
-    }
-
-    fn delete_element(&mut self, index: usize) {
-        // Nop
-    }
-
-    fn type_of(&self) -> Typeof {
-        Typeof::Number
-    }
-
-    fn proto(&self, heap: &Heap) -> Option<ObjectId> {
-        Some(heap.number_proto())
-    }
-
-    fn set_proto(&mut self, proto_id: Option<ObjectId>) {
-        // Nop
-    }
-}
-
-pub struct BoolObject(pub bool);
-impl Object for BoolObject {
-    fn get_own_property(&self, key: &str) -> Option<Value> {
-        None
-    }
-
-    fn set_own_property(&mut self, key: String, value: Value) {
-        // Nop
-    }
-
-    fn delete_own_property(&mut self, key: &str) {
-        // Nop
-    }
-
-    fn own_properties(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn len(&self) -> usize {
-        0
-    }
-
-    fn get_element(&self, index: usize) -> Option<Value> {
-        None
-    }
-
-    fn set_element(&mut self, index: usize, value: Value) {
-        // Nop
-    }
-
-    fn delete_element(&mut self, index: usize) {
-        // Nop
-    }
-
-    fn type_of(&self) -> Typeof {
-        Typeof::Boolean
-    }
-
-    fn proto(&self, heap: &Heap) -> Option<ObjectId> {
-        Some(heap.bool_proto)
-    }
-
-    fn set_proto(&mut self, proto_id: Option<ObjectId>) {
-        // Nop
     }
 }
 
@@ -618,72 +400,74 @@ impl Object for BoolObject {
 // borrowed ref of a heap-allocated object, and release it correctly when it's
 // time.
 pub enum ValueObjectRef<'h> {
-    Number(NumberObject),
-    Bool(BoolObject),
-    Heap(Ref<'h, HeapObject>),
+    Number(f64, &'h Heap),
+    Bool(bool, &'h Heap),
+    Heap(ObjectId, &'h Heap),
 }
+
 impl<'h> ValueObjectRef<'h> {
-    pub fn as_object(&self) -> &dyn Object {
+    pub fn into_heap_ref(self) -> Option<Ref<'h, HeapObject>> {
         match self {
-            ValueObjectRef::Number(no) => no as &dyn Object,
-            ValueObjectRef::Bool(bo) => bo as &dyn Object,
-            ValueObjectRef::Heap(ho) => ho.as_object(),
+            Self::Heap(obj_id, heap) => heap.get(obj_id),
+            _ => None,
         }
-    }
-
-    pub fn into_str(self) -> Result<Ref<'h, str>, Self> {
-        // This is a bit contorted because Ref::filter_map consumes self, and may return a part of
-        // it, or return self back whole as it was.  Then we have to pack it back in its initial
-        // form.
-        match self {
-            Self::Heap(horef) => Ref::filter_map(horef, |hobj| hobj.as_str()).map_err(Self::Heap),
-            _ => Err(self),
-        }
-    }
-}
-impl<'h> From<NumberObject> for ValueObjectRef<'h> {
-    fn from(value: NumberObject) -> Self {
-        Self::Number(value)
-    }
-}
-impl<'h> From<BoolObject> for ValueObjectRef<'h> {
-    fn from(value: BoolObject) -> Self {
-        Self::Bool(value)
-    }
-}
-impl<'h> From<Ref<'h, HeapObject>> for ValueObjectRef<'h> {
-    fn from(value: Ref<'h, HeapObject>) -> Self {
-        Self::Heap(value)
     }
 }
 
-pub enum ValueObjectMut<'h> {
-    Number(NumberObject),
-    Bool(BoolObject),
-    Heap(RefMut<'h, HeapObject>),
-}
-impl<'h> ValueObjectMut<'h> {
-    pub fn as_object_mut(&mut self) -> &mut dyn Object {
-        match self {
-            ValueObjectMut::Number(no) => no as &mut dyn Object,
-            ValueObjectMut::Bool(bo) => bo as &mut dyn Object,
-            ValueObjectMut::Heap(ho) => ho.as_object_mut(),
+impl<'h> Object for ValueObjectRef<'h> {
+    fn get_own_element_or_property(&self, index_or_key: IndexOrKey) -> Option<Value> {
+        match (self, index_or_key) {
+            (
+                ValueObjectRef::Number(_, heap) | ValueObjectRef::Bool(_, heap),
+                IndexOrKey::Key("__proto__"),
+            ) => self.proto(heap).map(Value::Object),
+            (ValueObjectRef::Heap(obj_id, heap), ik) => {
+                heap.get(*obj_id)?.get_own_element_or_property(ik)
+            }
+            (_, _) => None,
         }
     }
-}
-impl<'h> From<NumberObject> for ValueObjectMut<'h> {
-    fn from(value: NumberObject) -> Self {
-        Self::Number(value)
+
+    fn set_own_element_or_property(&mut self, index_or_key: IndexOrKey, value: Value) {
+        if let ValueObjectRef::Heap(ho) = self {
+            ho.set_own_element_or_property(index_or_key, value)
+        }
     }
-}
-impl<'h> From<BoolObject> for ValueObjectMut<'h> {
-    fn from(value: BoolObject) -> Self {
-        Self::Bool(value)
+
+    fn delete_own_element_or_property(&mut self, index_or_key: IndexOrKey) {
+        if let ValueObjectRef::Heap(ho) = self {
+            ho.delete_own_element_or_property(index_or_key)
+        }
     }
-}
-impl<'h> From<RefMut<'h, HeapObject>> for ValueObjectMut<'h> {
-    fn from(value: RefMut<'h, HeapObject>) -> Self {
-        Self::Heap(value)
+
+    fn own_properties(&self) -> Vec<String> {
+        match self {
+            ValueObjectRef::Number(_, _) => Vec::new(),
+            ValueObjectRef::Bool(_, _) => Vec::new(),
+            ValueObjectRef::Heap(ho) => ho.own_properties(),
+        }
+    }
+
+    fn type_of(&self) -> Typeof {
+        match self {
+            ValueObjectRef::Number(_, _) => Typeof::Number,
+            ValueObjectRef::Bool(_, _) => Typeof::Boolean,
+            ValueObjectRef::Heap(ho) => ho.type_of(),
+        }
+    }
+
+    fn proto(&self, heap: &Heap) -> Option<ObjectId> {
+        match self {
+            ValueObjectRef::Number(_, heap) => Some(heap.number_proto),
+            ValueObjectRef::Bool(_, heap) => Some(heap.bool_proto),
+            ValueObjectRef::Heap(ho) => ho.proto(heap),
+        }
+    }
+
+    fn set_proto(&mut self, proto_id: Option<ObjectId>) {
+        if let ValueObjectRef::Heap(ho) = self {
+            ho.set_proto(proto_id)
+        }
     }
 }
 
@@ -696,14 +480,14 @@ mod tests {
         let heap = Heap::new();
         {
             let mut number_proto = heap.get_mut(heap.number_proto()).unwrap();
-            let number_proto = number_proto.deref_mut().as_object_mut();
-            number_proto.set_own_property("isNumber".to_string(), Value::Bool(true));
-            number_proto.set_own_property("isCool".to_string(), Value::Bool(true));
+            let number_proto = number_proto.deref_mut();
+            number_proto.set_own_element_or_property("isNumber".into(), Value::Bool(true));
+            number_proto.set_own_element_or_property("isCool".into(), Value::Bool(true));
         }
 
-        let num = NumberObject(123.0);
-        assert!(num.get_own_property("isNumber").is_none());
-        assert!(num.get_own_property("isCool").is_none());
+        let num = ValueObjectRef::Number(123.0, &heap);
+        assert!(num.get_own_element_or_property("isNumber".into()).is_none());
+        assert!(num.get_own_element_or_property("isCool".into()).is_none());
         assert_eq!(
             heap.get_property_chained(&num, "isNumber"),
             Some(Value::Bool(true))
@@ -719,14 +503,14 @@ mod tests {
         let heap = Heap::new();
         {
             let mut bool_proto = heap.get_mut(heap.bool_proto()).unwrap();
-            let bool_proto = bool_proto.deref_mut().as_object_mut();
-            bool_proto.set_own_property("isNumber".to_string(), Value::Bool(false));
-            bool_proto.set_own_property("isCool".to_string(), Value::Bool(true));
+            let bool_proto = bool_proto.deref_mut();
+            bool_proto.set_own_element_or_property("isNumber".into(), Value::Bool(false));
+            bool_proto.set_own_element_or_property("isCool".into(), Value::Bool(true));
         }
 
-        let num = BoolObject(true);
-        assert!(num.get_own_property("isNumber").is_none());
-        assert!(num.get_own_property("isCool").is_none());
+        let num = ValueObjectRef::Bool(true, &heap);
+        assert!(num.get_own_element_or_property("isNumber".into()).is_none());
+        assert!(num.get_own_element_or_property("isCool".into()).is_none());
         assert_eq!(
             heap.get_property_chained(&num, "isNumber"),
             Some(Value::Bool(false))
@@ -742,8 +526,9 @@ mod tests {
         let mut heap = Heap::new();
         {
             let mut array_proto = heap.get_mut(heap.array_proto()).unwrap();
-            let array_proto = array_proto.deref_mut().as_object_mut();
-            array_proto.set_own_property("specialArrayProperty".to_string(), Value::Number(999.0));
+            let array_proto = array_proto.deref_mut();
+            array_proto
+                .set_own_element_or_property("specialArrayProperty".into(), Value::Number(999.0));
         }
 
         let arr = heap.new_array(vec![
@@ -752,12 +537,13 @@ mod tests {
             Value::Number(3.0),
         ]);
         let arr = heap.get(arr).unwrap();
-        let arr = arr.as_object();
-        assert!(arr.get_own_property("specialArrayProperty").is_none());
+        assert!(arr
+            .get_own_element_or_property("specialArrayProperty".into())
+            .is_none());
         assert_eq!(
-            heap.get_property_chained(arr, "specialArrayProperty"),
+            heap.get_property_chained(arr.deref(), "specialArrayProperty"),
             Some(Value::Number(999.0))
         );
-        assert_eq!(heap.get_property_chained(arr, "isCool"), None);
+        assert_eq!(heap.get_property_chained(arr.deref(), "isCool"), None);
     }
 }

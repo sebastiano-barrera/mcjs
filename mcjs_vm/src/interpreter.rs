@@ -18,7 +18,7 @@ use crate::{
     bytecode_compiler,
     common::{Context, Result},
     error,
-    heap::{self, Heap, Object, ObjectExt},
+    heap::{self, Heap, IndexOrKey, Object},
     loader::{self, BreakRangeID},
     // jit::{self, InterpreterStep},
     stack,
@@ -579,13 +579,9 @@ impl<'a> Interpreter<'a> {
                         .heap
                         .get(oid)
                         .ok_or_else(|| error!("invalid function (object is not callable)"))?;
-                    let closure: &Closure =
-                        if let heap::HeapObject::Closure(cobj) = heap_object.deref() {
-                            cobj.closure()
-                        } else {
-                            // TODO Generalize to other types of callable objects?
-                            return Err(error!("can't call non-closure"));
-                        };
+                    let closure: &Closure = heap_object
+                        .as_closure()
+                        .ok_or_else(|| error!("can't call non-closure"))?;
 
                     // The arguments have to be "read" before adding the stack frame;
                     // they will no longer be accessible
@@ -716,7 +712,7 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = self.get_operand(*value);
 
-                    obj.as_object_mut().set_own_element_or_property(key, value);
+                    obj.set_own_element_or_property(key.to_ref(), value);
                 }
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = self.get_operand_object(*obj)?;
@@ -724,11 +720,12 @@ impl<'a> Interpreter<'a> {
                     let key = Self::value_to_index_or_key(&self.realm.heap, &key);
 
                     let value = match key {
-                        Some(heap::IndexOrKey::Index(ndx)) => obj.as_object().get_element(ndx),
-                        Some(heap::IndexOrKey::Key(key)) => self
-                            .realm
-                            .heap
-                            .get_property_chained(obj.as_object(), key.deref()),
+                        Some(ik @ heap::IndexOrKeyOwned::Index(_)) => {
+                            obj.get_own_element_or_property(ik.to_ref())
+                        }
+                        Some(heap::IndexOrKeyOwned::Key(key)) => {
+                            self.realm.heap.get_property_chained(&obj, &key)
+                        }
                         None => None,
                     }
                     .unwrap_or(Value::Undefined);
@@ -741,7 +738,7 @@ impl<'a> Interpreter<'a> {
                     // TODO Something more efficient?
                     let keys: Vec<String> = {
                         let obj = self.get_operand_object(*obj)?;
-                        obj.as_object().own_properties()
+                        obj.own_properties()
                     };
                     let keys = keys
                         .into_iter()
@@ -762,30 +759,35 @@ impl<'a> Interpreter<'a> {
                         let key = self.get_operand(*key);
                         let key = Self::value_to_index_or_key(&self.realm.heap, &key)
                             .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                        obj.as_object_mut().delete_own_element_or_property(key);
+                        obj.delete_own_element_or_property(key.to_ref());
                     }
 
                     self.data.top_mut().set_result(*dest, Value::Bool(true));
                 }
 
                 Instr::ArrayPush { arr, value } => {
-                    let len = {
-                        let arr = self.get_operand_object(*arr)?;
-                        arr.as_object().len()
-                    };
-
                     let value = self.get_operand(*value);
-                    let mut arr = self.get_operand_object_mut(*arr)?;
-                    arr.as_object_mut().set_element(len, value);
+                    let mut arr = self
+                        .get_operand_object_mut(*arr)?
+                        .into_heap_ref()
+                        .ok_or_else(|| error!("not an array!"))?;
+
+                    let was_array = arr.array_push(value);
+                    assert!(was_array);
                 }
                 Instr::ArrayNth { dest, arr, index } => {
                     let value = {
-                        let arr = self.get_operand_object(*arr)?;
+                        let arr = self
+                            .get_operand_object(*arr)?
+                            .into_heap_ref()
+                            .ok_or_else(|| error!("not an array!"))?;
+                        let elements = arr.array_elements().unwrap();
+
                         let num = self.get_operand(*index).expect_num()?;
                         let num_trunc = num.trunc();
                         if num_trunc == num {
                             let ndx = num_trunc as usize;
-                            arr.as_object().get_element(ndx).unwrap_or(Value::Undefined)
+                            elements.get(ndx).copied().unwrap_or(Value::Undefined)
                         } else {
                             Value::Undefined
                         }
@@ -794,10 +796,13 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
                 Instr::ArrayLen { dest, arr } => {
-                    let len: usize = {
-                        let arr = self.get_operand_object(*arr)?;
-                        arr.as_object().len()
-                    };
+                    let len = self
+                        .get_operand_object(*arr)?
+                        .into_heap_ref()
+                        .ok_or_else(|| error!("not an array!"))?
+                        .array_elements()
+                        .unwrap()
+                        .len();
                     self.data
                         .top_mut()
                         .set_result(*dest, Value::Number(len as f64));
@@ -1056,7 +1061,7 @@ impl<'a> Interpreter<'a> {
             Ok(obj) => obj,
             Err(_) => return false,
         };
-        self.realm.heap.is_instance_of(obj.as_object(), sup_oid)
+        self.realm.heap.is_instance_of(&obj, sup_oid)
     }
 
     fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<str>> {
@@ -1125,13 +1130,16 @@ impl<'a> Interpreter<'a> {
                 .unwrap_or(ValueOrdering::Incomparable),
             (Value::Null, Value::Null) => ValueOrdering::Equal,
             (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
+            #[rustfmt::skip]
             (Value::Object(a), Value::Object(b)) => {
                 let a = self.realm.heap.get(*a);
+                let a = a.as_ref().and_then(|ho| ho.as_str());
+
                 let b = self.realm.heap.get(*b);
-                match (a.as_deref(), b.as_deref()) {
-                    (Some(heap::HeapObject::String(a)), Some(heap::HeapObject::String(b))) => {
-                        a.string().cmp(b.string()).into()
-                    }
+                let b = b.as_ref().and_then(|ho| ho.as_str());
+
+                match (a, b) {
+                    (Some(a), Some(b)) => a.cmp(b).into(),
                     _ => ValueOrdering::Incomparable,
                 }
             }
@@ -1169,10 +1177,9 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| error!("could not use as object: {:?}", vreg))
     }
 
-    fn get_operand_object_mut(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectMut> {
-        let value = self.get_operand(vreg);
-        as_object_mut(value, &self.realm.heap)
-            .ok_or_else(|| error!("could not use as object: {:?}", vreg))
+    fn get_operand_object_mut(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectRef> {
+        // TODO Remove this function, inline into all callers
+        self.get_operand_object(vreg)
     }
 
     fn js_typeof(&mut self, value: &Value) -> Value {
@@ -1180,7 +1187,7 @@ impl<'a> Interpreter<'a> {
         let ty_s = match value {
             Value::Number(_) => "number",
             Value::Bool(_) => "boolean",
-            Value::Object(oid) => match self.realm.heap.get(*oid).unwrap().as_object().type_of() {
+            Value::Object(oid) => match self.realm.heap.get(*oid).unwrap().type_of() {
                 heap::Typeof::Object => "object",
                 heap::Typeof::Function => "function",
                 heap::Typeof::String => "string",
@@ -1204,22 +1211,21 @@ impl<'a> Interpreter<'a> {
     fn value_to_index_or_key<'h>(
         heap: &'h heap::Heap,
         value: &Value,
-    ) -> Option<heap::IndexOrKey<Ref<'h, str>>> {
+    ) -> Option<heap::IndexOrKeyOwned> {
         match value {
             Value::Number(n) if *n >= 0.0 => {
                 let n_trunc = n.trunc();
                 if *n == n_trunc {
                     let ndx = n_trunc as usize;
-                    Some(heap::IndexOrKey::Index(ndx))
+                    Some(heap::IndexOrKeyOwned::Index(ndx))
                 } else {
                     None
                 }
             }
             Value::Object(oid) => {
                 let obj = heap.get(*oid)?;
-                Ref::filter_map(obj, |hobj| hobj.as_str())
-                    .map(heap::IndexOrKey::Key)
-                    .ok()
+                let string = obj.as_str()?.to_owned();
+                Some(heap::IndexOrKeyOwned::Key(string))
             }
             _ => None,
         }
@@ -1230,14 +1236,10 @@ impl<'a> Interpreter<'a> {
     /// See: https://262.ecma-international.org/14.0/#sec-toboolean
     fn to_boolean(&self, value: Value) -> bool {
         match value {
+            Value::Null => false,
             Value::Bool(bool_val) => bool_val,
             Value::Number(num) => num != 0.0,
-            Value::Object(oid) => match self.realm.heap.get(oid).unwrap().deref() {
-                heap::HeapObject::Ord(_) => true,
-                heap::HeapObject::Closure(_) => true,
-                heap::HeapObject::String(sobj) => !sobj.string().is_empty(),
-            },
-            Value::Null => false,
+            Value::Object(oid) => self.realm.heap.get(oid).unwrap().to_boolean(),
             Value::Undefined => false,
             Value::SelfFunction => true,
             Value::Internal(_) => {
@@ -1270,18 +1272,9 @@ fn init_stack(
 
 fn as_object_ref(value: Value, heap: &heap::Heap) -> Option<heap::ValueObjectRef> {
     match value {
-        Value::Object(oid) => heap.get(oid).map(Into::into),
-        Value::Number(num) => Some(heap::NumberObject(num).into()),
-        Value::Bool(bool) => Some(heap::BoolObject(bool).into()),
-        _ => None,
-    }
-}
-
-fn as_object_mut(value: Value, heap: &heap::Heap) -> Option<heap::ValueObjectMut> {
-    match value {
-        Value::Object(oid) => heap.get_mut(oid).map(Into::into),
-        Value::Number(num) => Some(heap::NumberObject(num).into()),
-        Value::Bool(bool) => Some(heap::BoolObject(bool).into()),
+        Value::Object(oid) => heap.get(oid).map(heap::ValueObjectRef::Heap),
+        Value::Number(num) => Some(heap::ValueObjectRef::Number(num, heap)),
+        Value::Bool(bool) => Some(heap::ValueObjectRef::Bool(bool, heap)),
         _ => None,
     }
 }
@@ -1316,12 +1309,8 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
         Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
         Value::Object(oid) => {
             let hobj = heap.get(oid)?;
-            if let heap::HeapObject::String(sobj) = hobj.deref() {
-                let s = sobj.string().to_owned();
-                Some(bytecode::Literal::String(s.to_owned()))
-            } else {
-                None
-            }
+            hobj.as_str()
+                .map(|s| bytecode::Literal::String(s.to_owned()))
         }
         Value::Null => Some(bytecode::Literal::Null),
         Value::Undefined => Some(bytecode::Literal::Undefined),
@@ -1364,8 +1353,8 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         );
         let oid = heap.number_proto();
         let mut number_proto = heap.get_mut(oid).unwrap();
-        number_proto.as_object_mut().set_own_property(
-            "toString".to_string(),
+        number_proto.set_own_element_or_property(
+            "toString".into(),
             Value::Object(Number_prototype_toString),
         )
     }
@@ -1401,11 +1390,7 @@ fn nf_Array_isArray(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> R
             .heap
             .get(*oid)
             .ok_or_else(|| error!("no such object!"))?;
-        if let heap::HeapObject::Ord(obj) = obj.deref() {
-            obj.is_array()
-        } else {
-            false
-        }
+        obj.array_elements().is_some()
     } else {
         false
     };
@@ -1418,9 +1403,8 @@ fn nf_Array_push(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Resul
     // TODO Proper error handling, instead of these unwrap
     let oid = this.expect_obj().unwrap();
     let mut arr = intrp.realm.heap.get_mut(oid).unwrap();
-    let len = arr.as_object().len();
     let value = *args.get(0).unwrap();
-    arr.as_object_mut().set_element(len, value);
+    arr.array_push(value);
     Ok(Value::Undefined)
 }
 
@@ -1471,11 +1455,7 @@ fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<V
         Some(Value::Number(num)) => num.to_string(),
         Some(Value::Bool(true)) => "true".into(),
         Some(Value::Bool(false)) => "false".into(),
-        Some(Value::Object(oid)) => match intrp.realm.heap.get(*oid).unwrap().deref() {
-            heap::HeapObject::Ord(_) => "<object>".to_owned(),
-            heap::HeapObject::String(sobj) => sobj.string().clone(),
-            heap::HeapObject::Closure(_) => "<closure>".to_owned(),
-        },
+        Some(Value::Object(oid)) => intrp.realm.heap.get(*oid).unwrap().js_to_string(),
         Some(Value::Null) => "null".into(),
         Some(Value::Undefined) => "undefined".into(),
         Some(Value::SelfFunction) => "<function>".into(),
@@ -1502,11 +1482,11 @@ fn nf_cash_print(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Resu
             if let Some(s) = obj.as_str() {
                 println!("  {:?}", s);
             } else {
-                let obj = obj.as_object();
-                println!("{:?} [{} properties]", obj_id, obj.len());
+                let props = obj.own_properties();
+                println!("{:?} [{} properties]", obj_id, props.len());
 
-                for prop in obj.own_properties() {
-                    let value = obj.get_own_property(&prop);
+                for prop in props {
+                    let value = obj.get_own_element_or_property(IndexOrKey::Key(&prop));
                     println!("  - {:?} = {:?}", prop, value);
                 }
             }
