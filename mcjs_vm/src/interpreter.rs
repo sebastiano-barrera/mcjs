@@ -574,12 +574,12 @@ impl<'a> Interpreter<'a> {
                     return_value,
                 } => {
                     let oid = self.get_operand(*callee).expect_obj()?;
-                    let heap_object = self
+                    let ho_ref = self
                         .realm
                         .heap
                         .get(oid)
-                        .ok_or_else(|| error!("invalid function (object is not callable)"))?;
-                    let closure: &Closure = heap_object
+                        .ok_or_else(|| error!("invalid function (object is not callable)"))?.borrow();
+                    let closure: &Closure = ho_ref
                         .as_closure()
                         .ok_or_else(|| error!("can't call non-closure"))?;
 
@@ -676,7 +676,7 @@ impl<'a> Interpreter<'a> {
                         }
                         Closure::Native(nf) => {
                             let nf = *nf;
-                            drop(heap_object);
+                            drop(ho_ref);
 
                             let this = self.get_operand(*this);
                             let ret_val = nf(self, &this, &arg_vals)?;
@@ -769,8 +769,9 @@ impl<'a> Interpreter<'a> {
                     let value = self.get_operand(*value);
                     let mut arr = self
                         .get_operand_object_mut(*arr)?
-                        .into_heap_ref()
-                        .ok_or_else(|| error!("not an array!"))?;
+                        .into_heap_cell()
+                        .ok_or_else(|| error!("not an array!"))?
+                        .borrow_mut();
 
                     let was_array = arr.array_push(value);
                     assert!(was_array);
@@ -779,8 +780,9 @@ impl<'a> Interpreter<'a> {
                     let value = {
                         let arr = self
                             .get_operand_object(*arr)?
-                            .into_heap_ref()
-                            .ok_or_else(|| error!("not an array!"))?;
+                            .into_heap_cell()
+                            .ok_or_else(|| error!("not an array!"))?
+                            .borrow();
                         let elements = arr.array_elements().unwrap();
 
                         let num = self.get_operand(*index).expect_num()?;
@@ -798,8 +800,9 @@ impl<'a> Interpreter<'a> {
                 Instr::ArrayLen { dest, arr } => {
                     let len = self
                         .get_operand_object(*arr)?
-                        .into_heap_ref()
+                        .into_heap_cell()
                         .ok_or_else(|| error!("not an array!"))?
+                        .borrow()
                         .array_elements()
                         .unwrap()
                         .len();
@@ -1065,9 +1068,12 @@ impl<'a> Interpreter<'a> {
     }
 
     fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<str>> {
-        self.get_operand_object(vreg)?
-            .into_str()
-            .map_err(|_| error!("expected string, but got another type"))
+        let ho = self
+            .get_operand_object(vreg)?
+            .into_heap_cell()
+            .ok_or_else(|| error!("not a heap object"))?
+            .borrow();
+        Ok(Ref::filter_map(ho, |ho| ho.as_str()).unwrap())
     }
 
     fn dump_output(self) -> FinishedData {
@@ -1132,10 +1138,10 @@ impl<'a> Interpreter<'a> {
             (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
             #[rustfmt::skip]
             (Value::Object(a), Value::Object(b)) => {
-                let a = self.realm.heap.get(*a);
+                let a = self.realm.heap.get(*a).map(|x| x.borrow());
                 let a = a.as_ref().and_then(|ho| ho.as_str());
 
-                let b = self.realm.heap.get(*b);
+                let b = self.realm.heap.get(*b).map(|x| x.borrow());
                 let b = b.as_ref().and_then(|ho| ho.as_str());
 
                 match (a, b) {
@@ -1187,7 +1193,7 @@ impl<'a> Interpreter<'a> {
         let ty_s = match value {
             Value::Number(_) => "number",
             Value::Bool(_) => "boolean",
-            Value::Object(oid) => match self.realm.heap.get(*oid).unwrap().type_of() {
+            Value::Object(oid) => match self.realm.heap.get(*oid).unwrap().borrow().type_of() {
                 heap::Typeof::Object => "object",
                 heap::Typeof::Function => "function",
                 heap::Typeof::String => "string",
@@ -1224,7 +1230,7 @@ impl<'a> Interpreter<'a> {
             }
             Value::Object(oid) => {
                 let obj = heap.get(*oid)?;
-                let string = obj.as_str()?.to_owned();
+                let string = obj.borrow().as_str()?.to_owned();
                 Some(heap::IndexOrKeyOwned::Key(string))
             }
             _ => None,
@@ -1239,7 +1245,7 @@ impl<'a> Interpreter<'a> {
             Value::Null => false,
             Value::Bool(bool_val) => bool_val,
             Value::Number(num) => num != 0.0,
-            Value::Object(oid) => self.realm.heap.get(oid).unwrap().to_boolean(),
+            Value::Object(oid) => self.realm.heap.get(oid).unwrap().borrow().to_boolean(),
             Value::Undefined => false,
             Value::SelfFunction => true,
             Value::Internal(_) => {
@@ -1309,7 +1315,8 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
         Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
         Value::Object(oid) => {
             let hobj = heap.get(oid)?;
-            hobj.as_str()
+            hobj.borrow()
+                .as_str()
                 .map(|s| bytecode::Literal::String(s.to_owned()))
         }
         Value::Null => Some(bytecode::Literal::Null),
@@ -1352,7 +1359,7 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
             HashMap::new(),
         );
         let oid = heap.number_proto();
-        let mut number_proto = heap.get_mut(oid).unwrap();
+        let mut number_proto = heap.get(oid).unwrap().borrow_mut();
         number_proto.set_own_element_or_property(
             "toString".into(),
             Value::Object(Number_prototype_toString),
@@ -1390,7 +1397,7 @@ fn nf_Array_isArray(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> R
             .heap
             .get(*oid)
             .ok_or_else(|| error!("no such object!"))?;
-        obj.array_elements().is_some()
+        obj.borrow().array_elements().is_some()
     } else {
         false
     };
@@ -1402,7 +1409,7 @@ fn nf_Array_isArray(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> R
 fn nf_Array_push(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
     // TODO Proper error handling, instead of these unwrap
     let oid = this.expect_obj().unwrap();
-    let mut arr = intrp.realm.heap.get_mut(oid).unwrap();
+    let mut arr = intrp.realm.heap.get(oid).unwrap().borrow_mut();
     let value = *args.get(0).unwrap();
     arr.array_push(value);
     Ok(Value::Undefined)
@@ -1455,7 +1462,7 @@ fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<V
         Some(Value::Number(num)) => num.to_string(),
         Some(Value::Bool(true)) => "true".into(),
         Some(Value::Bool(false)) => "false".into(),
-        Some(Value::Object(oid)) => intrp.realm.heap.get(*oid).unwrap().js_to_string(),
+        Some(Value::Object(oid)) => intrp.realm.heap.get(*oid).unwrap().borrow().js_to_string(),
         Some(Value::Null) => "null".into(),
         Some(Value::Undefined) => "undefined".into(),
         Some(Value::SelfFunction) => "<function>".into(),
@@ -1478,7 +1485,7 @@ fn nf_Boolean(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Va
 fn nf_cash_print(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
     for arg in args {
         if let Value::Object(obj_id) = arg {
-            let obj = intrp.realm.heap.get(*obj_id).unwrap();
+            let obj = intrp.realm.heap.get(*obj_id).unwrap().borrow();
             if let Some(s) = obj.as_str() {
                 println!("  {:?}", s);
             } else {
@@ -1728,7 +1735,11 @@ pub mod debugger {
         }
 
         pub fn get_object(&self, obj_id: heap::ObjectId) -> Option<Ref<heap::HeapObject>> {
-            self.interpreter.realm.heap.get(obj_id)
+            self.interpreter
+                .realm
+                .heap
+                .get(obj_id)
+                .map(|hocell| hocell.borrow())
         }
     }
 }

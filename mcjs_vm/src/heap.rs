@@ -1,5 +1,5 @@
 use std::{
-    borrow::{Borrow, Cow},
+    borrow::Cow,
     cell::{Ref, RefCell, RefMut},
     collections::HashMap,
     ops::{Deref, DerefMut},
@@ -171,6 +171,7 @@ impl Heap {
         let mut trace = vec![];
 
         while let Some(proto) = cur_proto {
+            let proto = proto.borrow();
             match proto.proto(self) {
                 Some(proto_id) if proto_id == sup_oid => return true,
                 Some(proto_id) => {
@@ -191,11 +192,8 @@ impl Heap {
         false
     }
 
-    pub fn get(&self, oid: ObjectId) -> Option<Ref<HeapObject>> {
-        self.objects.get(oid).map(|refcell| refcell.borrow())
-    }
-    pub fn get_mut(&self, oid: ObjectId) -> Option<RefMut<HeapObject>> {
-        self.objects.get(oid).map(|refcell| refcell.borrow_mut())
+    pub fn get(&self, oid: ObjectId) -> Option<&RefCell<HeapObject>> {
+        self.objects.get(oid)
     }
 
     pub fn get_property_chained<O: ?Sized + Object>(&self, obj: &O, key: &str) -> Option<Value> {
@@ -204,7 +202,7 @@ impl Heap {
         if value.is_some() {
             value
         } else if let Some(proto_id) = obj.proto(self) {
-            let proto = self.get(proto_id)?;
+            let proto = self.get(proto_id)?.borrow();
             self.get_property_chained(proto.deref(), key)
         } else {
             None
@@ -402,13 +400,13 @@ impl Object for HeapObject {
 pub enum ValueObjectRef<'h> {
     Number(f64, &'h Heap),
     Bool(bool, &'h Heap),
-    Heap(ObjectId, &'h Heap),
+    Heap(&'h RefCell<HeapObject>),
 }
 
 impl<'h> ValueObjectRef<'h> {
-    pub fn into_heap_ref(self) -> Option<Ref<'h, HeapObject>> {
+    pub fn into_heap_cell(self) -> Option<&'h RefCell<HeapObject>> {
         match self {
-            Self::Heap(obj_id, heap) => heap.get(obj_id),
+            Self::Heap(ho) => Some(ho),
             _ => None,
         }
     }
@@ -421,8 +419,9 @@ impl<'h> Object for ValueObjectRef<'h> {
                 ValueObjectRef::Number(_, heap) | ValueObjectRef::Bool(_, heap),
                 IndexOrKey::Key("__proto__"),
             ) => self.proto(heap).map(Value::Object),
-            (ValueObjectRef::Heap(obj_id, heap), ik) => {
-                heap.get(*obj_id)?.get_own_element_or_property(ik)
+            (ValueObjectRef::Heap(ho), ik) => {
+                let horef = ho.borrow();
+                horef.get_own_element_or_property(ik)
             }
             (_, _) => None,
         }
@@ -430,13 +429,14 @@ impl<'h> Object for ValueObjectRef<'h> {
 
     fn set_own_element_or_property(&mut self, index_or_key: IndexOrKey, value: Value) {
         if let ValueObjectRef::Heap(ho) = self {
-            ho.set_own_element_or_property(index_or_key, value)
+            ho.borrow_mut()
+                .set_own_element_or_property(index_or_key, value)
         }
     }
 
     fn delete_own_element_or_property(&mut self, index_or_key: IndexOrKey) {
         if let ValueObjectRef::Heap(ho) = self {
-            ho.delete_own_element_or_property(index_or_key)
+            ho.borrow_mut().delete_own_element_or_property(index_or_key)
         }
     }
 
@@ -444,7 +444,7 @@ impl<'h> Object for ValueObjectRef<'h> {
         match self {
             ValueObjectRef::Number(_, _) => Vec::new(),
             ValueObjectRef::Bool(_, _) => Vec::new(),
-            ValueObjectRef::Heap(ho) => ho.own_properties(),
+            ValueObjectRef::Heap(ho) => ho.borrow().own_properties(),
         }
     }
 
@@ -452,7 +452,7 @@ impl<'h> Object for ValueObjectRef<'h> {
         match self {
             ValueObjectRef::Number(_, _) => Typeof::Number,
             ValueObjectRef::Bool(_, _) => Typeof::Boolean,
-            ValueObjectRef::Heap(ho) => ho.type_of(),
+            ValueObjectRef::Heap(ho) => ho.borrow().type_of(),
         }
     }
 
@@ -460,13 +460,13 @@ impl<'h> Object for ValueObjectRef<'h> {
         match self {
             ValueObjectRef::Number(_, heap) => Some(heap.number_proto),
             ValueObjectRef::Bool(_, heap) => Some(heap.bool_proto),
-            ValueObjectRef::Heap(ho) => ho.proto(heap),
+            ValueObjectRef::Heap(ho) => ho.borrow().proto(heap),
         }
     }
 
     fn set_proto(&mut self, proto_id: Option<ObjectId>) {
         if let ValueObjectRef::Heap(ho) = self {
-            ho.set_proto(proto_id)
+            ho.borrow_mut().set_proto(proto_id)
         }
     }
 }
@@ -479,7 +479,7 @@ mod tests {
     fn test_number_properties() {
         let heap = Heap::new();
         {
-            let mut number_proto = heap.get_mut(heap.number_proto()).unwrap();
+            let mut number_proto = heap.get(heap.number_proto()).unwrap().borrow_mut();
             let number_proto = number_proto.deref_mut();
             number_proto.set_own_element_or_property("isNumber".into(), Value::Bool(true));
             number_proto.set_own_element_or_property("isCool".into(), Value::Bool(true));
@@ -502,7 +502,7 @@ mod tests {
     fn test_bool_properties() {
         let heap = Heap::new();
         {
-            let mut bool_proto = heap.get_mut(heap.bool_proto()).unwrap();
+            let mut bool_proto = heap.get(heap.bool_proto()).unwrap().borrow_mut();
             let bool_proto = bool_proto.deref_mut();
             bool_proto.set_own_element_or_property("isNumber".into(), Value::Bool(false));
             bool_proto.set_own_element_or_property("isCool".into(), Value::Bool(true));
@@ -525,7 +525,7 @@ mod tests {
     fn test_array() {
         let mut heap = Heap::new();
         {
-            let mut array_proto = heap.get_mut(heap.array_proto()).unwrap();
+            let mut array_proto = heap.get(heap.array_proto()).unwrap().borrow_mut();
             let array_proto = array_proto.deref_mut();
             array_proto
                 .set_own_element_or_property("specialArrayProperty".into(), Value::Number(999.0));
@@ -536,7 +536,7 @@ mod tests {
             Value::Number(6.0),
             Value::Number(3.0),
         ]);
-        let arr = heap.get(arr).unwrap();
+        let arr = heap.get(arr).unwrap().borrow();
         assert!(arr
             .get_own_element_or_property("specialArrayProperty".into())
             .is_none());
