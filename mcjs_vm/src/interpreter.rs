@@ -1146,16 +1146,19 @@ impl<'a> Interpreter<'a> {
             (Value::Null, Value::Null) => ValueOrdering::Equal,
             (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
             #[rustfmt::skip]
-            (Value::Object(a), Value::Object(b)) => {
-                let a = self.realm.heap.get(*a).map(|x| x.borrow());
-                let a = a.as_ref().and_then(|ho| ho.as_str());
+            (Value::Object(a_oid), Value::Object(b_oid)) => {
+                let a_obj = self.realm.heap.get(*a_oid).map(|x| x.borrow());
+                let b_obj = self.realm.heap.get(*b_oid).map(|x| x.borrow());
 
-                let b = self.realm.heap.get(*b).map(|x| x.borrow());
-                let b = b.as_ref().and_then(|ho| ho.as_str());
+                let a_str = a_obj.as_ref().and_then(|ho| ho.as_str());
+                let b_str = b_obj.as_ref().and_then(|ho| ho.as_str());
 
-                match (a, b) {
-                    (Some(a), Some(b)) => a.cmp(b).into(),
-                    _ => ValueOrdering::Incomparable,
+                if let (Some(a_str), Some(b_str)) = (a_str, b_str) {
+                    a_str.cmp(b_str).into()
+                } else if a_oid == b_oid {
+                    ValueOrdering::Equal
+                } else {
+                    ValueOrdering::Incomparable
                 }
             }
             _ => ValueOrdering::Incomparable,
@@ -1586,7 +1589,7 @@ pub mod debugger {
 
     use super::{Fuel, InstrBreakpoint, Interpreter, SourceBreakpoint};
 
-    pub use heap::{ObjectId, Object, IndexOrKey};
+    pub use heap::{IndexOrKey, Object, ObjectId};
 
     /// The only real entry point to all the debugging features present in the
     /// Interpreter.
