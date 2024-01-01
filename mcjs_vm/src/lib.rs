@@ -19,4 +19,3 @@ pub use bytecode::{FnId, GlobalIID, Literal, ModuleId, IID, SCRIPT_MODULE_ID};
 pub use common::Error;
 pub use interpreter::{Interpreter, Options, Realm, Value as InterpreterValue};
 pub use loader::Loader;
-

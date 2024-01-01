@@ -122,7 +122,7 @@ impl std::fmt::Debug for Closure {
 
 slotmap::new_key_type! { pub struct UpvalueId; }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Options {
     #[cfg(enable_jit)]
     pub jit_mode: JitMode,
@@ -132,15 +132,6 @@ pub struct Options {
 pub enum JitMode {
     Compile,
     UseTraces,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            #[cfg(enable_jit)]
-            jit_mode: JitMode::UseTraces,
-        }
-    }
 }
 
 pub struct NotADirectoryError(PathBuf);
@@ -740,7 +731,6 @@ impl<'a> Interpreter<'a> {
                     .unwrap_or(Value::Undefined);
 
                     tprint!("  -> {:?}", value);
-                    drop(obj);
                     self.data.top_mut().set_result(*dest, value);
                 }
                 Instr::ObjGetKeys { dest, obj } => {
@@ -1226,10 +1216,7 @@ impl<'a> Interpreter<'a> {
         )
     }
 
-    fn value_to_index_or_key<'h>(
-        heap: &'h heap::Heap,
-        value: &Value,
-    ) -> Option<heap::IndexOrKeyOwned> {
+    fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::IndexOrKeyOwned> {
         match value {
             Value::Number(n) if *n >= 0.0 => {
                 let n_trunc = n.trunc();

@@ -62,7 +62,7 @@ impl IndexOrKeyOwned {
     pub fn to_ref(&self) -> IndexOrKey {
         match self {
             IndexOrKeyOwned::Index(ndx) => IndexOrKey::Index(*ndx),
-            IndexOrKeyOwned::Key(key) => IndexOrKey::Key(&key),
+            IndexOrKeyOwned::Key(key) => IndexOrKey::Key(key),
         }
     }
 }
@@ -294,7 +294,7 @@ impl Object for HeapObject {
         }
     }
 
-    fn get_own_element_or_property<'a>(&self, index_or_key: IndexOrKey<'a>) -> Option<Value> {
+    fn get_own_element_or_property(&self, index_or_key: IndexOrKey) -> Option<Value> {
         if index_or_key == IndexOrKey::Key("__proto__") {
             return self.proto_id.map(Value::Object);
         }
@@ -311,7 +311,7 @@ impl Object for HeapObject {
             (_, IndexOrKey::Index(_)) => None,
         }
     }
-    fn set_own_element_or_property<'a>(&mut self, index_or_key: IndexOrKey<'a>, value: Value) {
+    fn set_own_element_or_property(&mut self, index_or_key: IndexOrKey, value: Value) {
         if index_or_key == IndexOrKey::Key("__proto__") {
             if let Value::Object(new_proto_id) = value {
                 self.proto_id = Some(new_proto_id);

@@ -66,7 +66,7 @@ fn main() {
 }
 
 fn run_and_write(params: &TestParams, negative_test: &Option<metadata::NegativeTest>) {
-    let test_error = run_test(&params).err();
+    let test_error = run_test(params).err();
     let test_error = filter_expected_error(negative_test, test_error);
     let outcome = TestOutcome {
         file_path: params.test262_root.join(params.file_path),
@@ -88,7 +88,7 @@ fn filter_expected_error(
     negative_test: &Option<metadata::NegativeTest>,
     test_error: Option<TestError>,
 ) -> Option<TestError> {
-    let test_error = match (negative_test, test_error) {
+    match (negative_test, test_error) {
         (
             Some(metadata::NegativeTest {
                 phase: metadata::Phase::Parse,
@@ -97,8 +97,7 @@ fn filter_expected_error(
             Some(TestError::Load(_)),
         ) => None,
         (_, err) => err,
-    };
-    test_error
+    }
 }
 
 #[derive(Default)]
@@ -149,7 +148,7 @@ fn run_test(params: &TestParams) -> Result<(), TestError> {
         let mut realm = mcjs_vm::Realm::new(&mut loader);
 
         for file_path in paths {
-            let file_path_str = (&file_path).to_string_lossy().into_owned();
+            let file_path_str = file_path.to_string_lossy().into_owned();
             let mut content = std::fs::read_to_string(&file_path).map_err(TestError::Read)?;
             if params.is_strict {
                 content.insert_str(0, "\"use strict\";");
