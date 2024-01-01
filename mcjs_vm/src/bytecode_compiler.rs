@@ -1191,18 +1191,39 @@ fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Resu
     for stmt in stmts {
         match stmt {
             Stmt::Decl(Decl::Var(var_decl)) => {
+                // `var` variables declarations can be thought of as a name binding + an
+                // assignment.
+                //   - the name binding behaves as if it was moved at the beginning of the block.  the initial value is `undefined`
+                //   - the assignment is left at the original position. the program will have to
+                //   reach that spot before it takes effect.
+                //
+                //   So, these 2 block behave identically:
+                //
+                //   ```
+                //   {
+                //      $print(x);   // prints 'undefined'
+                //      var x = 22;
+                //      $print(x);   // prints '22'
+                //   }
+                //
+                //   {
+                //      var x;
+                //      $print(x);   // prints 'undefined'
+                //      x = 22;
+                //      $print(x);   // prints '22'
+                //   }
+                //   ```
+                //
                 compile_var_decl_namedef(builder, var_decl);
             }
             Stmt::Decl(Decl::Fn(fn_decl)) => {
+                // Function definitions are simply done first, regardless of where they appear in
+                // the block.  Name binding and assignment happen together, before the rest of the
+                // block is run.
                 compile_fn_decl_namedef(builder, fn_decl);
+                compile_fn_decl_assignment(builder, fn_decl)?;
             }
             _ => (),
-        }
-    }
-
-    for stmt in stmts {
-        if let Stmt::Decl(Decl::Fn(fn_decl)) = stmt {
-            compile_fn_decl_assignment(builder, fn_decl)?;
         }
     }
 
@@ -1259,16 +1280,14 @@ fn compile_var_decl_assignment(
         let name: JsWord = ident.id.to_id().0;
         let var = builder.get_var(&name);
 
-        let value = if let Some(expr) = &decl.init {
-            compile_expr(builder, expr)?
+        if let Some(expr) = &decl.init {
+            let value = compile_expr(builder, expr)?;
+            builder.write_var(&var, value);
         } else {
-            // TODO waste: Extra register
-            let reg = builder.new_vreg();
-            builder.set_const(reg, Literal::Undefined);
-            reg
-        };
-
-        builder.write_var(&var, value);
+            // We do nothing.
+            // The register had already been reserved for this variable in the namedef phase, and
+            // it is implicitly initialized to undefined by the interpreter.
+        }
     }
 
     Ok(())
@@ -1371,6 +1390,14 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
         obj: dest,
         key,
         value: proto,
+    });
+    let ctor = builder.get_var(&"Function".into());
+    let ctor = builder.read_var(&ctor);
+    builder.set_const(key, Literal::String("constructor".to_string()));
+    builder.emit(Instr::ObjSet {
+        obj: dest,
+        key,
+        value: ctor,
     });
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
