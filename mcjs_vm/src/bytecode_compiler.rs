@@ -1240,19 +1240,26 @@ fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Resu
 }
 
 fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) {
+    use swc_ecma_ast::VarDeclKind;
+
+    if var_decl.kind != VarDeclKind::Var {
+        // The name is defined at the same time as the assignment.
+        // See `compile_var_decl_assignment`
+        return;
+    }
+
     for decl in &var_decl.decls {
         let name = get_var_decl_name(decl);
-        compile_namedef(builder, name);
+        if let Var::Reg(_) = builder.get_var(&name) {
+            // We must *not* re-bind the same name to a different register.  The function/var name will
+            // remain bound to the value it had before.  This might be a function argument!
+        } else {
+            compile_namedef(builder, name);
+        }
     }
 }
 
 fn compile_namedef(builder: &mut Builder, name: JsWord) {
-    if let Var::Reg(_) = builder.get_var(&name) {
-        // We must *not* re-bind the same name to a different register.  The function/var name will
-        // remain bound to the value it had before.  This might be a function argument!
-        return
-    }
-
     let is_script_global =
         builder.fn_stack.len() == 1 && builder.flags.source_type == SourceType::Script;
     if is_script_global {
@@ -1276,6 +1283,15 @@ fn compile_var_decl_assignment(
     var_decl: &swc_ecma_ast::VarDecl,
 ) -> Result<()> {
     use swc_ecma_ast::VarDeclKind;
+
+    if var_decl.kind != VarDeclKind::Var {
+        // The name is defined here, not at the beginning of the block.
+        // See `compile_var_decl_namedef`
+        for decl in &var_decl.decls {
+            let name = get_var_decl_name(decl);
+            compile_namedef(builder, name);
+        }
+    }
 
     let _is_const = match var_decl.kind {
         VarDeclKind::Var => false, // panic!("limitation: `var` bindings not supported"),
