@@ -1,7 +1,9 @@
+#!/usr/bin/env ruby
+
 require 'optparse'
 require 'json'
 
-require './common'
+require_relative 'common'
 
 class Hash
   def deep_get(*keys)
