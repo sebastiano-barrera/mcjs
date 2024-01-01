@@ -226,7 +226,7 @@ mod frame_view {
         app_data: web::Data<AppData<'static>>,
         path_params: web::Path<u64>,
     ) -> actix_web::Result<HttpResponse> {
-        use mcjs_vm::interpreter::debugger::ObjectId;
+        use mcjs_vm::interpreter::debugger::{IndexOrKey, Object, ObjectId};
 
         let object_id_ffi: u64 = path_params.into_inner();
         let object_id: ObjectId = slotmap::KeyData::from_ffi(object_id_ffi).into();
@@ -236,7 +236,6 @@ mod frame_view {
             .query(move |state| {
                 let probe = state.probe()?;
                 let obj = probe.get_object(object_id)?;
-                let obj = obj.as_object();
 
                 // Only get a shallow representation of the object, which the user/client can further expand
                 let properties = obj.own_properties();
@@ -284,7 +283,7 @@ mod frame_view {
                                     td."align-top" { "{ " }
                                     td."align-top" { (format!("{}:", key)) }
                                     td."align-top" {
-                                        (show_value(obj.get_own_property(&key).unwrap()))
+                                        (show_value(obj.get_own_element_or_property(IndexOrKey::Key(&key)).unwrap()))
                                     }
                                     td."align-top" { "}" }
                                 }
@@ -298,7 +297,7 @@ mod frame_view {
                                     td."align-top" { (if index == 0 { "{ " } else { ", " }) }
                                     td."align-top" { (format!("{}:", key)) }
                                     td."align-top" {
-                                        (show_value(obj.get_own_property(key).unwrap()))
+                                        (show_value(obj.get_own_element_or_property(IndexOrKey::Key(key)).unwrap()))
                                     }
                                 }
                             }
@@ -1113,8 +1112,8 @@ mod interpreter_manager {
             }
         };
 
-        let mut realm = Realm::new();
         let mut loader = Loader::new(params.main_directory);
+        let mut realm = Realm::new(&mut loader);
         let mut version = 0;
 
         for filename in params.scripts {

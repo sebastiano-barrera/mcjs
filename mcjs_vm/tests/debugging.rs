@@ -23,7 +23,7 @@ foo();
         .load_script(Some("foo.js".to_string()), SOURCE_CODE.to_string())
         .unwrap();
 
-    let mut realm = Realm::new();
+    let mut realm = Realm::new(&mut loader);
 
     let exit = Interpreter::new(&mut realm, &mut loader, main_fnid)
         .run()
@@ -75,7 +75,7 @@ fn test_pos_breakpoint() {
     // Hardcoded. Must be updated if breakme-0.js changes
     let pos = swc_common::BytePos(166);
 
-    let mut realm = Realm::new();
+    let mut realm = Realm::new(&mut loader);
 
     // Resolve into the (potentially multiple) GIIDs
     let break_range_ids: Vec<_> = loader

@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -34,6 +35,8 @@ pub struct Loader {
     // Key is the absolute filename of the (previously loaded) module
     mod_of_path: HashMap<PathBuf, bytecode::ModuleId>,
     pkg_of_path: HashMap<PathBuf, PackageId>,
+
+    boot_script_fnid: Option<bytecode::FnId>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
@@ -106,7 +109,7 @@ impl Loader {
     /// imports (e.g. when `import * as x from './asd/lol'` appears in a script/REPL
     /// chunk).
     pub fn new(base_path: Option<PathBuf>) -> Self {
-        Loader {
+        let mut loader = Loader {
             base_path,
             next_module_id: 1,
             next_package_id: 1,
@@ -120,7 +123,31 @@ impl Loader {
             packages: HashMap::new(),
             mod_of_path: HashMap::new(),
             pkg_of_path: HashMap::new(),
-        }
+            boot_script_fnid: None,
+        };
+
+        let fnid = loader
+            .load_script(
+                None,
+                r#"
+                // TODO TODO TODO This needs to be updated to support more than 8 args
+                Function.prototype.call = 
+                    function (new_this, arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
+                        // `this` is the function to call
+                        const bound = this.bind(new_this);
+                        return bound(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+                    }
+                "#
+                .into(),
+            )
+            .unwrap();
+        loader.boot_script_fnid = Some(fnid);
+
+        loader
+    }
+
+    pub fn boot_script_fnid(&self) -> bytecode::FnId {
+        self.boot_script_fnid.unwrap()
     }
 
     pub fn get_module_root_fn(&self, module_id: bytecode::ModuleId) -> Option<bytecode::LocalFnId> {

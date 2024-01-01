@@ -189,7 +189,7 @@ impl<'a> Frame<'a> {
         // FrameHeader
         assert!(
             argndx.0 < ARGS_COUNT_MAX,
-            "not yet implemented: call with >= {}",
+            "not yet implemented: call with >= {} arguments",
             ARGS_COUNT_MAX
         );
         Some(self.get_result(bytecode::VReg(argndx.0)))

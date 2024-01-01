@@ -116,9 +116,11 @@ fn prepare_vm(filename: &str) -> VMPrereq {
         .load_script(Some(filename.to_string()), content)
         .expect("error while compiling script");
 
+    let realm = mcjs_vm::Realm::new(&mut loader);
+
     VMPrereq {
         loader,
         root_fnid,
-        realm: mcjs_vm::Realm::new(),
+        realm,
     }
 }

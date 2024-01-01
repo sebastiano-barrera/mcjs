@@ -222,28 +222,28 @@ pub struct HeapObject {
     exotic_part: Exotic,
 }
 impl HeapObject {
-    pub(crate) fn as_str(&self) -> Option<&str> {
+    pub fn as_str(&self) -> Option<&str> {
         match &self.exotic_part {
             Exotic::String { string } => Some(string),
             _ => None,
         }
     }
 
-    pub(crate) fn as_closure(&self) -> Option<&Closure> {
+    pub fn as_closure(&self) -> Option<&Closure> {
         match &self.exotic_part {
             Exotic::Function { closure } => Some(closure),
             _ => None,
         }
     }
 
-    pub(crate) fn array_elements(&self) -> Option<&[Value]> {
+    pub fn array_elements(&self) -> Option<&[Value]> {
         match &self.exotic_part {
             Exotic::Array { elements } => Some(elements),
             _ => None,
         }
     }
 
-    pub(crate) fn array_push(&mut self, value: Value) -> bool {
+    pub fn array_push(&mut self, value: Value) -> bool {
         match &mut self.exotic_part {
             Exotic::Array { elements } => {
                 elements.push(value);
@@ -253,14 +253,14 @@ impl HeapObject {
         }
     }
 
-    pub(crate) fn to_boolean(&self) -> bool {
+    pub fn to_boolean(&self) -> bool {
         match &self.exotic_part {
             Exotic::None | Exotic::Array { .. } | Exotic::Function { .. } => true,
             Exotic::String { string } => !string.is_empty(),
         }
     }
 
-    pub(crate) fn js_to_string(&self) -> String {
+    pub fn js_to_string(&self) -> String {
         match &self.exotic_part {
             Exotic::Array { .. } | Exotic::None => "<object>".to_owned(),
             Exotic::String { string } => string.clone(),

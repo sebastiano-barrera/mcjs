@@ -158,14 +158,22 @@ pub struct Realm {
 
 #[allow(clippy::new_without_default)]
 impl Realm {
-    pub fn new() -> Realm {
+    pub fn new(loader: &mut loader::Loader) -> Realm {
         let mut heap = heap::Heap::new();
         let global_obj = init_builtins(&mut heap);
-        Realm {
+        let mut realm = Realm {
             heap,
             module_objs: HashMap::new(),
             global_obj,
-        }
+        };
+
+        let boot_script_fnid = loader.boot_script_fnid();
+        Interpreter::new(&mut realm, loader, boot_script_fnid)
+            .run()
+            .unwrap()
+            .expect_finished();
+
+        realm
     }
 }
 
@@ -1375,6 +1383,11 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let Boolean = heap.new_function(Closure::Native(nf_Boolean), HashMap::new());
     global.insert("Boolean".to_string(), Value::Object(Boolean));
 
+    let mut func_cons_props = HashMap::new();
+    func_cons_props.insert("prototype".to_string(), Value::Object(heap.func_proto()));
+    let Function = heap.new_function(Closure::Native(nf_Function), func_cons_props);
+    global.insert("Function".to_string(), Value::Object(Function));
+
     let cash_print = heap.new_function(Closure::Native(nf_cash_print), HashMap::new());
     global.insert("$print".to_string(), Value::Object(cash_print));
 
@@ -1489,6 +1502,11 @@ fn nf_Boolean(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Va
 }
 
 #[allow(non_snake_case)]
+fn nf_Function(_intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
+    todo!("not yet implemented!")
+}
+
+#[allow(non_snake_case)]
 fn nf_cash_print(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
     for arg in args {
         if let Value::Object(obj_id) = arg {
@@ -1568,7 +1586,7 @@ pub mod debugger {
 
     use super::{Fuel, InstrBreakpoint, Interpreter, SourceBreakpoint};
 
-    pub use heap::ObjectId;
+    pub use heap::{ObjectId, Object, IndexOrKey};
 
     /// The only real entry point to all the debugging features present in the
     /// Interpreter.
@@ -1803,10 +1821,11 @@ mod tests {
         let chunk_fnid = loader
             .load_script(Some(filename), code.to_string())
             .expect("couldn't compile test script");
+        let realm = Realm::new(&mut loader);
         VMPrereq {
             loader,
             root_fnid: chunk_fnid,
-            realm: Realm::new(),
+            realm,
         }
     }
 

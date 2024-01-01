@@ -20,8 +20,8 @@ fn main() {
         .expect("can't convert main filename to UTF-8");
     let import_path = format!("./{}", filename);
 
-    let mut realm = Realm::new();
     let mut loader = Loader::new(Some(base_path.to_owned()));
+    let mut realm = Realm::new(&mut loader);
 
     let main_fnid = loader
         .load_import(&import_path, mcjs_vm::SCRIPT_MODULE_ID)

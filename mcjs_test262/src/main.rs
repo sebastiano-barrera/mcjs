@@ -146,7 +146,7 @@ fn run_test(params: &TestParams) -> Result<(), TestError> {
 
     let res = std::panic::catch_unwind(move || {
         let mut loader = mcjs_vm::Loader::new(None);
-        let mut realm = mcjs_vm::Realm::new();
+        let mut realm = mcjs_vm::Realm::new(&mut loader);
 
         for file_path in paths {
             let file_path_str = (&file_path).to_string_lossy().into_owned();
