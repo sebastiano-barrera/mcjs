@@ -1,9 +1,9 @@
 +-------------------------------------------------------------------------------------+-----+------+------------------+
 |                                       dirname                                       | ok  | fail |     progress     |
 +-------------------------------------------------------------------------------------+-----+------+------------------+
-| /home/sebastiano/src/test262/test/language/block-scope/leave                        |     | 30   |                  |
+| /home/sebastiano/src/test262/test/language/block-scope/leave                        | 14  | 16   | 46.6666666666667 |
 | /home/sebastiano/src/test262/test/language/block-scope/return-from                  | 4   |      |                  |
-| /home/sebastiano/src/test262/test/language/block-scope/shadowing                    | 8   | 22   | 26.6666666666667 |
+| /home/sebastiano/src/test262/test/language/block-scope/shadowing                    | 10  | 20   | 33.3333333333333 |
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/for-in                | 6   | 10   | 37.5             |
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/function-declarations | 4   | 8    | 33.3333333333333 |
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration         | 6   | 183  | 3.17460317460317 |
