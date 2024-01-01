@@ -1140,13 +1140,6 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::Decl(Decl::Fn(_)) => Ok(()),
 
         Stmt::Expr(expr_stmt) => {
-            if let Some(Lit::Str(ref lit_str)) = expr_stmt.expr.as_lit() {
-                let in_outermost_fn_scope = builder.cur_fnb().scopes.len() == 1;
-                if lit_str.value.as_bytes() == b"use strict" && in_outermost_fn_scope {
-                    builder.cur_fnb().enable_strict_mode();
-                }
-            }
-
             compile_expr(&mut builder, &expr_stmt.expr)?;
             Ok(())
         }
@@ -1330,6 +1323,20 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     builder.start_function(name, func.params.as_slice());
 
     let stmts = &func.body.as_ref().expect("function without body?!").stmts;
+
+    for stmt in stmts {
+        use swc_ecma_ast::Stmt;
+
+        // only look at the topmost scope
+        if let Stmt::Expr(expr_stmt) = stmt {
+            if let Some(Lit::Str(ref lit_str)) = expr_stmt.expr.as_lit() {
+                if lit_str.value.as_bytes() == b"use strict" {
+                    builder.cur_fnb().enable_strict_mode();
+                }
+            }
+        }
+    }
+
     compile_block(builder, stmts)?;
 
     let mut inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
