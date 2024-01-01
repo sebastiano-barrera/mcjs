@@ -275,6 +275,7 @@ pub enum Instr {
     Throw(VReg),
     PopExcHandler,
     PushExcHandler(IID),
+    GetCurrentException(VReg),
 
     Breakpoint,
 }
@@ -381,6 +382,7 @@ impl Instr {
             Instr::Breakpoint => {},
             Instr::PopExcHandler => {},
             Instr::PushExcHandler(iid) => { an.jump_target(*iid) },
+            Instr::GetCurrentException(dest) => { an.write_vreg(*dest); },
         };
 
         an.end(self)

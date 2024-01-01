@@ -905,7 +905,25 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
             let handler_start = builder.peek_iid();
             if let Some(handler) = &try_stmt.handler {
-                compile_block_scoped(&mut builder, &handler.body)?;
+                builder.cur_fnb().push_scope();
+
+                if let Some(param) = &handler.param {
+                    // TODO I really need some sort of `compile_pattern`
+                    match param {
+                        Pat::Ident(ident) => {
+                            let ident = ident.to_id().0;
+                            let reg = builder.new_vreg();
+                            builder.emit(Instr::GetCurrentException(reg));
+                            builder.define_var(ident, reg);
+                        }
+                        _ => {
+                            unsupported_node!(param);
+                        }
+                    }
+                }
+
+                compile_block(&mut builder, &handler.body.stmts)?;
+                builder.cur_fnb().pop_scope();
             }
             let jmp_after_catch = builder.reserve();
 
@@ -1176,11 +1194,7 @@ fn compile_block_scoped(
     block: &swc_ecma_ast::BlockStmt,
 ) -> std::result::Result<(), Error> {
     builder.cur_fnb().push_scope();
-
-    let stmts = &block.stmts;
-
-    compile_block(builder, stmts)?;
-
+    compile_block(builder, &block.stmts)?;
     builder.cur_fnb().pop_scope();
     Ok(())
 }

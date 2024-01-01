@@ -969,6 +969,10 @@ impl<'a> Interpreter<'a> {
                     return Ok(ExitInternal::Suspended);
                 }
 
+                Instr::GetCurrentException(dest) => {
+                    let current_exc = self.current_exc.expect("no current exception!");
+                    self.data.top_mut().set_result(*dest, current_exc);
+                }
                 Instr::Throw(exc_value) => {
                     self.current_exc = Some(self.get_operand(*exc_value));
                     let handler = self
