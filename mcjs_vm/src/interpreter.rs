@@ -627,7 +627,7 @@ impl<'a> Interpreter<'a> {
                             // If I understand this correctly, we don't need to box anything right
                             // now.  We just pass the value, and the callee will box it when
                             // needed.
-                            let this = match (func.is_strict_mode(), this) {
+                            let this = match (callee_func.is_strict_mode(), this) {
                                 (false, Value::Null | Value::Undefined) => {
                                     Value::Object(self.realm.global_obj)
                                 }
