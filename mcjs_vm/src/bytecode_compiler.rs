@@ -1188,42 +1188,47 @@ fn compile_block_scoped(
 fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Result<()> {
     use swc_ecma_ast::Stmt;
 
+    // Functions are done first.
+    // This is so that if a `function` declaration and `var` declaration bind the same name,
+    // the `function` one masks the other.
+    // Multiple `function` declarations can mask each other.  The last one in the source code
+    // wins.
     for stmt in stmts {
-        match stmt {
-            Stmt::Decl(Decl::Var(var_decl)) => {
-                // `var` variables declarations can be thought of as a name binding + an
-                // assignment.
-                //   - the name binding behaves as if it was moved at the beginning of the block.  the initial value is `undefined`
-                //   - the assignment is left at the original position. the program will have to
-                //   reach that spot before it takes effect.
-                //
-                //   So, these 2 block behave identically:
-                //
-                //   ```
-                //   {
-                //      $print(x);   // prints 'undefined'
-                //      var x = 22;
-                //      $print(x);   // prints '22'
-                //   }
-                //
-                //   {
-                //      var x;
-                //      $print(x);   // prints 'undefined'
-                //      x = 22;
-                //      $print(x);   // prints '22'
-                //   }
-                //   ```
-                //
-                compile_var_decl_namedef(builder, var_decl);
-            }
-            Stmt::Decl(Decl::Fn(fn_decl)) => {
-                // Function definitions are simply done first, regardless of where they appear in
-                // the block.  Name binding and assignment happen together, before the rest of the
-                // block is run.
-                compile_fn_decl_namedef(builder, fn_decl);
-                compile_fn_decl_assignment(builder, fn_decl)?;
-            }
-            _ => (),
+        if let Stmt::Decl(Decl::Fn(fn_decl)) = stmt {
+            // Function definitions are simply done first, regardless of where they appear in
+            // the block.  Name binding and assignment happen together, before the rest of the
+            // block is run.
+            compile_fn_decl_namedef(builder, fn_decl);
+            compile_fn_decl_assignment(builder, fn_decl)?;
+        }
+    }
+
+    for stmt in stmts {
+        if let Stmt::Decl(Decl::Var(var_decl)) = stmt {
+            // `var` variables declarations can be thought of as a name binding + an
+            // assignment.
+            //   - the name binding behaves as if it was moved at the beginning of the block.  the initial value is `undefined`
+            //   - the assignment is left at the original position. the program will have to
+            //   reach that spot before it takes effect.
+            //
+            //   So, these 2 block behave identically:
+            //
+            //   ```
+            //   {
+            //      $print(x);   // prints 'undefined'
+            //      var x = 22;
+            //      $print(x);   // prints '22'
+            //   }
+            //
+            //   {
+            //      var x;
+            //      $print(x);   // prints 'undefined'
+            //      x = 22;
+            //      $print(x);   // prints '22'
+            //   }
+            //   ```
+            //
+            compile_var_decl_namedef(builder, var_decl);
         }
     }
 
@@ -1242,6 +1247,12 @@ fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarD
 }
 
 fn compile_namedef(builder: &mut Builder, name: JsWord) {
+    if let Var::Reg(_) = builder.get_var(&name) {
+        // We must *not* re-bind the same name to a different register.  The function/var name will
+        // remain bound to the value it had before.  This might be a function argument!
+        return
+    }
+
     let is_script_global =
         builder.fn_stack.len() == 1 && builder.flags.source_type == SourceType::Script;
     if is_script_global {
