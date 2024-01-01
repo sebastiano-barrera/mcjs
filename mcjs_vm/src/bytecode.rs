@@ -162,7 +162,8 @@ pub enum Instr {
         arg: VReg,
     },
 
-    ArithAdd(VReg, VReg, VReg),
+    // either numeric addition or string concatentation (chosen at runtime)
+    OpAdd(VReg, VReg, VReg),
     ArithSub(VReg, VReg, VReg),
     ArithMul(VReg, VReg, VReg),
     ArithDiv(VReg, VReg, VReg),
@@ -324,7 +325,7 @@ impl Instr {
             Instr::GetGlobalThis (dest) => { an.write_vreg(*dest); },
             Instr::BoolNot { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
             Instr::UnaryMinus { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
-            Instr::ArithAdd(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
+            Instr::OpAdd(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
             Instr::ArithSub(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
             Instr::ArithMul(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
             Instr::ArithDiv(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },

@@ -497,7 +497,7 @@ impl<'a> Interpreter<'a> {
                     self.data.top_mut().set_result(*dest, value);
                 }
 
-                Instr::ArithAdd(dest, a, b) => match self.get_operand(*a) {
+                Instr::OpAdd(dest, a, b) => match self.get_operand(*a) {
                     Value::Number(_) => self.with_numbers(*dest, *a, *b, |x, y| x + y),
                     Value::Object(_) => {
                         let value = self.str_append(a, b)?;
@@ -1043,12 +1043,11 @@ impl<'a> Interpreter<'a> {
 
     fn str_append(&mut self, a: &VReg, b: &VReg) -> Result<Value> {
         // TODO Make this at least *decently* efficient!
+        let b = self.get_operand(*b);
+
         let mut buf = self.get_operand_string(*a)?.to_owned();
-        {
-            let tail_ref = self.get_operand_string(*b)?;
-            let tail = tail_ref.deref();
-            buf.push_str(tail);
-        }
+        let tail = value_to_string(b, &self.realm.heap);
+        buf.push_str(&tail);
         let value = literal_to_value(bytecode::Literal::String(buf), &mut self.realm.heap);
         Ok(value)
     }
@@ -1468,22 +1467,30 @@ fn nf_Number_prototype_toString(
 #[allow(non_snake_case)]
 
 fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<Value> {
-    let value_str = match args.get(0) {
-        Some(Value::Number(num)) => num.to_string(),
-        Some(Value::Bool(true)) => "true".into(),
-        Some(Value::Bool(false)) => "false".into(),
-        Some(Value::Object(oid)) => intrp.realm.heap.get(*oid).unwrap().borrow().js_to_string(),
-        Some(Value::Null) => "null".into(),
-        Some(Value::Undefined) => "undefined".into(),
-        Some(Value::SelfFunction) => "<function>".into(),
-        Some(Value::Internal(_)) => unreachable!(),
-        None => "".into(),
-    };
+    let value = args.get(0).copied();
+    let heap = &intrp.realm.heap;
+
+    let value_str = value
+        .map(|v| value_to_string(v, heap))
+        .unwrap_or_else(|| String::new());
 
     Ok(literal_to_value(
         bytecode::Literal::String(value_str),
         &mut intrp.realm.heap,
     ))
+}
+
+fn value_to_string(value: Value, heap: &Heap) -> String {
+    match value {
+        Value::Number(num) => num.to_string(),
+        Value::Bool(true) => "true".into(),
+        Value::Bool(false) => "false".into(),
+        Value::Object(oid) => heap.get(oid).unwrap().borrow().js_to_string(),
+        Value::Null => "null".into(),
+        Value::Undefined => "undefined".into(),
+        Value::SelfFunction => "<function>".into(),
+        Value::Internal(_) => unreachable!(),
+    }
 }
 
 #[allow(non_snake_case)]

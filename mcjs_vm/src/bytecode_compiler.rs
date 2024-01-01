@@ -1533,7 +1533,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             // TODO There must be a better way.  2-operand instructions?  accumulator register?
             let ret = builder.new_vreg();
             let instr = match bin_expr.op {
-                BinaryOp::Add => Instr::ArithAdd(ret, a, b),
+                BinaryOp::Add => Instr::OpAdd(ret, a, b),
                 BinaryOp::Sub => Instr::ArithSub(ret, a, b),
                 BinaryOp::Mul => Instr::ArithMul(ret, a, b),
                 BinaryOp::Div => Instr::ArithDiv(ret, a, b),
@@ -2041,7 +2041,7 @@ fn compile_assignment_rhs(
 
     let lhs_value = match assign_op {
         AssignOp::Assign => rhs,
-        AssignOp::AddAssign => xform_value(lhs_value, rhs, Instr::ArithAdd),
+        AssignOp::AddAssign => xform_value(lhs_value, rhs, Instr::OpAdd),
         AssignOp::SubAssign => xform_value(lhs_value, rhs, Instr::ArithSub),
         AssignOp::MulAssign => xform_value(lhs_value, rhs, Instr::ArithMul),
         AssignOp::DivAssign => xform_value(lhs_value, rhs, Instr::ArithDiv),
