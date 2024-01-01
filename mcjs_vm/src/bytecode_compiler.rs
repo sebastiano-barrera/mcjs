@@ -1139,8 +1139,15 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::Decl(Decl::Var(var_decl)) => compile_var_decl_assignment(&mut builder, var_decl),
         Stmt::Decl(Decl::Fn(_)) => Ok(()),
 
-        Stmt::Expr(expr) => {
-            compile_expr(&mut builder, &expr.expr)?;
+        Stmt::Expr(expr_stmt) => {
+            if let Some(Lit::Str(ref lit_str)) = expr_stmt.expr.as_lit() {
+                let in_outermost_fn_scope = builder.cur_fnb().scopes.len() == 1;
+                if lit_str.value.as_bytes() == b"use strict" && in_outermost_fn_scope {
+                    builder.cur_fnb().enable_strict_mode();
+                }
+            }
+
+            compile_expr(&mut builder, &expr_stmt.expr)?;
             Ok(())
         }
 
