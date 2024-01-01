@@ -22,6 +22,15 @@
 	hx-select="#function_bytecode"
 	hx-swap="outerHTML"
 >
+	<div></div>
+	<div>
+		{{#if function.is_strict}}
+			strict
+		{{else}}
+			NON-strict
+		{{/if}}
+	</div>
+
 	{{#each function.consts}}
 		<div class="text-right">
 			k{{@index}}

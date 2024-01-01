@@ -361,6 +361,7 @@ mod frame_view {
                         })
                         .collect(),
                     consts: func.consts().iter().map(show_literal).collect(),
+                    is_strict: func.is_strict_mode(),
                 },
             });
         }
@@ -424,6 +425,7 @@ mod frame_view {
     struct Function {
         consts: Vec<String>,
         bytecode: Vec<Instruction>,
+        is_strict: bool,
     }
 
     #[derive(Clone, Serialize)]
