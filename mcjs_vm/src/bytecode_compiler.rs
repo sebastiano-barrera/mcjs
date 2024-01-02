@@ -4,7 +4,7 @@ use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, Span, Spanned};
 use swc_ecma_ast::{
     ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, FnDecl, ForHead, Function, Lit, Pat, Stmt,
-    UpdateOp, VarDecl,
+    UpdateOp, VarDecl, VarDeclKind,
 };
 
 use crate::bytecode::{self, IdentAsmt, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
@@ -597,7 +597,7 @@ fn compile_module(
                 _ => {}
             }
         }
-        compile_decls_namedef(&mut builder, &decls)?;
+        compile_func_scope_namedefs(&mut builder, &decls)?;
     }
 
     for item in &ast_module.body {
@@ -794,7 +794,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
     let mut builder = builder.with_span(&stmt.span());
 
     match stmt {
-        Stmt::Block(block) => compile_block_scoped(&mut builder, block),
+        Stmt::Block(block) => compile_block(&mut builder, &block.stmts),
         Stmt::Empty(_) => {
             // no code needs to be emitted
             Ok(())
@@ -887,7 +887,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             // TODO Allow the catch clause to access the exception object
             // We reunite the cases by *always* having a catch clause (it will run the finalizer)
             let push_handler_instr = builder.reserve();
-            compile_block_scoped(&mut builder, &try_stmt.block)?;
+            compile_block(&mut builder, &(&try_stmt.block).stmts)?;
             builder.emit(Instr::PopExcHandler);
             let jmp_after_try = builder.reserve();
 
@@ -917,7 +917,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
 
             let finalizer_start = builder.peek_iid();
             if let Some(finalizer) = &try_stmt.finalizer {
-                compile_block_scoped(&mut builder, finalizer)?;
+                compile_block(&mut builder, &finalizer.stmts)?;
             }
 
             *builder.get_mut(push_handler_instr).unwrap() = Instr::PushExcHandler(handler_start);
@@ -1174,22 +1174,14 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
     }
 }
 
-fn compile_block_scoped(
-    builder: &mut BuilderWithBreakRange<'_>,
-    block: &swc_ecma_ast::BlockStmt,
-) -> std::result::Result<(), Error> {
-    builder.cur_fnb().push_scope();
-    compile_block(builder, &block.stmts)?;
-    builder.cur_fnb().pop_scope();
-    Ok(())
-}
-
 fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Result<()> {
     // TODO TODO TODO Hoist let/const decls
 
+    builder.cur_fnb().push_scope();
     for stmt in stmts {
         compile_stmt(builder, stmt)?;
     }
+    builder.cur_fnb().pop_scope();
     Ok(())
 }
 
@@ -1263,7 +1255,7 @@ fn find_hdecls_recursive<'a>(stmt: &'a Stmt, out: &mut Vec<HoistedDeclRef<'a>>) 
 /// previous bindings, such function parameters) and `function` declarations are processed later
 /// (they *will* shadow previous declarations). This will happen regardless of the order in
 /// `decls`.
-fn compile_decls_namedef(builder: &mut Builder, decls: &[HoistedDeclRef]) -> Result<()> {
+fn compile_func_scope_namedefs(builder: &mut Builder, decls: &[HoistedDeclRef]) -> Result<()> {
     // `var` variables declarations can be thought of as a name binding + an
     // assignment.
     //   - the name binding behaves as if it was moved at the beginning of the block.  the
@@ -1453,7 +1445,7 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     for stmt in stmts {
         find_hdecls_recursive(stmt, &mut decls);
     }
-    compile_decls_namedef(builder, &decls)?;
+    compile_func_scope_namedefs(builder, &decls)?;
 
     compile_block(builder, stmts)?;
 
