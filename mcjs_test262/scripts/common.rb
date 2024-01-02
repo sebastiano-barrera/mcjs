@@ -131,8 +131,8 @@ class Database
       )
       , q2 as (
       	select dirname
-      	, sum(count) filter (where success = 1) as ok
-      	, sum(count) filter (where success = 0) as fail
+      	, ifnull(sum(count) filter (where success = 1), 0) as ok
+      	, ifnull(sum(count) filter (where success = 0), 0) as fail
       	from q
       	group by dirname
       )
