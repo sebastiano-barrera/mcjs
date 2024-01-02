@@ -27,7 +27,7 @@ fn main() {
         if !file_path.contains(&opts.filter) {
             continue;
         }
-        eprintln!("test {}/{}", ndx, tests_count);
+        eprintln!("test {:4}/{:4} -- {}", ndx, tests_count, file_path);
 
         let full_path = &test262_root.join(file_path);
         let metadata = match parse_metadata(full_path) {
