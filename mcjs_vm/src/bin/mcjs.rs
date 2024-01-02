@@ -18,7 +18,7 @@ fn main() {
         .unwrap()
         .to_str()
         .expect("can't convert main filename to UTF-8");
-    let content = std::fs::read_to_string(&filename).expect("could not read file");
+    let content = std::fs::read_to_string(&main_path).expect("could not read file");
 
     let mut loader = Loader::new(Some(base_path.to_owned()));
     let mut realm = Realm::new(&mut loader);
