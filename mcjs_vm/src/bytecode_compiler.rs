@@ -1369,9 +1369,9 @@ fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarD
 }
 
 fn compile_namedef(builder: &mut Builder, name: JsWord) {
-    eprintln!("compile namedef {}", name);
-    let is_script_global =
-        builder.fn_stack.len() == 1 && builder.flags.source_type == SourceType::Script;
+    let is_script_global = builder.fn_stack.len() == 1
+        && builder.cur_fnb().scopes.len() == 1
+        && builder.flags.source_type == SourceType::Script;
     if is_script_global {
         // Script global => don't assign any register. Subsequent calls to `get_var` will
         // return Var::Global(_). `read_var` and `write_var` will generate object member
