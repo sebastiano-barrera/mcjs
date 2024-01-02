@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, Span, Spanned};
 use swc_ecma_ast::{
-    ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, ForHead, Function, Lit, Pat, UpdateOp, VarDecl,
+    ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, FnDecl, ForHead, Function, Lit, Pat, Stmt,
+    UpdateOp, VarDecl,
 };
 
 use crate::bytecode::{self, IdentAsmt, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
@@ -569,47 +570,34 @@ fn compile_module(
 
     let mut mod_default_export = None;
 
-    // We have to handle hoisting here like we do for blocks.  See [#hoisting].
-
-    // Since we compile every nested function's body here, we have to handle 'use strict' here,
-    // so that we can pass it onto those nested functions.
-
-    for item in &ast_module.body {
-        match item {
-            ModuleItem::Stmt(Stmt::Expr(expr_stmt)) => {
-                if let Some(Lit::Str(ref lit_str)) = expr_stmt.expr.as_lit() {
-                    if lit_str.value.as_bytes() == b"use strict" {
-                        builder.cur_fnb().enable_strict_mode();
-                    }
-                }
+    if let Some(Stmt::Expr(expr_stmt)) = ast_module.body.first().and_then(|i| i.as_stmt()) {
+        if let Some(Lit::Str(ref lit_str)) = expr_stmt.expr.as_lit() {
+            if lit_str.value.as_bytes() == b"use strict" {
+                builder.cur_fnb().enable_strict_mode();
             }
-
-            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl)))
-            | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
-                decl: Decl::Var(var_decl),
-                ..
-            })) => compile_var_decl_namedef(&mut builder, var_decl),
-
-            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl)))
-            | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
-                decl: Decl::Fn(fn_decl),
-                ..
-            })) => compile_fn_decl_namedef(&mut builder, fn_decl),
-
-            _ => {}
         }
     }
 
-    for item in &ast_module.body {
-        match item {
-            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl)))
-            | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
-                decl: Decl::Fn(fn_decl),
-                ..
-            })) => compile_fn_decl_assignment(&mut builder, fn_decl)?,
-
-            _ => {}
+    {
+        // We have to handle hoisting here like we do for function body blocks.  See [#hoisting].
+        // TODO any smarter way to allocate this memory? Static array somewhere?
+        let mut decls = Vec::new();
+        for item in &ast_module.body {
+            match item {
+                ModuleItem::Stmt(stmt) => {
+                    find_hdecls_recursive(stmt, &mut decls);
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl { decl, .. })) => {
+                    match decl {
+                        Decl::Fn(d) => decls.push(HoistedDeclRef::Fn(d)),
+                        Decl::Var(d) => decls.push(HoistedDeclRef::Var(d)),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
         }
+        compile_decls_namedef(&mut builder, &decls)?;
     }
 
     for item in &ast_module.body {
@@ -978,9 +966,6 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 use swc_ecma_ast::VarDeclOrExpr;
                 match init {
                     VarDeclOrExpr::VarDecl(var_decl) => {
-                        // This one we don't need to hoist really.  The for statement has its own
-                        // scope.
-                        compile_var_decl_namedef(&mut builder, var_decl);
                         compile_var_decl_assignment(&mut builder, var_decl)?;
                     }
                     VarDeclOrExpr::Expr(expr) => {
@@ -1200,54 +1185,122 @@ fn compile_block_scoped(
 }
 
 fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Result<()> {
-    use swc_ecma_ast::Stmt;
+    // TODO TODO TODO Hoist let/const decls
 
-    // Functions are done first.
-    // This is so that if a `function` declaration and `var` declaration bind the same name,
-    // the `function` one masks the other.
-    // Multiple `function` declarations can mask each other.  The last one in the source code
-    // wins.
     for stmt in stmts {
-        if let Stmt::Decl(Decl::Fn(fn_decl)) = stmt {
-            // Function definitions are simply done first, regardless of where they appear in
-            // the block.  Name binding and assignment happen together, before the rest of the
-            // block is run.
-            compile_fn_decl_namedef(builder, fn_decl);
-            compile_fn_decl_assignment(builder, fn_decl)?;
-        }
+        compile_stmt(builder, stmt)?;
     }
+    Ok(())
+}
 
-    for stmt in stmts {
-        if let Stmt::Decl(Decl::Var(var_decl)) = stmt {
-            // `var` variables declarations can be thought of as a name binding + an
-            // assignment.
-            //   - the name binding behaves as if it was moved at the beginning of the block.  the initial value is `undefined`
-            //   - the assignment is left at the original position. the program will have to
-            //   reach that spot before it takes effect.
-            //
-            //   So, these 2 block behave identically:
-            //
-            //   ```
-            //   {
-            //      $print(x);   // prints 'undefined'
-            //      var x = 22;
-            //      $print(x);   // prints '22'
-            //   }
-            //
-            //   {
-            //      var x;
-            //      $print(x);   // prints 'undefined'
-            //      x = 22;
-            //      $print(x);   // prints '22'
-            //   }
-            //   ```
-            //
+// Helper type.  Helps unify the cases where the decl comes from a `Decl` or a `VarDeclOrExpr`
+enum HoistedDeclRef<'a> {
+    Var(&'a VarDecl),
+    Fn(&'a FnDecl),
+}
+
+fn find_hdecls_recursive<'a>(stmt: &'a Stmt, out: &mut Vec<HoistedDeclRef<'a>>) {
+    match stmt {
+        Stmt::Decl(Decl::Fn(fn_decl)) => {
+            out.push(HoistedDeclRef::Fn(fn_decl));
+        }
+        Stmt::Decl(Decl::Var(var_decl)) => {
+            out.push(HoistedDeclRef::Var(var_decl));
+        }
+        Stmt::Block(block_stmt) => {
+            for stmt in &block_stmt.stmts {
+                find_hdecls_recursive(stmt, out);
+            }
+        }
+        Stmt::If(if_stmt) => {
+            find_hdecls_recursive(&if_stmt.cons, out);
+            if let Some(alt) = &if_stmt.alt {
+                find_hdecls_recursive(&*alt, out);
+            }
+        }
+        Stmt::While(while_stmt) => {
+            find_hdecls_recursive(&while_stmt.body, out);
+        }
+        Stmt::For(for_stmt) => {
+            use swc_ecma_ast::VarDeclOrExpr;
+            if let Some(VarDeclOrExpr::VarDecl(var_decl)) = &for_stmt.init {
+                out.push(HoistedDeclRef::Var(&*var_decl));
+            }
+            find_hdecls_recursive(&for_stmt.body, out);
+        }
+        Stmt::Try(try_stmt) => {
+            for stmt in &try_stmt.block.stmts {
+                find_hdecls_recursive(stmt, out);
+            }
+            if let Some(catch_block) = &try_stmt.handler {
+                for stmt in &catch_block.body.stmts {
+                    find_hdecls_recursive(stmt, out);
+                }
+            }
+            if let Some(finally_block) = &try_stmt.finalizer {
+                for stmt in &finally_block.stmts {
+                    find_hdecls_recursive(stmt, out);
+                }
+            }
+        }
+        Stmt::ForIn(for_in_stmt) => {
+            if let swc_ecma_ast::ForHead::VarDecl(var_decl) = &for_in_stmt.left {
+                out.push(HoistedDeclRef::Var(&*var_decl));
+            }
+        }
+        Stmt::ForOf(for_or_stmt) => {
+            if let swc_ecma_ast::ForHead::VarDecl(var_decl) = &for_or_stmt.left {
+                out.push(HoistedDeclRef::Var(&*var_decl));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Do the 'namedef' phase of function-scoped declarations (`var` and `function`).
+///
+/// In compliance with the ES spec, `var` declarations are processed first (they will *not* shadow
+/// previous bindings, such function parameters) and `function` declarations are processed later
+/// (they *will* shadow previous declarations). This will happen regardless of the order in
+/// `decls`.
+fn compile_decls_namedef(builder: &mut Builder, decls: &[HoistedDeclRef]) -> Result<()> {
+    // `var` variables declarations can be thought of as a name binding + an
+    // assignment.
+    //   - the name binding behaves as if it was moved at the beginning of the block.  the
+    //   initial value is `undefined`
+    //   - the assignment is left at the original position. the program will have to reach that
+    //   spot before it takes effect.
+    //
+    //   So, these 2 block behave identically:
+    //
+    //   ```
+    //   {
+    //      $print(x);   // prints 'undefined'
+    //      var x = 22;
+    //      $print(x);   // prints '22'
+    //   }
+    //
+    //   {
+    //      var x;
+    //      $print(x);   // prints 'undefined'
+    //      x = 22;
+    //      $print(x);   // prints '22'
+    //   }
+    //   ```
+    //
+    for decl in decls {
+        if let HoistedDeclRef::Var(var_decl) = decl {
             compile_var_decl_namedef(builder, var_decl);
         }
     }
 
-    for stmt in stmts {
-        compile_stmt(builder, stmt)?;
+    // Multiple `function` declarations can mask each other, and mask var declarations.  The last
+    // one in the source code wins.
+    for decl in decls {
+        if let HoistedDeclRef::Fn(fn_decl) = decl {
+            compile_fn_decl_namedef(builder, fn_decl);
+            compile_fn_decl_assignment(builder, fn_decl)?;
+        }
     }
 
     Ok(())
@@ -1265,8 +1318,8 @@ fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarD
     for decl in &var_decl.decls {
         let name = get_var_decl_name(decl);
         if let Var::Reg(_) = builder.get_var(&name) {
-            // We must *not* re-bind the same name to a different register.  The function/var name will
-            // remain bound to the value it had before.  This might be a function argument!
+            // We must *not* re-bind the same name to a different register.  The name will remain
+            // bound to the same location as before. (It's almost surely a function argument.)
         } else {
             compile_namedef(builder, name);
         }
@@ -1276,6 +1329,11 @@ fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarD
 fn compile_namedef(builder: &mut Builder, name: JsWord) {
     let is_script_global =
         builder.fn_stack.len() == 1 && builder.flags.source_type == SourceType::Script;
+    eprintln!(
+        "namedef {} {}",
+        std::str::from_utf8(name.as_bytes()).unwrap(),
+        if is_script_global { "[global]" } else { "" }
+    );
     if is_script_global {
         // Script global => don't assign any register. Subsequent calls to `get_var` will
         // return Var::Global(_). `read_var` and `write_var` will generate object member
@@ -1319,11 +1377,16 @@ fn compile_var_decl_assignment(
             .as_ident()
             .unwrap_or_else(|| unsupported_node!(decl));
         let name: JsWord = ident.id.to_id().0;
-        let var = builder.get_var(&name);
+        let vreg = builder.get_vreg(&name).unwrap_or_else(|| {
+            panic!(
+                "compiler bug: var decl [{}]: assignment phase done before namedef phase",
+                std::str::from_utf8(name.as_bytes()).unwrap()
+            )
+        });
 
         if let Some(expr) = &decl.init {
             let value = compile_expr(builder, expr)?;
-            builder.write_var(&var, value);
+            builder.write_var(&Var::Reg(vreg), value);
         } else {
             // We do nothing.
             // The register had already been reserved for this variable in the namedef phase, and
@@ -1343,6 +1406,8 @@ fn get_var_decl_name(decl: &swc_ecma_ast::VarDeclarator) -> JsWord {
 }
 
 fn compile_fn_decl_namedef(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnDecl) {
+    // Don't check if the variable is defined already: `function` declarations mask `var`
+    // declarations
     let name = get_fn_decl_name(fn_decl);
     compile_namedef(builder, name);
 }
@@ -1385,10 +1450,8 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     let stmts = &func.body.as_ref().expect("function without body?!").stmts;
 
     for stmt in stmts {
-        use swc_ecma_ast::Stmt;
-
         // only look at the topmost scope
-        if let Stmt::Expr(expr_stmt) = stmt {
+        if let swc_ecma_ast::Stmt::Expr(expr_stmt) = stmt {
             if let Some(Lit::Str(ref lit_str)) = expr_stmt.expr.as_lit() {
                 if lit_str.value.as_bytes() == b"use strict" {
                     builder.cur_fnb().enable_strict_mode();
@@ -1396,6 +1459,12 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
             }
         }
     }
+
+    let mut decls = Vec::new();
+    for stmt in stmts {
+        find_hdecls_recursive(stmt, &mut decls);
+    }
+    compile_decls_namedef(builder, &decls)?;
 
     compile_block(builder, stmts)?;
 
@@ -1475,6 +1544,7 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
             compile_block(builder, &block.stmts)?;
         }
         swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
+            // TODO actually make the compiled function return the expression's value
             compile_expr(builder, expr)?;
         }
     }
