@@ -1,34 +1,34 @@
-+-------------------------------------------------------------------------------------+----+------+------------------+
-|                                       dirname                                       | ok | fail |     progress     |
-+-------------------------------------------------------------------------------------+----+------+------------------+
-| /home/sebastiano/src/test262/test/language/block-scope/leave                        | 14 | 16   | 46.6666666666667 |
-| /home/sebastiano/src/test262/test/language/block-scope/return-from                  | 4  |      |                  |
-| /home/sebastiano/src/test262/test/language/block-scope/shadowing                    | 22 | 8    | 73.3333333333333 |
-| /home/sebastiano/src/test262/test/language/block-scope/syntax/for-in                | 6  | 10   | 37.5             |
-| /home/sebastiano/src/test262/test/language/block-scope/syntax/function-declarations | 4  | 8    | 33.3333333333333 |
-| /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration         | 2  | 187  | 1.05820105820106 |
-| /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration-global  | 2  | 4    | 33.3333333333333 |
-| /home/sebastiano/src/test262/test/language/comments                                 | 36 | 10   | 78.2608695652174 |
-| /home/sebastiano/src/test262/test/language/comments/hashbang                        | 37 | 21   | 63.7931034482759 |
-| /home/sebastiano/src/test262/test/language/expressions/function                     | 10 | 89   | 10.1010101010101 |
-| /home/sebastiano/src/test262/test/language/expressions/function/dstr                | 12 | 360  | 3.2258064516129  |
-| /home/sebastiano/src/test262/test/language/expressions/function/early-errors        |    | 8    |                  |
-| /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b1    |    | 2    |                  |
-| /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b2    |    | 3    |                  |
-| /home/sebastiano/src/test262/test/language/function-code                            | 84 | 197  | 29.8932384341637 |
-| /home/sebastiano/src/test262/test/language/statements/if                            | 36 | 89   | 28.8             |
-| /home/sebastiano/src/test262/test/language/statements/labeled                       | 12 | 27   | 30.7692307692308 |
-| /home/sebastiano/src/test262/test/language/statements/let                           | 2  | 39   | 4.8780487804878  |
-| /home/sebastiano/src/test262/test/language/statements/let/dstr                      | 6  | 180  | 3.2258064516129  |
-| /home/sebastiano/src/test262/test/language/statements/let/syntax                    | 26 | 34   | 43.3333333333333 |
-| /home/sebastiano/src/test262/test/language/statements/return                        | 2  | 29   | 6.45161290322581 |
-| /home/sebastiano/src/test262/test/language/statements/switch                        | 20 | 69   | 22.4719101123596 |
-| /home/sebastiano/src/test262/test/language/statements/switch/syntax/redeclaration   |    | 127  |                  |
-| /home/sebastiano/src/test262/test/language/statements/throw                         | 4  | 24   | 14.2857142857143 |
-| /home/sebastiano/src/test262/test/language/statements/try                           | 42 | 160  | 20.7920792079208 |
-| /home/sebastiano/src/test262/test/language/statements/try/dstr                      | 6  | 180  | 3.2258064516129  |
-| /home/sebastiano/src/test262/test/language/statements/variable                      | 5  | 110  | 4.34782608695652 |
-| /home/sebastiano/src/test262/test/language/statements/variable/dstr                 | 8  | 186  | 4.12371134020619 |
-| /home/sebastiano/src/test262/test/language/statements/while                         | 22 | 50   | 30.5555555555556 |
-| /home/sebastiano/src/test262/test/language/white-space                              | 62 | 72   | 46.2686567164179 |
-+-------------------------------------------------------------------------------------+----+------+------------------+
++-------------------------------------------------------------------------------------+-----+------+------------------+
+|                                       dirname                                       | ok  | fail |     progress     |
++-------------------------------------------------------------------------------------+-----+------+------------------+
+| /home/sebastiano/src/test262/test/language/block-scope/leave                        | 14  | 16   | 46.6666666666667 |
+| /home/sebastiano/src/test262/test/language/block-scope/return-from                  | 4   |      |                  |
+| /home/sebastiano/src/test262/test/language/block-scope/shadowing                    | 24  | 6    | 80.0             |
+| /home/sebastiano/src/test262/test/language/block-scope/syntax/for-in                | 6   | 10   | 37.5             |
+| /home/sebastiano/src/test262/test/language/block-scope/syntax/function-declarations | 4   | 8    | 33.3333333333333 |
+| /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration         | 6   | 183  | 3.17460317460317 |
+| /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration-global  | 6   |      |                  |
+| /home/sebastiano/src/test262/test/language/comments                                 | 36  | 10   | 78.2608695652174 |
+| /home/sebastiano/src/test262/test/language/comments/hashbang                        | 37  | 21   | 63.7931034482759 |
+| /home/sebastiano/src/test262/test/language/expressions/function                     | 13  | 86   | 13.1313131313131 |
+| /home/sebastiano/src/test262/test/language/expressions/function/dstr                | 12  | 360  | 3.2258064516129  |
+| /home/sebastiano/src/test262/test/language/expressions/function/early-errors        |     | 8    |                  |
+| /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b1    |     | 2    |                  |
+| /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b2    |     | 3    |                  |
+| /home/sebastiano/src/test262/test/language/function-code                            | 149 | 130  | 53.405017921147  |
+| /home/sebastiano/src/test262/test/language/statements/if                            | 40  | 85   | 32.0             |
+| /home/sebastiano/src/test262/test/language/statements/labeled                       | 12  | 27   | 30.7692307692308 |
+| /home/sebastiano/src/test262/test/language/statements/let                           | 4   | 37   | 9.75609756097561 |
+| /home/sebastiano/src/test262/test/language/statements/let/dstr                      | 6   | 180  | 3.2258064516129  |
+| /home/sebastiano/src/test262/test/language/statements/let/syntax                    | 34  | 26   | 56.6666666666667 |
+| /home/sebastiano/src/test262/test/language/statements/return                        | 8   | 23   | 25.8064516129032 |
+| /home/sebastiano/src/test262/test/language/statements/switch                        | 24  | 65   | 26.9662921348315 |
+| /home/sebastiano/src/test262/test/language/statements/switch/syntax/redeclaration   | 2   | 125  | 1.5748031496063  |
+| /home/sebastiano/src/test262/test/language/statements/throw                         | 24  | 4    | 85.7142857142857 |
+| /home/sebastiano/src/test262/test/language/statements/try                           | 76  | 126  | 37.6237623762376 |
+| /home/sebastiano/src/test262/test/language/statements/try/dstr                      | 6   | 180  | 3.2258064516129  |
+| /home/sebastiano/src/test262/test/language/statements/variable                      | 21  | 94   | 18.2608695652174 |
+| /home/sebastiano/src/test262/test/language/statements/variable/dstr                 | 8   | 186  | 4.12371134020619 |
+| /home/sebastiano/src/test262/test/language/statements/while                         | 24  | 48   | 33.3333333333333 |
+| /home/sebastiano/src/test262/test/language/white-space                              | 92  | 42   | 68.6567164179104 |
++-------------------------------------------------------------------------------------+-----+------+------------------+

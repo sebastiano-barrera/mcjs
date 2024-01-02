@@ -1329,11 +1329,6 @@ fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarD
 fn compile_namedef(builder: &mut Builder, name: JsWord) {
     let is_script_global =
         builder.fn_stack.len() == 1 && builder.flags.source_type == SourceType::Script;
-    eprintln!(
-        "namedef {} {}",
-        std::str::from_utf8(name.as_bytes()).unwrap(),
-        if is_script_global { "[global]" } else { "" }
-    );
     if is_script_global {
         // Script global => don't assign any register. Subsequent calls to `get_var` will
         // return Var::Global(_). `read_var` and `write_var` will generate object member
@@ -1372,21 +1367,15 @@ fn compile_var_decl_assignment(
     };
 
     for decl in &var_decl.decls {
-        let ident = decl
-            .name
-            .as_ident()
-            .unwrap_or_else(|| unsupported_node!(decl));
-        let name: JsWord = ident.id.to_id().0;
-        let vreg = builder.get_vreg(&name).unwrap_or_else(|| {
-            panic!(
-                "compiler bug: var decl [{}]: assignment phase done before namedef phase",
-                std::str::from_utf8(name.as_bytes()).unwrap()
-            )
-        });
-
         if let Some(expr) = &decl.init {
+            let ident = decl
+                .name
+                .as_ident()
+                .unwrap_or_else(|| unsupported_node!(decl));
+            let name: JsWord = ident.id.to_id().0;
+            let var = builder.get_var(&name);
             let value = compile_expr(builder, expr)?;
-            builder.write_var(&Var::Reg(vreg), value);
+            builder.write_var(&var, value);
         } else {
             // We do nothing.
             // The register had already been reserved for this variable in the namedef phase, and
