@@ -18,13 +18,13 @@ fn main() {
         .unwrap()
         .to_str()
         .expect("can't convert main filename to UTF-8");
-    let import_path = format!("./{}", filename);
+    let content = std::fs::read_to_string(&filename).expect("could not read file");
 
     let mut loader = Loader::new(Some(base_path.to_owned()));
     let mut realm = Realm::new(&mut loader);
 
     let main_fnid = loader
-        .load_import(&import_path, mcjs_vm::SCRIPT_MODULE_ID)
+        .load_script(Some(filename.to_owned()), content)
         .expect("compile error");
 
     use mcjs_vm::interpreter::Exit;
