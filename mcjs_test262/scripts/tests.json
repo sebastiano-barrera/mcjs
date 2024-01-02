@@ -1,6 +1,8 @@
 {
   "test262Root": "/home/sebastiano/src/test262/",
   "testFiles": [
+    "test/language/function-code/switch-case-decl-onlystrict.js",
+    "test/language/function-code/switch-dflt-decl-onlystrict.js",
     "test/language/expressions/function/S10.1.1_A1_T2.js",
     "test/language/expressions/function/arguments-with-arguments-fn.js",
     "test/language/expressions/function/arguments-with-arguments-lex.js",
@@ -1537,11 +1539,7 @@
     "test/language/function-code/S10.4.3_A1.js",
     "test/language/function-code/S10.4A1.1_T2.js",
     "test/language/function-code/S10.4_A1.1_T1.js",
-    "test/language/function-code/block-decl-onlystrict.js",
-    "test/language/function-code/eval-param-env-with-computed-key.js",
-    "test/language/function-code/eval-param-env-with-prop-initializer.js",
-    "test/language/function-code/switch-case-decl-onlystrict.js",
-    "test/language/function-code/switch-dflt-decl-onlystrict.js"
+    "test/language/function-code/block-decl-onlystrict.js"
   ],
   "dibled": [
     "test/language/arguments-object/10.5-1-s.js",
@@ -24266,6 +24264,8 @@
     "test/language/white-space/string-horizontal-tab.js",
     "test/language/white-space/string-nbsp.js",
     "test/language/white-space/string-space.js",
-    "test/language/white-space/string-vertical-tab.js"
+    "test/language/white-space/string-vertical-tab.js",
+    "test/language/function-code/eval-param-env-with-computed-key.js",
+    "test/language/function-code/eval-param-env-with-prop-initializer.js"
   ]
 }
