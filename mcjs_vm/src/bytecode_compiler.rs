@@ -602,6 +602,18 @@ fn compile_module(
 
     for item in &ast_module.body {
         match item {
+            ModuleItem::Stmt(Stmt::Decl(decl)) => {
+                compile_decl_block_scope_part(&mut builder, decl)?;
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
+                compile_decl_block_scope_part(&mut builder, &export_decl.decl)?;
+            }
+            _ => {}
+        }
+    }
+
+    for item in &ast_module.body {
+        match item {
             ModuleItem::ModuleDecl(decl) => match decl {
                 ModuleDecl::Import(decl) => {
                     if decl.type_only {
@@ -682,7 +694,7 @@ fn compile_module(
                 }
 
                 ModuleDecl::ExportDecl(export_decl) => match &export_decl.decl {
-                    // Skip: already processed in previous phase
+                    // Skip: already processed (namedef at function level, asmt at block level)
                     Decl::Fn(_) => {}
                     // Only do assignment part
                     Decl::Var(var_decl) => {
@@ -887,7 +899,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             // TODO Allow the catch clause to access the exception object
             // We reunite the cases by *always* having a catch clause (it will run the finalizer)
             let push_handler_instr = builder.reserve();
-            compile_block(&mut builder, &(&try_stmt.block).stmts)?;
+            compile_block(&mut builder, &try_stmt.block.stmts)?;
             builder.emit(Instr::PopExcHandler);
             let jmp_after_try = builder.reserve();
 
@@ -1174,14 +1186,40 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
     }
 }
 
-fn compile_block(builder: &mut Builder, stmts: &Vec<swc_ecma_ast::Stmt>) -> Result<()> {
-    // TODO TODO TODO Hoist let/const decls
-
+fn compile_block(builder: &mut Builder, stmts: &[Stmt]) -> Result<()> {
     builder.cur_fnb().push_scope();
+
+    for stmt in stmts {
+        if let Stmt::Decl(decl) = stmt {
+            compile_decl_block_scope_part(builder, decl)?;
+        }
+    }
+
     for stmt in stmts {
         compile_stmt(builder, stmt)?;
     }
+
     builder.cur_fnb().pop_scope();
+    Ok(())
+}
+
+fn compile_decl_block_scope_part(builder: &mut Builder, decl: &Decl) -> Result<()> {
+    match decl {
+        Decl::Var(vd) => match vd.kind {
+            VarDeclKind::Var => {}
+            VarDeclKind::Let | VarDeclKind::Const => {
+                for decl in &vd.decls {
+                    let name = get_var_decl_name(decl);
+                    compile_namedef(builder, name);
+                }
+            }
+        },
+        Decl::Fn(fd) => {
+            compile_fn_decl_assignment(builder, fd)?;
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 
@@ -1282,7 +1320,25 @@ fn compile_func_scope_namedefs(builder: &mut Builder, decls: &[HoistedDeclRef]) 
     //
     for decl in decls {
         if let HoistedDeclRef::Var(var_decl) = decl {
-            compile_var_decl_namedef(builder, var_decl);
+            match var_decl.kind {
+                VarDeclKind::Var => {
+                    for decl in &var_decl.decls {
+                        let name = get_var_decl_name(decl);
+                        if let Var::Reg(_) = builder.get_var(&name) {
+                            // For `var` only:
+                            // We must *not* re-bind the same name to a different register.  The name will remain
+                            // bound to the same location as before. (It's almost surely a function argument.)
+                        } else {
+                            compile_namedef(builder, name);
+                        }
+                    }
+                }
+                VarDeclKind::Let | VarDeclKind::Const => {
+                    // This name will be defined later, at the top of the
+                    // innermost *block* where the definition appears, not
+                    // necessarily at the top of the function level block.
+                }
+            }
         }
     }
 
@@ -1290,8 +1346,8 @@ fn compile_func_scope_namedefs(builder: &mut Builder, decls: &[HoistedDeclRef]) 
     // one in the source code wins.
     for decl in decls {
         if let HoistedDeclRef::Fn(fn_decl) = decl {
-            compile_fn_decl_namedef(builder, fn_decl);
-            compile_fn_decl_assignment(builder, fn_decl)?;
+            let name = get_fn_decl_name(fn_decl);
+            compile_namedef(builder, name);
         }
     }
 
@@ -1300,12 +1356,6 @@ fn compile_func_scope_namedefs(builder: &mut Builder, decls: &[HoistedDeclRef]) 
 
 fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) {
     use swc_ecma_ast::VarDeclKind;
-
-    if var_decl.kind != VarDeclKind::Var {
-        // The name is defined at the same time as the assignment.
-        // See `compile_var_decl_assignment`
-        return;
-    }
 
     for decl in &var_decl.decls {
         let name = get_var_decl_name(decl);
@@ -1319,6 +1369,7 @@ fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarD
 }
 
 fn compile_namedef(builder: &mut Builder, name: JsWord) {
+    eprintln!("compile namedef {}", name);
     let is_script_global =
         builder.fn_stack.len() == 1 && builder.flags.source_type == SourceType::Script;
     if is_script_global {
@@ -1343,17 +1394,8 @@ fn compile_var_decl_assignment(
 ) -> Result<()> {
     use swc_ecma_ast::VarDeclKind;
 
-    if var_decl.kind != VarDeclKind::Var {
-        // The name is defined here, not at the beginning of the block.
-        // See `compile_var_decl_namedef`
-        for decl in &var_decl.decls {
-            let name = get_var_decl_name(decl);
-            compile_namedef(builder, name);
-        }
-    }
-
     let _is_const = match var_decl.kind {
-        VarDeclKind::Var => false, // panic!("limitation: `var` bindings not supported"),
+        VarDeclKind::Var => false,
         VarDeclKind::Let => false,
         VarDeclKind::Const => true,
     };
@@ -1384,13 +1426,6 @@ fn get_var_decl_name(decl: &swc_ecma_ast::VarDeclarator) -> JsWord {
         .as_ident()
         .unwrap_or_else(|| unsupported_node!(decl));
     ident.id.to_id().0
-}
-
-fn compile_fn_decl_namedef(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnDecl) {
-    // Don't check if the variable is defined already: `function` declarations mask `var`
-    // declarations
-    let name = get_fn_decl_name(fn_decl);
-    compile_namedef(builder, name);
 }
 
 fn compile_fn_decl_assignment(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnDecl) -> Result<()> {
