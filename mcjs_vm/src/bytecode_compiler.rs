@@ -978,6 +978,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 use swc_ecma_ast::VarDeclOrExpr;
                 match init {
                     VarDeclOrExpr::VarDecl(var_decl) => {
+                        compile_var_decl_block_scope_part(&mut builder, var_decl);
                         compile_var_decl_assignment(&mut builder, var_decl)?;
                     }
                     VarDeclOrExpr::Expr(expr) => {
@@ -1205,15 +1206,7 @@ fn compile_block(builder: &mut Builder, stmts: &[Stmt]) -> Result<()> {
 
 fn compile_decl_block_scope_part(builder: &mut Builder, decl: &Decl) -> Result<()> {
     match decl {
-        Decl::Var(vd) => match vd.kind {
-            VarDeclKind::Var => {}
-            VarDeclKind::Let | VarDeclKind::Const => {
-                for decl in &vd.decls {
-                    let name = get_var_decl_name(decl);
-                    compile_namedef(builder, name);
-                }
-            }
-        },
+        Decl::Var(vd) => compile_var_decl_block_scope_part(builder, vd),
         Decl::Fn(fd) => {
             compile_fn_decl_assignment(builder, fd)?;
         }
@@ -1221,6 +1214,18 @@ fn compile_decl_block_scope_part(builder: &mut Builder, decl: &Decl) -> Result<(
     }
 
     Ok(())
+}
+
+fn compile_var_decl_block_scope_part(builder: &mut Builder, vd: &VarDecl) {
+    match vd.kind {
+        VarDeclKind::Var => {}
+        VarDeclKind::Let | VarDeclKind::Const => {
+            for decl in &vd.decls {
+                let name = get_var_decl_name(decl);
+                compile_namedef(builder, name);
+            }
+        }
+    }
 }
 
 // Helper type.  Helps unify the cases where the decl comes from a `Decl` or a `VarDeclOrExpr`
@@ -2029,8 +2034,17 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             Ok(buf_reg)
         }
 
+        Expr::Seq(seq_expr) => {
+            let (head, tail) = seq_expr.exprs.split_first().unwrap();
+            let mut result = compile_expr(&mut builder, &*head)?;
+            for expr in tail {
+                result = compile_expr(&mut builder, &*expr)?;
+            }
+
+            Ok(result)
+        }
+
         // Expr::SuperProp(_) => todo!(),
-        // Expr::Seq(_) => todo!(),
         // Expr::TaggedTpl(_) => todo!(),
         // Expr::Arrow(_) => todo!(),
         // Expr::Class(_) => todo!(),
