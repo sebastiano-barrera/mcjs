@@ -7,10 +7,12 @@ use actix_web::{web, App, HttpResponse, HttpServer};
 use anyhow::{Error, Result};
 use handlebars::Handlebars;
 use listenfd::ListenFd;
+use mcjs_vm::bytecode;
 use serde::{Deserialize, Serialize};
 
 use mcjs_vm::interpreter::debugger::BreakRangeID;
 use mcjs_vm::interpreter::Fuel;
+use serde_json::json;
 
 #[actix_web::main]
 async fn main() -> Result<()> {
@@ -48,6 +50,7 @@ async fn main() -> Result<()> {
             .wrap(Logger::default())
             .service(actix_files::Files::new("/assets", "./data/assets/"))
             .service(view_main)
+            .service(view_function_bytecode)
             .service(action_set_src_breakpoint)
             .service(action_set_instr_breakpoint)
             .service(action_delete_breakpoint)
@@ -175,6 +178,7 @@ async fn view_main(
 
     let app_data = app_data.into_inner();
     let params = &params;
+    let frame_ndx = params.frame_ndx.unwrap_or(0);
 
     let snapshot = app_data.snapshot().await;
     if snapshot.model.is_some() {
@@ -187,10 +191,22 @@ async fn view_main(
             }
         }
 
+        // TODO This is a sign that the snapshot thing needs to be redesigned
+        let function_bytecode_init = app_data
+            .intrp_handle
+            .query(move |state| {
+                let probe = state.probe().unwrap();
+                render_function_bytecode(probe, frame_ndx, true)
+            })
+            .await
+            .map_err(actix_web::error::ErrorInternalServerError)?
+            .into_string();
+
         let params = serde_json::json!({
             "snapshot": &*snapshot,
-            "frame_ndx": params.frame_ndx.unwrap_or(0),
+            "frame_ndx": frame_ndx,
             "focus_current_instr": params.focus_current_instr.unwrap_or(true),
+            "function_bytecode_init": function_bytecode_init,
         });
         let body = app_data
             .handlebars
@@ -202,6 +218,138 @@ async fn view_main(
     } else {
         Ok(HttpResponse::Ok().body("Interpreter finished successfully.  No debugging!"))
     }
+}
+
+#[actix_web::get("/bytecode")]
+async fn view_function_bytecode(
+    app_data: web::Data<AppData<'_>>,
+    etag_header: web::Header<actix_web::http::header::IfNoneMatch>,
+    query_params: web::Query<MainViewParams>,
+) -> actix_web::Result<HttpResponse> {
+    let app_data = app_data.into_inner();
+
+    let MainViewParams {
+        frame_ndx,
+        focus_current_instr,
+    } = query_params.into_inner();
+    let frame_ndx = frame_ndx.unwrap_or(0);
+    let focus_current_instr = focus_current_instr.unwrap_or(false);
+
+    let snapshot = app_data.snapshot().await;
+
+    use actix_web::http::header::IfNoneMatch;
+    if let IfNoneMatch::Items(tags) = etag_header.0 {
+        for tag in tags {
+            if tag.tag().parse().ok() == Some(snapshot.version) {
+                return Ok(HttpResponse::NotModified().body(""));
+            }
+        }
+    }
+
+    let body = app_data
+        .intrp_handle
+        .query(move |state| {
+            let probe = state.probe().unwrap();
+            render_function_bytecode(probe, frame_ndx, focus_current_instr)
+        })
+        .await
+        .map_err(|err: anyhow::Error| actix_web::error::ErrorInternalServerError(err))?;
+
+    Ok(HttpResponse::Ok()
+        .append_header(("ETag", format!("\"{}\"", snapshot.version)))
+        .body(body.into_string()))
+}
+
+fn render_function_bytecode(
+    probe: &mcjs_vm::interpreter::debugger::Probe,
+    frame_ndx: usize,
+    focus_current_instr: bool,
+) -> Result<maud::PreEscaped<String>, anyhow::Error> {
+    use std::fmt::Write;
+
+    let bytecode::GlobalIID(fnid, current_iid) = probe.frame_giid(frame_ndx);
+    let func = probe.loader().get_function(fnid).unwrap();
+
+    let instr_breakpoints: Vec<_> = probe.instr_breakpoints().collect();
+
+    let mut x_init = String::new();
+    if focus_current_instr {
+        writeln!(
+            x_init,
+            "var focus_current_instr = true, current_iid = {};",
+            current_iid.0
+        )
+        .unwrap();
+    }
+    // Non-smooth scrolling on load (too distracting on "next")
+    x_init.push_str(
+        r#"
+      $watch("markedBreakRange", (mbr) => {
+          if (!mbr) return
+          const name = "instr-" + mbr.iidStart
+          $refs[name].scrollIntoView({ behavior: "smooth", block: "center" })
+      })
+      if (focus_current_instr) {
+      	  setTimeout(() => {
+      	      const name = "instr-" + current_iid
+      	      $refs[name].scrollIntoView({ block: "center" })
+      	  }, 0)
+      }"#,
+    );
+
+    Ok(maud::html! {
+        div
+            class="grid grid-cols-[auto_1fr] gap-x-1 auto-rows-min justify-start [&>*]:whitespace-nowrap"
+            x-init=(x_init)
+        {
+            div {}
+            div {
+                @if func.is_strict_mode() {
+                    "strict"
+                } @else {
+                    "NON-strict"
+                }
+            }
+
+            @for (index, constant) in func.consts().iter().enumerate() {
+                div."text-right" { (format!("k{index}")) }
+                div { (format!("{:?}", constant)) }
+            }
+            @for (index, instr) in func.instrs().iter().enumerate() {
+                @let iid = bytecode::IID(index.try_into().unwrap());
+                @let giid = bytecode::GlobalIID(fnid, iid);
+                div
+                    x-ref=(format!("instr-{}", index))
+                    class=(format!("
+                            text-right rounded-r-md cursor-pointer 
+                            hover:bg-zinc-100 hover:dark:bg-zinc-700
+                            [&.current-instr]:font-medium
+                            [&.current-instr]:bg-black [&.current-instr]:text-white
+                            [&.current-instr]:dark:bg-white [&.current-instr]:dark:text-black
+                            [&.highlight]:dark:bg-sky-800 [&.highlight]:bg-sky-200
+                            {}",
+                        if iid == current_iid { "current-instr" } else { "" }))
+                    x-bind:class=(format!(r#"{{
+                            "highlight": markedBreakRange?.iidStart <= {index} && {index} < markedBreakRange?.iidEnd
+                        }}"#))
+                {
+                    span
+                        class="font-mono px-2"
+                        hx-trigger="dblclick"
+                        hx-post=(format!("/instrs/{}.{}.{}/set_breakpoint", giid.0.0.0, giid.0.1.0, index))
+                        hx-swap="none"
+                    {
+                        @if instr_breakpoints.contains(&giid) {
+                            span."text-red-500" { "●" }
+                        }
+                        (format!("{index}⬥ "))
+                    }
+                }
+
+        div { (format!("{:?}", instr)) }
+            }
+        }
+    })
 }
 
 mod frame_view {
@@ -315,11 +463,7 @@ mod frame_view {
         Ok(HttpResponse::Ok().body(markup.into_string()))
     }
 
-    pub fn snapshot(
-        probe: &Probe<'_, '_>,
-        loader: &mcjs_vm::Loader,
-        has_breakpoint: impl Fn(GlobalIID) -> bool,
-    ) -> Snapshot {
+    pub fn snapshot(probe: &Probe<'_, '_>, loader: &mcjs_vm::Loader) -> Snapshot {
         use bytecode::FnId;
 
         let mut frames = Vec::new();
@@ -346,23 +490,6 @@ mod frame_view {
                 functionID: lfnid.0,
                 iid: giid.1 .0,
                 values,
-                function: Function {
-                    bytecode: func
-                        .instrs()
-                        .iter()
-                        .enumerate()
-                        .map(|(ndx, instr)| {
-                            let iid = bytecode::IID(ndx.try_into().unwrap());
-                            let giid = bytecode::GlobalIID(fnid, iid);
-                            Instruction {
-                                textual_repr: format!("{:?}", instr),
-                                has_breakpoint: has_breakpoint(giid),
-                            }
-                        })
-                        .collect(),
-                    consts: func.consts().iter().map(show_literal).collect(),
-                    is_strict: func.is_strict_mode(),
-                },
             });
         }
 
@@ -417,7 +544,6 @@ mod frame_view {
         functionID: u16,
         iid: u16,
 
-        function: Function,
         values: Values,
     }
 
@@ -430,8 +556,17 @@ mod frame_view {
 
     #[derive(Clone, Serialize)]
     struct Instruction {
-        textual_repr: String,
+        opcode: &'static str,
+        operands: [Option<Operand>; 4],
         has_breakpoint: bool,
+        writes: String,
+    }
+
+    #[derive(Clone, Serialize)]
+    struct Operand {
+        label: Option<&'static str>,
+        loc: String,
+        value: String,
     }
 
     #[derive(Clone, Serialize)]
@@ -1234,9 +1369,7 @@ mod model {
                 .collect();
 
             let instr_breakpoints: Vec<_> = probe.instr_breakpoints().collect();
-
-            let has_breakpoint = |giid| instr_breakpoints.contains(&giid);
-            let frame_view_snapshot = super::frame_view::snapshot(probe, loader, has_breakpoint);
+            let frame_view_snapshot = super::frame_view::snapshot(probe, loader);
 
             VMState {
                 source_breakpoints,
