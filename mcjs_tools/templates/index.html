@@ -18,18 +18,9 @@
 	hx-trigger="vmStateChanged"
 	hx-push-url="true"
 >
-	<div class="grid grid-cols-[minmax(0,7cm)_1cm_1fr] inset-0 w-full h-full">
+	<div class="grid grid-cols-[minmax(0,7cm)_1fr] inset-0 w-full h-full">
 		<div class="p-0">
 			{{> sidebar }}
-		</div>
-
-		<div id="main-area-labels" class="grid stack-view-grid-rows inset-0">
-			<div class="sticky lowercase text-xl text-vertical dark:text-white py-2 ml-auto mr-auto">
-				Code
-			</div>
-			<div class="sticky lowercase text-xl text-vertical text-right dark:text-white py-2 ml-auto mr-auto">
-				Data
-			</div>
 		</div>
 
 		<div id="main-area" class="inset-0 w-full h-full overflow-x-scroll flex">
