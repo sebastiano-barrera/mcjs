@@ -165,6 +165,41 @@ struct FnBuilder {
     captures: Vec<String>,
     ident_history: Vec<IdentAsmt>,
     is_strict_mode: bool,
+
+    // This is the set of registers the program has to 'unshare' in order to
+    // loop back to the beginning of a scope.
+    //
+    // ## Why?
+    //
+    // JavaScript has this weird rule where multiple runs of the same block
+    // (typically in a loop) generate distinct variables. The weird part (to me)
+    // is observable in a test like the following:
+    //
+    // ```
+    //   const a = []
+    //   for (let i=0; a.push(function() { return i }), i < 5; i++) {
+    //     ...
+    //   }
+    // ```
+    //
+    // On each iteration of the for loop, the closure added to `a` captures a
+    // *new* variable, even though it's still called `i`. The 5 closures that result
+    // from this loop all 'see' distinct locations on the heap, with values 0, 1, 2, 3,
+    // and 4.
+    //
+    // 'Unsharing' means to copy the upvalue back into an inline stack slot (so
+    // that it will be shared again with a new upvalue on the next cycle).
+    //
+    // ## Representation
+    //
+    // Each time a new variable is predicted to be shared (e.g. used as
+    // parameter in ClosureAddCapture) it is pushed onto `unshare_on_loopback`
+    // and a counter `shared_count` is increased on the current Scope.
+    // Upon exiting the scope, the count is added to the parent scope's
+    // `shared_count`.  This way, at any point in time, the current Scope tracks
+    // how many variables have been shared at any point within it; they can be
+    // found in the last N slots of `unshare_on_loopback`.
+    unshare_on_loopback: Vec<VReg>,
 }
 
 enum Var {
@@ -183,14 +218,14 @@ enum Var {
 
 #[derive(Debug)]
 struct Scope {
-    // TODO Take advantage of identifier interning!
-    // TODO After introducing VRegs, this could become a Vec
     vars: HashMap<JsWord, VReg>,
+    shared_count: usize,
 }
 impl Scope {
     fn new() -> Self {
         Scope {
             vars: HashMap::new(),
+            shared_count: 0,
         }
     }
 }
@@ -211,6 +246,7 @@ impl FnBuilder {
             span: None,
             ident_history: Vec::new(),
             is_strict_mode: false,
+            unshare_on_loopback: Vec::new(),
         }
     }
 
@@ -265,7 +301,22 @@ impl FnBuilder {
         self.scopes.push(Scope::new());
     }
     fn pop_scope(&mut self) {
-        self.scopes.pop().unwrap();
+        let closed_scope = self.scopes.pop().unwrap();
+        if let Some(new_inner_scope) = self.scopes.last_mut() {
+            new_inner_scope.shared_count += closed_scope.shared_count;
+        }
+    }
+    fn unshare_on_loopback(&mut self, vreg: VReg) {
+        self.inner_scope_mut().shared_count += 1;
+        self.unshare_on_loopback.push(vreg);
+    }
+
+    fn emit_unshare(&mut self) {
+        let count = self.inner_scope().shared_count;
+        let to_unshare = &self.unshare_on_loopback[self.unshare_on_loopback.len() - count..];
+        for reg in to_unshare {
+            self.instrs.push(Instr::Unshare(*reg));
+        }
     }
 
     fn inner_scope(&self) -> &Scope {
@@ -1009,6 +1060,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 compile_expr(&mut builder, update)?;
             }
 
+            builder.cur_fnb().emit_unshare();
             builder.emit(Instr::Jmp(loop_start));
             let loop_end = builder.peek_iid();
 
@@ -1511,6 +1563,7 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     });
     for vreg in captures {
         builder.emit(Instr::ClosureAddCapture(vreg));
+        builder.cur_fnb().unshare_on_loopback(vreg);
     }
 
     let proto = builder.new_vreg();

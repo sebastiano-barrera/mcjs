@@ -203,6 +203,7 @@ pub enum Instr {
         forced_this: Option<VReg>,
     },
     ClosureAddCapture(VReg),
+    Unshare(VReg),
 
     ObjCreateEmpty(VReg),
     ObjSet {
@@ -361,6 +362,7 @@ impl Instr {
                 forced_this: _,
             } => { an.write_vreg(*dest);  },
             Instr::ClosureAddCapture(arg) => { an.read_vreg(*arg); },
+            Instr::Unshare(reg) => { an.write_vreg(*reg); an.read_vreg(*reg); },
             Instr::ObjCreateEmpty(dest) => { an.write_vreg(*dest); },
             Instr::ObjSet { obj, key, value } => { an.read_vreg(*obj); an.read_vreg(*key); an.read_vreg(*value); }
             Instr::ObjGet { dest, obj, key } => { an.write_vreg(*dest); an.read_vreg(*obj); an.read_vreg(*key); }

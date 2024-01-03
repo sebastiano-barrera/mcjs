@@ -10,7 +10,7 @@
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration-global  | 6   | 0    | 100.0            |
 | /home/sebastiano/src/test262/test/language/comments                                 | 36  | 10   | 78.2608695652174 |
 | /home/sebastiano/src/test262/test/language/comments/hashbang                        | 37  | 21   | 63.7931034482759 |
-| /home/sebastiano/src/test262/test/language/expressions/function                     | 13  | 86   | 13.1313131313131 |
+| /home/sebastiano/src/test262/test/language/expressions/function                     | 15  | 84   | 15.1515151515152 |
 | /home/sebastiano/src/test262/test/language/expressions/function/dstr                | 12  | 360  | 3.2258064516129  |
 | /home/sebastiano/src/test262/test/language/expressions/function/early-errors        | 0   | 8    | 0.0              |
 | /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b1    | 0   | 2    | 0.0              |
@@ -20,7 +20,7 @@
 | /home/sebastiano/src/test262/test/language/statements/labeled                       | 12  | 27   | 30.7692307692308 |
 | /home/sebastiano/src/test262/test/language/statements/let                           | 4   | 37   | 9.75609756097561 |
 | /home/sebastiano/src/test262/test/language/statements/let/dstr                      | 6   | 180  | 3.2258064516129  |
-| /home/sebastiano/src/test262/test/language/statements/let/syntax                    | 36  | 24   | 60.0             |
+| /home/sebastiano/src/test262/test/language/statements/let/syntax                    | 38  | 22   | 63.3333333333333 |
 | /home/sebastiano/src/test262/test/language/statements/return                        | 8   | 23   | 25.8064516129032 |
 | /home/sebastiano/src/test262/test/language/statements/switch                        | 24  | 65   | 26.9662921348315 |
 | /home/sebastiano/src/test262/test/language/statements/switch/syntax/redeclaration   | 2   | 125  | 1.5748031496063  |
