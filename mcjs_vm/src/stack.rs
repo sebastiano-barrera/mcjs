@@ -258,6 +258,17 @@ impl<'a> FrameMut<'a> {
         }
     }
 
+    pub(crate) fn ensure_inline(&mut self, var: bytecode::VReg) {
+        let slot = &mut self.values[var.0 as usize];
+        match slot {
+            Slot::Inline(_) => {}
+            Slot::Upvalue(upv_id) => {
+                let value = *self.upv_alloc.get(*upv_id).unwrap();
+                *slot = Slot::Inline(value);
+            }
+        }
+    }
+
     pub(crate) fn set_return_target(&mut self, iid: IID, reg: VReg) {
         self.header.return_target = Some((iid, reg));
     }

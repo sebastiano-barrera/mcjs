@@ -866,6 +866,9 @@ impl<'a> Interpreter<'a> {
                         "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
                     )
                 }
+                Instr::Unshare(reg) => {
+                    self.data.top_mut().ensure_inline(*reg);
+                }
 
                 Instr::UnaryMinus { dest, arg } => {
                     let arg_val: f64 = self.get_operand(*arg).expect_num()?;
