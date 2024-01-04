@@ -182,7 +182,7 @@ impl<'a> eframe::App for AppData {
 
             let mut bkpt_to_set = None;
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::both().show(ui, |ui| {
                 let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
 
                 for (ndx, instr) in func.instrs().iter().enumerate() {
@@ -232,10 +232,83 @@ impl<'a> eframe::App for AppData {
 }
 
 fn source_code_view(ui: &mut egui::Ui, probe: &Probe) {
+    // TODO Cache this
+
     let giid = probe.giid();
-    egui::ScrollArea::vertical().show(ui, |ui| match fetch_source_code(probe, giid) {
-        Some(text) => ui.code(&*text),
-        None => ui.label("(No source code)"),
+    let fnid = giid.0;
+    let loader = probe.loader();
+    let source_map = match loader.get_source_map(fnid.0) {
+        Some(sm) => sm,
+        None => {
+            ui.label("No source map!");
+            return;
+        }
+    };
+
+    let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
+
+    // All break ranges must belong to the same file, so we just peek
+    // one and use it to get a ptr to that swc_common::SourceFile.
+    // Then we use source file's offset in the source map to make sure
+    // that the markers are expressed in file-local offsets.
+    //
+    // (There should *always* be at least a single break range in a
+    // function, belonging at least to an empty statement.  I *might*
+    // be wrong; we'll see.)
+    let (_, brange) = break_ranges.peek().expect("no break ranges!");
+
+    let source_file = source_map.lookup_byte_offset(brange.lo).sf;
+    let src = source_file.src.as_bytes();
+
+    // TODO this is inefficient as hell!
+
+    enum Marker {
+        LineStart { line_end: usize },
+        BreakButton,
+    }
+
+    enum Segment<'a> {
+        Text(&'a [u8]),
+        LineEnd,
+        Button,
+    }
+    let mut ranges = Vec::new();
+
+    let lines_count = source_file.count_lines();
+
+    let mut markers: Vec<_> = (0..lines_count)
+        .map(|line_ndx| {
+            let (ofs_start, ofs_end) = source_file.line_bounds(line_ndx);
+            let marker = Marker::LineStart {
+                line_end: ofs_end.0 as usize,
+            };
+            (ofs_start.0 as usize, marker)
+        })
+        .collect();
+    markers.extend(break_ranges.map(|(_, brange)| (brange.lo.0 as usize, Marker::BreakButton)));
+    markers.sort_by_key(|(ofs, _)| *ofs);
+    let mut markers = markers.into_iter().peekable();
+    while let Some((line_start, marker)) = markers.next() {
+        let line_end = match marker {
+            Marker::LineStart { line_end } => line_end,
+            _ => panic!(),
+        };
+
+        let mut rest = line_start;
+
+        while let Some((ofs, Marker::BreakButton)) = markers.peek() {
+            assert!(*ofs >= line_start);
+            assert!(*ofs < line_end);
+            ranges.push(Segment::Text(&src[line_start..*ofs]));
+            ranges.push(Segment::Button);
+            rest = *ofs;
+        }
+        ranges.push(Segment::Text(&src[rest..line_end]));
+        ranges.push(Segment::LineEnd);
+    }
+
+    egui::ScrollArea::both().show(ui, |ui| {
+        // ----
     });
 }
 
