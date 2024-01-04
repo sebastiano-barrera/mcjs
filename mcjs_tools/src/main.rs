@@ -174,21 +174,40 @@ impl<'a> eframe::App for AppData {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let probe = self.si.probe_mut().unwrap();
+            let mut probe = self.si.probe_mut().unwrap();
 
-            let giid = probe.giid();
-            let fnid = giid.0;
+            let vm_giid = probe.giid();
+            let fnid = vm_giid.0;
             let func = probe.loader().get_function(fnid).unwrap();
 
+            let mut bkpt_to_set = None;
+
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
+
                 for (ndx, instr) in func.instrs().iter().enumerate() {
-                    let is_current = ndx == giid.1 .0 as usize;
-                    let res = ui.selectable_label(is_current, format!("{:4} {:?}", ndx, instr));
+                    let is_current = ndx == vm_giid.1 .0 as usize;
+                    let res = ui.horizontal(|ui| {
+                        let giid =
+                            bytecode::GlobalIID(fnid, bytecode::IID(ndx.try_into().unwrap()));
+                        if instr_bkpts.contains(&giid) {
+                            ui.label("•");
+                        }
+                        let instr_repr = format!("{:4} {:?}", ndx, instr);
+                        if ui.selectable_label(is_current, instr_repr).clicked() {
+                            bkpt_to_set = Some(giid);
+                        }
+                    });
+
                     if recent_state_change && is_current {
-                        res.scroll_to_me(None);
+                        res.response.scroll_to_me(None);
                     }
                 }
             });
+
+            if let Some(bkpt_to_set) = bkpt_to_set {
+                probe.set_instr_breakpoint(bkpt_to_set);
+            }
         });
 
         match action {
