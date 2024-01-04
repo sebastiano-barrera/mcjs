@@ -17,7 +17,10 @@ fn main() {
     eprintln!("params = {:?}", params);
 
     let si = interpreter_manager::StandaloneInterpreter::new(params);
-    let app = AppData { si };
+    let app = AppData {
+        si,
+        recent_state_change: false,
+    };
 
     let native_options = eframe::NativeOptions::default();
     eframe::run_native("mcjs tools", native_options, Box::new(|_cc| Box::new(app))).unwrap();
@@ -53,13 +56,22 @@ fn parse_args() -> Result<interpreter_manager::Params> {
 
 struct AppData {
     si: Pin<Box<interpreter_manager::StandaloneInterpreter>>,
+    recent_state_change: bool,
 }
 
 impl<'a> eframe::App for AppData {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use interpreter_manager::State;
 
-        let mut recent_state_change = false;
+        let recent_state_change = self.recent_state_change;
+        self.recent_state_change = false;
+
+        enum Action {
+            Next,
+            Restart,
+            Continue,
+            None,
+        }
 
         match self.si.state_mut() {
             State::Ready { filename_ndx } => {
@@ -89,69 +101,69 @@ impl<'a> eframe::App for AppData {
             _ => {}
         };
 
-        egui::SidePanel::left("sidebar").show(ctx, |ui| {
-            if let Some(err_message) = self.si.error_message() {
-                ui.heading("interpreter failed");
-                ui.label(&err_message);
-            }
+        let action = egui::SidePanel::left("sidebar")
+            .show(ctx, |ui| {
+                let mut action = Action::None;
 
-            if ui.button("NEXT").clicked() {
-                let mut probe = self.si.probe_mut().unwrap();
-                probe.set_fuel(Fuel::Limited(1));
-                self.si.resume();
-                recent_state_change = true;
-            }
-            if ui.button("CONTINUE").clicked() {
-                self.si.resume();
-                recent_state_change = true;
-            }
-            if ui.button("RESTART").clicked() {
-                self.si.restart();
-                self.si.resume();
-                recent_state_change = true;
-            }
-            ui.button("DELETE");
-
-            let probe = self.si.probe_mut().unwrap();
-            let status_text = format!("suspended at {:?}", probe.giid());
-
-            ui.separator();
-            ui.label(status_text);
-
-            ui.separator();
-            ui.label("Double click on a <source code range> to set a breakpoint");
-
-            ui.heading("SOURCE BREAKPOINTS");
-            let loader = probe.loader();
-            ui.vertical(|ui| {
-                for (brid, _) in probe.source_breakpoints() {
-                    let break_range = loader.get_break_range(brid).unwrap();
-                    let source_map = loader.get_source_map(brid.module_id()).unwrap();
-                    let loc = source_map.lookup_char_pos(break_range.lo);
-                    let filename = loc.file.name.to_string();
-                    ui.label(format!("{}:{}", filename, loc.line));
+                if let Some(err_message) = self.si.error_message() {
+                    ui.heading("interpreter failed");
+                    ui.label(&err_message);
                 }
-            });
 
-            ui.heading("INSTR. BREAKPOINTS");
-            ui.vertical(|ui| {
-                for giid in probe.instr_breakpoints() {
-                    ui.label(format!("{:?}", giid));
+                if ui.button("NEXT").clicked() {
+                    action = Action::Next;
                 }
-            });
+                if ui.button("CONTINUE").clicked() {
+                    action = Action::Continue;
+                }
+                if ui.button("RESTART").clicked() {
+                    action = Action::Restart;
+                }
+                ui.button("DELETE");
 
-            ui.heading("STACK");
-            ui.vertical(|ui| {
-                for (ndx, frame) in probe.frames().enumerate() {
-                    let iid = if ndx == 0 {
-                        probe.giid().1
-                    } else {
-                        frame.header().return_target.unwrap().0
-                    };
-                    ui.label(format!("{:?}:{:?}", frame.header().fn_id, iid));
-                }
-            });
-        });
+                let probe = self.si.probe_mut().unwrap();
+                let status_text = format!("suspended at {:?}", probe.giid());
+
+                ui.separator();
+                ui.label(status_text);
+
+                ui.separator();
+                ui.label("Double click on a <source code range> to set a breakpoint");
+
+                ui.heading("SOURCE BREAKPOINTS");
+                let loader = probe.loader();
+                ui.vertical(|ui| {
+                    for (brid, _) in probe.source_breakpoints() {
+                        let break_range = loader.get_break_range(brid).unwrap();
+                        let source_map = loader.get_source_map(brid.module_id()).unwrap();
+                        let loc = source_map.lookup_char_pos(break_range.lo);
+                        let filename = loc.file.name.to_string();
+                        ui.label(format!("{}:{}", filename, loc.line));
+                    }
+                });
+
+                ui.heading("INSTR. BREAKPOINTS");
+                ui.vertical(|ui| {
+                    for giid in probe.instr_breakpoints() {
+                        ui.label(format!("{:?}", giid));
+                    }
+                });
+
+                ui.heading("STACK");
+                ui.vertical(|ui| {
+                    for (ndx, frame) in probe.frames().enumerate() {
+                        let iid = if ndx == 0 {
+                            probe.giid().1
+                        } else {
+                            frame.header().return_target.unwrap().0
+                        };
+                        ui.label(format!("{:?}:{:?}", frame.header().fn_id, iid));
+                    }
+                });
+
+                action
+            })
+            .inner;
 
         if let State::Suspended(_) = self.si.state_mut() {
             let probe = self.si.probe_mut().unwrap();
@@ -178,6 +190,25 @@ impl<'a> eframe::App for AppData {
                 }
             });
         });
+
+        match action {
+            Action::None => {}
+            Action::Next => {
+                let mut probe = self.si.probe_mut().unwrap();
+                probe.set_fuel(Fuel::Limited(1));
+                self.si.resume();
+                self.recent_state_change = true;
+            }
+            Action::Continue => {
+                self.si.resume();
+                self.recent_state_change = true;
+            }
+            Action::Restart => {
+                self.si.restart();
+                self.si.resume();
+                self.recent_state_change = true;
+            }
+        }
     }
 }
 
