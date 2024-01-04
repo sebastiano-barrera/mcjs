@@ -3,9 +3,12 @@
 
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use anyhow::Result;
+use mcjs_vm::bytecode;
 use mcjs_vm::interpreter::debugger::Probe;
+use mcjs_vm::interpreter::Fuel;
 
 fn main() {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
@@ -56,52 +59,154 @@ impl<'a> eframe::App for AppData {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use interpreter_manager::State;
 
+        let mut recent_state_change = false;
+
+        match self.si.state_mut() {
+            State::Ready { filename_ndx } => {
+                let should_start = egui::CentralPanel::default()
+                    .show(ctx, |ui| {
+                        ui.label(format!("Ready to proceed with file #{}", *filename_ndx + 1));
+                        ui.button("Start").clicked()
+                    })
+                    .inner;
+                if should_start {
+                    self.si.resume();
+                }
+                return;
+            }
+            State::Finished => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.label("Interpreter finished successfully. No debugging!");
+                });
+                return;
+            }
+            State::Failed(interpreter_manager::Error::Generic(err)) => {
+                egui::SidePanel::right("simple_central_panel").show(ctx, |ui| {
+                    ui.label(format!("Error: {:?}", err));
+                });
+                return;
+            }
+            _ => {}
+        };
+
         egui::SidePanel::left("sidebar").show(ctx, |ui| {
-            ui.button("NEXT");
+            if let Some(err_message) = self.si.error_message() {
+                ui.heading("interpreter failed");
+                ui.label(&err_message);
+            }
+
+            if ui.button("NEXT").clicked() {
+                let mut probe = self.si.probe_mut().unwrap();
+                probe.set_fuel(Fuel::Limited(1));
+                self.si.resume();
+                recent_state_change = true;
+            }
             if ui.button("CONTINUE").clicked() {
                 self.si.resume();
+                recent_state_change = true;
             }
-            ui.button("RESTART");
+            if ui.button("RESTART").clicked() {
+                self.si.restart();
+                self.si.resume();
+                recent_state_change = true;
+            }
             ui.button("DELETE");
 
+            let probe = self.si.probe_mut().unwrap();
+            let status_text = format!("suspended at {:?}", probe.giid());
+
+            ui.separator();
+            ui.label(status_text);
+
+            ui.separator();
             ui.label("Double click on a <source code range> to set a breakpoint");
 
             ui.heading("SOURCE BREAKPOINTS");
-            ui.heading("INSTR. BREAKPOINTS");
-            ui.heading("STACK");
-        });
-
-        egui::SidePanel::right("source_code").show(ctx, |ui| {
-            let state = self.si.state_mut();
-            let text = match state {
-                State::Ready { filename_ndx } => format!("ready for file #{}", filename_ndx),
-                State::Finished => format!("finished"),
-                State::Suspended(intrp) => {
-                    let probe = Probe::attach(intrp);
-                    format!("suspended at {:?}", probe.giid())
+            let loader = probe.loader();
+            ui.vertical(|ui| {
+                for (brid, _) in probe.source_breakpoints() {
+                    let break_range = loader.get_break_range(brid).unwrap();
+                    let source_map = loader.get_source_map(brid.module_id()).unwrap();
+                    let loc = source_map.lookup_char_pos(break_range.lo);
+                    let filename = loc.file.name.to_string();
+                    ui.label(format!("{}:{}", filename, loc.line));
                 }
-                State::Failed(err) => format!("failure: {:?}", err),
-            };
+            });
 
-            ui.code(text);
+            ui.heading("INSTR. BREAKPOINTS");
+            ui.vertical(|ui| {
+                for giid in probe.instr_breakpoints() {
+                    ui.label(format!("{:?}", giid));
+                }
+            });
+
+            ui.heading("STACK");
+            ui.vertical(|ui| {
+                for (ndx, frame) in probe.frames().enumerate() {
+                    let iid = if ndx == 0 {
+                        probe.giid().1
+                    } else {
+                        frame.header().return_target.unwrap().0
+                    };
+                    ui.label(format!("{:?}:{:?}", frame.header().fn_id, iid));
+                }
+            });
         });
+
+        if let State::Suspended(_) = self.si.state_mut() {
+            let probe = self.si.probe_mut().unwrap();
+
+            egui::SidePanel::right("source_code").show(ctx, |ui| {
+                source_code_view(ui, &probe);
+            });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            use mcjs_vm::bytecode::{ConstIndex, Instr, VReg};
-            let instrs = &[
-                Instr::Copy {
-                    dst: VReg(1),
-                    src: VReg(2),
-                },
-                Instr::LoadConst(VReg(3), ConstIndex(2)),
-                Instr::ObjCreateEmpty(VReg(4)),
-            ];
+            let probe = self.si.probe_mut().unwrap();
 
-            for (ndx, instr) in instrs.iter().enumerate() {
-                ui.monospace(format!("{:4} {:?}", ndx, instr));
-            }
+            let giid = probe.giid();
+            let fnid = giid.0;
+            let func = probe.loader().get_function(fnid).unwrap();
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (ndx, instr) in func.instrs().iter().enumerate() {
+                    let is_current = ndx == giid.1 .0 as usize;
+                    let res = ui.selectable_label(is_current, format!("{:4} {:?}", ndx, instr));
+                    if recent_state_change && is_current {
+                        res.scroll_to_me(None);
+                    }
+                }
+            });
         });
     }
+}
+
+fn source_code_view(ui: &mut egui::Ui, probe: &Probe) {
+    let giid = probe.giid();
+    egui::ScrollArea::vertical().show(ui, |ui| match fetch_source_code(probe, giid) {
+        Some(text) => ui.code(&*text),
+        None => ui.label("(No source code)"),
+    });
+}
+
+fn fetch_source_code<'a>(
+    probe: &'a Probe<'a, '_>,
+    giid: bytecode::GlobalIID,
+) -> Option<Rc<String>> {
+    let fnid = giid.0;
+
+    let loader = probe.loader();
+    let source_map = loader.get_source_map(fnid.0)?;
+    let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
+
+    // All break ranges must belong to the same file, so we just peek one and use it to get a
+    // ptr to that swc_common::SourceFile.
+    // Then we use source file's offset in the source map to make sure that the markers are
+    // expressed in file-local offsets.
+    let (_, brange) = break_ranges.peek()?;
+    let source_file = source_map.lookup_byte_offset(brange.lo).sf;
+
+    Some(Rc::clone(&source_file.src))
 }
 
 mod interpreter_manager {
@@ -109,6 +214,7 @@ mod interpreter_manager {
     use std::pin::Pin;
     use std::{marker::PhantomPinned, path::Path};
 
+    use mcjs_vm::interpreter::debugger::Probe;
     use mcjs_vm::{
         interpreter::{Exit, InterpreterError},
         Interpreter, Loader, Realm,
@@ -169,6 +275,11 @@ mod interpreter_manager {
             &mut self_.state
         }
 
+        pub fn restart(self: &mut Pin<Box<Self>>) {
+            let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
+            self_.state = State::Ready { filename_ndx: 0 };
+        }
+
         pub fn resume(self: &mut Pin<Box<Self>>) {
             // Safe because nowhere in this function we move neither
             // `realm` or `loader` (`state`, and therefore the
@@ -209,6 +320,26 @@ mod interpreter_manager {
                     Err(err) => State::Failed(Error::Interpreter(err)),
                 },
             };
+        }
+
+        pub fn probe_mut<'a>(self: &'a mut Pin<Box<Self>>) -> Option<Probe<'a, 'static>> {
+            // Safe because the Probe allows mutating the Interpreter
+            // or accessing the Loader and/or Realm read-only (as &T)
+            match self.state_mut() {
+                State::Suspended(intrp) => Some(Probe::attach(intrp)),
+                State::Failed(Error::Interpreter(intrp_err)) => Some(intrp_err.probe()),
+                _ => None,
+            }
+        }
+
+        pub fn error_message(self: &mut Pin<Box<Self>>) -> Option<String> {
+            match self.state_mut() {
+                State::Suspended(_) => None,
+                State::Failed(Error::Interpreter(intrp_err)) => {
+                    Some(format!("{:?}", intrp_err.error))
+                }
+                _ => None,
+            }
         }
     }
 
