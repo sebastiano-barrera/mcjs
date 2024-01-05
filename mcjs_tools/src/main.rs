@@ -572,7 +572,13 @@ mod interpreter_manager {
 
         pub fn restart(self: &mut Pin<Box<Self>>) {
             let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
-            self_.state = State::Ready { filename_ndx: 0 };
+            let prev_state = std::mem::replace(&mut self_.state, State::Finished);
+            self_.state = match prev_state {
+                State::Suspended(intrp) => State::Suspended(intrp.restart()),
+                State::Ready { .. } | State::Finished | State::Failed(_) => {
+                    State::Ready { filename_ndx: 0 }
+                }
+            };
         }
 
         pub fn resume(self: &mut Pin<Box<Self>>) {
