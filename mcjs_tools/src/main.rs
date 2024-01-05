@@ -1,15 +1,11 @@
 #![allow(dead_code)]
 #![allow(unused_must_use)]
 
-use std::ops::Range;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::rc::Rc;
-use std::sync::Arc;
 
 use anyhow::Result;
 use mcjs_vm::bytecode;
-use mcjs_vm::interpreter::debugger::Probe;
 use mcjs_vm::interpreter::Fuel;
 
 fn main() {
@@ -63,7 +59,7 @@ struct AppData {
     source_code_view: source_code_view::Cache,
 }
 
-impl<'a> eframe::App for AppData {
+impl eframe::App for AppData {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use interpreter_manager::State;
 
@@ -601,7 +597,7 @@ mod interpreter_manager {
                         filename.to_string_lossy().into_owned()
                     );
 
-                    match start_intrp(&filename, &mut self_.realm, &mut self_.loader) {
+                    match start_intrp(filename, &mut self_.realm, &mut self_.loader) {
                         Ok(intrp) => {
                             let intrp = unsafe { std::mem::transmute(intrp) };
                             State::Suspended(intrp)
