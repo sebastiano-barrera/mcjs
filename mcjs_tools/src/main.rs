@@ -167,6 +167,7 @@ impl eframe::App for AppData {
 
         if let State::Suspended(_) = self.si.state_mut() {
             let res = egui::SidePanel::right("source_code")
+                .min_width(300.0)
                 .show(ctx, |ui| {
                     source_code_view::show(ui, &mut self.source_code_view)
                 })
@@ -190,7 +191,7 @@ impl eframe::App for AppData {
 
             let mut bkpt_to_set = None;
 
-            egui::ScrollArea::both().show(ui, |ui| {
+            egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                 let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
                 let preview_bkpt_iid = self
                     .source_code_view
