@@ -1479,7 +1479,7 @@ fn nf_String(intrp: &mut Interpreter, _this: &Value, args: &[Value]) -> Result<V
 
     let value_str = value
         .map(|v| value_to_string(v, heap))
-        .unwrap_or_else(|| String::new());
+        .unwrap_or_else(String::new);
 
     Ok(literal_to_value(
         bytecode::Literal::String(value_str),

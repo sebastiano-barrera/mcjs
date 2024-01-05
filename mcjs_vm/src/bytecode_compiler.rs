@@ -1304,7 +1304,7 @@ fn find_hdecls_recursive<'a>(stmt: &'a Stmt, out: &mut Vec<HoistedDeclRef<'a>>) 
         Stmt::If(if_stmt) => {
             find_hdecls_recursive(&if_stmt.cons, out);
             if let Some(alt) = &if_stmt.alt {
-                find_hdecls_recursive(&*alt, out);
+                find_hdecls_recursive(alt, out);
             }
         }
         Stmt::While(while_stmt) => {
@@ -1313,7 +1313,7 @@ fn find_hdecls_recursive<'a>(stmt: &'a Stmt, out: &mut Vec<HoistedDeclRef<'a>>) 
         Stmt::For(for_stmt) => {
             use swc_ecma_ast::VarDeclOrExpr;
             if let Some(VarDeclOrExpr::VarDecl(var_decl)) = &for_stmt.init {
-                out.push(HoistedDeclRef::Var(&*var_decl));
+                out.push(HoistedDeclRef::Var(var_decl));
             }
             find_hdecls_recursive(&for_stmt.body, out);
         }
@@ -1334,12 +1334,12 @@ fn find_hdecls_recursive<'a>(stmt: &'a Stmt, out: &mut Vec<HoistedDeclRef<'a>>) 
         }
         Stmt::ForIn(for_in_stmt) => {
             if let swc_ecma_ast::ForHead::VarDecl(var_decl) = &for_in_stmt.left {
-                out.push(HoistedDeclRef::Var(&*var_decl));
+                out.push(HoistedDeclRef::Var(var_decl));
             }
         }
         Stmt::ForOf(for_or_stmt) => {
             if let swc_ecma_ast::ForHead::VarDecl(var_decl) = &for_or_stmt.left {
-                out.push(HoistedDeclRef::Var(&*var_decl));
+                out.push(HoistedDeclRef::Var(var_decl));
             }
         }
         _ => {}
@@ -2092,9 +2092,9 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
 
         Expr::Seq(seq_expr) => {
             let (head, tail) = seq_expr.exprs.split_first().unwrap();
-            let mut result = compile_expr(&mut builder, &*head)?;
+            let mut result = compile_expr(&mut builder, head)?;
             for expr in tail {
-                result = compile_expr(&mut builder, &*expr)?;
+                result = compile_expr(&mut builder, expr)?;
             }
 
             Ok(result)
