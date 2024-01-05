@@ -266,6 +266,7 @@ impl FnBuilder {
             ident_history: self.ident_history,
             trace_anchors: self.trace_anchors,
             is_strict_mode: self.is_strict_mode,
+            span: self.span.unwrap(),
         }
         .build()
     }
@@ -576,8 +577,9 @@ impl Builder {
         }
     }
 
-    fn end_function(&mut self) -> LocalFnId {
-        let fnb = self.fn_stack.pop().expect("no FnBuilder!");
+    fn end_function(&mut self, span: Span) -> LocalFnId {
+        let mut fnb = self.fn_stack.pop().expect("no FnBuilder!");
+        fnb.span = Some(span);
         let fnid = fnb.fnid;
         self.fns.insert(fnid, fnb);
         fnid
@@ -829,7 +831,7 @@ fn compile_module(
     });
 
     builder.emit(Instr::Return(module_obj));
-    let root_fnid = builder.end_function();
+    let root_fnid = builder.end_function(ast_module.span());
 
     // The root function is the outermost scope, and therefore must capture
     // nothing.  Otherwise, we have a bug.
@@ -1623,7 +1625,8 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
         }
     }
 
-    let inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
+    let mut inner_fnb = builder.fn_stack.pop().expect("no FnBuilder!");
+    inner_fnb.span = Some(arrow.span);
 
     let forced_this = builder.new_vreg();
     builder.emit(Instr::LoadThis(forced_this));

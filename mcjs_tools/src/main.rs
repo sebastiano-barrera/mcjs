@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 #![allow(unused_must_use)]
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use mcjs_vm::bytecode;
@@ -20,6 +22,7 @@ fn main() {
     let app = AppData {
         si,
         recent_state_change: false,
+        source_code_view: Default::default(),
     };
 
     let native_options = eframe::NativeOptions::default();
@@ -57,6 +60,7 @@ fn parse_args() -> Result<interpreter_manager::Params> {
 struct AppData {
     si: Pin<Box<interpreter_manager::StandaloneInterpreter>>,
     recent_state_change: bool,
+    source_code_view: source_code_view::Cache,
 }
 
 impl<'a> eframe::App for AppData {
@@ -166,11 +170,17 @@ impl<'a> eframe::App for AppData {
             .inner;
 
         if let State::Suspended(_) = self.si.state_mut() {
-            let probe = self.si.probe_mut().unwrap();
+            let mut probe = self.si.probe_mut().unwrap();
 
-            egui::SidePanel::right("source_code").show(ctx, |ui| {
-                source_code_view(ui, &probe);
-            });
+            let res = egui::SidePanel::right("source_code")
+                .show(ctx, |ui| {
+                    source_code_view::show(ui, &probe, &mut self.source_code_view)
+                })
+                .inner;
+
+            if let Some(brid) = res.set_source_bpkt {
+                probe.set_source_breakpoint(brid);
+            }
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -184,17 +194,28 @@ impl<'a> eframe::App for AppData {
 
             egui::ScrollArea::both().show(ui, |ui| {
                 let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
+                let preview_bkpt_iid = self
+                    .source_code_view
+                    .preview_breakrange()
+                    .map(|br| br.iid_start);
 
                 for (ndx, instr) in func.instrs().iter().enumerate() {
                     let is_current = ndx == vm_giid.1 .0 as usize;
                     let res = ui.horizontal(|ui| {
-                        let giid =
-                            bytecode::GlobalIID(fnid, bytecode::IID(ndx.try_into().unwrap()));
+                        let iid = bytecode::IID(ndx.try_into().unwrap());
+                        let giid = bytecode::GlobalIID(fnid, iid);
+
                         if instr_bkpts.contains(&giid) {
                             ui.label("•");
                         }
+                        if preview_bkpt_iid == Some(iid) {
+                            ui.label(" >> ");
+                        }
+
                         let instr_repr = format!("{:4} {:?}", ndx, instr);
-                        if ui.selectable_label(is_current, instr_repr).clicked() {
+
+                        let res = ui.selectable_label(is_current, instr_repr);
+                        if res.clicked() {
                             bkpt_to_set = Some(giid);
                         }
                     });
@@ -231,105 +252,256 @@ impl<'a> eframe::App for AppData {
     }
 }
 
-fn source_code_view(ui: &mut egui::Ui, probe: &Probe) {
-    // TODO Cache this
+mod source_code_view {
+    use std::{ops::Range, rc::Rc, sync::Arc};
 
-    let giid = probe.giid();
-    let fnid = giid.0;
-    let loader = probe.loader();
-    let source_map = match loader.get_source_map(fnid.0) {
-        Some(sm) => sm,
-        None => {
-            ui.label("No source map!");
-            return;
+    use mcjs_vm::{bytecode, interpreter::debugger::Probe};
+
+    #[derive(Default)]
+    pub struct Cache {
+        main: Option<Main>,
+        focus: Option<Focus>,
+    }
+    struct Main {
+        fnid: bytecode::FnId,
+        galley: Arc<egui::Galley>,
+        src: Rc<String>,
+        source_start_ofs: u32,
+    }
+    struct Focus {
+        cursor_ofs: u32,
+        candidate_breakranges: Vec<BreakRangeCache>,
+        preview_breakrange_index: Option<usize>,
+    }
+    struct BreakRangeCache {
+        id: mcjs_vm::BreakRangeID,
+        br: bytecode::BreakRange,
+        galley: Arc<egui::Galley>,
+    }
+
+    impl Cache {
+        pub fn preview_breakrange(&self) -> Option<&bytecode::BreakRange> {
+            let focus = self.focus.as_ref()?;
+            let ndx = focus.preview_breakrange_index?;
+            Some(&focus.candidate_breakranges[ndx].br)
         }
-    };
-
-    let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
-
-    // All break ranges must belong to the same file, so we just peek
-    // one and use it to get a ptr to that swc_common::SourceFile.
-    // Then we use source file's offset in the source map to make sure
-    // that the markers are expressed in file-local offsets.
-    //
-    // (There should *always* be at least a single break range in a
-    // function, belonging at least to an empty statement.  I *might*
-    // be wrong; we'll see.)
-    let (_, brange) = break_ranges.peek().expect("no break ranges!");
-
-    let source_file = source_map.lookup_byte_offset(brange.lo).sf;
-    let src = source_file.src.as_bytes();
-
-    // TODO this is inefficient as hell!
-
-    enum Marker {
-        LineStart { line_end: usize },
-        BreakButton,
     }
 
-    enum Segment<'a> {
-        Text(&'a [u8]),
-        LineEnd,
-        Button,
+    #[derive(Default)]
+    pub struct Response {
+        pub set_source_bpkt: Option<mcjs_vm::BreakRangeID>,
     }
-    let mut ranges = Vec::new();
 
-    let lines_count = source_file.count_lines();
+    pub fn show(ui: &mut egui::Ui, probe: &Probe, cache: &mut Cache) -> Response {
+        let mut my_response = Response::default();
 
-    let mut markers: Vec<_> = (0..lines_count)
-        .map(|line_ndx| {
-            let (ofs_start, ofs_end) = source_file.line_bounds(line_ndx);
-            let marker = Marker::LineStart {
-                line_end: ofs_end.0 as usize,
+        let giid = probe.giid();
+        let fnid = giid.0;
+
+        if cache.main.as_ref().map(|m| m.fnid != fnid).unwrap_or(true) {
+            let loader = probe.loader();
+            let source_map = match loader.get_source_map(fnid.0) {
+                Some(sm) => sm,
+                None => {
+                    ui.label("No source map!");
+                    return my_response;
+                }
             };
-            (ofs_start.0 as usize, marker)
-        })
-        .collect();
-    markers.extend(break_ranges.map(|(_, brange)| (brange.lo.0 as usize, Marker::BreakButton)));
-    markers.sort_by_key(|(ofs, _)| *ofs);
-    let mut markers = markers.into_iter().peekable();
-    while let Some((line_start, marker)) = markers.next() {
-        let line_end = match marker {
-            Marker::LineStart { line_end } => line_end,
-            _ => panic!(),
-        };
 
-        let mut rest = line_start;
+            let abs_span = *loader.get_function(fnid).unwrap().span();
 
-        while let Some((ofs, Marker::BreakButton)) = markers.peek() {
-            assert!(*ofs >= line_start);
-            assert!(*ofs < line_end);
-            ranges.push(Segment::Text(&src[line_start..*ofs]));
-            ranges.push(Segment::Button);
-            rest = *ofs;
+            let source_file = {
+                let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
+
+                // All break ranges must belong to the same file, so we just peek
+                // one and use it to get a ptr to that swc_common::SourceFile.
+                // Then we use source file's offset in the source map to make sure
+                // that the markers are expressed in file-local offsets.
+                //
+                // (There should *always* be at least a single break range in a
+                // function, belonging at least to an empty statement.  I *might*
+                // be wrong; we'll see.)
+                let (_, brange) = break_ranges.peek().expect("no break ranges!");
+                source_map.lookup_byte_offset(brange.lo).sf
+            };
+            let (ofs_start, ofs_end) = source_map.span_to_char_offset(&source_file, abs_span);
+            let ofs_start = ofs_start as usize;
+            let ofs_end = ofs_end as usize;
+
+            let galley = ui.fonts(|fonts| {
+                make_highlight_galley(
+                    &source_file.src,
+                    ofs_start..ofs_end,
+                    egui::Color32::GRAY,
+                    egui::Color32::WHITE,
+                    fonts,
+                )
+            });
+
+            cache.main = Some(Main {
+                fnid,
+                galley,
+                src: Rc::clone(&source_file.src),
+                source_start_ofs: source_file.start_pos.0,
+            });
         }
-        ranges.push(Segment::Text(&src[rest..line_end]));
-        ranges.push(Segment::LineEnd);
+
+        let main = cache.main.as_ref().unwrap();
+
+        egui::ScrollArea::both().show(ui, |ui| {
+            let galley = match &cache.focus {
+                Some(focus) => match &focus.preview_breakrange_index {
+                    Some(ndx) => &focus.candidate_breakranges[*ndx].galley,
+                    None => &main.galley,
+                },
+                None => &main.galley,
+            };
+            let res = ui.add(egui::Label::new(Arc::clone(galley)).sense(egui::Sense::click()));
+
+            if res.double_clicked() {
+                let pos = res.interact_pointer_pos().unwrap() - res.rect.min;
+                let cursor_ofs: u32 = galley
+                    .cursor_from_pos(pos)
+                    .ccursor
+                    .index
+                    .try_into()
+                    .unwrap();
+
+                if cache
+                    .focus
+                    .as_ref()
+                    .map(|f| f.cursor_ofs != cursor_ofs)
+                    .unwrap_or(true)
+                {
+                    let candidate_breakranges = probe
+                        .loader()
+                        .function_breakranges(fnid)
+                        .unwrap()
+                        .filter_map(|(brid, br)| {
+                            let lo = br.lo.0 - main.source_start_ofs;
+                            let hi = br.hi.0 - main.source_start_ofs;
+                            if lo <= cursor_ofs && cursor_ofs < hi {
+                                Some((brid, br, lo, hi))
+                            } else {
+                                None
+                            }
+                        })
+                        .map(|(brid, br, lo, hi)| {
+                            let galley = ui.fonts(|fonts| {
+                                make_highlight_galley(
+                                    main.src.as_str(),
+                                    lo as usize..hi as usize,
+                                    egui::Color32::GRAY,
+                                    egui::Color32::RED,
+                                    fonts,
+                                )
+                            });
+                            BreakRangeCache {
+                                id: brid,
+                                br: br.clone(),
+                                galley,
+                            }
+                        })
+                        .collect();
+
+                    cache.focus = Some(Focus {
+                        cursor_ofs,
+                        candidate_breakranges,
+                        preview_breakrange_index: None,
+                    });
+                }
+            }
+
+            if let Some(focus) = cache.focus.as_mut() {
+                let breakranges = &focus.candidate_breakranges;
+
+                egui::Window::new("breakranges at point").show(ui.ctx(), |ui| {
+                    ui.label(format!(
+                        "{} breakranges at position {}",
+                        breakranges.len(),
+                        focus.cursor_ofs,
+                    ));
+                    focus.preview_breakrange_index = None;
+                    for (ndx, br_cache) in breakranges.iter().enumerate() {
+                        let res = ui.button(format!("{:?}", br_cache.br.lo));
+
+                        if res.hovered() {
+                            focus.preview_breakrange_index = Some(ndx);
+                        }
+
+                        if res.clicked() {
+                            my_response.set_source_bpkt = Some(br_cache.id);
+                        }
+                    }
+                });
+            }
+        });
+
+        my_response
     }
 
-    egui::ScrollArea::both().show(ui, |ui| {
-        // ----
-    });
-}
+    fn make_highlight_galley(
+        text: &str,
+        highlight: Range<usize>,
+        normal_color: egui::Color32,
+        highlight_color: egui::Color32,
+        fonts: &egui::epaint::text::Fonts,
+    ) -> Arc<egui::Galley> {
+        use egui::epaint::text::{FontFamily, FontId, LayoutJob, TextFormat};
+        let mut layout_job = LayoutJob::default();
 
-fn fetch_source_code<'a>(
-    probe: &'a Probe<'a, '_>,
-    giid: bytecode::GlobalIID,
-) -> Option<Rc<String>> {
-    let fnid = giid.0;
+        layout_job.append(
+            &text[0..highlight.start],
+            0.0,
+            TextFormat {
+                font_id: FontId::new(14.0, FontFamily::Monospace),
+                color: normal_color,
+                ..Default::default()
+            },
+        );
 
-    let loader = probe.loader();
-    let source_map = loader.get_source_map(fnid.0)?;
-    let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
+        layout_job.append(
+            &text[highlight.start..highlight.end],
+            0.0,
+            TextFormat {
+                font_id: FontId::new(14.0, FontFamily::Monospace),
+                color: highlight_color,
+                ..Default::default()
+            },
+        );
 
-    // All break ranges must belong to the same file, so we just peek one and use it to get a
-    // ptr to that swc_common::SourceFile.
-    // Then we use source file's offset in the source map to make sure that the markers are
-    // expressed in file-local offsets.
-    let (_, brange) = break_ranges.peek()?;
-    let source_file = source_map.lookup_byte_offset(brange.lo).sf;
+        layout_job.append(
+            &text[highlight.end..],
+            0.0,
+            TextFormat {
+                font_id: FontId::new(14.0, FontFamily::Monospace),
+                color: normal_color,
+                ..Default::default()
+            },
+        );
 
-    Some(Rc::clone(&source_file.src))
+        fonts.layout_job(layout_job)
+    }
+
+    fn fetch_source_code<'a>(
+        probe: &'a Probe<'a, '_>,
+        giid: bytecode::GlobalIID,
+    ) -> Option<Rc<String>> {
+        let fnid = giid.0;
+
+        let loader = probe.loader();
+        let source_map = loader.get_source_map(fnid.0)?;
+        let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
+
+        // All break ranges must belong to the same file, so we just peek one and use it to get a
+        // ptr to that swc_common::SourceFile.
+        // Then we use source file's offset in the source map to make sure that the markers are
+        // expressed in file-local offsets.
+        let (_, brange) = break_ranges.peek()?;
+        let source_file = source_map.lookup_byte_offset(brange.lo).sf;
+
+        Some(Rc::clone(&source_file.src))
+    }
 }
 
 mod interpreter_manager {

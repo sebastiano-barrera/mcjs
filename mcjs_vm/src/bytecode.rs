@@ -423,7 +423,7 @@ type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
 ///
 /// Each BreakRange implicitly belongs to a specific module.  "Implicit" because
 /// the module ID is not included in this struct.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BreakRange {
     pub lo: swc_common::BytePos,
     pub hi: swc_common::BytePos,
@@ -440,6 +440,7 @@ pub struct Function {
     ident_history: Vec<IdentAsmt>,
     trace_anchors: HashMap<IID, TraceAnchor>,
     is_strict_mode: bool,
+    span: Span,
 }
 pub struct TraceAnchor {
     pub trace_id: String,
@@ -464,6 +465,7 @@ pub struct FunctionBuilder {
     pub ident_history: Vec<IdentAsmt>,
     pub trace_anchors: HashMap<IID, TraceAnchor>,
     pub is_strict_mode: bool,
+    pub span: Span,
 }
 
 impl FunctionBuilder {
@@ -479,6 +481,7 @@ impl FunctionBuilder {
             ident_history: self.ident_history,
             trace_anchors: self.trace_anchors,
             is_strict_mode: self.is_strict_mode,
+            span: self.span,
         }
     }
 }
@@ -512,6 +515,10 @@ impl Function {
 
     pub fn is_strict_mode(&self) -> bool {
         self.is_strict_mode
+    }
+
+    pub fn span(&self) -> &Span {
+        &self.span
     }
 }
 
