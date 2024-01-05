@@ -93,7 +93,7 @@ impl eframe::App for AppData {
                 return;
             }
             State::Failed(interpreter_manager::Error::Generic(err)) => {
-                egui::SidePanel::right("simple_central_panel").show(ctx, |ui| {
+                egui::CentralPanel::default().show(ctx, |ui| {
                     ui.label(format!("Error: {:?}", err));
                 });
                 return;
@@ -166,14 +166,16 @@ impl eframe::App for AppData {
             .inner;
 
         if let State::Suspended(_) = self.si.state_mut() {
-            let mut probe = self.si.probe_mut().unwrap();
-
             let res = egui::SidePanel::right("source_code")
                 .show(ctx, |ui| {
-                    source_code_view::show(ui, &probe, &mut self.source_code_view)
+                    source_code_view::show(ui, &mut self.source_code_view)
                 })
                 .inner;
 
+            let mut probe = self.si.probe_mut().unwrap();
+            ctx.fonts(|fonts| {
+                source_code_view::update(&mut self.source_code_view, &probe, &res, fonts)
+            });
             if let Some(brid) = res.set_source_bpkt {
                 probe.set_source_breakpoint(brid);
             }
@@ -286,63 +288,18 @@ mod source_code_view {
     #[derive(Default)]
     pub struct Response {
         pub set_source_bpkt: Option<mcjs_vm::BreakRangeID>,
+        pub set_focus_cursor: Option<u32>,
+        pub close_focus: bool,
+        pub set_preview_brange_ndx: Option<usize>,
     }
 
-    pub fn show(ui: &mut egui::Ui, probe: &Probe, cache: &mut Cache) -> Response {
+    pub fn show(ui: &mut egui::Ui, cache: &Cache) -> Response {
         let mut my_response = Response::default();
 
-        let giid = probe.giid();
-        let fnid = giid.0;
-
-        if cache.main.as_ref().map(|m| m.fnid != fnid).unwrap_or(true) {
-            let loader = probe.loader();
-            let source_map = match loader.get_source_map(fnid.0) {
-                Some(sm) => sm,
-                None => {
-                    ui.label("No source map!");
-                    return my_response;
-                }
-            };
-
-            let abs_span = *loader.get_function(fnid).unwrap().span();
-
-            let source_file = {
-                let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
-
-                // All break ranges must belong to the same file, so we just peek
-                // one and use it to get a ptr to that swc_common::SourceFile.
-                // Then we use source file's offset in the source map to make sure
-                // that the markers are expressed in file-local offsets.
-                //
-                // (There should *always* be at least a single break range in a
-                // function, belonging at least to an empty statement.  I *might*
-                // be wrong; we'll see.)
-                let (_, brange) = break_ranges.peek().expect("no break ranges!");
-                source_map.lookup_byte_offset(brange.lo).sf
-            };
-            let (ofs_start, ofs_end) = source_map.span_to_char_offset(&source_file, abs_span);
-            let ofs_start = ofs_start as usize;
-            let ofs_end = ofs_end as usize;
-
-            let galley = ui.fonts(|fonts| {
-                make_highlight_galley(
-                    &source_file.src,
-                    ofs_start..ofs_end,
-                    egui::Color32::GRAY,
-                    egui::Color32::WHITE,
-                    fonts,
-                )
-            });
-
-            cache.main = Some(Main {
-                fnid,
-                galley,
-                src: Rc::clone(&source_file.src),
-                source_start_ofs: source_file.start_pos.0,
-            });
-        }
-
-        let main = cache.main.as_ref().unwrap();
+        let main = match &cache.main {
+            Some(main) => main,
+            None => return my_response,
+        };
 
         egui::ScrollArea::both().show(ui, |ui| {
             let galley = match &cache.focus {
@@ -362,71 +319,31 @@ mod source_code_view {
                     .index
                     .try_into()
                     .unwrap();
-
-                if cache
-                    .focus
-                    .as_ref()
-                    .map(|f| f.cursor_ofs != cursor_ofs)
-                    .unwrap_or(true)
-                {
-                    let candidate_breakranges = probe
-                        .loader()
-                        .function_breakranges(fnid)
-                        .unwrap()
-                        .filter_map(|(brid, br)| {
-                            let lo = br.lo.0 - main.source_start_ofs;
-                            let hi = br.hi.0 - main.source_start_ofs;
-                            if lo <= cursor_ofs && cursor_ofs < hi {
-                                Some((brid, br, lo, hi))
-                            } else {
-                                None
-                            }
-                        })
-                        .map(|(brid, br, lo, hi)| {
-                            let galley = ui.fonts(|fonts| {
-                                make_highlight_galley(
-                                    main.src.as_str(),
-                                    lo as usize..hi as usize,
-                                    egui::Color32::GRAY,
-                                    egui::Color32::RED,
-                                    fonts,
-                                )
-                            });
-                            BreakRangeCache {
-                                id: brid,
-                                br: br.clone(),
-                                galley,
-                            }
-                        })
-                        .collect();
-
-                    cache.focus = Some(Focus {
-                        cursor_ofs,
-                        candidate_breakranges,
-                        preview_breakrange_index: None,
-                    });
-                }
+                my_response.set_focus_cursor = Some(cursor_ofs);
             }
 
-            if let Some(focus) = cache.focus.as_mut() {
+            if let Some(focus) = &cache.focus {
                 let breakranges = &focus.candidate_breakranges;
 
+                // TODO Make window closable
                 egui::Window::new("breakranges at point").show(ui.ctx(), |ui| {
                     ui.label(format!(
                         "{} breakranges at position {}",
                         breakranges.len(),
                         focus.cursor_ofs,
                     ));
-                    focus.preview_breakrange_index = None;
+
+                    my_response.set_preview_brange_ndx = None;
                     for (ndx, br_cache) in breakranges.iter().enumerate() {
                         let res = ui.button(format!("{:?}", br_cache.br.lo));
 
                         if res.hovered() {
-                            focus.preview_breakrange_index = Some(ndx);
+                            my_response.set_preview_brange_ndx = Some(ndx);
                         }
 
                         if res.clicked() {
                             my_response.set_source_bpkt = Some(br_cache.id);
+                            my_response.close_focus = true;
                         }
                     }
                 });
@@ -434,6 +351,130 @@ mod source_code_view {
         });
 
         my_response
+    }
+
+    pub fn update(
+        cache: &mut Cache,
+        probe: &Probe,
+        response: &Response,
+        fonts: &egui::epaint::Fonts,
+    ) {
+        let giid = probe.giid();
+        let fnid = giid.0;
+
+        let needs_update = match &cache.main {
+            Some(main) if fnid == main.fnid => false,
+            _ => true,
+        };
+        if needs_update {
+            let loader = probe.loader();
+            cache.main = cache_main(loader, fnid, fonts);
+            cache.focus = None;
+        };
+
+        if response.set_source_bpkt.is_some() {
+            cache.focus = None;
+        }
+
+        if let Some(cursor_ofs) = response.set_focus_cursor {
+            let needs_update = match &cache.focus {
+                Some(focus) if focus.cursor_ofs == cursor_ofs => false,
+                _ => true,
+            };
+            if needs_update {
+                let main = cache.main.as_ref().unwrap();
+                cache.focus = cache_focus(probe, fnid, cursor_ofs, fonts, main);
+            }
+        }
+
+        if let (Some(focus), Some(ndx)) = (&mut cache.focus, &response.set_preview_brange_ndx) {
+            focus.preview_breakrange_index = Some(*ndx);
+        }
+    }
+
+    fn cache_focus(
+        probe: &Probe<'_, '_>,
+        fnid: mcjs_vm::FnId,
+        cursor_ofs: u32,
+        fonts: &egui::epaint::Fonts,
+        main: &Main,
+    ) -> Option<Focus> {
+        let candidate_breakranges = probe
+            .loader()
+            .function_breakranges(fnid)
+            .unwrap()
+            .filter_map(|(brid, br)| {
+                let lo = br.lo.0 - main.source_start_ofs;
+                let hi = br.hi.0 - main.source_start_ofs;
+                if lo <= cursor_ofs && cursor_ofs < hi {
+                    Some((brid, br, lo, hi))
+                } else {
+                    None
+                }
+            })
+            .map(|(brid, br, lo, hi)| {
+                let galley = make_highlight_galley(
+                    main.src.as_str(),
+                    lo as usize..hi as usize,
+                    egui::Color32::GRAY,
+                    egui::Color32::RED,
+                    fonts,
+                );
+                BreakRangeCache {
+                    id: brid,
+                    br: br.clone(),
+                    galley,
+                }
+            })
+            .collect();
+        Some(Focus {
+            cursor_ofs,
+            candidate_breakranges,
+            preview_breakrange_index: None,
+        })
+    }
+
+    fn cache_main(
+        loader: &mcjs_vm::Loader,
+        fnid: mcjs_vm::FnId,
+        fonts: &egui::text::Fonts,
+    ) -> Option<Main> {
+        // Can't update with no source map
+        let source_map = loader.get_source_map(fnid.0)?;
+        let abs_span = *loader.get_function(fnid).unwrap().span();
+
+        let source_file = {
+            let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
+
+            // All break ranges must belong to the same file, so we just peek
+            // one and use it to get a ptr to that swc_common::SourceFile.
+            // Then we use source file's offset in the source map to make sure
+            // that the markers are expressed in file-local offsets.
+            //
+            // (There should *always* be at least a single break range in a
+            // function, belonging at least to an empty statement.  I *might*
+            // be wrong; we'll see.)
+            let (_, brange) = break_ranges.peek().expect("no break ranges!");
+            source_map.lookup_byte_offset(brange.lo).sf
+        };
+        let (ofs_start, ofs_end) = source_map.span_to_char_offset(&source_file, abs_span);
+        let ofs_start = ofs_start as usize;
+        let ofs_end = ofs_end as usize;
+
+        let galley = make_highlight_galley(
+            &source_file.src,
+            ofs_start..ofs_end,
+            egui::Color32::GRAY,
+            egui::Color32::WHITE,
+            fonts,
+        );
+
+        Some(Main {
+            fnid,
+            galley,
+            src: Rc::clone(&source_file.src),
+            source_start_ofs: source_file.start_pos.0,
+        })
     }
 
     fn make_highlight_galley(
