@@ -45,9 +45,7 @@ fn parse_args() -> Result<interpreter_manager::Params> {
     }
 
     if params.main_directory.is_none() && params.filenames.len() == 1 {
-        params.main_directory = params.filenames[0]
-            .parent()
-            .map(|p| p.to_path_buf().canonicalize().unwrap());
+        params.main_directory = params.filenames[0].parent().map(|p| p.to_path_buf());
     }
 
     Ok(params)
@@ -217,6 +215,8 @@ impl eframe::App for AppData {
                         if res.clicked() {
                             bkpt_to_set = Some(giid);
                         }
+
+                        inline_value_view::show(ui, &probe, func, instr);
                     });
 
                     if recent_state_change && is_current {
@@ -248,6 +248,114 @@ impl eframe::App for AppData {
                 self.recent_state_change = true;
             }
         }
+    }
+}
+
+mod inline_value_view {
+    use std::borrow::Cow;
+
+    use mcjs_vm::{bytecode, interpreter::debugger::Probe, InterpreterValue, Literal};
+
+    struct Analyzer<'a, 'b> {
+        ui: &'a mut egui::Ui,
+        func: &'a bytecode::Function,
+        probe: &'a Probe<'a, 'b>,
+    }
+
+    // Narrows a &str from "xyz(whatever)" into "whatever". (Panics if
+    // the string is not in that form).
+    //
+    // We do this because slotmap doesn't give us visibility into its
+    // IDs, so we use this hack to get a more readable string out of
+    // their Debug impl.
+    fn peel_parens(s: &str) -> &str {
+        let (_, s) = s.split_once('(').unwrap();
+        let (inside, _) = s.split_once(')').unwrap();
+        inside
+    }
+
+    impl<'a, 'b> bytecode::InstrAnalyzer for Analyzer<'a, 'b> {
+        fn start(&mut self, _opcode_name: &'static str) {}
+
+        fn read_vreg_labeled(&mut self, _vreg: bytecode::VReg, _description: Option<&'static str>) {
+        }
+
+        fn write_vreg_labeled(&mut self, vreg: bytecode::VReg, _description: Option<&'static str>) {
+            let frame = self.probe.frames().next().unwrap();
+            let slot = frame.get_slot(vreg);
+            if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
+                self.ui.label(format!("{:?} »", upv_id));
+            }
+
+            let value = frame.get_result(vreg);
+            let text: Cow<str> = match value {
+                InterpreterValue::Number(n) => format!("{}", n).into(),
+                InterpreterValue::Bool(true) => "true".into(),
+                InterpreterValue::Bool(false) => "false".into(),
+                InterpreterValue::Object(obj_id) => {
+                    let obj_id = format!("{:?}", obj_id);
+                    let obj_id = peel_parens(&obj_id);
+                    format!("obj{}", obj_id).to_string().into()
+                }
+                InterpreterValue::Null => "null".into(),
+                InterpreterValue::Undefined => "undefined".into(),
+                InterpreterValue::SelfFunction => panic!(),
+                InterpreterValue::Internal(_) => panic!(),
+            };
+            self.ui.label(text);
+        }
+
+        fn jump_target(&mut self, _iid: mcjs_vm::IID) {}
+
+        fn load_const(&mut self, item: bytecode::ConstIndex) {
+            let value = &self.func.consts()[item.0 as usize];
+            let text: Cow<str> = match value {
+                Literal::Number(n) => format!("{}", n).into(),
+                Literal::String(s) => format!("{:?}", s).into(),
+                Literal::Bool(true) => "true".into(),
+                Literal::Bool(false) => "false".into(),
+                Literal::Null => "null".into(),
+                Literal::Undefined => "undefined".into(),
+                Literal::SelfFunction => {
+                    panic!("I really gotta delete Literal::SelfFunction one of these days")
+                }
+            };
+            self.ui.label(text);
+        }
+
+        fn load_null(&mut self) {
+            self.ui.label("null");
+        }
+
+        fn load_undefined(&mut self) {
+            self.ui.label("undefined");
+        }
+
+        fn load_capture(&mut self, item: bytecode::CaptureIndex) {
+            self.ui.label(format!("{:?}", item));
+        }
+
+        fn load_arg(&mut self, item: bytecode::ArgIndex) {
+            self.ui.label(format!("{:?}", item));
+        }
+
+        fn load_this(&mut self) {
+            self.ui.label("this");
+        }
+
+        fn end(&mut self, _instr: &bytecode::Instr) {}
+    }
+
+    pub fn show(
+        ui: &mut egui::Ui,
+        probe: &Probe,
+        func: &bytecode::Function,
+        instr: &bytecode::Instr,
+    ) {
+        ui.horizontal(move |ui| {
+            let mut analyzer = Analyzer { ui, func, probe };
+            instr.analyze(&mut analyzer);
+        });
     }
 }
 

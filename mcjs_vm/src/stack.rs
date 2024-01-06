@@ -15,9 +15,25 @@ pub struct InterpreterData {
 type Heap = slotmap::SlotMap<UpvalueId, Value>;
 
 #[derive(Clone, Copy)]
-pub(crate) enum Slot {
+enum Slot {
     Inline(Value),
     Upvalue(UpvalueId),
+}
+
+#[cfg(feature = "debugger")]
+#[derive(Debug)]
+pub enum SlotDebug {
+    Inline(Value),
+    Upvalue(UpvalueId),
+}
+#[cfg(feature = "debugger")]
+impl From<Slot> for SlotDebug {
+    fn from(value: Slot) -> Self {
+        match value {
+            Slot::Inline(x) => SlotDebug::Inline(x),
+            Slot::Upvalue(x) => SlotDebug::Upvalue(x),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -164,6 +180,11 @@ pub struct FrameMut<'a> {
 impl<'a> Frame<'a> {
     pub fn header(&self) -> &'a FrameHeader {
         self.header
+    }
+
+    #[cfg(feature = "debugger")]
+    pub fn get_slot(&self, vreg: bytecode::VReg) -> SlotDebug {
+        self.values[vreg.0 as usize].into()
     }
 
     pub fn get_result(&self, vreg: bytecode::VReg) -> Value {
