@@ -818,16 +818,18 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::BoolOpAnd(dest, a, b) => {
-                    let a: bool = self.get_operand(*a).expect_bool()?;
-                    let b: bool = self.get_operand(*b).expect_bool()?;
-                    let res = a && b;
-                    self.data.top_mut().set_result(*dest, Value::Bool(res));
+                    let a = self.get_operand(*a);
+                    let b = self.get_operand(*b);
+                    let a_bool = self.to_boolean(a);
+                    let res = if a_bool { b } else { Value::Bool(false) };
+                    self.data.top_mut().set_result(*dest, res);
                 }
                 Instr::BoolOpOr(dest, a, b) => {
-                    let a: bool = self.get_operand(*a).expect_bool()?;
-                    let b: bool = self.get_operand(*b).expect_bool()?;
-                    let res = a || b;
-                    self.data.top_mut().set_result(*dest, Value::Bool(res));
+                    let a = self.get_operand(*a);
+                    let b = self.get_operand(*b);
+                    let a_bool = self.to_boolean(a);
+                    let res = if a_bool { a } else { b };
+                    self.data.top_mut().set_result(*dest, res);
                 }
 
                 Instr::ClosureNew {
@@ -1242,7 +1244,8 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Converts the given value to a boolean (e.g. for use by `if`)
+    /// Converts the given value to a boolean (e.g. for use by `if`,
+    /// or operators `&&` and `||`)
     ///
     /// See: https://262.ecma-international.org/14.0/#sec-toboolean
     fn to_boolean(&self, value: Value) -> bool {
