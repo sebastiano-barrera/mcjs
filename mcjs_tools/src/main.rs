@@ -375,6 +375,7 @@ mod source_code_view {
     }
     struct Main {
         fnid: bytecode::FnId,
+        ppi: f32,
         galley: Arc<egui::Galley>,
         src: Rc<String>,
         source_start_ofs: u32,
@@ -411,7 +412,10 @@ mod source_code_view {
 
         let main = match &cache.main {
             Some(main) => main,
-            None => return my_response,
+            None => {
+                ui.label("<no source code available>");
+                return my_response;
+            }
         };
 
         egui::ScrollArea::both().show(ui, |ui| {
@@ -475,8 +479,11 @@ mod source_code_view {
         let giid = probe.giid();
         let fnid = giid.0;
 
+        // if pixels per point changes, we need to re-make the galleys
+        let ppi = fonts.pixels_per_point();
+
         let needs_update = match &cache.main {
-            Some(main) if fnid == main.fnid => false,
+            Some(main) if fnid == main.fnid && ppi == main.ppi => false,
             _ => true,
         };
         if needs_update {
@@ -584,6 +591,7 @@ mod source_code_view {
 
         Some(Main {
             fnid,
+            ppi: 0.0,
             galley,
             src: Rc::clone(&source_file.src),
             source_start_ofs: source_file.start_pos.0,
