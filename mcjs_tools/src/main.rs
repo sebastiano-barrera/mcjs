@@ -14,7 +14,8 @@ fn main() {
     let params = parse_args().expect("cli error");
     eprintln!("params = {:?}", params);
 
-    let si = interpreter_manager::StandaloneInterpreter::new(params);
+    let mut si = interpreter_manager::StandaloneInterpreter::new(params);
+    si.resume();
     let app = AppData {
         si,
         recent_state_change: false,
@@ -72,10 +73,13 @@ impl eframe::App for AppData {
         }
 
         match self.si.state_mut() {
-            State::Ready { filename_ndx } => {
+            State::Ready => {
                 let should_start = egui::CentralPanel::default()
                     .show(ctx, |ui| {
-                        ui.label(format!("Ready to proceed with file #{}", *filename_ndx + 1));
+                        ui.label(format!(
+                            "Ready to proceed with file #{}",
+                            self.si.n_filenames_done()
+                        ));
                         ui.button("Start").clicked()
                     })
                     .inner;
@@ -651,6 +655,7 @@ mod source_code_view {
 }
 
 mod interpreter_manager {
+    use std::cmp::Ordering;
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::{marker::PhantomPinned, path::Path};
@@ -679,14 +684,13 @@ mod interpreter_manager {
         realm: Realm,
         loader: Loader,
         filenames: Vec<PathBuf>,
+        n_filenames_done: usize,
         state: State<'static>,
         _pin: PhantomPinned,
     }
     pub enum State<'a> {
         /// Ready to process the next file in the sequence
-        Ready {
-            filename_ndx: usize,
-        },
+        Ready,
 
         /// Finished successfully. Won't proceed to any other state.
         Finished,
@@ -702,11 +706,16 @@ mod interpreter_manager {
                 realm,
                 loader,
                 filenames: params.filenames,
-                state: State::Ready { filename_ndx: 0 },
+                n_filenames_done: 0,
+                state: State::Ready,
                 _pin: PhantomPinned,
             };
 
             Box::pin(si)
+        }
+
+        pub fn n_filenames_done(&self) -> usize {
+            self.n_filenames_done
         }
 
         pub fn state_mut<'a>(self: &'a mut Pin<Box<Self>>) -> &'a mut State<'static> {
@@ -721,8 +730,9 @@ mod interpreter_manager {
             let prev_state = std::mem::replace(&mut self_.state, State::Finished);
             self_.state = match prev_state {
                 State::Suspended(intrp) => State::Suspended(intrp.restart()),
-                State::Ready { .. } | State::Finished | State::Failed(_) => {
-                    State::Ready { filename_ndx: 0 }
+                State::Ready | State::Finished | State::Failed(_) => {
+                    self_.n_filenames_done = 0;
+                    State::Ready
                 }
             };
         }
@@ -738,16 +748,15 @@ mod interpreter_manager {
             let state = std::mem::replace(&mut self_.state, State::Finished);
 
             self_.state = match state {
-                State::Ready { filename_ndx } => {
-                    let filename = &self_.filenames[filename_ndx];
+                State::Ready => {
+                    let filename = &self_.filenames[self_.n_filenames_done];
                     println!();
                     println!(
-                        "(starting loop for file #{}: {})",
-                        filename_ndx,
+                        "(starting loop for file: {})",
                         filename.to_string_lossy().into_owned()
                     );
 
-                    match start_intrp(filename, &mut self_.realm, &mut self_.loader) {
+                    match start_intrp(&filename, &mut self_.realm, &mut self_.loader) {
                         Ok(intrp) => {
                             let intrp = unsafe { std::mem::transmute(intrp) };
                             State::Suspended(intrp)
@@ -761,7 +770,17 @@ mod interpreter_manager {
                 }
                 State::Suspended(intrp) => match intrp.run() {
                     Ok(exit) => match exit {
-                        Exit::Finished(_) => State::Finished,
+                        Exit::Finished(_) => {
+                            self_.n_filenames_done += 1;
+                            match self_.n_filenames_done.cmp(&self_.filenames.len()) {
+                                Ordering::Less => {
+                                    self_.state = State::Ready;
+                                    return self.resume();
+                                }
+                                Ordering::Equal => State::Finished,
+                                Ordering::Greater => panic!("assertion failed"),
+                            }
+                        }
                         Exit::Suspended(new_intrp) => State::Suspended(new_intrp),
                     },
                     Err(err) => State::Failed(Error::Interpreter(err)),
