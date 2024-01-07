@@ -140,6 +140,7 @@ impl Loader {
                 Function.prototype.apply = function (new_this, args) {
                     // TODO change once spread syntax (e.g. `f(...args)`) is implemented
                     // `this` is the function to call
+                    args = args || [];
                     return this.bind(new_this)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
                 }
                 "#
