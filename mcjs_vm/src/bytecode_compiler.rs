@@ -1676,9 +1676,10 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     .with_span(call_expr.span)
             })?;
 
-            if let Some(callee) = callee.as_ident() {
-                let sym = callee.sym.as_ref();
-                if sym == "sink" {
+            // Some things expressed in the `f(...)` call syntax are not actually calls to
+            // anything, but have a special meaning
+            match callee.as_ref() {
+                Expr::Ident(i) if &i.sym == "sink" => {
                     for arg in args {
                         let var = compile_expr(&mut builder, &arg.expr)?;
                         builder.emit(Instr::PushToSink(var));
@@ -1686,8 +1687,9 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
 
                     let ret = builder.new_vreg();
                     builder.set_const(ret, Literal::Undefined);
-                    return Ok(ret);
-                } else if sym == "__start_trace" {
+                    Ok(ret)
+                }
+                Expr::Ident(i) if &i.sym == "__start_trace" => {
                     let trace_id = match args[0].expr.as_ref() {
                         Expr::Lit(Lit::Str(trace_id)) => trace_id.value.to_string(),
                         _ => {
@@ -1698,8 +1700,9 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     builder.place_trace_anchor(trace_id);
                     let ret = builder.new_vreg();
                     builder.set_const(ret, Literal::Undefined);
-                    return Ok(ret);
-                } else if sym == "require" {
+                    Ok(ret)
+                }
+                Expr::Ident(i) if &i.sym == "require" => {
                     if args.len() != 1 {
                         return Err(error!("`require` takes a single argument only"));
                     }
@@ -1707,45 +1710,46 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     let import_path = compile_expr(&mut builder, &args[0].expr)?;
                     let ret = builder.new_vreg();
                     builder.emit(Instr::ImportModule(ret, import_path));
-                    return Ok(ret);
+                    Ok(ret)
+                }
+                _ => {
+                    let mut arg_regs = Vec::new();
+                    for arg in args {
+                        if arg.spread.is_some() {
+                            panic!("unsupported: spread function parameter: function(a, b, ...)");
+                        }
+                        let reg = compile_expr(&mut builder, &arg.expr)?;
+                        arg_regs.push(reg);
+                    }
+
+                    let (this, callee) = match callee.as_ref() {
+                        Expr::Member(member_expr) => {
+                            let MemberAccess { obj, key: _, value } =
+                                compile_member_access(&mut builder, member_expr)?;
+                            (obj, value)
+                        }
+                        other_expr => {
+                            let this = builder.new_vreg();
+                            builder.set_const(this, bytecode::Literal::Undefined);
+
+                            let callee_func = compile_expr(&mut builder, other_expr)?;
+                            (this, callee_func)
+                        }
+                    };
+                    let return_value = builder.new_vreg();
+                    builder.emit(Instr::Call {
+                        return_value,
+                        this,
+                        callee,
+                    });
+
+                    for reg in arg_regs {
+                        builder.emit(Instr::CallArg(reg));
+                    }
+
+                    Ok(return_value)
                 }
             }
-
-            let mut arg_regs = Vec::new();
-            for arg in args {
-                if arg.spread.is_some() {
-                    panic!("unsupported: spread function parameter: function(a, b, ...)");
-                }
-                let reg = compile_expr(&mut builder, &arg.expr)?;
-                arg_regs.push(reg);
-            }
-
-            let (this, callee) = match callee.as_ref() {
-                Expr::Member(member_expr) => {
-                    let MemberAccess { obj, key: _, value } =
-                        compile_member_access(&mut builder, member_expr)?;
-                    (obj, value)
-                }
-                other_expr => {
-                    let this = builder.new_vreg();
-                    builder.set_const(this, bytecode::Literal::Undefined);
-
-                    let callee_func = compile_expr(&mut builder, other_expr)?;
-                    (this, callee_func)
-                }
-            };
-            let return_value = builder.new_vreg();
-            builder.emit(Instr::Call {
-                return_value,
-                this,
-                callee,
-            });
-
-            for reg in arg_regs {
-                builder.emit(Instr::CallArg(reg));
-            }
-
-            Ok(return_value)
         }
 
         Expr::Bin(bin_expr) => {
