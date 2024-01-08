@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, Span, Spanned};
 use swc_ecma_ast::{
-    ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, FnDecl, ForHead, Function, Lit, Pat, Stmt,
-    UpdateOp, VarDecl, VarDeclKind,
+    ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, Expr, FnDecl, ForHead, Function, Lit,
+    ModuleItem, Pat, ReturnStmt, Stmt, UpdateOp, VarDecl, VarDeclKind,
 };
 
 use crate::bytecode::{self, IdentAsmt, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
@@ -32,6 +32,7 @@ struct Builder {
     breakable_ranges: Vec<bytecode::BreakRange>,
     brange_stack: Vec<bytecode::BreakRange>,
     flags: CompileFlags,
+    source_map: Rc<SourceMap>,
 }
 
 impl Builder {
@@ -45,7 +46,7 @@ impl Builder {
     ///
     /// `source_map` is used to generate the spans where breakpoints can be set
     /// (`breakable_ranges`).
-    fn new(flags: CompileFlags) -> Self {
+    fn new(flags: CompileFlags, source_map: Rc< SourceMap>) -> Self {
         let next_fnid = flags.min_fnid;
         assert!(next_fnid >= 1);
         Builder {
@@ -55,6 +56,7 @@ impl Builder {
             breakable_ranges: Vec::new(),
             brange_stack: Vec::new(),
             flags,
+            source_map,
         }
     }
 
@@ -138,7 +140,7 @@ pub fn compile_file(
     let ast_module = parse_file(filename.clone(), content, Lrc::clone(&source_map))
         .with_context(error!("while parsing file: {filename}"))?;
 
-    let compiled_mod = compile_module(&ast_module, flags).with_context(
+    let compiled_mod = compile_module(&ast_module, Lrc::clone(&source_map), flags).with_context(
         error!("while compiling module: {filename}").with_source_map(Lrc::clone(&source_map)),
     )?;
 
@@ -601,11 +603,12 @@ struct CompiledModule {
 
 fn compile_module(
     ast_module: &swc_ecma_ast::Module,
+    source_map: Rc< SourceMap>,
     flags: CompileFlags,
 ) -> Result<CompiledModule> {
     use swc_ecma_ast::{ExportDecl, Expr, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
 
-    let mut builder = Builder::new(flags);
+    let mut builder = Builder::new(flags, source_map);
     builder.start_function(None, &[]);
 
     let lit_named = builder.new_vreg();
@@ -1712,6 +1715,44 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     builder.emit(Instr::ImportModule(ret, import_path));
                     Ok(ret)
                 }
+                Expr::Ident(i) if &i.sym == "eval" => {
+                    if args.len() != 1 {
+                        return Err(error!("`eval` takes a single argument only"));
+                    }
+
+                    match args[0].expr.as_ref() {
+                        Expr::Lit(Lit::Str(s)) => {
+                            let err_handler = mk_error_handler(&builder.source_map);
+
+                            let filename = swc_common::FileName::Custom("<eval'ed code>".into());
+                            let source_file= builder.source_map.new_source_file(filename, s.value.to_string());
+
+                            let mut parser = make_parser(&*source_file, &err_handler);
+                            let ast = parser.parse_script().map_err(|e| {
+                                e.into_diagnostic(&err_handler).emit();
+                                error!("in eval: parse error")
+                            })?;
+
+                            let last_ndx = ast.body.len() - 1;
+                            for (ndx, stmt) in ast.body.into_iter().enumerate() {
+                                if ndx == last_ndx {
+                                    if let Some(expr_stmt) = stmt.as_expr() {
+                                        return compile_expr(&mut builder, &*expr_stmt.expr);
+                                    }
+                                } 
+
+                                compile_stmt(&mut builder, &stmt)?;
+                            }
+
+                            let dest = builder.new_vreg();
+                            builder.emit(Instr::LoadUndefined(dest));
+                            Ok(dest)
+                        },
+                        _ => {
+                            Err(error!("`eval` only supported when called with a single string literal (e.g. `eval(\"some(code)\")`)"))
+                        }
+                    }
+                }
                 _ => {
                     let mut arg_regs = Vec::new();
                     for arg in args {
@@ -2302,27 +2343,25 @@ fn parse_file(
     content: String,
     source_map: Lrc<SourceMap>,
 ) -> Result<swc_ecma_ast::Module> {
-    use swc_common::{
-        errors::{emitter::EmitterWriter, Handler},
-        sync::Lrc,
-        FileName, SourceMap,
-    };
-    use swc_ecma_ast::EsVersion;
-    use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
-
-    let err_handler = Handler::with_emitter(
-        true,  // can_emit_warnings
-        false, // treat_err_as_bug
-        Box::new(EmitterWriter::new(
-            Box::new(std::io::stderr()),
-            Some(source_map.clone()),
-            false, // short_message
-            true,  // teach
-        )),
-    );
+    let err_handler = mk_error_handler(&source_map);
 
     let path = std::path::PathBuf::from(filename);
-    let source_file = source_map.new_source_file(FileName::Real(path), content);
+    let source_file = source_map.new_source_file(swc_common::FileName::Real(path), content);
+
+    let mut parser = make_parser(&*source_file, &err_handler);
+    parser.parse_module().map_err(|e| {
+        e.into_diagnostic(&err_handler).emit();
+        error!("parse error")
+    })
+}
+
+fn make_parser<'a>(
+    source_file: &'a swc_common::SourceFile,
+    err_handler: &swc_common::errors::Handler,
+) -> swc_ecma_parser::Parser<swc_ecma_parser::lexer::Lexer<'a>> {
+    use swc_common::SourceMap;
+    use swc_ecma_ast::EsVersion;
+    use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
     let input = StringInput::from(&*source_file);
     let lexer = Lexer::new(
@@ -2336,11 +2375,21 @@ fn parse_file(
     for e in parser.take_errors() {
         e.into_diagnostic(&err_handler).emit();
     }
+    parser
+}
 
-    parser.parse_module().map_err(|e| {
-        e.into_diagnostic(&err_handler).emit();
-        error!("parse error")
-    })
+fn mk_error_handler(source_map: &Rc<SourceMap>) -> swc_common::errors::Handler {
+    use swc_common::errors::{emitter::EmitterWriter, Handler};
+    Handler::with_emitter(
+        true,  // can_emit_warnings
+        false, // treat_err_as_bug
+        Box::new(EmitterWriter::new(
+            Box::new(std::io::stderr()),
+            Some(source_map.clone()),
+            false, // short_message
+            true,  // teach
+        )),
+    )
 }
 
 #[cfg(test)]
