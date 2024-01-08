@@ -645,7 +645,7 @@ impl<'a> Interpreter<'a> {
                                 // TODO Actually, we just need to allocate enough space for
                                 // *variables*, not for instructions.  However, this is OK for now,
                                 // as n_instrs is always >= n_variables.
-                                n_regs: callee_func.instrs().len().try_into().unwrap(),
+                                n_regs: callee_func.n_regs() as u32,
                                 captures: &closure.upvalues,
                                 this,
                             };
@@ -895,11 +895,10 @@ impl<'a> Interpreter<'a> {
                     } else {
                         // TODO Refactor with other implementations of Call?
                         let root_fn = self.loader.get_function(root_fnid).unwrap();
-                        let n_instrs = root_fn.instrs().len().try_into().unwrap();
 
                         let call_meta = stack::CallMeta {
                             fnid: root_fnid,
-                            n_regs: n_instrs,
+                            n_regs: root_fn.n_regs() as u32,
                             captures: &[],
                             this: Value::Undefined,
                         };

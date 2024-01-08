@@ -435,6 +435,7 @@ pub struct BreakRange {
 pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
+    n_regs: u8,
     // TODO(performance) following elision of Operand, better data structures
     loop_heads: HashMap<IID, LoopInfo>,
     ident_history: Vec<IdentAsmt>,
@@ -462,6 +463,7 @@ pub struct IdentAsmt {
 pub struct FunctionBuilder {
     pub instrs: Box<[Instr]>,
     pub consts: Box<[Literal]>,
+    pub n_regs: u8,
     pub ident_history: Vec<IdentAsmt>,
     pub trace_anchors: HashMap<IID, TraceAnchor>,
     pub is_strict_mode: bool,
@@ -477,6 +479,7 @@ impl FunctionBuilder {
         Function {
             instrs: self.instrs,
             consts: self.consts,
+            n_regs: self.n_regs,
             loop_heads,
             ident_history: self.ident_history,
             trace_anchors: self.trace_anchors,
@@ -493,6 +496,10 @@ impl Function {
 
     pub fn consts(&self) -> &[Literal] {
         self.consts.as_ref()
+    }
+
+    pub fn n_regs(&self) -> u8 {
+        self.n_regs
     }
 
     pub fn ident_history(&self) -> &[IdentAsmt] {

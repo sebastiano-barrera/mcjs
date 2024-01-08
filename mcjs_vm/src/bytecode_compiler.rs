@@ -265,6 +265,7 @@ impl FnBuilder {
         bytecode::FunctionBuilder {
             instrs: self.instrs.into_boxed_slice(),
             consts: self.consts.into_boxed_slice(),
+            n_regs: self.next_vreg,
             ident_history: self.ident_history,
             trace_anchors: self.trace_anchors,
             is_strict_mode: self.is_strict_mode,
