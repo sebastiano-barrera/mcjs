@@ -6,7 +6,7 @@
 | /home/sebastiano/src/test262/test/language/block-scope/shadowing                    | 30  | 0    | 100.0            |
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/for-in                | 6   | 10   | 37.5             |
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/function-declarations | 4   | 8    | 33.3333333333333 |
-| /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration         | 6   | 183  | 3.17460317460317 |
+| /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration         | 14  | 175  | 7.40740740740741 |
 | /home/sebastiano/src/test262/test/language/block-scope/syntax/redeclaration-global  | 6   | 0    | 100.0            |
 | /home/sebastiano/src/test262/test/language/comments                                 | 38  | 8    | 82.6086956521739 |
 | /home/sebastiano/src/test262/test/language/comments/hashbang                        | 37  | 21   | 63.7931034482759 |
