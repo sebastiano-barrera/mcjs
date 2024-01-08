@@ -1541,7 +1541,7 @@
     "test/language/function-code/S10.4_A1.1_T1.js",
     "test/language/function-code/block-decl-onlystrict.js"
   ],
-  "dibled": [
+  "disabled": [
     "test/language/arguments-object/10.5-1-s.js",
     "test/language/arguments-object/10.5-1gs.js",
     "test/language/arguments-object/10.5-7-b-1-s.js",
@@ -24266,6 +24266,22 @@
     "test/language/white-space/string-space.js",
     "test/language/white-space/string-vertical-tab.js",
     "test/language/function-code/eval-param-env-with-computed-key.js",
-    "test/language/function-code/eval-param-env-with-prop-initializer.js"
+    "test/language/function-code/eval-param-env-with-prop-initializer.js",
+    "test/annexB/built-ins/RegExp/RegExp-leading-escape-BMP.js",
+    "test/annexB/built-ins/RegExp/RegExp-trailing-escape-BMP.js",
+    "test/built-ins/RegExp/prototype/source/value-empty.js",
+    "test/built-ins/RegExp/prototype/source/value-line-terminator.js",
+    "test/built-ins/RegExp/prototype/source/value-slash.js",
+    "test/built-ins/RegExp/prototype/source/value-u.js",
+    "test/built-ins/RegExp/prototype/source/value-u.js",
+    "test/built-ins/RegExp/prototype/source/value.js",
+    "test/built-ins/global/S10.2.3_A1.3_T1.js",
+    "test/built-ins/global/S10.2.3_A1.3_T2.js",
+    "test/built-ins/global/S10.2.3_A1.3_T3.js",
+    "test/built-ins/global/S10.2.3_A1.3_T4.js",
+    "test/built-ins/global/S10.2.3_A2.3_T1.js",
+    "test/built-ins/global/S10.2.3_A2.3_T2.js",
+    "test/built-ins/global/S10.2.3_A2.3_T3.js",
+    "test/built-ins/global/S10.2.3_A2.3_T4.js"
   ]
 }
