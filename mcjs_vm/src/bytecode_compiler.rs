@@ -1495,6 +1495,9 @@ fn compile_fn_decl_assignment(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnD
         panic!("unsupported case: fn_decl.declare");
     }
     let name = get_fn_decl_name(fn_decl);
+    if builder.cur_fnb().inner_scope().vars.contains_key(&name) {
+        return Err(error!("redeclared name: {}", name.to_string()));
+    }
     let var = builder.get_var(&name);
     let value = compile_function(builder, Some(name.clone()), &fn_decl.function)?;
     builder.write_var(&var, value);
