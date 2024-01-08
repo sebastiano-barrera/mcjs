@@ -46,7 +46,7 @@ impl Builder {
     ///
     /// `source_map` is used to generate the spans where breakpoints can be set
     /// (`breakable_ranges`).
-    fn new(flags: CompileFlags, source_map: Rc< SourceMap>) -> Self {
+    fn new(flags: CompileFlags, source_map: Rc<SourceMap>) -> Self {
         let next_fnid = flags.min_fnid;
         assert!(next_fnid >= 1);
         Builder {
@@ -603,7 +603,7 @@ struct CompiledModule {
 
 fn compile_module(
     ast_module: &swc_ecma_ast::Module,
-    source_map: Rc< SourceMap>,
+    source_map: Rc<SourceMap>,
     flags: CompileFlags,
 ) -> Result<CompiledModule> {
     use swc_ecma_ast::{ExportDecl, Expr, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
@@ -1034,7 +1034,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 use swc_ecma_ast::VarDeclOrExpr;
                 match init {
                     VarDeclOrExpr::VarDecl(var_decl) => {
-                        compile_var_decl_block_scope_part(&mut builder, var_decl);
+                        compile_var_decl_block_scope_part(&mut builder, var_decl)?;
                         compile_var_decl_assignment(&mut builder, var_decl)?;
                     }
                     VarDeclOrExpr::Expr(expr) => {
@@ -1264,25 +1264,25 @@ fn compile_block(builder: &mut Builder, stmts: &[Stmt]) -> Result<()> {
 fn compile_decl_block_scope_part(builder: &mut Builder, decl: &Decl) -> Result<()> {
     match decl {
         Decl::Var(vd) => compile_var_decl_block_scope_part(builder, vd),
-        Decl::Fn(fd) => {
-            compile_fn_decl_assignment(builder, fd)?;
-        }
-        _ => {}
+        Decl::Fn(fd) => compile_fn_decl_assignment(builder, fd),
+        _ => Ok(()),
     }
-
-    Ok(())
 }
 
-fn compile_var_decl_block_scope_part(builder: &mut Builder, vd: &VarDecl) {
+fn compile_var_decl_block_scope_part(builder: &mut Builder, vd: &VarDecl) -> Result<()> {
     match vd.kind {
         VarDeclKind::Var => {}
         VarDeclKind::Let | VarDeclKind::Const => {
             for decl in &vd.decls {
                 let name = get_var_decl_name(decl);
+                if builder.cur_fnb().inner_scope().vars.contains_key(&name) {
+                    return Err(error!("redeclared name: {}", name.to_string()));
+                }
                 compile_namedef(builder, name);
             }
         }
     }
+    Ok(())
 }
 
 // Helper type.  Helps unify the cases where the decl comes from a `Decl` or a `VarDeclOrExpr`
