@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, Span, Spanned};
 use swc_ecma_ast::{
     ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, Expr, FnDecl, ForHead, Function, Lit,
-    ModuleItem, Pat, ReturnStmt, Stmt, UpdateOp, VarDecl, VarDeclKind,
+    ModuleItem, Pat, ReturnStmt, Stmt, UpdateOp, VarDecl, VarDeclKind, VarDeclarator,
 };
 
 use crate::bytecode::{self, IdentAsmt, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
@@ -1086,12 +1087,30 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         }
 
         Stmt::ForIn(forin_stmt) => {
-            let item_var = match &forin_stmt.left {
-                swc_ecma_ast::ForHead::VarDecl(var_decl) => var_decl.as_ref(),
-                swc_ecma_ast::ForHead::UsingDecl(_) => todo!(),
-                swc_ecma_ast::ForHead::Pat(_) => panic!(
-                    "unsupported syntax: destructuring pattern as `<pattern>` in: `for (<pattern> in ...) {{ ... }}`"
-                ),
+            use swc_ecma_ast::{ForHead, Pat};
+
+            let item_var: Cow<VarDecl> = match &forin_stmt.left {
+                ForHead::VarDecl(var_decl) => Cow::Borrowed(var_decl.as_ref()),
+                ForHead::UsingDecl(_) => todo!(),
+                ForHead::Pat(pat) => match pat.as_ref() {
+                    Pat::Ident(ident) => {
+                        let decl = VarDeclarator {
+                            span: ident.span,
+                            name: pat.as_ref().clone(),
+                            init: None,
+                            definite: false,
+                        };
+                        Cow::Owned(VarDecl {
+                            declare: false,
+                            kind: VarDeclKind::Var,
+                            decls: vec![decl],
+                            span: ident.span,
+                        })
+                    },
+                    _ => panic!(
+                        "unsupported syntax: destructuring pattern as `<pattern>` in: `for (<pattern> in ...) {{ ... }}`"
+                    ),
+                },
             };
 
             assert_eq!(item_var.decls.len(), 1);
@@ -1743,7 +1762,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                                     if let Some(expr_stmt) = stmt.as_expr() {
                                         return compile_expr(&mut builder, &*expr_stmt.expr);
                                     }
-                                } 
+                                }
 
                                 compile_stmt(&mut builder, &stmt)?;
                             }

@@ -25,7 +25,7 @@
 | /home/sebastiano/src/test262/test/language/statements/switch                        | 26  | 59   | 30.5882352941176 |
 | /home/sebastiano/src/test262/test/language/statements/switch/syntax/redeclaration   | 2   | 47   | 4.08163265306122 |
 | /home/sebastiano/src/test262/test/language/statements/throw                         | 24  | 4    | 85.7142857142857 |
-| /home/sebastiano/src/test262/test/language/statements/try                           | 90  | 112  | 44.5544554455446 |
+| /home/sebastiano/src/test262/test/language/statements/try                           | 92  | 110  | 45.5445544554455 |
 | /home/sebastiano/src/test262/test/language/statements/try/dstr                      | 6   | 152  | 3.79746835443038 |
 | /home/sebastiano/src/test262/test/language/statements/variable                      | 22  | 91   | 19.4690265486726 |
 | /home/sebastiano/src/test262/test/language/statements/variable/dstr                 | 8   | 158  | 4.81927710843374 |
