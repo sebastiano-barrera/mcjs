@@ -20,6 +20,7 @@ fn main() {
         si,
         recent_state_change: false,
         source_code_view: Default::default(),
+        frame_ndx: 0,
     };
 
     let native_options = eframe::NativeOptions::default();
@@ -56,6 +57,7 @@ struct AppData {
     si: Pin<Box<interpreter_manager::StandaloneInterpreter>>,
     recent_state_change: bool,
     source_code_view: source_code_view::Cache,
+    frame_ndx: usize,
 }
 
 impl eframe::App for AppData {
@@ -70,6 +72,7 @@ impl eframe::App for AppData {
             Restart,
             Continue,
             None,
+            SetStackFrame { index: usize },
         }
 
         match self.si.state_mut() {
@@ -159,7 +162,18 @@ impl eframe::App for AppData {
                         } else {
                             frame.header().return_target.unwrap().0
                         };
-                        ui.label(format!("{:?}:{:?}", frame.header().fn_id, iid));
+
+                        let text = format!("{:?}:{:?}", frame.header().fn_id, iid);
+                        let bg = if ndx == self.frame_ndx {
+                            ctx.style().visuals.selection.bg_fill
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+
+                        let res = ui.add(egui::Button::new(text).frame(false).fill(bg));
+                        if res.clicked() {
+                            action = Action::SetStackFrame { index: ndx };
+                        }
                     }
                 });
 
@@ -187,7 +201,8 @@ impl eframe::App for AppData {
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut probe = self.si.probe_mut().unwrap();
 
-            let vm_giid = probe.giid();
+            let frame = probe.frames().nth(self.frame_ndx).unwrap();
+            let vm_giid = probe.frame_giid(self.frame_ndx);
             let fnid = vm_giid.0;
             let func = probe.loader().get_function(fnid).unwrap();
 
@@ -220,7 +235,7 @@ impl eframe::App for AppData {
                             bkpt_to_set = Some(giid);
                         }
 
-                        inline_value_view::show(ui, &probe, func, instr);
+                        inline_value_view::show(ui, &frame, func, instr);
                     });
 
                     if recent_state_change && is_current {
@@ -241,15 +256,21 @@ impl eframe::App for AppData {
                 probe.set_fuel(Fuel::Limited(1));
                 self.si.resume();
                 self.recent_state_change = true;
+                self.frame_ndx = 0;
             }
             Action::Continue => {
                 self.si.resume();
                 self.recent_state_change = true;
+                self.frame_ndx = 0;
             }
             Action::Restart => {
                 self.si.restart();
                 self.si.resume();
                 self.recent_state_change = true;
+                self.frame_ndx = 0;
+            }
+            Action::SetStackFrame { index } => {
+                self.frame_ndx = index;
             }
         }
     }
@@ -258,12 +279,12 @@ impl eframe::App for AppData {
 mod inline_value_view {
     use std::borrow::Cow;
 
-    use mcjs_vm::{bytecode, interpreter::debugger::Probe, InterpreterValue, Literal};
+    use mcjs_vm::{bytecode, stack::Frame, InterpreterValue, Literal};
 
     struct Analyzer<'a, 'b> {
         ui: &'a mut egui::Ui,
         func: &'a bytecode::Function,
-        probe: &'a Probe<'a, 'b>,
+        frame: &'a Frame<'b>,
     }
 
     // Narrows a &str from "xyz(whatever)" into "whatever". (Panics if
@@ -285,13 +306,12 @@ mod inline_value_view {
         }
 
         fn write_vreg_labeled(&mut self, vreg: bytecode::VReg, _description: Option<&'static str>) {
-            let frame = self.probe.frames().next().unwrap();
-            let slot = frame.get_slot(vreg);
+            let slot = self.frame.get_slot(vreg);
             if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
                 self.ui.label(format!("{:?} »", upv_id));
             }
 
-            let value = frame.get_result(vreg);
+            let value = self.frame.get_result(vreg);
             let text: Cow<str> = match value {
                 InterpreterValue::Number(n) => format!("{}", n).into(),
                 InterpreterValue::Bool(true) => "true".into(),
@@ -352,12 +372,12 @@ mod inline_value_view {
 
     pub fn show(
         ui: &mut egui::Ui,
-        probe: &Probe,
+        frame: &Frame,
         func: &bytecode::Function,
         instr: &bytecode::Instr,
     ) {
         ui.horizontal(move |ui| {
-            let mut analyzer = Analyzer { ui, func, probe };
+            let mut analyzer = Analyzer { ui, func, frame };
             instr.analyze(&mut analyzer);
         });
     }
