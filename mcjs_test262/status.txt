@@ -15,8 +15,8 @@
 | /home/sebastiano/src/test262/test/language/expressions/function/early-errors        | 0   | 8    | 0.0              |
 | /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b1    | 0   | 2    | 0.0              |
 | /home/sebastiano/src/test262/test/language/expressions/function/forbidden-ext/b2    | 0   | 3    | 0.0              |
-| /home/sebastiano/src/test262/test/language/function-code                            | 188 | 91   | 67.3835125448029 |
-| /home/sebastiano/src/test262/test/language/statements/if                            | 44  | 57   | 43.5643564356436 |
+| /home/sebastiano/src/test262/test/language/function-code                            | 190 | 89   | 68.1003584229391 |
+| /home/sebastiano/src/test262/test/language/statements/if                            | 54  | 47   | 53.4653465346535 |
 | /home/sebastiano/src/test262/test/language/statements/labeled                       | 12  | 21   | 36.3636363636364 |
 | /home/sebastiano/src/test262/test/language/statements/let                           | 4   | 35   | 10.2564102564103 |
 | /home/sebastiano/src/test262/test/language/statements/let/dstr                      | 6   | 152  | 3.79746835443038 |
@@ -27,7 +27,7 @@
 | /home/sebastiano/src/test262/test/language/statements/throw                         | 24  | 4    | 85.7142857142857 |
 | /home/sebastiano/src/test262/test/language/statements/try                           | 92  | 110  | 45.5445544554455 |
 | /home/sebastiano/src/test262/test/language/statements/try/dstr                      | 6   | 152  | 3.79746835443038 |
-| /home/sebastiano/src/test262/test/language/statements/variable                      | 22  | 91   | 19.4690265486726 |
+| /home/sebastiano/src/test262/test/language/statements/variable                      | 24  | 89   | 21.2389380530973 |
 | /home/sebastiano/src/test262/test/language/statements/variable/dstr                 | 8   | 158  | 4.81927710843374 |
 | /home/sebastiano/src/test262/test/language/statements/while                         | 28  | 38   | 42.4242424242424 |
 | /home/sebastiano/src/test262/test/language/white-space                              | 102 | 32   | 76.1194029850746 |

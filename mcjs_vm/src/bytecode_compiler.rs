@@ -1265,7 +1265,7 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
             let end: IID = builder.peek_iid();
 
             *builder.get_mut(jmp_to_alt).unwrap() = Instr::JmpIf { cond, dest: alt };
-            *builder.get_mut(jmp_to_end).unwrap() = Instr::JmpIf { cond, dest: end };
+            *builder.get_mut(jmp_to_end).unwrap() = Instr::Jmp(end);
             Ok(())
         }
         other => unsupported_node!(other),
