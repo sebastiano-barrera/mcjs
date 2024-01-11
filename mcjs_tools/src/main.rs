@@ -130,13 +130,14 @@ impl eframe::App for AppData {
                 ui.button("DELETE");
 
                 ui.horizontal(|ui| {
-                    ui.heading("State:");
-                    match self.si.state_mut() {
-                        State::Ready => format!("Ready"),
-                        State::Finished => format!("Finished"),
-                        State::Suspended(_) => format!("Suspended"),
-                        State::Failed(_) => format!("Failed"),
-                    }
+                    ui.label("State:");
+                    let text = match self.si.state_mut() {
+                        State::Ready => "Ready",
+                        State::Finished => "Finished",
+                        State::Suspended(_) => "Suspended",
+                        State::Failed(_) => "Failed",
+                    };
+                    ui.label(text);
                 });
                 
                 let probe = self.si.probe_mut().unwrap();
@@ -192,7 +193,7 @@ impl eframe::App for AppData {
             })
             .inner;
 
-        if let State::Suspended(_) = self.si.state_mut() {
+        if let Some(probe) = self.si.probe_mut() {
             let res = egui::SidePanel::right("source_code")
                 .min_width(300.0)
                 .show(ctx, |ui| {
@@ -200,7 +201,6 @@ impl eframe::App for AppData {
                 })
                 .inner;
 
-            let probe = self.si.probe_mut().unwrap();
             ctx.fonts(|fonts| {
                 source_code_view::update(&mut self.source_code_view, &probe, &res, fonts)
             });
