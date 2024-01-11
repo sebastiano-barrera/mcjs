@@ -129,6 +129,16 @@ impl eframe::App for AppData {
                 }
                 ui.button("DELETE");
 
+                ui.horizontal(|ui| {
+                    ui.heading("State:");
+                    match self.si.state_mut() {
+                        State::Ready => format!("Ready"),
+                        State::Finished => format!("Finished"),
+                        State::Suspended(_) => format!("Suspended"),
+                        State::Failed(_) => format!("Failed"),
+                    }
+                });
+                
                 let probe = self.si.probe_mut().unwrap();
                 let status_text = format!("suspended at {:?}", probe.giid());
 
