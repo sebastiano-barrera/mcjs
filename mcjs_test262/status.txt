@@ -20,7 +20,7 @@
 | /home/sebastiano/src/test262/test/language/statements/labeled                       | 12  | 21   | 36.3636363636364 |
 | /home/sebastiano/src/test262/test/language/statements/let                           | 4   | 35   | 10.2564102564103 |
 | /home/sebastiano/src/test262/test/language/statements/let/dstr                      | 6   | 152  | 3.79746835443038 |
-| /home/sebastiano/src/test262/test/language/statements/let/syntax                    | 40  | 18   | 68.9655172413793 |
+| /home/sebastiano/src/test262/test/language/statements/let/syntax                    | 41  | 17   | 70.6896551724138 |
 | /home/sebastiano/src/test262/test/language/statements/return                        | 8   | 23   | 25.8064516129032 |
 | /home/sebastiano/src/test262/test/language/statements/switch                        | 26  | 59   | 30.5882352941176 |
 | /home/sebastiano/src/test262/test/language/statements/switch/syntax/redeclaration   | 2   | 47   | 4.08163265306122 |
