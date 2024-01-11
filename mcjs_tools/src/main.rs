@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 use anyhow::Result;
-use mcjs_vm::bytecode;
 use mcjs_vm::interpreter::Fuel;
+use mcjs_vm::{bytecode, BreakRangeID, GlobalIID};
 
 fn main() {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
@@ -14,7 +14,8 @@ fn main() {
     let params = parse_args().expect("cli error");
     eprintln!("params = {:?}", params);
 
-    let mut si = interpreter_manager::StandaloneInterpreter::new(params);
+    let mut si = interpreter_manager::StandaloneInterpreter::new(params)
+        .expect("could not create interpreter");
     si.resume();
     let app = AppData {
         si,
@@ -73,7 +74,11 @@ impl eframe::App for AppData {
             Continue,
             None,
             SetStackFrame { index: usize },
+            SetSourceBreakpoint { brange_id: BreakRangeID },
+            SetInstrBreakpoint { giid: GlobalIID },
         }
+
+        let mut action = Action::None;
 
         match self.si.state_mut() {
             State::Ready => {
@@ -106,10 +111,8 @@ impl eframe::App for AppData {
             _ => {}
         };
 
-        let action = egui::SidePanel::left("sidebar")
+        egui::SidePanel::left("sidebar")
             .show(ctx, |ui| {
-                let mut action = Action::None;
-
                 if let Some(err_message) = self.si.error_message() {
                     ui.heading("interpreter failed");
                     ui.label(&err_message);
@@ -176,8 +179,6 @@ impl eframe::App for AppData {
                         }
                     }
                 });
-
-                action
             })
             .inner;
 
@@ -189,17 +190,17 @@ impl eframe::App for AppData {
                 })
                 .inner;
 
-            let mut probe = self.si.probe_mut().unwrap();
+            let probe = self.si.probe_mut().unwrap();
             ctx.fonts(|fonts| {
                 source_code_view::update(&mut self.source_code_view, &probe, &res, fonts)
             });
-            if let Some(brid) = res.set_source_bpkt {
-                probe.set_source_breakpoint(brid);
+            if let Some(brange_id) = res.set_source_bpkt {
+                action = Action::SetSourceBreakpoint { brange_id };
             }
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let mut probe = self.si.probe_mut().unwrap();
+            let probe = self.si.probe_mut().unwrap();
 
             let frame = probe.frames().nth(self.frame_ndx).unwrap();
             let vm_giid = probe.frame_giid(self.frame_ndx);
@@ -244,8 +245,8 @@ impl eframe::App for AppData {
                 }
             });
 
-            if let Some(bkpt_to_set) = bkpt_to_set {
-                probe.set_instr_breakpoint(bkpt_to_set);
+            if let Some(giid) = bkpt_to_set {
+                action = Action::SetInstrBreakpoint { giid };
             }
         });
 
@@ -271,6 +272,12 @@ impl eframe::App for AppData {
             }
             Action::SetStackFrame { index } => {
                 self.frame_ndx = index;
+            }
+            Action::SetSourceBreakpoint { brange_id } => {
+                self.si.set_source_breakpoint(brange_id);
+            }
+            Action::SetInstrBreakpoint { giid } => {
+                self.si.set_instr_breakpoint(giid);
             }
         }
     }
@@ -684,14 +691,14 @@ mod source_code_view {
 
 mod interpreter_manager {
     use std::cmp::Ordering;
+    use std::marker::PhantomPinned;
     use std::path::PathBuf;
     use std::pin::Pin;
-    use std::{marker::PhantomPinned, path::Path};
 
-    use mcjs_vm::interpreter::debugger::Probe;
+    use mcjs_vm::interpreter::debugger::{BreakpointError, Probe};
     use mcjs_vm::{
         interpreter::{Exit, InterpreterError},
-        Interpreter, Loader, Realm,
+        BreakRangeID, FnId, GlobalIID, Interpreter, Loader, Realm,
     };
 
     use anyhow::{anyhow, Result};
@@ -711,9 +718,10 @@ mod interpreter_manager {
     pub struct StandaloneInterpreter {
         realm: Realm,
         loader: Loader,
-        filenames: Vec<PathBuf>,
-        n_filenames_done: usize,
+        scripts: Vec<Script>,
+        n_scripts_done: usize,
         state: State<'static>,
+        saved_state: DebuggingSave,
         _pin: PhantomPinned,
     }
     pub enum State<'a> {
@@ -726,24 +734,122 @@ mod interpreter_manager {
         Failed(Error<'a>),
     }
 
+    /// Represents one of the scripts that the interpreter will run.
+    ///
+    /// Each file is associated to a stable FnId, in order to keep valid those breakpoints that
+    /// were placed on scripts (as opposed to modules, which get this property for free, because
+    /// they are cached/reused).
+    ///
+    /// Details other than the FnId should be retrived via the Loader.
+    struct Script {
+        filename: PathBuf,
+        main_fnid: FnId,
+    }
+
+    /// Parts of the interpreter's state that are saved and restored across a restart cycle.
+    ///
+    /// These include instruction and source breakpoints.
+    ///
+    /// In broad strokes: this state is saved when calling `StandaloneInterpreter::restart`, and
+    /// restored as soon as a new interpreter is created with the next call to
+    /// `StandaloneInterpreter::next`.
+    struct DebuggingSave {
+        instr_bkpts: Vec<GlobalIID>,
+        source_bkpts: Vec<BreakRangeID>,
+    }
+
+    impl Default for DebuggingSave {
+        fn default() -> Self {
+            DebuggingSave {
+                instr_bkpts: Vec::new(),
+                source_bkpts: Vec::new(),
+            }
+        }
+    }
+
+    impl DebuggingSave {
+        /// Restores the state stored in this object into the given Interpreter.
+        ///
+        /// Returns true iff every breakpoint was restored successfully. Check it on
+        /// return!
+        #[must_use]
+        fn restore(&self, intrp: &mut Interpreter) -> bool {
+            let mut all_ok = true;
+            let mut probe = Probe::attach(intrp);
+
+            eprintln!(
+                "restoring: {} instr bkpts, {} source bkpts",
+                self.instr_bkpts.len(),
+                self.source_bkpts.len()
+            );
+
+            for giid in &self.instr_bkpts {
+                let res = probe.set_instr_breakpoint(*giid);
+                match res {
+                    Ok(_) | Err(BreakpointError::AlreadyThere) => {}
+                    Err(_) => {
+                        all_ok = false;
+                    }
+                }
+            }
+
+            for brange_id in &self.source_bkpts {
+                let res = probe.set_source_breakpoint(*brange_id);
+                match res {
+                    Ok(_) | Err(BreakpointError::AlreadyThere) => {}
+                    Err(_) => {
+                        all_ok = false;
+                    }
+                }
+            }
+
+            all_ok
+        }
+    }
+
+    impl Script {
+        fn read_script(loader: &mut Loader, filename: PathBuf) -> Result<Script> {
+            let filename_str = filename.to_string_lossy().into_owned();
+            let script_text = std::fs::read_to_string(filename.clone())
+                .map_err(|err| anyhow!("read error: {:?}: {:?}", filename, err))?;
+
+            let main_fnid = loader
+                .load_script(Some(filename_str.clone()), script_text)
+                .map_err(|err| anyhow!("compile error: {:?}: {:?}", filename_str, err))?;
+
+            Ok(Script {
+                filename,
+                main_fnid,
+            })
+        }
+    }
+
     impl StandaloneInterpreter {
-        pub fn new(params: Params) -> Pin<Box<StandaloneInterpreter>> {
+        pub fn new(params: Params) -> Result<Pin<Box<StandaloneInterpreter>>> {
             let mut loader = Loader::new(params.main_directory);
             let realm = Realm::new(&mut loader);
+
+            let scripts = params
+                .filenames
+                .into_iter()
+                .map(|filename| Script::read_script(&mut loader, filename))
+                .collect::<Result<Vec<_>, _>>()?;
+
             let si = StandaloneInterpreter {
                 realm,
                 loader,
-                filenames: params.filenames,
-                n_filenames_done: 0,
+                scripts,
+                n_scripts_done: 0,
                 state: State::Ready,
+                saved_state: DebuggingSave::default(),
                 _pin: PhantomPinned,
             };
 
-            Box::pin(si)
+            Ok(Box::pin(si))
         }
 
         pub fn n_filenames_done(&self) -> usize {
-            self.n_filenames_done
+            self.n_scripts_done
         }
 
         pub fn state_mut<'a>(self: &'a mut Pin<Box<Self>>) -> &'a mut State<'static> {
@@ -753,16 +859,40 @@ mod interpreter_manager {
             &mut self_.state
         }
 
+        pub fn set_instr_breakpoint(self: &mut Pin<Box<Self>>, giid: GlobalIID) {
+            let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
+
+            self_.saved_state.instr_bkpts.push(giid);
+
+            if let Some(intrp) = self_.interpreter_mut() {
+                let mut probe = Probe::attach(intrp);
+                probe.set_instr_breakpoint(giid);
+            }
+        }
+
+        pub fn set_source_breakpoint(self: &mut Pin<Box<Self>>, brange_id: BreakRangeID) {
+            let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
+
+            self_.saved_state.source_bkpts.push(brange_id);
+
+            if let Some(intrp) = self_.interpreter_mut() {
+                let mut probe = Probe::attach(intrp);
+                probe.set_source_breakpoint(brange_id);
+            }
+        }
+
         pub fn restart(self: &mut Pin<Box<Self>>) {
             let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
-            let prev_state = std::mem::replace(&mut self_.state, State::Finished);
-            self_.state = match prev_state {
-                State::Suspended(intrp) => State::Suspended(intrp.restart()),
-                State::Ready | State::Finished | State::Failed(_) => {
-                    self_.n_filenames_done = 0;
-                    State::Ready
-                }
-            };
+
+            self_.n_scripts_done = 0;
+            self_.state = State::Ready;
+        }
+
+        fn interpreter_mut(&mut self) -> Option<&mut Interpreter<'static>> {
+            match &mut self.state {
+                State::Suspended(intrp) => Some(intrp),
+                _ => None,
+            }
         }
 
         pub fn resume(self: &mut Pin<Box<Self>>) {
@@ -777,42 +907,49 @@ mod interpreter_manager {
 
             self_.state = match state {
                 State::Ready => {
-                    let filename = &self_.filenames[self_.n_filenames_done];
+                    let script = &self_.scripts[self_.n_scripts_done];
                     println!();
                     println!(
                         "(starting loop for file: {})",
-                        filename.to_string_lossy().into_owned()
+                        script.filename.to_string_lossy().into_owned()
                     );
 
-                    match start_intrp(&filename, &mut self_.realm, &mut self_.loader) {
-                        Ok(intrp) => {
-                            let intrp = unsafe { std::mem::transmute(intrp) };
-                            State::Suspended(intrp)
-                        }
-                        Err(err) => State::Failed(Error::Generic(err)),
+                    let intrp =
+                        Interpreter::new(&mut self_.realm, &mut self_.loader, script.main_fnid);
+                    // Cast the lifetime: real "trust me" moment
+                    let mut intrp: Interpreter<'static> = unsafe { std::mem::transmute(intrp) };
+
+                    let all_ok = self_.saved_state.restore(&mut intrp);
+                    if !all_ok {
+                        eprintln!(
+                            "warning: not all breakpoints could be restored after restart"
+                        );
                     }
+                    State::Suspended(intrp)
                 }
                 cur @ State::Failed(_) | cur @ State::Finished => {
                     // nothing  to do
                     cur
                 }
-                State::Suspended(intrp) => match intrp.run() {
-                    Ok(exit) => match exit {
-                        Exit::Finished(_) => {
-                            self_.n_filenames_done += 1;
-                            match self_.n_filenames_done.cmp(&self_.filenames.len()) {
-                                Ordering::Less => {
-                                    self_.state = State::Ready;
-                                    return self.resume();
+                State::Suspended(intrp) => {
+                    match intrp.run() {
+                        Ok(exit) => match exit {
+                            Exit::Finished(_) => {
+                                self_.n_scripts_done += 1;
+                                match self_.n_scripts_done.cmp(&self_.scripts.len()) {
+                                    Ordering::Less => {
+                                        self_.state = State::Ready;
+                                        return self.resume();
+                                    }
+                                    Ordering::Equal => State::Finished,
+                                    Ordering::Greater => panic!("assertion failed"),
                                 }
-                                Ordering::Equal => State::Finished,
-                                Ordering::Greater => panic!("assertion failed"),
                             }
-                        }
-                        Exit::Suspended(new_intrp) => State::Suspended(new_intrp),
-                    },
-                    Err(err) => State::Failed(Error::Interpreter(err)),
-                },
+                            Exit::Suspended(new_intrp) => State::Suspended(new_intrp),
+                        },
+                        Err(err) => State::Failed(Error::Interpreter(err)),
+                    }
+                }
             };
         }
 
@@ -835,21 +972,5 @@ mod interpreter_manager {
                 _ => None,
             }
         }
-    }
-
-    fn start_intrp<'a>(
-        filename: &Path,
-        realm: &'a mut Realm,
-        loader: &'a mut Loader,
-    ) -> Result<Interpreter<'a>> {
-        let filename_str = filename.to_string_lossy().into_owned();
-        let script_text = std::fs::read_to_string(filename)
-            .map_err(|err| anyhow!("read error: {:?}: {:?}", filename, err))?;
-
-        let main_fnid = loader
-            .load_script(Some(filename_str.clone()), script_text)
-            .map_err(|err| anyhow!("compile error: {:?}: {:?}", filename_str, err))?;
-
-        Ok(Interpreter::new(realm, loader, main_fnid))
     }
 }
