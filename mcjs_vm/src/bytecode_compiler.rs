@@ -1089,10 +1089,18 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
         Stmt::ForIn(forin_stmt) => {
             use swc_ecma_ast::{ForHead, Pat};
 
+            let is_strict_mode = builder.cur_fnb().is_strict_mode;
+
             let item_var: Cow<VarDecl> = match &forin_stmt.left {
                 ForHead::VarDecl(var_decl) => Cow::Borrowed(var_decl.as_ref()),
                 ForHead::UsingDecl(_) => todo!(),
                 ForHead::Pat(pat) => match pat.as_ref() {
+                    Pat::Ident(ident) if is_strict_mode && is_identifier_keyword(ident) => {
+                        return Err(
+                            error!("can't use keyword `{}` as identifier (in strict mode)", ident.sym)
+                            .with_span(ident.span)
+                        )
+                    },
                     Pat::Ident(ident) => {
                         let decl = VarDeclarator {
                             span: ident.span,
@@ -2413,6 +2421,10 @@ fn mk_error_handler(source_map: &Rc<SourceMap>) -> swc_common::errors::Handler {
             true,  // teach
         )),
     )
+}
+
+fn is_identifier_keyword(ident: &swc_ecma_ast::Ident) -> bool {
+    &ident.sym == "let" || &ident.sym == "const"
 }
 
 #[cfg(test)]
