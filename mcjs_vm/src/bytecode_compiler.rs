@@ -1298,14 +1298,20 @@ fn compile_decl_block_scope_part(builder: &mut Builder, decl: &Decl) -> Result<(
 }
 
 fn compile_var_decl_block_scope_part(builder: &mut Builder, vd: &VarDecl) -> Result<()> {
-    match vd.kind {
-        VarDeclKind::Var => {}
-        VarDeclKind::Let | VarDeclKind::Const => {
-            for decl in &vd.decls {
-                let name = get_var_decl_name(decl);
-                if builder.cur_fnb().inner_scope().vars.contains_key(&name) {
-                    return Err(error!("redeclared name: {}", name.to_string()));
-                }
+    for decl in &vd.decls {
+        let name = get_var_decl_name(decl);
+
+        // this check is needed for all decl kinds: var, let, const.
+        // we could have skipped var's here, but we must still process them here as well,
+        // in order to raise an error if any other `let`/`const` decls of the same name
+        // exist in the same block.
+        if builder.cur_fnb().inner_scope().vars.contains_key(&name) {
+            return Err(error!("redeclared name: {}", name.to_string()));
+        }
+
+        match vd.kind {
+            VarDeclKind::Var => {}
+            VarDeclKind::Let | VarDeclKind::Const => {
                 compile_namedef(builder, name);
             }
         }
