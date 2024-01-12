@@ -22,7 +22,7 @@ end
 
 Dir.chdir __dir__
 
-mcjs_version = Git::CommitID.get_current.to_s
+mcjs_version = Git::Repo::at_cwd.head.to_s
 
 filename = '../out/runs.json'
 STDERR.puts "loading #{filename}..."

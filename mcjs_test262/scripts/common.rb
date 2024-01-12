@@ -171,24 +171,47 @@ end
 
 
 module Git
-  class CommitID < Struct.new(:hash, :is_dirty)
-    # Get the current commit ID (HEAD) for the Git repository that the current
-    # working directory belongs to.
-    #
-    # The return value is a CommitID.
-    def self.get_current
-      CommitID.new(
-        is_dirty: (not `git status --porcelain`.empty?),
-        hash: `git rev-parse HEAD`.strip,
-      ).freeze
-    end
-
+  class Commit < Struct.new(:hash, :is_dirty)
     def to_s
       if self.is_dirty
         "#{self.hash}-dirty"
       else
         "#{self.hash}"
       end
+    end
+  end
+
+  class Repo
+    def initialize path
+      @path = path
+    end
+
+    def self.at_cwd
+      Repo.new(Dir.pwd)
+    end
+
+    # Get the current commit ID (HEAD) for the Git repository that the current
+    # working directory belongs to.
+    #
+    # The return value is a CommitID.
+    def head
+      Commit.new(
+        is_dirty: (not `git status --porcelain`.empty?),
+        hash: `git rev-parse HEAD`.strip,
+      ).freeze
+    end
+
+    def log_since_commit(commit_id)
+      raise Exception.new "invalid commit ID: '#{commit_id}'" unless commit_id.match? /^[0-9a-f]{1,}$/
+
+      `git log --format="%aI|%H|%s"`.each_line.map {|line|
+        date, hash, subject = line.chop.split '|'
+        {
+          :date => date,
+          :hash => hash,
+          :subject => subject,
+        }
+      }
     end
   end
 end
