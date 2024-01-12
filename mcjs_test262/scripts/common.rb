@@ -18,6 +18,11 @@ class TableSchema
   def field_type field
     @fields[field].type
   end
+
+  def field_name field
+    raise Exception.new "no such field: #{field}" unless @fields.include? field
+    field.to_s
+  end
 end
 
 class Table
@@ -68,6 +73,7 @@ RUNS = TableSchema.new 'runs', {
   :is_strict => Field.new(type: 'boolean'),
   :error_category => Field.new(type: 'varchar'),
   :error_message => Field.new(type: 'varchar'),
+  :version => Field.new(type: 'varchar'),
 }
 
 class Database
@@ -83,6 +89,8 @@ class Database
     if new_file
       @db.transaction { self.recreate }
     end
+
+    @stmt__delete_runs_for_version = nil
   end
 
   def transaction &block
@@ -101,6 +109,14 @@ class Database
     @runs.delete_all
   end
 
+  def delete_runs_for_version version
+    @stmt__delete_runs_for_version ||= @db.prepare "
+      delete from #{RUNS.name}
+      where #{RUNS.field_name :version} = ?
+    "
+    @stmt__delete_runs_for_version.execute(version.to_s)
+  end
+
   def insert_run record
     @runs.insert record
   end
@@ -110,6 +126,7 @@ class Database
     @db.execute '
       create view general as 
       select r.path
+      , r.version
       , r.error_message is null as success
       , tc.dirname
       , tc.basename
@@ -152,4 +169,27 @@ class Database
   end
 end
 
+
+module Git
+  class CommitID < Struct.new(:hash, :is_dirty)
+    # Get the current commit ID (HEAD) for the Git repository that the current
+    # working directory belongs to.
+    #
+    # The return value is a CommitID.
+    def self.get_current
+      CommitID.new(
+        is_dirty: (not `git status --porcelain`.empty?),
+        hash: `git rev-parse HEAD`.strip,
+      ).freeze
+    end
+
+    def to_s
+      if self.is_dirty
+        "#{self.hash}-dirty"
+      else
+        "#{self.hash}"
+      end
+    end
+  end
+end
 
