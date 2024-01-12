@@ -139,19 +139,20 @@ class Database
     @db.execute '
       create view status as
       with q as (
-      	select dirname
+      	select version
+        , dirname
       	, success
       	, count(*) as count
       	from general
-      	group by dirname, success 
-      	order by dirname, success
+      	group by version, dirname, success 
+      	order by version, dirname, success
       )
       , q2 as (
-      	select dirname
+      	select version, dirname
       	, ifnull(sum(count) filter (where success = 1), 0) as ok
       	, ifnull(sum(count) filter (where success = 0), 0) as fail
       	from q
-      	group by dirname
+      	group by version, dirname
       )
       select *
       , cast(ok as real) * 100 / (ok + fail) as progress
