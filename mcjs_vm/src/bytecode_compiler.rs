@@ -1302,16 +1302,28 @@ fn compile_var_decl_block_scope_part(builder: &mut Builder, vd: &VarDecl) -> Res
         let name = get_var_decl_name(decl);
 
         // this check is needed for all decl kinds: var, let, const.
-        // we could have skipped var's here, but we must still process them here as well,
-        // in order to raise an error if any other `let`/`const` decls of the same name
-        // exist in the same block.
-        if builder.cur_fnb().inner_scope().vars.contains_key(&name) {
-            return Err(error!("redeclared name: {}", name.to_string()));
-        }
+        // we could have skipped var's here, but we must still process them here as well, in order
+        // to raise an error if the `var` happens in the scope of any other `let`/`const` decls (at
+        // least in this function).
 
         match vd.kind {
-            VarDeclKind::Var => {}
+            VarDeclKind::Var => {
+                // We exclude the outermost scope of the function.
+                // This is fine because any conflict with a lexical decl (let/const) happening
+                // there would have already been caught during the
+                // compile_var_decl_block_scope_part phase of that lexical decl.
+                let parent_scopes = &builder.cur_fnb().scopes[1..];
+                if parent_scopes
+                    .iter()
+                    .any(|scope| scope.vars.contains_key(&name))
+                {
+                    return Err(error!("redeclared name: {}", name.to_string()));
+                }
+            }
             VarDeclKind::Let | VarDeclKind::Const => {
+                if builder.cur_fnb().inner_scope().vars.contains_key(&name) {
+                    return Err(error!("redeclared name: {}", name.to_string()));
+                }
                 compile_namedef(builder, name);
             }
         }
