@@ -1,49 +1,8 @@
 #!/usr/bin/env ruby
 
-require 'optparse'
-require 'json'
-
 require_relative 'common'
 
-class Hash
-  def deep_get(*keys)
-    value = self
-    keys.each do |k|
-      break if value.nil?
-      value = value[k]
-    end
-    value
-  end
-end
-
-#
-# Main
-#
-
-Dir.chdir __dir__
-
-mcjs_version = Git::Repo::at_cwd.head.to_s
-
-filename = '../out/runs.json'
-STDERR.puts "loading #{filename}..."
-runs = File.new(filename).each_line.map{|line| JSON::load line}
-
-STDERR.puts "inserting into db..."
-db = Database.new '../out/tests.db'
-db.transaction do
-  db.delete_runs_for_version(mcjs_version)
-  runs.each do |run|
-    record = {
-      :path => run["file_path"],
-      :is_strict => run["is_strict"] ? 1 : 0,
-      :error_category => run.deep_get("error", "category"),
-      :error_message => run.deep_get("error", "message"),
-      :version => mcjs_version,
-    }
-    db.insert_run record
-  end
-end
-
-STDERR.puts "inserted #{runs.length} records"
+inst = SourceInst.new(repo_home: Dir.pwd)
+inst.import_outcome
 
 
