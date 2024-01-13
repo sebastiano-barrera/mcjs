@@ -244,11 +244,9 @@ end
 class SourceInst
   def initialize(repo_home:, db_filename: nil, first_commit: nil)
     @repo = Git::open(repo_home)
-    puts "repo: #{@repo.dir}"
 
     db_filename ||= "#{@repo.dir}/mcjs_test262/out/tests.db"
     @db = Database.new(db_filename)
-    puts "database: #{db_filename}"
 
     @first_commit = first_commit || "32fb4783c60d1ffeb6db872600425fdf1e900225"
     @mcjs_version = nil
