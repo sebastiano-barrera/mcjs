@@ -1,4 +1,4 @@
-require './common'
+require_relative './common'
 
 Dir.chdir __dir__
 
