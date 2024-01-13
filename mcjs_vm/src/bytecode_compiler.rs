@@ -141,8 +141,17 @@ pub fn compile_file(
     let ast_module = parse_file(filename.clone(), content, Lrc::clone(&source_map))
         .with_context(error!("while parsing file: {filename}"))?;
 
-    let compiled_mod = compile_module(&ast_module, Lrc::clone(&source_map), flags).with_context(
-        error!("while compiling module: {filename}").with_source_map(Lrc::clone(&source_map)),
+    let src_type_name = match flags.source_type {
+        SourceType::Script => "script",
+        SourceType::Module => "module",
+    };
+    let compiled_mod = match flags.source_type {
+        SourceType::Module => compile_module(&ast_module, Lrc::clone(&source_map), flags),
+        SourceType::Script => compile_script(&ast_module, Lrc::clone(&source_map), flags),
+    }
+    .with_context(
+        error!("while compiling {}: {}", src_type_name, filename)
+            .with_source_map(Lrc::clone(&source_map)),
     )?;
 
     Ok(CompiledChunk {
@@ -837,7 +846,58 @@ fn compile_module(
 
     builder.emit(Instr::Return(module_obj));
     let root_fnid = builder.end_function(ast_module.span());
+    Ok(finish_module(builder, root_fnid))
+}
 
+fn compile_script(
+    ast_module: &swc_ecma_ast::Module,
+    source_map: Rc<SourceMap>,
+    flags: CompileFlags,
+) -> Result<CompiledModule> {
+    use swc_ecma_ast::{ExportDecl, Expr, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
+
+    let mut builder = Builder::new(flags, source_map);
+    builder.start_function(None, &[]);
+
+    if let Some(Stmt::Expr(expr_stmt)) = ast_module.body.first().and_then(|i| i.as_stmt()) {
+        if let Some(Lit::Str(ref lit_str)) = expr_stmt.expr.as_lit() {
+            if lit_str.value.as_bytes() == b"use strict" {
+                builder.cur_fnb().enable_strict_mode();
+            }
+        }
+    }
+
+    let get_stmts = || {
+        ast_module.body.iter().filter_map(|item| match item {
+            ModuleItem::Stmt(stmt) => Some(stmt),
+            ModuleItem::ModuleDecl(_) => None,
+        })
+    };
+
+    {
+        let mut decls = Vec::new();
+        for stmt in get_stmts() {
+            find_hdecls_recursive(stmt, &mut decls);
+        }
+        compile_func_scope_namedefs(&mut builder, &decls)?;
+    }
+
+    for stmt in get_stmts() {
+        if let Stmt::Decl(decl) = stmt {
+            compile_decl_block_scope_part(&mut builder, decl)?;
+        }
+    }
+
+    for stmt in get_stmts() {
+        compile_stmt(&mut builder, stmt)
+            .with_context(error!("while compiling statement").with_span(stmt.span()))?;
+    }
+
+    let root_fnid = builder.end_function(ast_module.span());
+    Ok(finish_module(builder, root_fnid))
+}
+
+fn finish_module(builder: Builder, root_fnid: LocalFnId) -> CompiledModule {
     // The root function is the outermost scope, and therefore must capture
     // nothing.  Otherwise, we have a bug.
     assert!(builder.fns.get(&root_fnid).unwrap().captures.is_empty());
@@ -851,11 +911,11 @@ fn compile_module(
         .map(|(fnid, fnb)| (fnid, fnb.build()))
         .collect();
 
-    Ok(CompiledModule {
+    CompiledModule {
         root_fnid,
         functions,
         breakable_ranges: builder.breakable_ranges,
-    })
+    }
 }
 
 fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> {
