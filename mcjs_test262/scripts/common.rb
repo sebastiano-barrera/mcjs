@@ -162,6 +162,7 @@ class Database
       select tc.path
       , r.version
       , r.error_message is null as success
+      , r.is_strict
       , tc.dirname
       , tc.basename
       , tc.uses_eval 
