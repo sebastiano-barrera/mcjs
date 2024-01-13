@@ -106,6 +106,8 @@ RUNS = TableSchema.new 'runs', {
   :version => Field.new(type: 'varchar'),
 }
 
+DiffItem = Struct.new(:path, :is_strict, :prev_success, :cur_success)
+
 class Database
   def initialize filename
     filename = Pathname.new filename
@@ -121,6 +123,7 @@ class Database
     end
 
     @stmt__delete_runs_for_version = nil
+    @stmt__outcome_diffs = nil
   end
 
   def transaction &block
@@ -231,6 +234,38 @@ class Database
     end
   end
 
+  def outcome_diffs(version_pre, version_post)
+    @stmt__outcome_diffs ||= @db.prepare '
+      select cur.path
+      , cur.is_strict
+      , prev.success as prev_success
+      , cur.success as cur_success
+      from (
+              select path
+              , is_strict
+              , success
+              from general
+              where version = ?
+      ) as prev left join (
+              select path
+              , is_strict
+              , success
+              from general
+              where version = ?
+      ) as cur on (prev.path = cur.path and prev.is_strict = cur.is_strict)
+      where prev_success <> cur_success
+    '
+    @stmt__outcome_diffs.execute([version_pre, version_post]).map do |row|
+      path, is_strict, prev_success, cur_success = row
+      DiffItem.new(
+        path: path,
+        is_strict: is_strict,
+        prev_success: prev_success,
+        cur_success: cur_success,
+      )
+    end
+  end
+
   private
 
   def recreate
@@ -311,6 +346,12 @@ class SourceInst
     end
 
     by_version
+  end
+
+  def outcome_diffs(version_pre, version_post)
+    version_pre = @repo.revparse version_pre
+    version_post = @repo.revparse version_post
+    @db.outcome_diffs(version_pre, version_post)
   end
 
   # Imports runs.json into database
