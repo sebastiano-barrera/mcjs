@@ -1269,13 +1269,12 @@ fn init_stack(
 ) -> stack::InterpreterData {
     let mut data = stack::InterpreterData::new();
     let root_fn = loader.get_function(fnid).unwrap();
-    let n_instrs = root_fn.instrs().len().try_into().unwrap();
 
     let global_this = Value::Object(realm.global_obj);
 
     data.push(stack::CallMeta {
         fnid,
-        n_regs: n_instrs,
+        n_regs: root_fn.n_regs() as u32,
         captures: &[],
         this: global_this,
     });
