@@ -289,7 +289,15 @@ class SourceInst
   end
 
   def mcjs_version
-    @mcjs_version ||= @repo.log[0].sha
+    if @mcjs_version.nil?
+      status = @repo.status
+      is_clean = status.changed.empty? \
+        and status.added.empty? \
+        and status.deleted.empty?
+      @mcjs_version = is_clean ? @repo.log[0].sha : "dirty"
+    end
+
+    @mcjs_version
   end
 
   def transaction &block
@@ -349,8 +357,8 @@ class SourceInst
   end
 
   def outcome_diffs(version_pre, version_post)
-    version_pre = @repo.revparse version_pre
-    version_post = @repo.revparse version_post
+    version_pre = @repo.revparse version_pre unless version_pre == "dirty"
+    version_post = @repo.revparse version_post unless version_post == "dirty"
     @db.outcome_diffs(version_pre, version_post)
   end
 
