@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use swc_atoms::JsWord;
 use swc_common::{sync::Lrc, Span, Spanned};
 use swc_ecma_ast::{
-    ArrowExpr, AssignOp, BinaryOp, Decl, ExportDecl, Expr, FnDecl, ForHead, Function, Lit,
-    ModuleItem, Pat, ReturnStmt, Stmt, UpdateOp, VarDecl, VarDeclKind, VarDeclarator,
+    ArrowExpr, AssignOp, BinaryOp, BlockStmt, Decl, ExportDecl, Expr, FnDecl, ForHead, Function,
+    Lit, ModuleItem, Pat, ReturnStmt, Stmt, UpdateOp, VarDecl, VarDeclKind, VarDeclarator,
 };
 
 use crate::bytecode::{self, IdentAsmt, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
@@ -1700,6 +1700,287 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
     Ok(dest)
+}
+
+mod declset {
+    use super::FnBuilder;
+
+    use swc_atoms::JsWord;
+    use swc_common::Span;
+    use swc_ecma_ast::{BlockStmt, FnDecl, ForHead, ModuleItem, Pat, Stmt, VarDecl, VarDeclKind};
+
+    #[derive(Debug)]
+    enum Kind {
+        /// `var`
+        Var,
+        /// `let`
+        Let,
+        /// `const`
+        Const,
+        /// `function`
+        Function,
+    }
+
+    impl From<VarDeclKind> for Kind {
+        fn from(value: VarDeclKind) -> Self {
+            match value {
+                VarDeclKind::Var => Kind::Var,
+                VarDeclKind::Let => Kind::Let,
+                VarDeclKind::Const => Kind::Const,
+            }
+        }
+    }
+
+    pub struct Decl {
+        kind: Kind,
+        name: JsWord,
+        span: Span,
+        lexical_span: Span,
+    }
+    pub struct RedeclError {
+        pub early_ndx: usize,
+        pub late_ndx: usize,
+    }
+
+    pub struct DeclSet(Vec<Decl>);
+    impl DeclSet {
+        fn new(mut decls: Vec<Decl>) -> Self {
+            // Sort outer to inner, children blocks in source order
+            decls.sort_by_key(|decl| (decl.span.lo, -(decl.span.hi.0 as i32)));
+            DeclSet(decls)
+        }
+    }
+
+    pub struct FnDeclBuilder<'a> {
+        fnb: &'a mut FnBuilder,
+        blocks: Vec<Span>,
+        decls: Vec<Decl>,
+    }
+
+    impl<'a> FnDeclBuilder<'a> {
+        pub fn new(fnb: &'a mut FnBuilder) -> Self {
+            FnDeclBuilder {
+                fnb,
+                blocks: Vec::new(),
+                decls: Vec::new(),
+            }
+        }
+
+        #[must_use]
+        pub fn build(self) -> (DeclSet, Vec<RedeclError>) {
+            assert!(
+                self.blocks.is_empty(),
+                "compiler bug: DeclCompiler::build called with outstanding blocks"
+            );
+
+            let decls = DeclSet::new(self.decls);
+            let redecls = check_redeclarations(&decls);
+            (decls, redecls)
+        }
+
+        fn start_block(&mut self, span: Span) {
+            self.blocks.push(span);
+        }
+        fn end_block(&mut self) {
+            self.blocks.pop().unwrap();
+        }
+        fn cur_span(&self) -> Span {
+            *self.blocks.last().unwrap()
+        }
+        fn outermost_span(&self) -> Span {
+            *self.blocks.first().unwrap()
+        }
+
+        fn declare_function(&mut self, fn_decl: &FnDecl) {
+            self.decls.push(Decl {
+                kind: Kind::Function,
+                name: get_fn_decl_name(fn_decl),
+                span: if self.fnb.is_strict_mode {
+                    self.cur_span()
+                } else {
+                    self.outermost_span()
+                },
+                lexical_span: self.cur_span(),
+            })
+        }
+
+        fn declare_var(&mut self, var_decl: &VarDecl) {
+            for declarator in &var_decl.decls {
+                let name = get_var_decl_name(declarator);
+                self.declare_var_direct(var_decl.kind, name);
+            }
+        }
+
+        fn declare_var_direct(&mut self, kind: VarDeclKind, name: JsWord) {
+            self.decls.push(Decl {
+                kind: kind.into(),
+                name,
+                span: match kind.into() {
+                    VarDeclKind::Var => self.outermost_span(),
+                    VarDeclKind::Let | VarDeclKind::Const => self.cur_span(),
+                },
+                lexical_span: self.cur_span(),
+            })
+        }
+    }
+
+    /// Check if the given decl array (see `Decl`) contains forbidden redeclarations
+    fn check_redeclarations(declset: &DeclSet) -> Vec<RedeclError> {
+        let mut redecls = Vec::new();
+
+        // TODO Use .group_by when it gets stabilized
+        let mut slice = declset.0.as_slice();
+        while slice.len() > 0 {
+            let span = slice[0].span;
+            let group_len = slice.partition_point(|d| d.span == span);
+            let group;
+            (group, slice) = slice.split_at(group_len);
+
+            // quadratic, but I expect this data to always be very small:
+            // one item per defined identifier, their number should almost
+            // always be < 10, very often < 5
+            for cur in 1..group.len() {
+                for prev in 0..cur {
+                    if group[cur].name == group[prev].name {
+                        let is_ok = match (&group[cur].kind, &group[prev].kind) {
+                            (Kind::Var, Kind::Var) => true,
+                            (Kind::Function, Kind::Function) => true,
+
+                            (Kind::Var, Kind::Function) => true,
+                            (Kind::Function, Kind::Var) => true,
+
+                            (Kind::Let, _) | (_, Kind::Let) => false,
+                            (Kind::Const, _) | (_, Kind::Const) => false,
+                        };
+
+                        if !is_ok {
+                            redecls.push(RedeclError {
+                                early_ndx: prev,
+                                late_ndx: cur,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        redecls
+    }
+
+    fn get_fn_decl_name(fn_decl: &swc_ecma_ast::FnDecl) -> JsWord {
+        let (name, _syn_ctxt) = fn_decl.ident.to_id();
+        name
+    }
+
+    fn get_var_decl_name(decl: &swc_ecma_ast::VarDeclarator) -> JsWord {
+        let ident = decl
+            .name
+            .as_ident()
+            .unwrap_or_else(|| unsupported_node!(decl));
+        ident.id.to_id().0
+    }
+
+    pub fn compile_decls_script(
+        fnb: &mut FnBuilder,
+        script: &swc_ecma_ast::Module,
+    ) -> (DeclSet, Vec<RedeclError>) {
+        let mut dc = FnDeclBuilder::new(fnb);
+        dc.start_block(script.span);
+
+        for item in &script.body {
+            match item {
+                ModuleItem::Stmt(stmt) => compile_decls_stmt(&mut dc, stmt),
+                ModuleItem::ModuleDecl(_) => {
+                    unreachable!("compiler bug: passed module AST node to `compile_decls_script`")
+                }
+            }
+        }
+
+        dc.end_block();
+        dc.build()
+    }
+
+    fn compile_decls_stmt(dc: &mut FnDeclBuilder, stmt: &Stmt) {
+        match stmt {
+            Stmt::Decl(swc_ecma_ast::Decl::Fn(fn_decl)) => dc.declare_function(&fn_decl),
+            Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl)) => dc.declare_var(&var_decl),
+
+            Stmt::Block(block_stmt) => {
+                compile_decls_block(dc, block_stmt);
+            }
+            Stmt::If(if_stmt) => {
+                compile_decls_stmt(dc, &if_stmt.cons);
+                if let Some(alt) = &if_stmt.alt {
+                    compile_decls_stmt(dc, alt);
+                }
+            }
+            Stmt::While(while_stmt) => {
+                compile_decls_stmt(dc, &while_stmt.body);
+            }
+            Stmt::For(for_stmt) => {
+                use swc_ecma_ast::VarDeclOrExpr;
+
+                dc.start_block(for_stmt.span);
+                if let Some(VarDeclOrExpr::VarDecl(var_decl)) = &for_stmt.init {
+                    dc.declare_var(&var_decl);
+                }
+                compile_decls_stmt(dc, &for_stmt.body);
+                dc.end_block();
+            }
+            Stmt::Try(try_stmt) => {
+                compile_decls_block(dc, &try_stmt.block);
+
+                if let Some(catch_block) = &try_stmt.handler {
+                    dc.start_block(catch_block.body.span);
+                    if let Some(pat) = &catch_block.param {
+                        match pat {
+                            Pat::Ident(binding_ident) => {
+                                let name = binding_ident.id.sym.clone();
+                                dc.declare_var_direct(VarDeclKind::Var, name)
+                            }
+                            _ => unsupported_node!(pat),
+                        }
+                    }
+                    for stmt in &catch_block.body.stmts {
+                        compile_decls_stmt(dc, stmt);
+                    }
+                    dc.end_block();
+                }
+
+                if let Some(finally_block) = &try_stmt.finalizer {
+                    compile_decls_block(dc, finally_block);
+                }
+            }
+
+            Stmt::ForIn(for_in_stmt) => {
+                dc.start_block(for_in_stmt.span);
+                if let ForHead::VarDecl(var_decl) = &for_in_stmt.left {
+                    dc.declare_var(var_decl);
+                }
+                compile_decls_stmt(dc, &for_in_stmt.body);
+                dc.end_block();
+            }
+
+            Stmt::ForOf(for_or_stmt) => {
+                dc.start_block(for_or_stmt.span);
+                if let ForHead::VarDecl(var_decl) = &for_or_stmt.left {
+                    dc.declare_var(var_decl);
+                }
+                compile_decls_stmt(dc, &for_or_stmt.body);
+                dc.end_block();
+            }
+
+            _ => {}
+        }
+    }
+
+    fn compile_decls_block(dc: &mut FnDeclBuilder, block_stmt: &BlockStmt) {
+        dc.start_block(block_stmt.span);
+        for stmt in &block_stmt.stmts {
+            compile_decls_stmt(dc, stmt);
+        }
+        dc.end_block();
+    }
 }
 
 fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VReg> {
