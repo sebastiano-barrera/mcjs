@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
+use swc_common::BytePos;
 use swc_common::{sync::Lrc, Span, Spanned};
 use swc_ecma_ast::{
     ArrowExpr, AssignOp, BinaryOp, BlockStmt, Decl, ExportDecl, Expr, FnDecl, ForHead, Function,
@@ -26,9 +27,9 @@ macro_rules! unsupported_node {
 /// The state we need to track to compile a single module.  Among other things,
 /// this includes things like tracking lexical scopes (so that variables are
 /// resolved to simple, scope-independent IDs), FnId generation.
-struct Builder {
-    fns: HashMap<LocalFnId, FnBuilder>,
-    fn_stack: Vec<FnBuilder>,
+struct Builder<'a> {
+    fns: HashMap<LocalFnId, FnBuilder<'a>>,
+    fn_stack: Vec<FnBuilder<'a>>,
     next_fnid: u16,
     breakable_ranges: Vec<bytecode::BreakRange>,
     brange_stack: Vec<bytecode::BreakRange>,
@@ -36,7 +37,7 @@ struct Builder {
     source_map: Rc<SourceMap>,
 }
 
-impl Builder {
+impl<'a> Builder<'a> {
     /// Create a new builder.
     ///
     /// At the end of the compilation process, the builder will have generated a
@@ -61,7 +62,10 @@ impl Builder {
         }
     }
 
-    fn with_span(&mut self, span: &swc_common::Span) -> BuilderWithBreakRange {
+    fn with_span<'s>(&'s mut self, span: &swc_common::Span) -> BuilderWithBreakRange<'s, 'a>
+    where
+        'a: 's,
+    {
         let iid_start = self.peek_iid();
         let iid_end = IID(iid_start.0 + 1);
         let local_fnid = self.cur_fnb().fnid;
@@ -77,22 +81,22 @@ impl Builder {
     }
 }
 
-struct BuilderWithBreakRange<'a>(&'a mut Builder);
+struct BuilderWithBreakRange<'a, 'b: 'a>(&'a mut Builder<'b>);
 
-impl<'a> std::ops::Deref for BuilderWithBreakRange<'a> {
-    type Target = Builder;
+impl<'a, 'b> std::ops::Deref for BuilderWithBreakRange<'a, 'b> {
+    type Target = Builder<'b>;
 
     fn deref(&self) -> &Self::Target {
         self.0
     }
 }
-impl<'a> std::ops::DerefMut for BuilderWithBreakRange<'a> {
+impl<'a, 'b> std::ops::DerefMut for BuilderWithBreakRange<'a, 'b> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
     }
 }
 
-impl<'a> Drop for BuilderWithBreakRange<'a> {
+impl<'a, 'b> Drop for BuilderWithBreakRange<'a, 'b> {
     fn drop(&mut self) {
         let mut brange = self.0.brange_stack.pop().unwrap();
         brange.iid_end = self.0.peek_iid();
@@ -162,9 +166,11 @@ pub fn compile_file(
     })
 }
 
-struct FnBuilder {
+struct FnBuilder<'a> {
     fnid: LocalFnId,
-    declset: declset::DeclSet,
+    declset: declset::DeclSet<'a>,
+    vregs: Box<[VReg]>,
+    global_this_vreg: Option<VReg>,
     scopes: Vec<Scope>,
     instrs: Vec<Instr>,
     consts: Vec<Literal>,
@@ -231,30 +237,37 @@ enum Var {
 
 #[derive(Debug)]
 struct Scope {
-    vars: HashMap<JsWord, VReg>,
     shared_count: usize,
 }
 impl Scope {
     fn new() -> Self {
-        Scope {
-            vars: HashMap::new(),
-            shared_count: 0,
-        }
+        Scope { shared_count: 0 }
     }
 }
 
-impl FnBuilder {
-    fn new(id: LocalFnId, declset: declset::DeclSet) -> Self {
+impl<'a> FnBuilder<'a> {
+    fn new(id: LocalFnId, declset: declset::DeclSet<'a>) -> Self {
+        // See doc comment for bytecode::ARGS_COUNT_MAX
+        let mut next_vreg = bytecode::ARGS_COUNT_MAX;
+
+        let n_decls = declset.decls().len();
+        let mut vregs = Vec::with_capacity(n_decls);
+        for _ in 0..n_decls {
+            vregs.push(VReg(next_vreg));
+            next_vreg += 1;
+        }
+
         FnBuilder {
             fnid: id,
             declset,
+            vregs: vregs.into_boxed_slice(),
+            global_this_vreg: None,
             scopes: vec![Scope::new()],
             instrs: Vec::new(),
             consts: Vec::new(),
             trace_anchors: HashMap::new(),
             captures: Vec::new(),
-            // See doc comment for bytecode::ARGS_COUNT_MAX
-            next_vreg: bytecode::ARGS_COUNT_MAX,
+            next_vreg,
             pending_break_instrs: Vec::new(),
             pending_continue_instrs: Vec::new(),
             span: None,
@@ -356,9 +369,10 @@ impl FnBuilder {
     // Subsequent calls to get_var will return  the IID for the GetCapture instruction.
     fn set_var_captured(&mut self, name: &JsWord) -> VReg {
         let name_str = name.to_string();
-        assert!(!self.captures.iter().any(|cap| cap == &name_str));
 
+        assert!(!self.captures.iter().any(|cap| cap == &name_str));
         self.captures.push(name_str);
+
         let cap_ndx: u16 = (self.captures.len() - 1)
             .try_into()
             .expect("too many captures!");
@@ -373,9 +387,7 @@ impl FnBuilder {
         let reg = self.next_vreg();
         self.emit(Instr::LoadCapture(reg, cap_ndx));
 
-        let outermost_scope = self.scopes.first_mut().unwrap();
-        let prev = outermost_scope.vars.insert(name.clone(), reg);
-        assert!(prev.is_none());
+        todo!("the decls structure needs to be modified in order for this to work");
 
         self.ident_history.push(IdentAsmt {
             iid: self.peek_iid(),
@@ -386,21 +398,30 @@ impl FnBuilder {
         reg
     }
 
-    fn get_vreg(&self, name: &JsWord) -> Option<VReg> {
-        self.scopes
-            .iter()
-            .rev() // innermost -> outwards
-            .find_map(|scope| scope.vars.get(name))
-            .cloned()
-    }
-
-    fn define_var(&mut self, name: JsWord, reg: VReg) {
-        let scope = self.inner_scope_mut();
-        let prev = scope.vars.insert(name.clone(), reg);
-        if prev.is_some() {
-            // definition of var $name shadows previous definition
+    fn get_global_this(&mut self) -> VReg {
+        if self.global_this_vreg.is_none() {
+            let reg = self.next_vreg();
+            self.emit(Instr::GetGlobalThis(reg));
+            self.global_this_vreg = Some(reg);
         }
 
+        self.global_this_vreg.clone().unwrap()
+    }
+
+    fn resolve_name(&mut self, name: &JsWord, point: BytePos) -> Option<VReg> {
+        if let Some(ndx) = self.declset.lookup(name, point) {
+            return Some(self.vregs[ndx]);
+        }
+
+        if name.as_bytes() == b"globalThis" {
+            return Some(self.get_global_this());
+        }
+
+        None
+    }
+
+    // TODO delete!
+    fn define_var(&mut self, name: JsWord, reg: VReg) {
         self.ident_history.push(IdentAsmt {
             iid: self.peek_iid(),
             reg,
@@ -415,7 +436,7 @@ impl FnBuilder {
     }
 }
 
-impl Builder {
+impl<'a> Builder<'a> {
     fn reserve(&mut self) -> IID {
         self.cur_fnb().reserve()
     }
@@ -436,7 +457,7 @@ impl Builder {
         self.cur_fnb().get_mut(iid)
     }
 
-    fn cur_fnb(&mut self) -> &mut FnBuilder {
+    fn cur_fnb(&mut self) -> &mut FnBuilder<'a> {
         self.fn_stack.last_mut().expect("no FnBuilder!")
     }
 
@@ -466,20 +487,13 @@ impl Builder {
         self.cur_fnb().define_var(name, reg)
     }
 
-    fn get_vreg(&mut self, sym: &JsWord) -> Option<VReg> {
-        if sym == "globalThis" {
-            let reg = self.new_vreg();
-            self.emit(Instr::GetGlobalThis(reg));
-            self.cur_fnb().define_var("globalThis".into(), reg);
-            return Some(reg);
-        }
-
+    fn get_vreg(&mut self, sym: &JsWord, point: BytePos) -> Option<VReg> {
         let found = self
             .fn_stack
-            .iter()
+            .iter_mut()
             .rev()
             .enumerate()
-            .find_map(|(ndx, fnb)| fnb.get_vreg(sym).map(|vreg| (ndx, vreg)));
+            .find_map(|(ndx, fnb)| fnb.resolve_name(sym, point).map(|vreg| (ndx, vreg)));
 
         match found {
             // Hell yeah, found it in the current function, we have a "simple" vreg
@@ -495,8 +509,8 @@ impl Builder {
 
     /// Determines the location where a variable is stored.  The return value can be subsequently
     /// used via `read_var` and `write_var` to access the variable properly.
-    fn get_var(&mut self, sym: &JsWord) -> Var {
-        match self.get_vreg(sym) {
+    fn get_var(&mut self, sym: &JsWord, point: BytePos) -> Var {
+        match self.get_vreg(sym, point) {
             Some(vreg) => Var::Reg(vreg),
             None => Var::Global(sym.clone()),
         }
@@ -535,7 +549,7 @@ impl Builder {
         let key = self.new_vreg();
         let dest = self.new_vreg();
 
-        let global_this = self.get_vreg(&"globalThis".into()).unwrap();
+        let global_this = self.cur_fnb().get_global_this();
         self.set_const(key, Literal::String(sym.to_string()));
         self.emit(Instr::ObjGet {
             dest,
@@ -548,7 +562,7 @@ impl Builder {
     fn write_global(&mut self, sym: &JsWord, value: VReg) {
         let key = self.new_vreg();
 
-        let global_this = self.get_vreg(&"globalThis".into()).unwrap();
+        let global_this = self.cur_fnb().get_global_this();
         self.set_const(key, Literal::String(sym.to_string()));
         self.emit(Instr::ObjSet {
             obj: global_this,
@@ -566,7 +580,7 @@ impl Builder {
         &mut self,
         name: Option<JsWord>,
         params: &[swc_ecma_ast::Param],
-        declset: declset::DeclSet,
+        declset: declset::DeclSet<'a>,
     ) {
         let fnid = LocalFnId(self.next_fnid);
         self.next_fnid += 1;
@@ -794,7 +808,7 @@ fn compile_module(
             for decl in &var_decl.decls {
                 let name = get_var_decl_name(decl);
                 let value = builder
-                    .get_vreg(&name)
+                    .get_vreg(&name, decl.span_lo())
                     .expect("compiler bug: module export has no value");
 
                 let key = builder.new_vreg();
@@ -842,7 +856,20 @@ fn compile_script(
         .unwrap_or(false);
 
     let decl_flags = declset::Flags { is_strict_mode };
-    let declset = declset::compile_decls_script(ast_module, decl_flags)?;
+    let declset = {
+        let mut declset = declset::compile_decls_module(ast_module, decl_flags)?;
+        // bit of a hack, but it works: `var`/`function` declarations at the
+        //   toplevel scope of a script are allocated as properties of `globalThis`.
+        //   They look like local variables but they're not.
+        //
+        //   To get this effect, we *delete* those toplevel declarations from the
+        //   declset. This way, the name resolution code won't find them, and
+        //   FnBuilder will re-route read/writes to properties of globalThis.  It's
+        //   easier and simpler than carefully skipping them with a separate "script
+        //   mode".
+        declset.delete_toplevel();
+        declset
+    };
 
     let mut builder = Builder::new(flags, source_map);
     builder.start_function(None, &[], declset);
@@ -850,22 +877,40 @@ fn compile_script(
         builder.cur_fnb().enable_strict_mode();
     }
 
-    let get_stmts = || {
-        ast_module.body.iter().filter_map(|item| match item {
-            ModuleItem::Stmt(stmt) => Some(stmt),
-            ModuleItem::ModuleDecl(_) => None,
-        })
-    };
+    // assignments that happen at function top
+    // TODO refactor to function
+    {
+        let builder = &mut builder;
 
-    for stmt in get_stmts() {
-        if let Stmt::Decl(decl) = stmt {
-            compile_decl_block_scope_part(&mut builder, decl)?;
+        if is_strict_mode {
+            let point = ast_module.span.span_lo();
+            let visible_decls: &[declset::Decl] = builder.cur_fnb().declset.visible_at(point);
+            for decl in visible_decls {
+                if let declset::Kind::Var {
+                    fn_decl: Some(fn_decl),
+                } = decl.kind
+                {
+                    let func = fn_decl.function.as_ref();
+                    let value = compile_function(builder, None, func)?;
+
+                    println!("defined function `{}`", decl.name.to_string());
+                    let var = builder.get_var(&decl.name, func.span_lo());
+                    builder.write_var(&var, value);
+                }
+            }
         }
     }
 
-    for stmt in get_stmts() {
-        compile_stmt(&mut builder, stmt)
-            .with_context(error!("while compiling statement").with_span(stmt.span()))?;
+    // TODO assignments that happen at block top
+
+    for module_item in &ast_module.body {
+        match module_item {
+            ModuleItem::Stmt(stmt) => {
+                compile_stmt(&mut builder, stmt)
+                    .with_context(error!("while compiling statement").with_span(stmt.span()))?;
+            }
+            ModuleItem::ModuleDecl(_) => {}
+        }
     }
 
     let root_fnid = builder.end_function(ast_module.span());
@@ -905,7 +950,7 @@ fn finish_module(builder: Builder, root_fnid: LocalFnId) -> CompiledModule {
     }
 }
 
-fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> {
+fn compile_stmt<'a>(builder: &mut Builder<'a>, stmt: &'a swc_ecma_ast::Stmt) -> Result<()> {
     use swc_ecma_ast::Stmt;
 
     let mut builder = builder.with_span(&stmt.span());
@@ -1083,7 +1128,6 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
                 use swc_ecma_ast::VarDeclOrExpr;
                 match init {
                     VarDeclOrExpr::VarDecl(var_decl) => {
-                        compile_var_decl_block_scope_part(&mut builder, var_decl)?;
                         compile_var_decl_assignment(&mut builder, var_decl)?;
                     }
                     VarDeclOrExpr::Expr(expr) => {
@@ -1319,14 +1363,8 @@ fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> 
     }
 }
 
-fn compile_block(builder: &mut Builder, stmts: &[Stmt]) -> Result<()> {
+fn compile_block<'a>(builder: &mut Builder<'a>, stmts: &'a [Stmt]) -> Result<()> {
     builder.cur_fnb().push_scope();
-
-    for stmt in stmts {
-        if let Stmt::Decl(decl) = stmt {
-            compile_decl_block_scope_part(builder, decl)?;
-        }
-    }
 
     for stmt in stmts {
         compile_stmt(builder, stmt)?;
@@ -1336,85 +1374,9 @@ fn compile_block(builder: &mut Builder, stmts: &[Stmt]) -> Result<()> {
     Ok(())
 }
 
-fn compile_decl_block_scope_part(builder: &mut Builder, decl: &Decl) -> Result<()> {
-    match decl {
-        Decl::Var(vd) => compile_var_decl_block_scope_part(builder, vd),
-        Decl::Fn(fd) => compile_fn_decl_assignment(builder, fd),
-        _ => Ok(()),
-    }
-}
-
-fn compile_var_decl_block_scope_part(builder: &mut Builder, vd: &VarDecl) -> Result<()> {
-    for decl in &vd.decls {
-        let name = get_var_decl_name(decl);
-
-        // this check is needed for all decl kinds: var, let, const.
-        // we could have skipped var's here, but we must still process them here as well, in order
-        // to raise an error if the `var` happens in the scope of any other `let`/`const` decls (at
-        // least in this function).
-
-        match vd.kind {
-            VarDeclKind::Var => {
-                // We exclude the outermost scope of the function.
-                // This is fine because any conflict with a lexical decl (let/const) happening
-                // there would have already been caught during the
-                // compile_var_decl_block_scope_part phase of that lexical decl.
-                let parent_scopes = &builder.cur_fnb().scopes[1..];
-                if parent_scopes
-                    .iter()
-                    .any(|scope| scope.vars.contains_key(&name))
-                {
-                    return Err(error!("redeclared name: {}", name.to_string()));
-                }
-            }
-            VarDeclKind::Let | VarDeclKind::Const => {
-                if builder.cur_fnb().inner_scope().vars.contains_key(&name) {
-                    return Err(error!("redeclared name: {}", name.to_string()));
-                }
-                compile_namedef(builder, name);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn compile_var_decl_namedef(builder: &mut Builder, var_decl: &swc_ecma_ast::VarDecl) {
-    use swc_ecma_ast::VarDeclKind;
-
-    for decl in &var_decl.decls {
-        let name = get_var_decl_name(decl);
-        if let Var::Reg(_) = builder.get_var(&name) {
-            // We must *not* re-bind the same name to a different register.  The name will remain
-            // bound to the same location as before. (It's almost surely a function argument.)
-        } else {
-            compile_namedef(builder, name);
-        }
-    }
-}
-
-fn compile_namedef(builder: &mut Builder, name: JsWord) {
-    let is_script_global = builder.fn_stack.len() == 1
-        && builder.cur_fnb().scopes.len() == 1
-        && builder.flags.source_type == SourceType::Script;
-    if is_script_global {
-        // Script global => don't assign any register. Subsequent calls to `get_var` will
-        // return Var::Global(_). `read_var` and `write_var` will generate object member
-        // reads and writes.
-    } else {
-        // Not a script global => 'lock' this name to a specific register. Subsequent calls
-        // to `get_var` will return Var::Reg(_), and direct writes will be generated by
-        // `write_var`.
-        //
-        // Yet-unassigned vregs are implicitly initialized to Undefined, so no
-        // explicit instruction is required here
-        let reg = builder.new_vreg();
-        builder.define_var(name, reg);
-    }
-}
-
-fn compile_var_decl_assignment(
-    builder: &mut Builder,
-    var_decl: &swc_ecma_ast::VarDecl,
+fn compile_var_decl_assignment<'a>(
+    builder: &mut Builder<'a>,
+    var_decl: &'a swc_ecma_ast::VarDecl,
 ) -> Result<()> {
     use swc_ecma_ast::VarDeclKind;
 
@@ -1431,7 +1393,7 @@ fn compile_var_decl_assignment(
                 .as_ident()
                 .unwrap_or_else(|| unsupported_node!(decl));
             let name: JsWord = ident.id.to_id().0;
-            let var = builder.get_var(&name);
+            let var = builder.get_var(&name, ident.span_lo());
             let value = compile_expr(builder, expr)?;
             builder.write_var(&var, value);
         } else {
@@ -1452,26 +1414,17 @@ fn get_var_decl_name(decl: &swc_ecma_ast::VarDeclarator) -> JsWord {
     ident.id.to_id().0
 }
 
-fn compile_fn_decl_assignment(builder: &mut Builder, fn_decl: &swc_ecma_ast::FnDecl) -> Result<()> {
-    if fn_decl.declare {
-        panic!("unsupported case: fn_decl.declare");
-    }
-    let name = get_fn_decl_name(fn_decl);
-    if builder.cur_fnb().inner_scope().vars.contains_key(&name) {
-        return Err(error!("redeclared name: {}", name.to_string()));
-    }
-    let var = builder.get_var(&name);
-    let value = compile_function(builder, Some(name.clone()), &fn_decl.function)?;
-    builder.write_var(&var, value);
-    Ok(())
-}
-
+// TODO Dedup with the one in declset
 fn get_fn_decl_name(fn_decl: &swc_ecma_ast::FnDecl) -> JsWord {
     let (name, _) = fn_decl.ident.to_id();
     name
 }
 
-fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function) -> Result<VReg> {
+fn compile_function<'a>(
+    builder: &mut Builder<'a>,
+    name: Option<JsWord>,
+    func: &'a Function,
+) -> Result<VReg> {
     if !func.decorators.is_empty() {
         panic!("unsupported: function decorators");
     }
@@ -1494,7 +1447,7 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     let decl_flags = declset::Flags { is_strict_mode };
     let declset = declset::compile_decls_function(func, decl_flags)?;
 
-    builder.start_function(name, func.params.as_slice(), declset);
+    builder.start_function(name.clone(), func.params.as_slice(), declset);
     if is_strict_mode {
         builder.cur_fnb().enable_strict_mode();
     }
@@ -1510,7 +1463,7 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
     for var_name in inner_fnb.captures.iter() {
         let var_name: JsWord = var_name.as_str().into();
         let vreg = builder
-            .get_vreg(&var_name)
+            .get_vreg(&var_name, func.span_lo())
             .expect("not yet implemented: capturing a variable that is global");
         captures.push(vreg);
     }
@@ -1535,7 +1488,7 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
         key,
         value: proto,
     });
-    let ctor = builder.get_var(&"Function".into());
+    let ctor = builder.get_var(&"Function".into(), func.span_hi());
     let ctor = builder.read_var(&ctor);
     builder.set_const(key, Literal::String("constructor".to_string()));
     builder.emit(Instr::ObjSet {
@@ -1543,6 +1496,12 @@ fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function
         key,
         value: ctor,
     });
+
+    if let Some(name) = name {
+        println!("defined function `{}`", name.to_string());
+        let var = builder.get_var(&name, func.span_lo());
+        builder.write_var(&var, dest);
+    }
 
     builder.fns.insert(inner_fnb.fnid, inner_fnb);
     Ok(dest)
@@ -1555,65 +1514,79 @@ mod declset {
     use super::FnBuilder;
 
     use swc_atoms::JsWord;
-    use swc_common::{Span, Spanned};
+    use swc_common::{BytePos, Span, Spanned};
     use swc_ecma_ast::{
         BlockStmt, BlockStmtOrExpr, FnDecl, ForHead, ModuleItem, Pat, Stmt, VarDecl, VarDeclKind,
     };
 
     #[derive(Debug, Clone, Copy)]
-    enum Kind {
-        /// `var`
-        Var,
+    pub enum Kind<'a> {
+        /// `var`, `function`
+        Var { fn_decl: Option<&'a FnDecl> },
         /// `let`
         Let,
         /// `const`
         Const,
-        /// `function`
-        Function,
     }
 
-    impl From<VarDeclKind> for Kind {
+    impl<'a> From<VarDeclKind> for Kind<'a> {
         fn from(value: VarDeclKind) -> Self {
             match value {
-                VarDeclKind::Var => Kind::Var,
+                VarDeclKind::Var => Kind::Var { fn_decl: None },
                 VarDeclKind::Let => Kind::Let,
                 VarDeclKind::Const => Kind::Const,
             }
         }
     }
 
-    pub struct Decl {
-        kind: Kind,
-        name: JsWord,
-        visibility_span: Span,
-        lexical_span: Span,
-        decl_span: Span,
-    }
-    pub struct RedeclError {
-        pub early_ndx: usize,
-        pub late_ndx: usize,
+    pub struct Decl<'a> {
+        pub kind: Kind<'a>,
+        pub name: JsWord,
+        pub visibility_span: Span,
+        pub lexical_span: Span,
+        pub decl_span: Span,
     }
 
-    pub struct DeclSet(Vec<Decl>);
-    impl DeclSet {
-        fn new(mut decls: Vec<Decl>) -> Self {
-            // Sort outer to inner, children blocks in source order
-            decls
-                .sort_by_key(|decl| (decl.visibility_span.lo, -(decl.visibility_span.hi.0 as i32)));
-            DeclSet(decls)
+    pub struct DeclSet<'a>(Vec<Decl<'a>>);
+    pub struct DeclId(usize);
+
+    impl<'a> DeclSet<'a> {
+        pub fn decls(&self) -> &[Decl] {
+            self.0.as_slice()
+        }
+
+        pub fn lookup(&self, name: &JsWord, point: BytePos) -> Option<usize> {
+            self.0.iter().enumerate().find_map(|(ndx, decl)| {
+                let span = &decl.visibility_span;
+                if &decl.name == name && span.lo >= point && point < span.hi {
+                    Some(ndx)
+                } else {
+                    None
+                }
+            })
+        }
+
+        pub fn delete_toplevel(&mut self) {
+            if let Some(toplevel_span) = self.0.last().map(|decl| decl.visibility_span) {
+                self.0.retain(|decl| decl.visibility_span != toplevel_span);
+            }
+        }
+
+        pub fn visible_at(&self, point: BytePos) -> &[Decl<'a>] {
+            todo!()
         }
     }
 
-    pub struct FnDeclBuilder {
+    pub struct FnDeclBuilder<'a> {
         flags: Flags,
         blocks: Vec<Span>,
-        decls: Vec<Decl>,
+        decls: Vec<Decl<'a>>,
     }
     pub struct Flags {
         pub is_strict_mode: bool,
     }
 
-    impl FnDeclBuilder {
+    impl<'a> FnDeclBuilder<'a> {
         pub fn new(flags: Flags) -> Self {
             FnDeclBuilder {
                 flags,
@@ -1623,15 +1596,71 @@ mod declset {
         }
 
         #[must_use]
-        pub fn build(self) -> Result<DeclSet> {
+        pub fn build(self) -> Result<DeclSet<'a>> {
             assert!(
                 self.blocks.is_empty(),
                 "compiler bug: DeclCompiler::build called with outstanding blocks"
             );
 
-            let decls = DeclSet::new(self.decls);
-            check_redeclarations(&decls)?;
-            Ok(decls)
+            let mut decls = self.decls;
+
+            // Sort inner to outer scope (parents after children), children
+            // blocks in source order, with redeclarations adjacent.
+            //
+            // This way, the outermost scope is ordered last, and FnBuilder can
+            // append more variables (for captures)
+            decls.sort_by_key(|decl| {
+                (
+                    -(decl.visibility_span.hi.0 as i32),
+                    -(decl.visibility_span.lo.0 as i32),
+                    decl.name.unsafe_data(),
+                )
+            });
+
+            let mut decls = decls.into_iter().peekable();
+            let mut decls_deduped = Vec::with_capacity(decls.len());
+
+            // This scan relies on the ordering (which acts as a grouping mechanism)
+            while let Some(mut decl) = decls.next() {
+                while let Some(next) = decls.peek() {
+                    if next.visibility_span == decl.visibility_span && next.name == decl.name {
+                        // next is a redeclaration of decl.name
+
+                        match (&mut decl.kind, &next.kind) {
+                            // var/function over var/function => OK
+                            (Kind::Var { fn_decl: decl_fd }, Kind::Var { fn_decl: next_fd }) => {
+                                // function 'override' vars in the decl scan
+                                // phase (but NOTE: later, in the 'assignment'
+                                // phase, the var *assignment* will override the
+                                // function).
+
+                                // when multiple function decls "collide", the last one in source code order wins
+                                *decl_fd = match (*decl_fd, next_fd) {
+                                    (None, None) => None,
+                                    (None, Some(fd)) => Some(fd),
+                                    (Some(fd), None) => Some(fd),
+                                    (Some(_), Some(fd)) => Some(fd),
+                                };
+                            }
+                            (_, _) => {
+                                let err =
+                                    error!("Identifier '{}' has already been declared", next.name)
+                                        .with_span(next.decl_span);
+                                return Err(err);
+                            }
+                        };
+
+                        decls.next();
+                    } else {
+                        break;
+                    }
+                }
+
+                // note: redeclarations are *not* pushed in the new vec
+                decls_deduped.push(decl);
+            }
+
+            Ok(DeclSet(decls_deduped))
         }
 
         fn start_block(&mut self, span: Span) {
@@ -1647,17 +1676,20 @@ mod declset {
             *self.blocks.first().unwrap()
         }
 
-        fn declare_function(&mut self, fn_decl: &FnDecl) {
+        fn declare_function(&mut self, fn_decl: &'a FnDecl) {
             self.decls.push(Decl {
-                kind: Kind::Function,
                 name: get_fn_decl_name(fn_decl),
+                lexical_span: self.cur_span(),
+                decl_span: fn_decl.span(),
+                kind: Kind::Var {
+                    fn_decl: Some(fn_decl),
+                },
+
                 visibility_span: if self.flags.is_strict_mode {
                     self.cur_span()
                 } else {
                     self.outermost_span()
                 },
-                lexical_span: self.cur_span(),
-                decl_span: fn_decl.span(),
             })
         }
 
@@ -1682,51 +1714,6 @@ mod declset {
         }
     }
 
-    /// Check if the given decl array (see `Decl`) contains forbidden redeclarations
-    fn check_redeclarations(declset: &DeclSet) -> crate::common::Result<()> {
-        // TODO Use .group_by when it gets stabilized
-        let mut slice = declset.0.as_slice();
-        while slice.len() > 0 {
-            let span = slice[0].visibility_span;
-            let group_len = slice.partition_point(|d| d.visibility_span == span);
-            let group;
-            (group, slice) = slice.split_at(group_len);
-
-            // quadratic, but I expect this data to always be very small:
-            // one item per defined identifier, their number should almost
-            // always be < 10, very often < 5
-            for cur in 1..group.len() {
-                for prev in 0..cur {
-                    let cur_decl = &group[cur];
-                    let prev_decl = &group[prev];
-
-                    if cur_decl.name == prev_decl.name {
-                        let is_ok = match (cur_decl.kind, &prev_decl.kind) {
-                            (Kind::Var, Kind::Var) => true,
-                            (Kind::Function, Kind::Function) => true,
-
-                            (Kind::Var, Kind::Function) => true,
-                            (Kind::Function, Kind::Var) => true,
-
-                            (Kind::Let, _) | (_, Kind::Let) => false,
-                            (Kind::Const, _) | (_, Kind::Const) => false,
-                        };
-
-                        if !is_ok {
-                            return Err(error!(
-                                "Identifier '{}' has already been declared",
-                                cur_decl.name
-                            )
-                            .with_span(cur_decl.decl_span));
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     fn get_fn_decl_name(fn_decl: &swc_ecma_ast::FnDecl) -> JsWord {
         let (name, _syn_ctxt) = fn_decl.ident.to_id();
         name
@@ -1738,23 +1725,6 @@ mod declset {
             .as_ident()
             .unwrap_or_else(|| unsupported_node!(decl));
         ident.id.to_id().0
-    }
-
-    pub fn compile_decls_script(script: &swc_ecma_ast::Module, flags: Flags) -> Result<DeclSet> {
-        let mut dc = FnDeclBuilder::new(flags);
-        dc.start_block(script.span);
-
-        for item in &script.body {
-            match item {
-                ModuleItem::Stmt(stmt) => compile_decls_stmt(&mut dc, stmt),
-                ModuleItem::ModuleDecl(_) => {
-                    unreachable!("compiler bug: passed module AST node to `compile_decls_script`")
-                }
-            }
-        }
-
-        dc.end_block();
-        dc.build()
     }
 
     pub fn compile_decls_module(script: &swc_ecma_ast::Module, flags: Flags) -> Result<DeclSet> {
@@ -1772,7 +1742,7 @@ mod declset {
         dc.build()
     }
 
-    fn compile_module_decl(dc: &mut FnDeclBuilder, mod_decl: &swc_ecma_ast::ModuleDecl) {
+    fn compile_module_decl<'a>(dc: &mut FnDeclBuilder<'a>, mod_decl: &'a swc_ecma_ast::ModuleDecl) {
         use swc_ecma_ast::{DefaultDecl, ModuleDecl};
 
         match mod_decl {
@@ -1789,7 +1759,10 @@ mod declset {
         }
     }
 
-    pub fn compile_decls_function(func: &swc_ecma_ast::Function, flags: Flags) -> Result<DeclSet> {
+    pub fn compile_decls_function<'a>(
+        func: &'a swc_ecma_ast::Function,
+        flags: Flags,
+    ) -> Result<DeclSet<'a>> {
         let body = func.body.as_ref().unwrap();
 
         let mut dc = FnDeclBuilder::new(flags);
@@ -1811,10 +1784,10 @@ mod declset {
         dc.build()
     }
 
-    pub fn compile_decls_arrow_function(
-        arrow: &swc_ecma_ast::ArrowExpr,
+    pub fn compile_decls_arrow_function<'a>(
+        arrow: &'a swc_ecma_ast::ArrowExpr,
         flags: Flags,
-    ) -> Result<DeclSet> {
+    ) -> Result<DeclSet<'a>> {
         let body = arrow.body.as_ref();
 
         let mut dc = FnDeclBuilder::new(flags);
@@ -1838,7 +1811,7 @@ mod declset {
         dc.build()
     }
 
-    fn compile_decls_stmt(dc: &mut FnDeclBuilder, stmt: &Stmt) {
+    fn compile_decls_stmt<'a>(dc: &mut FnDeclBuilder<'a>, stmt: &'a Stmt) {
         match stmt {
             Stmt::Decl(decl) => compile_decl(dc, decl),
 
@@ -1911,7 +1884,7 @@ mod declset {
         }
     }
 
-    fn compile_decl(dc: &mut FnDeclBuilder, decl: &swc_ecma_ast::Decl) {
+    fn compile_decl<'a>(dc: &mut FnDeclBuilder<'a>, decl: &'a swc_ecma_ast::Decl) {
         match decl {
             swc_ecma_ast::Decl::Fn(fn_decl) => dc.declare_function(&fn_decl),
             swc_ecma_ast::Decl::Var(var_decl) => dc.declare_var(&var_decl),
@@ -1919,7 +1892,7 @@ mod declset {
         }
     }
 
-    fn compile_decls_block(dc: &mut FnDeclBuilder, block_stmt: &BlockStmt) {
+    fn compile_decls_block<'a>(dc: &mut FnDeclBuilder<'a>, block_stmt: &'a BlockStmt) {
         dc.start_block(block_stmt.span);
         for stmt in &block_stmt.stmts {
             compile_decls_stmt(dc, stmt);
@@ -1928,7 +1901,7 @@ mod declset {
     }
 }
 
-fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VReg> {
+fn compile_arrow_function<'a>(builder: &mut Builder<'a>, arrow: &'a ArrowExpr) -> Result<VReg> {
     if arrow.is_async {
         panic!("unsupported: async functions");
     }
@@ -1981,7 +1954,7 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
     let mut args = Vec::new();
     for var_name in inner_fnb.captures.iter() {
         let var_name = JsWord::from(var_name.as_str());
-        let var = builder.get_var(&var_name);
+        let var = builder.get_var(&var_name, arrow.span_lo());
         let vreg = builder.read_var(&var);
         args.push(vreg);
     }
@@ -2008,7 +1981,7 @@ fn compile_arrow_function(builder: &mut Builder, arrow: &ArrowExpr) -> Result<VR
 /// Compile the given expression.
 ///
 /// The resulting code implicitly leaves the result in the accumulator register.
-fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg> {
+fn compile_expr<'a>(builder: &mut Builder<'a>, expr: &'a swc_ecma_ast::Expr) -> Result<VReg> {
     use swc_ecma_ast::{CallExpr, Expr};
 
     let mut builder = builder.with_span(&expr.span());
@@ -2057,42 +2030,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     Ok(ret)
                 }
                 Expr::Ident(i) if &i.sym == "eval" => {
-                    if args.len() != 1 {
-                        return Err(error!("`eval` takes a single argument only"));
-                    }
-
-                    match args[0].expr.as_ref() {
-                        Expr::Lit(Lit::Str(s)) => {
-                            let err_handler = mk_error_handler(&builder.source_map);
-
-                            let filename = swc_common::FileName::Custom("<eval'ed code>".into());
-                            let source_file= builder.source_map.new_source_file(filename, s.value.to_string());
-
-                            let mut parser = make_parser(&*source_file, &err_handler);
-                            let ast = parser.parse_script().map_err(|e| {
-                                e.into_diagnostic(&err_handler).emit();
-                                error!("in eval: parse error")
-                            })?;
-
-                            let last_ndx = ast.body.len() - 1;
-                            for (ndx, stmt) in ast.body.into_iter().enumerate() {
-                                if ndx == last_ndx {
-                                    if let Some(expr_stmt) = stmt.as_expr() {
-                                        return compile_expr(&mut builder, &*expr_stmt.expr);
-                                    }
-                                }
-
-                                compile_stmt(&mut builder, &stmt)?;
-                            }
-
-                            let dest = builder.new_vreg();
-                            builder.emit(Instr::LoadUndefined(dest));
-                            Ok(dest)
-                        },
-                        _ => {
-                            Err(error!("`eval` only supported when called with a single string literal (e.g. `eval(\"some(code)\")`)"))
-                        }
-                    }
+                    return Err(error!("`eval` not supported"));
                 }
                 _ => {
                     let mut arg_regs = Vec::new();
@@ -2220,7 +2158,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                     ret
                 }
                 _ => {
-                    let var = builder.get_var(&ident.sym);
+                    let var = builder.get_var(&ident.sym, ident.span_lo());
                     builder.read_var(&var)
                 }
             };
@@ -2266,7 +2204,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                             let key = builder.new_vreg();
                             builder.set_const(key, Literal::String(sh.sym.to_string()));
 
-                            let var = builder.get_var(&sh.sym);
+                            let var = builder.get_var(&sh.sym, sh.span_lo());
                             let value = builder.read_var(&var);
                             builder.emit(Instr::ObjSet { obj, key, value });
                         }
@@ -2328,13 +2266,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
             // TODO Refactor this with Decl::Fn
             let name = fn_expr.ident.as_ref().map(|ident| ident.to_id().0);
             let func = &fn_expr.function;
-            let func = compile_function(&mut builder, name.clone(), func)?;
-
-            if let Some(name) = name {
-                builder.define_var(name, func);
-            }
-
-            Ok(func)
+            compile_function(&mut builder, name.clone(), func)
         }
 
         Expr::Unary(unary_expr) => {
@@ -2382,7 +2314,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg
                 Expr::Ident(ident) => {
                     // NOTE: update_expr.prefix does not matter in this case, but
                     // it will matter when this code is extended to other types of args
-                    let var = builder.get_var(&ident.sym);
+                    let var = builder.get_var(&ident.sym, ident.span_lo());
                     let reg = builder.read_var(&var);
                     compile_value_update(&mut builder, update_expr.op, reg);
                     builder.write_var(&var, reg);
@@ -2567,12 +2499,15 @@ fn compile_prop_name(prop_name: &swc_ecma_ast::PropName) -> Result<Literal> {
     }
 }
 
-fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) -> Result<VReg> {
+fn compile_assignment<'a>(
+    asmt: &'a swc_ecma_ast::AssignExpr,
+    builder: &mut Builder<'a>,
+) -> Result<VReg> {
     use swc_ecma_ast::{Expr, MemberExpr, MemberProp, PatOrExpr};
 
     if let Some(ident) = asmt.left.as_ident() {
         let rhs = compile_expr(builder, &asmt.right)?;
-        let var = builder.get_var(&ident.sym);
+        let var = builder.get_var(&ident.sym, ident.span_lo());
         compile_assignment_rhs(builder, asmt.op, &var, rhs);
         Ok(builder.read_var(&var))
     } else if let Some(target_expr) = asmt.left.as_expr() {
@@ -2604,9 +2539,9 @@ struct MemberAccess {
     key: VReg,
     value: VReg,
 }
-fn compile_member_access(
-    builder: &mut Builder,
-    member_expr: &swc_ecma_ast::MemberExpr,
+fn compile_member_access<'a>(
+    builder: &mut Builder<'a>,
+    member_expr: &'a swc_ecma_ast::MemberExpr,
 ) -> Result<MemberAccess> {
     let member_prop = &member_expr.prop;
     let key = compile_obj_member_prop(builder, member_prop)?;
@@ -2621,9 +2556,9 @@ fn compile_member_access(
     Ok(MemberAccess { obj, key, value })
 }
 
-fn compile_obj_member_prop(
-    builder: &mut Builder,
-    member_prop: &swc_ecma_ast::MemberProp,
+fn compile_obj_member_prop<'a>(
+    builder: &mut Builder<'a>,
+    member_prop: &'a swc_ecma_ast::MemberProp,
 ) -> Result<VReg> {
     use swc_ecma_ast::{ComputedPropName, MemberProp};
 
