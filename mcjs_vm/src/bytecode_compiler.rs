@@ -18,6 +18,8 @@ pub use swc_common::SourceMap;
 
 use std::rc::Rc;
 
+use self::declset2::find_declarations;
+
 macro_rules! unsupported_node {
     ($value:expr) => {{
         todo!("unsupported AST node: {:#?}", $value);
@@ -1058,7 +1060,7 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
             });
             let jmpif = builder.reserve();
 
-            compile_stmt(&mut builder, &while_stmt.body)?;
+            compile_block_single_stmt(&mut builder, &while_stmt.body)?;
             builder.emit(Instr::Jmp(while_header_iid));
             let while_end_iid = builder.peek_iid();
 
@@ -1072,7 +1074,7 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
 
         Stmt::DoWhile(stmt) => {
             let loop_start = builder.peek_iid();
-            compile_stmt(&mut builder, &stmt.body)?;
+            compile_block_single_stmt(&mut builder, &stmt.body)?;
             let cond = compile_expr(&mut builder, &stmt.test)?;
             builder.emit(Instr::JmpIf {
                 cond,
@@ -1082,10 +1084,29 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
         }
 
         Stmt::For(stmt) => {
+            use swc_ecma_ast::VarDeclOrExpr;
+
+            // Two scopes:
+            //   - outer (includes any variable initialized in the 'initializer' expr)
+            //   - inner (corresponds to the `for` stmt body)
+
+            // outer scope
             builder.cur_fnb().push_scope();
 
+            {
+                let mut decls = Vec::new();
+                let decl_flags = declset2::FindDeclFlags {
+                    hoist_vars: false,
+                    hoist_functions: false,
+                    only_hoisted: false,
+                };
+                if let Some(VarDeclOrExpr::VarDecl(var_decl)) = &stmt.init {
+                    declset2::find_var_decls(&mut decls, decl_flags, var_decl);
+                }
+                block_start_decls(&mut builder, &decls)?;
+            }
+
             if let Some(init) = &stmt.init {
-                use swc_ecma_ast::VarDeclOrExpr;
                 match init {
                     VarDeclOrExpr::VarDecl(var_decl) => {
                         compile_var_decl_assignment(&mut builder, var_decl)?;
@@ -1111,7 +1132,7 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
             };
             let jmpif = builder.reserve();
 
-            compile_stmt(&mut builder, &stmt.body)?;
+            compile_block_single_stmt(&mut builder, &stmt.body)?;
 
             let continue_target = builder.peek_iid();
             if let Some(update) = &stmt.update {
@@ -1214,7 +1235,7 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
             });
             builder.define_var(item_var_name.clone(), key);
 
-            compile_stmt(&mut builder, &forin_stmt.body)?;
+            compile_block_single_stmt(&mut builder, &forin_stmt.body)?;
 
             builder.emit(Instr::ArithInc(key_ndx, key_ndx));
 
@@ -1269,7 +1290,7 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
                 iter: iterator,
             });
             builder.define_var(item_var_name.clone(), item);
-            compile_stmt(&mut builder, &forof_stmt.body)?;
+            compile_block_single_stmt(&mut builder, &forof_stmt.body)?;
 
             builder.cur_fnb().pop_scope();
 
@@ -1305,12 +1326,12 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
             });
             let jmp_to_alt = builder.reserve();
 
-            compile_stmt(&mut builder, &if_stmt.cons)?;
+            compile_block_single_stmt(&mut builder, &if_stmt.cons)?;
             let jmp_to_end = builder.reserve();
 
             let alt = builder.peek_iid();
             if let Some(else_blk) = &if_stmt.alt {
-                compile_stmt(&mut builder, else_blk)?;
+                compile_block_single_stmt(&mut builder, else_blk)?;
             }
 
             let end: IID = builder.peek_iid();
@@ -1323,14 +1344,73 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
     }
 }
 
-fn compile_block<'a>(builder: &mut Builder, stmts: &'a [Stmt]) -> Result<()> {
+fn compile_block(builder: &mut Builder, stmts: &[Stmt]) -> Result<()> {
     builder.cur_fnb().push_scope();
+
+    let mut decls = Vec::new();
+    let decl_flags = declset2::FindDeclFlags {
+        hoist_vars: false,
+        hoist_functions: false,
+        only_hoisted: false,
+    };
+    for stmt in stmts {
+        find_declarations(&mut decls, decl_flags, stmt);
+    }
+    block_start_decls(builder, &decls)?;
 
     for stmt in stmts {
         compile_stmt(builder, stmt)?;
     }
 
     builder.cur_fnb().pop_scope();
+    Ok(())
+}
+
+fn compile_block_single_stmt(builder: &mut Builder, stmt: &Stmt) -> Result<()> {
+    builder.cur_fnb().push_scope();
+
+    let mut decls = Vec::new();
+    let decl_flags = declset2::FindDeclFlags {
+        hoist_vars: false,
+        hoist_functions: false,
+        only_hoisted: false,
+    };
+    find_declarations(&mut decls, decl_flags, stmt);
+    block_start_decls(builder, &decls)?;
+
+    compile_stmt(builder, stmt)?;
+
+    builder.cur_fnb().pop_scope();
+    Ok(())
+}
+
+fn block_start_decls(builder: &mut Builder, decls: &[declset2::Decl]) -> Result<()> {
+    use declset2::Kind;
+
+    let is_strict_mode = builder.cur_fnb().is_strict_mode;
+
+    for decl in decls {
+        let defined_at_block_scope = match decl.kind {
+            Kind::Var { fn_decl } => is_strict_mode && fn_decl.is_some(),
+            Kind::Lexical { .. } => true,
+        };
+        if defined_at_block_scope {
+            let reg = builder.new_vreg();
+            builder.define_var(decl.name.clone(), reg);
+        }
+    }
+
+    if is_strict_mode {
+        for decl in decls {
+            if let Some(fn_decl) = decl.kind.as_function() {
+                let name = Some(decl.name.clone());
+                compile_function(builder, name, &fn_decl.function)?;
+            }
+        }
+    } else {
+        // Functions already compiled at the function toplevel (see `compile_function`)
+    }
+
     Ok(())
 }
 
@@ -1496,7 +1576,6 @@ fn compile_function<'a>(
     });
 
     if let Some(name) = name {
-        println!("defined function `{}`", name.to_string());
         let var = builder.get_var(&name);
         builder.write_var(&var, dest);
     }
@@ -1676,7 +1755,7 @@ mod declset2 {
         }
     }
 
-    fn find_var_decls(
+    pub fn find_var_decls(
         decls: &mut Vec<Decl<'_>>,
         flags: FindDeclFlags,
         var_decl: &swc_ecma_ast::VarDecl,
