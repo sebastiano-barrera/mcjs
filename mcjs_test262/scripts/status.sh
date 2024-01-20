@@ -2,9 +2,8 @@
 
 cd "$(dirname "$0")"
 
-suffix=""
-[ -z "$(git status --porcelain)" ] || suffix="-dirty"
-version="$(git rev-parse HEAD)$suffix"
+version="$(git rev-parse HEAD)"
+[ -z "$(git status --porcelain)" ] || version="dirty"
 
 sqlite3 -table ../out/tests.db "select * from status where version like '${version}%'" >../out/status.txt
 
