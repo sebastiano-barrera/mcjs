@@ -388,13 +388,9 @@ impl<'a> FnBuilder {
     }
 
     fn get_global_this(&mut self) -> VReg {
-        if self.global_this_vreg.is_none() {
-            let reg = self.next_vreg();
-            self.emit(Instr::GetGlobalThis(reg));
-            self.global_this_vreg = Some(reg);
-        }
-
-        self.global_this_vreg.clone().unwrap()
+        let reg = self.next_vreg();
+        self.emit(Instr::GetGlobalThis(reg));
+        reg
     }
 
     fn get_vreg(&self, name: &JsWord) -> Option<VReg> {
