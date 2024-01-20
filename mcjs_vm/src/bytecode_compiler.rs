@@ -407,6 +407,9 @@ impl<'a> FnBuilder {
 
     // TODO delete!
     fn define_var(&mut self, name: JsWord, reg: VReg) {
+        let scope = self.inner_scope_mut();
+        scope.vars.insert(name.clone(), reg);
+
         self.ident_history.push(IdentAsmt {
             iid: self.peek_iid(),
             reg,
