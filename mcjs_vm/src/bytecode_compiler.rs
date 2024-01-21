@@ -18,8 +18,6 @@ pub use swc_common::SourceMap;
 
 use std::rc::Rc;
 
-use self::declset2::find_declarations;
-
 macro_rules! unsupported_node {
     ($value:expr) => {{
         todo!("unsupported AST node: {:#?}", $value);
@@ -638,7 +636,7 @@ fn compile_module(
 
     for decl in &decls {
         let reg = builder.new_vreg();
-        builder.cur_fnb().define_var(decl.name.clone(), reg);
+        builder.define_var(decl.name.clone(), reg);
     }
     for decl in &decls {
         if let Some(fn_decl) = decl.kind.as_function() {
@@ -1102,7 +1100,7 @@ fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Resu
                 if let Some(VarDeclOrExpr::VarDecl(var_decl)) = &stmt.init {
                     declset2::find_var_decls(&mut decls, decl_flags, var_decl);
                 }
-                block_start_decls(&mut builder, &decls)?;
+                block_start_decls(&mut builder, decls)?;
             }
 
             if let Some(init) = &stmt.init {
@@ -1353,9 +1351,9 @@ fn compile_block(builder: &mut Builder, stmts: &[Stmt]) -> Result<()> {
         only_hoisted: false,
     };
     for stmt in stmts {
-        find_declarations(&mut decls, decl_flags, stmt);
+        declset2::find_declarations(&mut decls, decl_flags, stmt);
     }
-    block_start_decls(builder, &decls)?;
+    block_start_decls(builder, decls)?;
 
     for stmt in stmts {
         compile_stmt(builder, stmt)?;
@@ -1374,8 +1372,8 @@ fn compile_block_single_stmt(builder: &mut Builder, stmt: &Stmt) -> Result<()> {
         hoist_functions: false,
         only_hoisted: false,
     };
-    find_declarations(&mut decls, decl_flags, stmt);
-    block_start_decls(builder, &decls)?;
+    declset2::find_declarations(&mut decls, decl_flags, stmt);
+    block_start_decls(builder, decls)?;
 
     compile_stmt(builder, stmt)?;
 
@@ -1383,12 +1381,14 @@ fn compile_block_single_stmt(builder: &mut Builder, stmt: &Stmt) -> Result<()> {
     Ok(())
 }
 
-fn block_start_decls(builder: &mut Builder, decls: &[declset2::Decl]) -> Result<()> {
+fn block_start_decls(builder: &mut Builder, decls: Vec<declset2::Decl>) -> Result<()> {
     use declset2::Kind;
+
+    let decls = declset2::check_redeclarations(decls)?;
 
     let is_strict_mode = builder.cur_fnb().is_strict_mode;
 
-    for decl in decls {
+    for decl in &decls {
         let defined_at_block_scope = match decl.kind {
             Kind::Var { fn_decl } => is_strict_mode && fn_decl.is_some(),
             Kind::Lexical { .. } => true,
@@ -1520,6 +1520,10 @@ fn compile_function<'a>(
         }
     }
 
+    for decl in &decls {
+        let reg = builder.new_vreg();
+        builder.define_var(decl.name.clone(), reg);
+    }
     for decl in &decls {
         if let Some(fn_decl) = decl.kind.as_function() {
             let name = Some(decl.name.clone());
@@ -1767,9 +1771,20 @@ mod declset2 {
             VarDeclKind::Const => true,
         };
 
-        if is_lexical || !flags.only_hoisted || flags.hoist_vars {
+        let is_included = if flags.only_hoisted {
+            flags.hoist_vars && !is_lexical
+        } else {
+            true
+        };
+
+        if is_included {
             for vd in &var_decl.decls {
-                let kind = Kind::Var { fn_decl: None };
+                let kind = match var_decl.kind {
+                    VarDeclKind::Var => Kind::Var { fn_decl: None },
+                    VarDeclKind::Let => Kind::Lexical { is_const: false },
+                    VarDeclKind::Const => Kind::Lexical { is_const: true },
+                };
+
                 let name = vd
                     .name
                     .as_ident()
