@@ -396,6 +396,7 @@ impl Instr {
 pub enum Literal {
     Number(f64),
     String(String),
+    JsWord(JsWord),
     Bool(bool),
     Null,
     Undefined,
@@ -526,6 +527,20 @@ impl Function {
 
     pub fn span(&self) -> &Span {
         &self.span
+    }
+    
+    pub fn dump(&self) {
+        println!("-- consts");
+        for (ndx, literal) in self.consts.iter().enumerate() {
+            println!(" {:4} {:?}", ndx, literal);
+        }
+
+        println!("-- instrs");
+        for (ndx, instr) in self.instrs.iter().enumerate() {
+            println!(" {:4} {:?}", ndx, instr);
+        }
+
+        println!();
     }
 }
 
