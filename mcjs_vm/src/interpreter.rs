@@ -1308,6 +1308,11 @@ fn literal_to_value(lit: bytecode::Literal, heap: &mut heap::Heap) -> Value {
             let oid = heap.new_string(st.clone());
             Value::Object(oid)
         }
+        bytecode::Literal::JsWord(jsw) => {
+            // TODO(performance) avoid this allocation
+            let oid = heap.new_string(jsw.to_string());
+            Value::Object(oid)
+        }
         bytecode::Literal::Bool(bo) => Value::Bool(bo),
         bytecode::Literal::Null => Value::Null,
         bytecode::Literal::Undefined => Value::Undefined,
