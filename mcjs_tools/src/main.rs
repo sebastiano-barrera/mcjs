@@ -139,7 +139,7 @@ impl eframe::App for AppData {
                     };
                     ui.label(text);
                 });
-                
+
                 let probe = self.si.probe_mut().unwrap();
                 let status_text = format!("suspended at {:?}", probe.giid());
 
@@ -353,6 +353,7 @@ mod inline_value_view {
             let text: Cow<str> = match value {
                 Literal::Number(n) => format!("{}", n).into(),
                 Literal::String(s) => format!("{:?}", s).into(),
+                Literal::JsWord(jsw) => format!("{}", jsw.to_string()).into(),
                 Literal::Bool(true) => "true".into(),
                 Literal::Bool(false) => "false".into(),
                 Literal::Null => "null".into(),
@@ -599,6 +600,9 @@ mod source_code_view {
         // Can't update with no source map
         let source_map = loader.get_source_map(fnid.0)?;
         let abs_span = *loader.get_function(fnid).unwrap().span();
+        if abs_span.is_dummy() {
+            return None;
+        }
 
         let source_file = {
             let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
@@ -628,7 +632,7 @@ mod source_code_view {
 
         Some(Main {
             fnid,
-            ppi: 0.0,
+            ppi: fonts.pixels_per_point(),
             galley,
             src: Rc::clone(&source_file.src),
             source_start_ofs: source_file.start_pos.0,
@@ -931,9 +935,7 @@ mod interpreter_manager {
 
                     let all_ok = self_.saved_state.restore(&mut intrp);
                     if !all_ok {
-                        eprintln!(
-                            "warning: not all breakpoints could be restored after restart"
-                        );
+                        eprintln!("warning: not all breakpoints could be restored after restart");
                     }
                     State::Suspended(intrp)
                 }
@@ -941,25 +943,23 @@ mod interpreter_manager {
                     // nothing  to do
                     cur
                 }
-                State::Suspended(intrp) => {
-                    match intrp.run() {
-                        Ok(exit) => match exit {
-                            Exit::Finished(_) => {
-                                self_.n_scripts_done += 1;
-                                match self_.n_scripts_done.cmp(&self_.scripts.len()) {
-                                    Ordering::Less => {
-                                        self_.state = State::Ready;
-                                        return self.resume();
-                                    }
-                                    Ordering::Equal => State::Finished,
-                                    Ordering::Greater => panic!("assertion failed"),
+                State::Suspended(intrp) => match intrp.run() {
+                    Ok(exit) => match exit {
+                        Exit::Finished(_) => {
+                            self_.n_scripts_done += 1;
+                            match self_.n_scripts_done.cmp(&self_.scripts.len()) {
+                                Ordering::Less => {
+                                    self_.state = State::Ready;
+                                    return self.resume();
                                 }
+                                Ordering::Equal => State::Finished,
+                                Ordering::Greater => panic!("assertion failed"),
                             }
-                            Exit::Suspended(new_intrp) => State::Suspended(new_intrp),
-                        },
-                        Err(err) => State::Failed(Error::Interpreter(err)),
-                    }
-                }
+                        }
+                        Exit::Suspended(new_intrp) => State::Suspended(new_intrp),
+                    },
+                    Err(err) => State::Failed(Error::Interpreter(err)),
+                },
             };
         }
 
