@@ -1,3 +1,5 @@
+#![cfg(feature = "debugger")]
+
 extern crate mcjs_vm;
 
 use mcjs_vm::{bytecode::LocalFnId, interpreter::debugger, FnId, Literal, ModuleId};
