@@ -3847,8 +3847,8 @@ mod past_compiler {
             names.insert(cap_decl, reg);
         }
         fnb.scopes.push(Scope {
-            block_id: None,
             names,
+            ..Default::default()
         });
 
         compile_block(&mut fnb, &func.body)?;
@@ -3865,26 +3865,28 @@ mod past_compiler {
     fn compile_stmt(fnb: &mut FnBuilder, stmt: &past::Stmt) -> Result<Option<bytecode::VReg>> {
         match stmt {
             past::Stmt::Block(block) => compile_block(fnb, block),
-            past::Stmt::Break(_) => todo!(),
-            past::Stmt::Continue(_) => todo!(),
+            past::Stmt::Break(block_id) => {
+                let iid = fnb.instrs.peek_iid();
+                fnb.instrs.push(Instr::Breakpoint);
+
+                let scope: &mut Scope = get_block_scope(&mut fnb.scopes, *block_id);
+                scope.deferred_break.push(iid);
+
+                Ok(None)
+            }
+            past::Stmt::Continue(block_id) => {
+                compile_unshare(fnb, block_id);
+
+                let iid = fnb.instrs.peek_iid();
+                fnb.instrs.push(Instr::Breakpoint);
+
+                let scope: &mut Scope = get_block_scope(&mut fnb.scopes, *block_id);
+                scope.deferred_continue.push(iid);
+
+                Ok(None)
+            }
             past::Stmt::Unshare(block_id) => {
-                let mut block_found = false;
-
-                for scope in fnb.scopes.iter().rev() {
-                    for reg in scope.names.values() {
-                        fnb.instrs.push(Instr::Unshare(*reg));
-                    }
-                    if scope.block_id == Some(*block_id) {
-                        block_found = true;
-                    }
-                }
-
-                if !block_found {
-                    panic!(
-                        "malformed PAST: Unshare({:?}): block ID not found",
-                        block_id
-                    );
-                }
+                compile_unshare(fnb, block_id);
                 Ok(None)
             }
             past::Stmt::If { test, cons, alt } => {
@@ -4199,6 +4201,35 @@ mod past_compiler {
         }
     }
 
+    fn compile_unshare(fnb: &mut FnBuilder<'_>, block_id: &past::BlockID) {
+        let mut block_found = false;
+
+        for scope in fnb.scopes.iter().rev() {
+            for reg in scope.names.values() {
+                fnb.instrs.push(Instr::Unshare(*reg));
+            }
+            if scope.block_id == Some(*block_id) {
+                block_found = true;
+                break;
+            }
+        }
+
+        if !block_found {
+            panic!(
+                "malformed PAST: Unshare({:?}): block ID not found",
+                block_id
+            );
+        }
+    }
+
+    fn get_block_scope(scopes: &mut [Scope], block_id: past::BlockID) -> &mut Scope {
+        scopes
+            .iter_mut()
+            .rev()
+            .find(|scope| scope.block_id == Some(block_id))
+            .unwrap()
+    }
+
     fn compile_read(fnb: &mut FnBuilder<'_>, name: &past::DeclName) -> bytecode::VReg {
         match resolve_name(fnb, name) {
             Loc::Reg(reg) => reg,
@@ -4316,10 +4347,7 @@ mod past_compiler {
         Ok(vreg)
     }
 
-    fn compile_block(
-        fnb: &mut FnBuilder,
-        block: &past::Block,
-    ) -> std::prelude::v1::Result<Option<bytecode::VReg>, Error> {
+    fn compile_block(fnb: &mut FnBuilder, block: &past::Block) -> Result<Option<bytecode::VReg>> {
         let names = block
             .decls
             .iter()
@@ -4328,14 +4356,24 @@ mod past_compiler {
         fnb.scopes.push(Scope {
             block_id: Some(block.id),
             names,
+            ..Default::default()
         });
+        let iid_start = fnb.instrs.peek_iid();
 
         let mut last_reg = None;
         for stmt in &block.stmts {
             last_reg = compile_stmt(fnb, stmt)?;
         }
 
-        fnb.scopes.pop().unwrap();
+        let iid_end = fnb.instrs.peek_iid();
+        let scope = fnb.scopes.pop().unwrap();
+        for iid in scope.deferred_break {
+            *fnb.instrs.get_mut(iid) = Instr::Jmp(iid_end);
+        }
+        for iid in scope.deferred_continue {
+            *fnb.instrs.get_mut(iid) = Instr::Jmp(iid_start);
+        }
+
         Ok(last_reg)
     }
 
@@ -4373,9 +4411,18 @@ mod past_compiler {
         globals: &'a HashSet<JsWord>,
     }
 
+    #[derive(Default)]
     struct Scope {
         block_id: Option<past::BlockID>,
         names: HashMap<past::DeclName, bytecode::VReg>,
+
+        /// `Break` instructions referring to this block. They need to be fixed after the block's
+        /// start/end instructions are known.
+        deferred_break: Vec<bytecode::IID>,
+
+        /// `Continue` instructions referring to this block. They need to be fixed after the
+        /// block's start/end instructions are known.
+        deferred_continue: Vec<bytecode::IID>,
     }
 
     enum Loc {
