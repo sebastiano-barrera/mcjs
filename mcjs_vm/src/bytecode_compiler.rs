@@ -825,13 +825,13 @@ fn compile_script(
     let function = past::compile_script(ast_module);
     assert!(function.n_parameters == 0);
 
-    // function.captures might not be empty.  In this case, it will contain the
-    // list of variables that should be accessed via `globalThis`. This is
-    // currently not used by the compiler.
+    // function.unbound_names might not be empty.  In this case, it will contain the list of
+    // variables that should be accessed via `globalThis`.
 
     let mut mod_builder = past_compiler::ModuleBuilder::new(flags.min_fnid);
-    let globals = function.captures.iter().cloned().collect();
-    let root_fnid = past_compiler::compile_function(&mut mod_builder, &globals, &function)?;
+    let globals = function.unbound_names.iter().cloned().collect();
+    let root_fnid =
+        past_compiler::compile_function(&mut mod_builder, &globals, Vec::new(), &function)?;
 
     // finish_module(builder, root_fnid)
     let functions = mod_builder.build();
@@ -2673,7 +2673,7 @@ mod past {
     #[derive(Debug)]
     pub struct Function {
         pub n_parameters: u8,
-        pub captures: Vec<JsWord>,
+        pub unbound_names: Vec<JsWord>,
         pub body: Block,
     }
 
@@ -2767,7 +2767,6 @@ mod past {
 
         CreateClosure {
             func: Box<Function>,
-            captures: Vec<Stmt>,
         },
 
         Call {
@@ -3100,14 +3099,8 @@ mod past {
                         is_global: false,
                     });
                     let func = compile_function(builder, &fn_decl.function);
-                    let captures: Vec<_> = func
-                        .captures
-                        .iter()
-                        .map(|cap| Stmt::Read(DeclName::Js(cap.clone())))
-                        .collect();
                     block.stmts.push(Stmt::CreateClosure {
                         func: Box::new(func),
-                        captures,
                     });
                 }
                 swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(builder, block, var_decl),
@@ -3271,14 +3264,8 @@ mod past {
 
             swc_ecma_ast::Expr::Fn(fn_expr) => {
                 let func = compile_function(builder, &fn_expr.function);
-                let captures: Vec<_> = func
-                    .captures
-                    .iter()
-                    .map(|cap| Stmt::Read(DeclName::Js(cap.clone())))
-                    .collect();
                 Stmt::CreateClosure {
                     func: Box::new(func),
-                    captures,
                 }
             }
             swc_ecma_ast::Expr::Arrow(arrow_expr) => {
@@ -3290,14 +3277,8 @@ mod past {
                     swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => compile_expr(builder, expr),
                 };
                 let func = compile_function_from_parts(builder, &params, body);
-                let captures: Vec<_> = func
-                    .captures
-                    .iter()
-                    .map(|cap| Stmt::Read(DeclName::Js(cap.clone())))
-                    .collect();
                 Stmt::CreateClosure {
                     func: Box::new(func),
-                    captures,
                 }
             }
             swc_ecma_ast::Expr::Unary(unary_expr) => {
@@ -3587,10 +3568,10 @@ mod past {
             stmts,
         };
 
-        let captures = find_unbound_references(&root);
+        let unbound_names = find_unbound_references(&root);
         Function {
             n_parameters,
-            captures,
+            unbound_names,
             body: root,
         }
     }
@@ -3644,9 +3625,7 @@ mod past {
                     queue.push(key);
                     queue.push(value);
                 }
-                Stmt::CreateClosure { captures, .. } => {
-                    queue.extend(captures.iter());
-                }
+                Stmt::CreateClosure { .. } => {}
                 Stmt::Call { callee, args, .. } => {
                     queue.push(callee.as_ref());
                     queue.extend(args.iter());
@@ -3718,9 +3697,7 @@ mod past {
                     queue.push(key);
                     queue.push(value);
                 }
-                Stmt::CreateClosure { captures, .. } => {
-                    queue.extend(captures.iter_mut());
-                }
+                Stmt::CreateClosure { .. } => {}
                 Stmt::Call { callee, args, .. } => {
                     queue.push(callee.as_mut());
                     queue.extend(args.iter_mut());
@@ -3764,11 +3741,23 @@ mod past {
                 Stmt::Read(DeclName::Js(js_name)) => {
                     referenced.insert(js_name.clone());
                 }
+                Stmt::CreateClosure { func } => {
+                    for name in &func.unbound_names {
+                        referenced.insert(name.clone());
+                    }
+                }
                 _ => (),
             });
         }
 
-        referenced.difference(&declared).cloned().collect()
+        #[allow(unused_mut)]
+        let mut unbound: Vec<_> = referenced.difference(&declared).cloned().collect();
+
+        // Helps with insta tests
+        #[cfg(test)]
+        unbound.sort();
+
+        unbound
     }
 
     #[cfg(test)]
@@ -3817,14 +3806,7 @@ mod past {
             "
                 .to_string(),
             );
-            println!("function = {:#?}", function);
-            let mut captures: Vec<_> = function
-                .captures
-                .into_iter()
-                .map(|word| word.to_string())
-                .collect();
-            captures.sort();
-            assert_eq!(&captures, &["console", "someGlobalVar"]);
+            insta::assert_debug_snapshot!(function);
         }
 
         fn quick_compile(src: String) -> super::Function {
@@ -3851,10 +3833,28 @@ mod past_compiler {
     pub fn compile_function<'a>(
         module_builder: &'a mut ModuleBuilder,
         globals: &'a HashSet<JsWord>,
+        captures: Vec<past::DeclName>,
         func: &past::Function,
     ) -> Result<bytecode::LocalFnId> {
         let mut fnb = FnBuilder::new(module_builder, globals);
+
+        let mut names = HashMap::new();
+        for (cap_ndx, cap_decl) in captures.into_iter().enumerate() {
+            let cap_ndx = cap_ndx.try_into().unwrap();
+            let reg = fnb.regs.gen();
+            fnb.instrs
+                .push(Instr::LoadCapture(reg, bytecode::CaptureIndex(cap_ndx)));
+            names.insert(cap_decl, reg);
+        }
+        fnb.scopes.push(Scope {
+            block_id: None,
+            names,
+        });
+
         compile_block(&mut fnb, &func.body)?;
+
+        fnb.scopes.pop();
+        assert_eq!(fnb.scopes.len(), 0);
 
         let function = fnb.build();
         let lfnid = module_builder.put_fn(function);
@@ -4048,13 +4048,25 @@ mod past_compiler {
                 fnb.instrs.push(Instr::ObjSet { obj, key, value });
                 Ok(None)
             }
-            past::Stmt::CreateClosure { func, captures } => {
+            past::Stmt::CreateClosure { func } => {
+                let mut cap_names = Vec::new();
                 let mut cap_regs = Vec::new();
-                for (cap_name, cap_stmt) in func.captures.iter().zip(captures) {
-                    cap_regs.push(compile_expr(fnb, cap_stmt)?);
+
+                for name in func.unbound_names.iter() {
+                    let name = past::DeclName::Js(name.clone());
+                    match resolve_name(fnb, &name) {
+                        Loc::Reg(reg) => {
+                            cap_names.push(name.clone());
+                            cap_regs.push(reg);
+                        }
+                        Loc::Global(_) => {
+                            // skip: the inner function will *also* see the name as global and
+                            // compile the appropriate access to globalThis
+                        }
+                    }
                 }
 
-                let lfnid = compile_function(fnb.module_builder, fnb.globals, func)?;
+                let lfnid = compile_function(fnb.module_builder, fnb.globals, cap_names, func)?;
                 let dest = fnb.regs.gen();
                 fnb.instrs.push(Instr::ClosureNew {
                     dest,
@@ -4238,17 +4250,16 @@ mod past_compiler {
             .rev()
             .find_map(|scope| scope.names.get(name).copied().map(Loc::Reg));
 
-        match local_reg {
-            Some(reg) => reg,
-            None => {
-                if let past::DeclName::Js(name) = name {
-                    if fnb.globals.contains(name) {
-                        return Loc::Global(name.clone());
-                    }
-                }
-                panic!("malformed PAST: undeclared name: {:?}", name)
+        if let Some(reg) = local_reg {
+            return reg;
+        }
+
+        if let past::DeclName::Js(name) = name {
+            if fnb.globals.contains(name) {
+                return Loc::Global(name.clone());
             }
         }
+        panic!("malformed PAST: undeclared name: {:?}", name)
     }
 
     fn compile_new(fnb: &mut FnBuilder<'_>, ret: bytecode::VReg, constructor: bytecode::VReg) {
@@ -4486,18 +4497,27 @@ mod past_compiler {
             let (functions, root_lfnid) = quick_compile(
                 "
                 (function() {
-                (function() {
-                (function() {
-                    let someLocalVar = 23;
-                    console.log(someGlobalVar, someLocalVar)
+                    (function() {
+                        (function() {
+                            let someLocalVar = 23;
+                            console.log(someGlobalVar, someLocalVar)
+                            someGlobalVar = 'lol'
+                        })()
+                    })()
                 })()
-                })()
-                })()
-            "
+                "
                 .to_string(),
             );
 
-            functions.get(&root_lfnid).unwrap().dump();
+            for (lfnid, func) in functions.iter() {
+                println!(
+                    "== function {:?} {}",
+                    lfnid,
+                    if lfnid == &root_lfnid { "[root]" } else { "" }
+                );
+
+                func.dump();
+            }
         }
 
         fn quick_compile(
@@ -4512,9 +4532,10 @@ mod past_compiler {
             let past_function = super::past::compile_script(swc_ast);
 
             let mut module_builder = super::ModuleBuilder::new(0);
-            let globals = past_function.captures.iter().cloned().collect();
-            let root_lfnid = super::compile_function(&mut module_builder, &globals, &past_function)
-                .expect("past->bytecode compile error");
+            let globals = past_function.unbound_names.iter().cloned().collect();
+            let root_lfnid =
+                super::compile_function(&mut module_builder, &globals, Vec::new(), &past_function)
+                    .expect("past->bytecode compile error");
 
             let funcs = module_builder.build();
             (funcs, root_lfnid)
