@@ -2,132 +2,72 @@
 source: mcjs_vm/src/bytecode_compiler.rs
 expression: function
 ---
-Function {
-    n_parameters: 0,
-    unbound_names: [
-        Atom('console' type=inline),
-        Atom('someGlobalVar' type=dynamic),
-    ],
-    body: Block {
-        id: block7,
-        decls: [],
-        stmts: [
-            Block(
-                Block {
-                    id: block0,
+[18-258] func (0) unbound[console, someGlobalVar, ] {Block {
+    id: block0,
+    decls: [],
+    stmts: [
+        [19-255] Call {
+            is_new: false,
+            callee: [19-255] CreateClosure {
+                func: [19-255] func (0) unbound[console, someGlobalVar, ] {Block {
+                    id: block1,
                     decls: [],
                     stmts: [
-                        Call {
+                        [49-234] Call {
                             is_new: false,
-                            callee: CreateClosure {
-                                func: Function {
-                                    n_parameters: 0,
-                                    unbound_names: [
-                                        Atom('console' type=inline),
-                                        Atom('someGlobalVar' type=dynamic),
-                                    ],
-                                    body: Block {
-                                        id: block6,
-                                        decls: [],
-                                        stmts: [
-                                            Block(
-                                                Block {
-                                                    id: block1,
-                                                    decls: [],
+                            callee: [49-234] CreateClosure {
+                                func: [49-234] func (0) unbound[console, someGlobalVar, ] {Block {
+                                    id: block2,
+                                    decls: [],
+                                    stmts: [
+                                        [79-213] Call {
+                                            is_new: false,
+                                            callee: [79-213] CreateClosure {
+                                                func: [79-213] func (0) unbound[console, someGlobalVar, ] {Block {
+                                                    id: block3,
+                                                    decls: [
+                                                        Decl: let someLocalVar,
+                                                    ],
                                                     stmts: [
-                                                        Call {
+                                                        [116-133] Assign(
+                                                            someLocalVar,
+                                                            [131-133] NumberLiteral(
+                                                                23.0,
+                                                            ),
+                                                        ),
+                                                        [155-166] Call {
                                                             is_new: false,
-                                                            callee: CreateClosure {
-                                                                func: Function {
-                                                                    n_parameters: 0,
-                                                                    unbound_names: [
-                                                                        Atom('console' type=inline),
-                                                                        Atom('someGlobalVar' type=dynamic),
-                                                                    ],
-                                                                    body: Block {
-                                                                        id: block5,
-                                                                        decls: [],
-                                                                        stmts: [
-                                                                            Block(
-                                                                                Block {
-                                                                                    id: block2,
-                                                                                    decls: [],
-                                                                                    stmts: [
-                                                                                        Call {
-                                                                                            is_new: false,
-                                                                                            callee: CreateClosure {
-                                                                                                func: Function {
-                                                                                                    n_parameters: 0,
-                                                                                                    unbound_names: [
-                                                                                                        Atom('console' type=inline),
-                                                                                                        Atom('someGlobalVar' type=dynamic),
-                                                                                                    ],
-                                                                                                    body: Block {
-                                                                                                        id: block4,
-                                                                                                        decls: [],
-                                                                                                        stmts: [
-                                                                                                            Block(
-                                                                                                                Block {
-                                                                                                                    id: block3,
-                                                                                                                    decls: [
-                                                                                                                        Decl: let someLocalVar,
-                                                                                                                    ],
-                                                                                                                    stmts: [
-                                                                                                                        Assign(
-                                                                                                                            someLocalVar,
-                                                                                                                            NumberLiteral(
-                                                                                                                                23.0,
-                                                                                                                            ),
-                                                                                                                        ),
-                                                                                                                        Call {
-                                                                                                                            is_new: false,
-                                                                                                                            callee: ObjectGet {
-                                                                                                                                obj: Read(
-                                                                                                                                    console,
-                                                                                                                                ),
-                                                                                                                                key: StringLiteral(
-                                                                                                                                    Atom('log' type=static),
-                                                                                                                                ),
-                                                                                                                            },
-                                                                                                                            args: [
-                                                                                                                                Read(
-                                                                                                                                    someGlobalVar,
-                                                                                                                                ),
-                                                                                                                                Read(
-                                                                                                                                    someLocalVar,
-                                                                                                                                ),
-                                                                                                                            ],
-                                                                                                                        },
-                                                                                                                    ],
-                                                                                                                },
-                                                                                                            ),
-                                                                                                        ],
-                                                                                                    },
-                                                                                                },
-                                                                                            },
-                                                                                            args: [],
-                                                                                        },
-                                                                                    ],
-                                                                                },
-                                                                            ),
-                                                                        ],
-                                                                    },
-                                                                },
+                                                            callee: [155-166] ObjectGet {
+                                                                obj: [155-162] Read(
+                                                                    console,
+                                                                ),
+                                                                key: [163-166] StringLiteral(
+                                                                    Atom('log' type=static),
+                                                                ),
                                                             },
-                                                            args: [],
+                                                            args: [
+                                                                [167-180] Read(
+                                                                    someGlobalVar,
+                                                                ),
+                                                                [182-194] Read(
+                                                                    someLocalVar,
+                                                                ),
+                                                            ],
                                                         },
                                                     ],
-                                                },
-                                            ),
-                                        ],
-                                    },
-                                },
+                                                }},
+                                            },
+                                            args: [],
+                                        },
+                                    ],
+                                }},
                             },
                             args: [],
                         },
                     ],
-                },
-            ),
-        ],
-    },
-}
+                }},
+            },
+            args: [],
+        },
+    ],
+}}
