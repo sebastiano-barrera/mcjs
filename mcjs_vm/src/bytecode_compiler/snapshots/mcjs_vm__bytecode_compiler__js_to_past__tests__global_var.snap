@@ -1,5 +1,5 @@
 ---
-source: mcjs_vm/src/bytecode_compiler.rs
+source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function
 ---
 [18-258] func (0) unbound[console, someGlobalVar, ] {Block {

@@ -1,5 +1,5 @@
 ---
-source: mcjs_vm/src/bytecode_compiler.rs
+source: mcjs_vm/src/bytecode_compiler/past_to_bytecode.rs
 expression: dump_functions(&compiled_module.functions)
 ---
 fn LocalFnId(0)
