@@ -1,5 +1,5 @@
 ---
-source: mcjs_vm/src/bytecode_compiler.rs
+source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function
 ---
 [1-71] func (0) unbound[myFunction, ] {Block {
