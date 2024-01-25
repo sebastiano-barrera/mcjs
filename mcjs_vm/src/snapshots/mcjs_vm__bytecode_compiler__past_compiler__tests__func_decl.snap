@@ -1,0 +1,15 @@
+---
+source: mcjs_vm/src/bytecode_compiler.rs
+expression: dump_functions(&compiled_module.functions)
+---
+fn LocalFnId(0)
+  k0 JsWord(Atom('myFunction' type=dynamic))
+  ClosureNew { dest: v0, fnid: LocalFnId(1), forced_this: None }
+  GetGlobalThis(v1)
+  LoadConst(v3, const[0])
+  ObjSet { obj: v1, key: v3, value: v2 }
+fn LocalFnId(1)
+  k0 Number(3.0)
+  LoadConst(v0, const[0])
+  Return(v0)
+

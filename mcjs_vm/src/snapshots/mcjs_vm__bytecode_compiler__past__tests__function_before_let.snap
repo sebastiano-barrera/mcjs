@@ -1,0 +1,48 @@
+---
+source: mcjs_vm/src/bytecode_compiler.rs
+expression: function
+---
+[18-126] func (0) unbound[] {Block {
+    id: block0,
+    decls: [],
+    stmts: [
+        [19-123] Call {
+            is_new: false,
+            callee: [19-123] CreateClosure {
+                func: [19-123] func (0) unbound[] {Block {
+                    id: block1,
+                    decls: [
+                        Decl: var f,
+                        Decl: let x,
+                    ],
+                    stmts: [
+                        [52-74] Assign(
+                            f,
+                            [52-74] CreateClosure {
+                                func: [52-74] func (0) unbound[x, ] {Block {
+                                    id: block2,
+                                    decls: [],
+                                    stmts: [
+                                        [67-72] Assign(
+                                            x,
+                                            [71-72] NumberLiteral(
+                                                3.0,
+                                            ),
+                                        ),
+                                    ],
+                                }},
+                            },
+                        ),
+                        [99-104] Assign(
+                            x,
+                            [103-104] NumberLiteral(
+                                2.0,
+                            ),
+                        ),
+                    ],
+                }},
+            },
+            args: [],
+        },
+    ],
+}}

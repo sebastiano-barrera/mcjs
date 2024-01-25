@@ -1,0 +1,21 @@
+---
+source: mcjs_vm/src/bytecode_compiler.rs
+expression: dump_functions(&compiled_module.functions)
+---
+fn LocalFnId(0)
+  ClosureNew { dest: v1, fnid: LocalFnId(1), forced_this: None }
+  LoadUndefined(v0)
+  Call { return_value: v2, this: v0, callee: v1 }
+fn LocalFnId(1)
+  k0 Number(2.0)
+  ClosureNew { dest: v2, fnid: LocalFnId(2), forced_this: None }
+  ClosureAddCapture(v1)
+  Copy { dst: v0, src: v2 }
+  LoadConst(v3, const[0])
+  Copy { dst: v1, src: v3 }
+fn LocalFnId(2)
+  k0 Number(3.0)
+  LoadCapture(v0, capture[0])
+  LoadConst(v1, const[0])
+  Copy { dst: v0, src: v1 }
+
