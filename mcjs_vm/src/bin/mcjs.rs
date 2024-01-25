@@ -25,6 +25,17 @@ fn main() {
             .load_script(Some(filename.to_owned()), content)
             .expect("compile error");
 
+        if config.dump_bytecode {
+            for fnid in loader.functions() {
+                println!(
+                    "fn {:?} {}",
+                    fnid,
+                    if fnid == &main_fnid { "[root]" } else { "" }
+                );
+                loader.get_function(*fnid).unwrap().dump();
+            }
+        }
+
         println!();
         println!("running...");
 
@@ -81,18 +92,26 @@ fn run_to_completion(mut intrp: Interpreter<'_>) {
 struct Config {
     paths: Vec<String>,
     start_shell: bool,
+    dump_bytecode: bool,
 }
 
 fn parse_args() -> Config {
     let mut paths = Vec::new();
     let mut start_shell = false;
+    let mut dump_bytecode = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--shell" || arg == "-s" {
-            start_shell = true;
-        } else {
-            paths.push(arg);
+        match arg.as_str() {
+            "--shell" | "-s" => {
+                start_shell = true;
+            }
+            "--dump-bytecode" => {
+                dump_bytecode = true;
+            }
+            _ => {
+                paths.push(arg);
+            }
         }
     }
 
@@ -100,5 +119,9 @@ fn parse_args() -> Config {
         start_shell = true;
     }
 
-    Config { paths, start_shell }
+    Config {
+        paths,
+        start_shell,
+        dump_bytecode,
+    }
 }
