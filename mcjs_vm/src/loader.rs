@@ -170,6 +170,10 @@ impl Loader {
         self.functions.get(&fnid)
     }
 
+    pub fn functions(&self) -> impl Iterator<Item = &bytecode::FnId> {
+        self.functions.keys()
+    }
+
     pub fn get_abs_path(&self, module_id: bytecode::ModuleId) -> Option<&Path> {
         match module_id {
             bytecode::SCRIPT_MODULE_ID => None,
