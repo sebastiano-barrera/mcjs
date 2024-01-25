@@ -27,20 +27,6 @@ use crate::{
 
 pub use crate::common::Error;
 
-macro_rules! tprintln {
-    ($($args:expr),*) => {
-        #[cfg(test)]
-        eprintln!($($args),*);
-    }
-}
-
-macro_rules! tprint {
-    ($($args:expr),*) => {
-        #[cfg(test)]
-        eprint!($($args),*);
-    }
-}
-
 /// A value that can be input, output, or processed by the program at runtime.
 ///
 /// Design notes: Value is `Copy` in an effort to make it as dumb as possible (easy to
@@ -437,18 +423,6 @@ impl<'a> Interpreter<'a> {
             }
 
             let instr = func.instrs()[self.iid.0 as usize];
-
-            #[cfg(test)]
-            {
-                self.print_indent();
-                tprint!("{:<4}  {:?}", self.iid.0, instr);
-                if let Instr::LoadConst(_, const_ndx) = instr {
-                    let lit = &func.consts()[const_ndx.0 as usize];
-                    tprint!(" = ({:?})", lit);
-                }
-                tprint!("    ");
-            }
-
             let mut next_ndx = self.iid.0 + 1;
 
             #[cfg(enable_jit)]
@@ -634,12 +608,6 @@ impl<'a> Interpreter<'a> {
                                 (_, other) => other,
                             };
 
-                            tprintln!("\n     - call with {} params", n_params);
-                            #[cfg(test)]
-                            for (i, arg) in arg_vals.iter().enumerate() {
-                                tprintln!("     - call arg[{}]: {:?}", i, arg);
-                            }
-
                             let call_meta = stack::CallMeta {
                                 fnid: closure.fnid,
                                 // TODO Actually, we just need to allocate enough space for
@@ -653,14 +621,6 @@ impl<'a> Interpreter<'a> {
                             self.data
                                 .top_mut()
                                 .set_return_target(return_to_iid, *return_value);
-
-                            tprintln!();
-                            self.print_indent();
-                            tprintln!(
-                                "-- fn {:?} [{} captures]",
-                                call_meta.fnid,
-                                call_meta.captures.len()
-                            );
 
                             self.data.push(call_meta);
                             for (i, arg) in arg_vals.into_iter().enumerate() {
@@ -697,7 +657,6 @@ impl<'a> Interpreter<'a> {
                         .top()
                         .get_arg(*arg_ndx)
                         .unwrap_or(Value::Undefined);
-                    tprint!("-> {:?}", value);
                     self.data.top_mut().set_result(*dest, value);
                 }
 
@@ -730,7 +689,6 @@ impl<'a> Interpreter<'a> {
                     }
                     .unwrap_or(Value::Undefined);
 
-                    tprint!("  -> {:?}", value);
                     self.data.top_mut().set_result(*dest, value);
                 }
                 Instr::ObjGetKeys { dest, obj } => {
@@ -813,7 +771,6 @@ impl<'a> Interpreter<'a> {
                 Instr::TypeOf { dest, arg: value } => {
                     let value = self.get_operand(*value);
                     let result = self.js_typeof(&value);
-                    tprint!("-> {:?}", result);
                     self.data.top_mut().set_result(*dest, result);
                 }
 
@@ -840,13 +797,7 @@ impl<'a> Interpreter<'a> {
                     let mut upvalues = Vec::new();
                     while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
                         let upv_id = self.data.top_mut().ensure_in_upvalue(cap);
-                        {
-                            self.print_indent();
-                            tprintln!("        upvalue: {:?} -> {:?}", cap, upv_id);
-                        }
-
                         upvalues.push(upv_id);
-
                         next_ndx += 1;
                     }
 
@@ -905,9 +856,6 @@ impl<'a> Interpreter<'a> {
                         self.data
                             .top_mut()
                             .set_return_target(IID(self.iid.0 + 1), *dest);
-
-                        self.print_indent();
-                        tprintln!("-- loading module {:?}", root_fnid.0);
 
                         self.data.push(call_meta);
                         self.iid = IID(0u16);
@@ -1008,8 +956,6 @@ impl<'a> Interpreter<'a> {
                     target_iid: *target_iid,
                 }),
             }
-
-            tprintln!();
 
             #[cfg(enable_jit)]
             if let Some(jitting) = &mut self.jitting {
@@ -1166,24 +1112,9 @@ impl<'a> Interpreter<'a> {
             .set_result(dest, Value::Bool(test(ordering)));
     }
 
-    fn print_indent(&self) {
-        #[cfg(test)]
-        for _ in 0..(self.data.len() - 1) {
-            tprint!("·   ");
-        }
-    }
-
     // TODO(cleanup) inline this function? It now adds nothing
     fn get_operand(&self, vreg: bytecode::VReg) -> Value {
-        let value = self.data.top().get_result(vreg);
-        //  TODO(cleanup) Move to a global logger. This is just for debugging!
-        #[cfg(test)]
-        {
-            tprintln!();
-            self.print_indent();
-            tprint!("        {:?} = {:?}", vreg, value);
-        }
-        value
+        self.data.top().get_result(vreg)
     }
 
     fn get_operand_object(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectRef> {

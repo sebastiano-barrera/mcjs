@@ -85,9 +85,6 @@ impl InterpreterData {
             captures: call_meta.captures.to_owned().into_boxed_slice(),
         };
 
-        #[cfg(test)]
-        eprintln!("  (allocated frame: {:?})", frame_hdr);
-
         for _ in 0..frame_hdr.regs_count {
             self.values.push(Slot::Inline(Value::Undefined));
         }
