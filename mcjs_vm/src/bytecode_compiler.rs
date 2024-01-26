@@ -11,8 +11,8 @@ use swc_ecma_ast::{
 
 use crate::bytecode::{self, IdentAsmt, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
 use crate::common::{Context, Error, Result};
-use crate::error;
 use crate::util::Mask;
+use crate::{error, tracing};
 
 pub use swc_common::SourceMap;
 
@@ -59,6 +59,9 @@ pub fn compile_file(
     flags: CompileFlags,
 ) -> Result<CompiledChunk> {
     use crate::common::Context;
+
+    let t = tracing::section("compile_file");
+    t.log("source", &content);
 
     let ast_module = parse_file(filename.clone(), content, Lrc::clone(&source_map))
         .with_context(error!("while parsing file: {filename}"))?;
@@ -159,7 +162,10 @@ fn compile_script(
 ) -> Result<CompiledModule> {
     use swc_ecma_ast::{ExportDecl, Expr, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
 
+    let t = tracing::section("compile_script");
+
     let function = js_to_past::compile_script(ast_module);
+    t.log_value("PAST", &function);
     assert!(function.n_parameters == 0);
 
     let mut mod_builder = past_to_bytecode::ModuleBuilder::new(flags.min_fnid);
@@ -171,5 +177,30 @@ fn compile_script(
         past_to_bytecode::compile_function(&mut mod_builder, &globals, Vec::new(), &function)?;
 
     let module = mod_builder.build(root_fnid);
+
+    trace_dump_module(&module);
+
     Ok(module)
+}
+
+fn trace_dump_module(module: &CompiledModule) {
+    let t = tracing::section("bytecode");
+    for (fnid, func) in &module.functions {
+        use std::fmt::Write;
+
+        let mut buf = String::new();
+
+        writeln!(buf).unwrap();
+        writeln!(buf, "-- consts").unwrap();
+        for (ndx, lit) in func.consts().iter().enumerate() {
+            writeln!(buf, "  k{:<4} {:?}", ndx, lit).unwrap();
+        }
+
+        writeln!(buf, "-- instrs").unwrap();
+        for (ndx, instr) in func.instrs().iter().enumerate() {
+            writeln!(buf, "  {:4} {:?}", ndx, instr).unwrap();
+        }
+
+        t.log(&format!("{:?}", fnid), &buf);
+    }
 }
