@@ -69,3 +69,18 @@ where
 pub fn shorten_by<T>(xs: &mut Vec<T>, n: usize) {
     xs.truncate(xs.len() - n);
 }
+
+pub fn write_comma_sep<W, T>(wrt: &mut W, values: impl Iterator<Item = T>) -> std::fmt::Result
+where
+    W: std::fmt::Write,
+    T: ToString,
+{
+    for (ndx, value) in values.enumerate() {
+        if ndx > 0 {
+            write!(wrt, ", ")?;
+        }
+        write!(wrt, "{}", value.to_string())?;
+    }
+
+    Ok(())
+}

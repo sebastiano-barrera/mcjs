@@ -166,7 +166,7 @@ fn compile_script(
 
     let function = js_to_past::compile_script(ast_module);
     t.log_value("PAST", &function);
-    assert!(function.n_parameters == 0);
+    assert!(function.parameters.is_empty());
 
     let mut mod_builder = past_to_bytecode::ModuleBuilder::new(flags.min_fnid);
 

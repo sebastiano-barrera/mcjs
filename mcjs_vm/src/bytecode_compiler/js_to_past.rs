@@ -13,21 +13,19 @@ macro_rules! unsupported_node {
 }
 
 pub struct Function {
-    pub n_parameters: u8,
+    pub parameters: Vec<JsWord>,
     pub unbound_names: Vec<JsWord>,
     pub body: Block,
     pub span: swc_common::Span,
 }
 impl std::fmt::Debug for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "[{}-{}] func ({}) unbound[",
-            self.span.lo.0, self.span.hi.0, self.n_parameters
-        )?;
-        for name in &self.unbound_names {
-            write!(f, "{}, ", name.to_string())?;
-        }
+        let lo = self.span.lo.0;
+        let hi = self.span.hi.0;
+        write!(f, "[{}-{}] func (", lo, hi)?;
+        write_comma_sep(f, self.parameters.iter())?;
+        write!(f, ") unbound[")?;
+        write_comma_sep(f, self.unbound_names.iter())?;
         write!(f, "] {{")?;
         self.body.fmt(f)?;
         write!(f, "}}")
@@ -69,6 +67,15 @@ impl std::fmt::Debug for Decl {
 pub enum DeclName {
     Js(JsWord),
     Tmp(TmpID),
+}
+
+impl DeclName {
+    pub fn expect_js_word(&self) -> &JsWord {
+        match self {
+            DeclName::Js(js_word) => js_word,
+            DeclName::Tmp(_) => panic!("assertion failed: DeclName expected to be JS word"),
+        }
+    }
 }
 
 impl std::fmt::Debug for DeclName {
@@ -223,7 +230,7 @@ mod builder {
 use builder::Builder;
 pub use builder::{BlockID, LabelID, TmpID};
 
-use crate::error;
+use crate::{error, util::write_comma_sep};
 
 pub fn compile_script(ast_module: swc_ecma_ast::Module) -> Function {
     use swc_ecma_ast::ModuleItem;
@@ -1206,33 +1213,19 @@ fn compile_function(builder: &mut Builder, swc_func: &swc_ecma_ast::Function) ->
 fn compile_function_from_parts(
     builder: &mut Builder,
     span: swc_common::Span,
-    params: &[swc_ecma_ast::Param],
-    mut body: Block,
+    swc_params: &[swc_ecma_ast::Param],
+    body: Block,
 ) -> Function {
-    // Two nested blocks:
-    //  - outer: declares variables corresponding to function parameters
-    //  - inner: the actual function body
-    // var declared names are hoisted to the outer block
-    let n_parameters = params.len().try_into().expect("too many parameters!");
-
-    for (ndx, param) in params.into_iter().enumerate() {
-        let ndx = ndx.try_into().unwrap();
+    let mut parameters = Vec::new();
+    for param in swc_params.into_iter() {
         let name = compile_name_pat(&param.pat);
-
-        body.decls.push(Decl {
-            name: name.clone(),
-            is_lexical: false,
-            is_global: false,
-        });
-        body.stmts.push(Stmt {
-            op: StmtOp::AssignParam(name, ndx),
-            span: param.span,
-        });
+        let name = name.expect_js_word();
+        parameters.push(name.clone());
     }
 
     let unbound_names = find_unbound_references(&body);
     Function {
-        n_parameters,
+        parameters,
         unbound_names,
         body,
         span,
