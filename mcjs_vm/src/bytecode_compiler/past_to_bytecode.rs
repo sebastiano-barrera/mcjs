@@ -464,7 +464,6 @@ fn compile_write(fnb: &mut FnBuilder, name: &js_to_past::DeclName, value: byteco
         }
         Loc::Global(name) => {
             let global_this = fnb.regs.gen();
-            let value = fnb.regs.gen();
 
             fnb.instrs.push(Instr::GetGlobalThis(global_this));
             let key = compile_load_const(fnb, Literal::JsWord(name));
