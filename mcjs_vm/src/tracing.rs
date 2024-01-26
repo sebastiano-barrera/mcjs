@@ -85,6 +85,7 @@ mod internal {
     impl SinkConfig {
         fn from_env() -> Self {
             let sink = match std::env::var("MCJS_TRACING_SINK") {
+                Ok(value) if value == "@discard" => SinkType::Discard,
                 Ok(filename) => SinkType::File(PathBuf::from(filename)),
                 _ => SinkType::Stdout,
             };
@@ -96,6 +97,7 @@ mod internal {
         File(PathBuf),
         Stdout,
         Buffer,
+        Discard,
     }
 
     lazy_static! {
@@ -115,6 +117,7 @@ mod internal {
         File(File),
         Stdout,
         Buffer(String),
+        Discard,
     }
     impl Sink {
         fn from_config(config: SinkConfig) -> Self {
@@ -125,6 +128,7 @@ mod internal {
                 }
                 SinkType::Stdout => Sink::Stdout,
                 SinkType::Buffer => Sink::Buffer(String::new()),
+                SinkType::Discard => Sink::Discard,
             }
         }
 
@@ -140,6 +144,7 @@ mod internal {
                 Sink::Buffer(buf) => {
                     buf.push_str(data);
                 }
+                Sink::Discard => {}
             }
         }
 
