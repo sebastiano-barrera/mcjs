@@ -101,7 +101,7 @@ impl Sink {
         }
     }
 
-    fn write(&mut self, data: String) {
+    fn write(&mut self, data: &str) {
         match self {
             Sink::File(f) => {
                 f.write(data.as_bytes()).unwrap();
@@ -111,7 +111,7 @@ impl Sink {
                 stdout.write(data.as_bytes()).unwrap();
             }
             Sink::Buffer(buf) => {
-                buf.push_str(&data);
+                buf.push_str(data);
             }
         }
     }
@@ -162,8 +162,8 @@ impl Logger {
 
         if self.sections_depth == 0 {
             let mut sink = get_sink();
-            let buf = std::mem::replace(&mut self.buf, String::new());
-            sink.write(buf);
+            sink.write(&self.buf);
+            self.buf.clear();
         }
     }
 
