@@ -12,6 +12,7 @@ mod heap;
 pub mod interpreter;
 pub mod stack;
 
+mod tracing;
 mod util;
 
 // TODO Refine the set of re-exported things?

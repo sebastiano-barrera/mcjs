@@ -1,0 +1,13 @@
+---
+source: mcjs_vm/src/tracing.rs
+expression: output
+---
+<section name>
+    the_value: (
+        1,
+        2,
+        3,
+    )
+    
+</>
+
