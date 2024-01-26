@@ -6,8 +6,8 @@ fn LocalFnId(0)
   k0 JsWord(Atom('myFunction' type=dynamic))
   ClosureNew { dest: v0, fnid: LocalFnId(1), forced_this: None }
   GetGlobalThis(v1)
-  LoadConst(v3, const[0])
-  ObjSet { obj: v1, key: v3, value: v2 }
+  LoadConst(v2, const[0])
+  ObjSet { obj: v1, key: v2, value: v0 }
 fn LocalFnId(1)
   k0 Number(3.0)
   LoadConst(v0, const[0])
