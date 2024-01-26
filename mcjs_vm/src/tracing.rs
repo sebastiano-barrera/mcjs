@@ -9,79 +9,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread_local;
 
-pub struct Config {
-    pub sink: SinkType,
-}
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            sink: SinkType::Stdout,
-        }
-    }
-}
-
-pub enum SinkType {
-    File(PathBuf),
-    Stdout,
-    Buffer,
-}
-
-pub fn init(config: Config) {
-    let mut sink = get_sink();
-    *sink = match config.sink {
-        SinkType::File(filename) => {
-            let file = File::open(filename).expect("could not open logger sink file");
-            Sink::File(file)
-        }
-        SinkType::Stdout => Sink::Stdout,
-        SinkType::Buffer => Sink::Buffer(String::new()),
-    };
-}
-
-lazy_static! {
-    static ref GLOBAL_SINK: Arc<Mutex<Sink>> = Arc::new(Mutex::new(Sink::Stdout));
-}
-
-fn get_sink() -> MutexGuard<'static, Sink> {
-    GLOBAL_SINK.lock().expect("could not lock global logger!")
-}
-
-enum Sink {
-    File(File),
-    Stdout,
-    Buffer(String),
-}
-impl Sink {
-    fn write(&mut self, data: String) {
-        match self {
-            Sink::File(f) => {
-                f.write(data.as_bytes()).unwrap();
-            }
-            Sink::Stdout => {
-                let mut stdout = std::io::stdout().lock();
-                stdout.write(data.as_bytes()).unwrap();
-            }
-            Sink::Buffer(buf) => {
-                buf.push_str(&data);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn take_buffer(&mut self) -> String {
-        let buf = match self {
-            Sink::Buffer(buf) => buf,
-            _ => panic!("take_buffer, but sink is not Sink::Buffer(_)"),
-        };
-
-        std::mem::replace(buf, String::new())
-    }
-}
-
-thread_local! {
-    static THREAD_LOGGER: RefCell<Logger> = RefCell::new(Logger::new());
-}
-
 #[must_use]
 pub fn section(header: &str) -> Section {
     THREAD_LOGGER.with(|logger| {
@@ -116,6 +43,92 @@ impl Drop for Section {
             logger.end_section();
         })
     }
+}
+
+struct SinkConfig {
+    sink: SinkType,
+}
+impl Default for SinkConfig {
+    fn default() -> Self {
+        SinkConfig {
+            sink: SinkType::Stdout,
+        }
+    }
+}
+impl SinkConfig {
+    fn from_env() -> Self {
+        let sink = match std::env::var("MCJS_TRACING_SINK") {
+            Ok(filename) => SinkType::File(PathBuf::from(filename)),
+            _ => SinkType::Stdout,
+        };
+        SinkConfig { sink }
+    }
+}
+
+enum SinkType {
+    File(PathBuf),
+    Stdout,
+    Buffer,
+}
+
+lazy_static! {
+    static ref GLOBAL_SINK: Arc<Mutex<Sink>> =
+        Arc::new(Mutex::new(Sink::from_config(SinkConfig::from_env())));
+}
+
+fn get_sink() -> MutexGuard<'static, Sink> {
+    GLOBAL_SINK.lock().expect("could not lock global logger!")
+}
+fn set_sink(new_sink: Sink) {
+    let mut sink = get_sink();
+    *sink = new_sink;
+}
+
+enum Sink {
+    File(File),
+    Stdout,
+    Buffer(String),
+}
+impl Sink {
+    fn from_config(config: SinkConfig) -> Self {
+        match config.sink {
+            SinkType::File(filename) => {
+                let file = File::create(filename).expect("could not open logger sink file");
+                Sink::File(file)
+            }
+            SinkType::Stdout => Sink::Stdout,
+            SinkType::Buffer => Sink::Buffer(String::new()),
+        }
+    }
+
+    fn write(&mut self, data: String) {
+        match self {
+            Sink::File(f) => {
+                f.write(data.as_bytes()).unwrap();
+            }
+            Sink::Stdout => {
+                let mut stdout = std::io::stdout().lock();
+                stdout.write(data.as_bytes()).unwrap();
+            }
+            Sink::Buffer(buf) => {
+                buf.push_str(&data);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn take_buffer(&mut self) -> String {
+        let buf = match self {
+            Sink::Buffer(buf) => buf,
+            _ => panic!("take_buffer, but sink is not Sink::Buffer(_)"),
+        };
+
+        std::mem::replace(buf, String::new())
+    }
+}
+
+thread_local! {
+    static THREAD_LOGGER: RefCell<Logger> = RefCell::new(Logger::new());
 }
 
 struct Logger {
@@ -179,9 +192,9 @@ mod tests {
 
     #[test]
     fn test_section() {
-        init(Config {
+        set_sink(Sink::from_config(SinkConfig {
             sink: SinkType::Buffer,
-        });
+        }));
 
         {
             let _s = section("section name");
