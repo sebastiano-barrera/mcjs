@@ -61,6 +61,13 @@ mod internal {
                 logger.log(tag, value);
             })
         }
+
+        pub fn copy_buffer(&self) -> String {
+            THREAD_LOGGER.with(|logger| {
+                let logger = logger.borrow_mut();
+                logger.buffer().to_string()
+            })
+        }
     }
 
     impl Drop for Section {
@@ -147,16 +154,6 @@ mod internal {
                 Sink::Discard => {}
             }
         }
-
-        #[cfg(test)]
-        fn take_buffer(&mut self) -> String {
-            let buf = match self {
-                Sink::Buffer(buf) => buf,
-                _ => panic!("take_buffer, but sink is not Sink::Buffer(_)"),
-            };
-
-            std::mem::replace(buf, String::new())
-        }
     }
 
     thread_local! {
@@ -216,6 +213,11 @@ mod internal {
         fn log(&mut self, tag: &str, value: &str) {
             self.write(&format!("{}: {}\n", tag, value));
         }
+
+        #[cfg(test)]
+        fn buffer(&self) -> &str {
+            &self.buf
+        }
     }
 
     #[cfg(test)]
@@ -224,16 +226,11 @@ mod internal {
 
         #[test]
         fn test_section() {
-            set_sink(Sink::from_config(SinkConfig {
-                sink: SinkType::Buffer,
-            }));
-
-            {
+            let output = {
                 let _s = section("section name");
                 _s.log_value("the_value", &(1, 2, 3));
-            }
-
-            let output = get_sink().take_buffer();
+                _s.copy_buffer()
+            };
             insta::assert_snapshot!(output);
         }
     }
