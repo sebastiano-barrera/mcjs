@@ -236,6 +236,19 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
             fnb.instrs.push(Instr::ArrayPush { arr, value });
             Ok(None)
         }
+        js_to_past::StmtOp::ArrayNth { arr, index } => {
+            let arr = compile_expr(fnb, arr)?;
+            let index = compile_expr(fnb, index)?;
+            let dest = fnb.regs.gen();
+            fnb.instrs.push(Instr::ArrayNth { dest, arr, index });
+            Ok(Some(dest))
+        }
+        js_to_past::StmtOp::ArrayLen(arr) => {
+            let arr = compile_expr(fnb, arr)?;
+            let dest = fnb.regs.gen();
+            fnb.instrs.push(Instr::ArrayLen { dest, arr });
+            Ok(Some(dest))
+        },
         js_to_past::StmtOp::ObjectCreate => {
             let obj = fnb.regs.gen();
             fnb.instrs.push(Instr::ObjCreateEmpty(obj));
@@ -254,6 +267,12 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
             let value = compile_expr(fnb, value.as_ref())?;
             fnb.instrs.push(Instr::ObjSet { obj, key, value });
             Ok(None)
+        }
+        js_to_past::StmtOp::ObjectGetKeys(obj) => {
+            let obj = compile_expr(fnb, obj.as_ref())?;
+            let dest = fnb.regs.gen();
+            fnb.instrs.push(Instr::ObjGetKeys { dest, obj });
+            Ok(Some(dest))
         }
         js_to_past::StmtOp::CreateClosure { func } => {
             let mut cap_names = Vec::new();

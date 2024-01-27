@@ -2102,7 +2102,7 @@ mod tests {
             .sink
             .into_iter()
             .map(|value| match value {
-                Some(Literal::String(s)) => s,
+                Some(Literal::String(s)) => s.clone(),
                 other => panic!("not a String: {:?}", other),
             })
             .collect();
