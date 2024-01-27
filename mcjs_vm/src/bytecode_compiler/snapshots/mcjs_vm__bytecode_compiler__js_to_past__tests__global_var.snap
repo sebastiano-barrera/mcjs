@@ -2,28 +2,28 @@
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function
 ---
-[18-258] func (0) unbound[console, someGlobalVar, ] {Block {
+[18-258] func () unbound[console, someGlobalVar] {Block {
     id: block0,
     decls: [],
     stmts: [
         [19-255] Call {
             is_new: false,
             callee: [19-255] CreateClosure {
-                func: [19-255] func (0) unbound[console, someGlobalVar, ] {Block {
+                func: [19-255] func () unbound[console, someGlobalVar] {Block {
                     id: block1,
                     decls: [],
                     stmts: [
                         [49-234] Call {
                             is_new: false,
                             callee: [49-234] CreateClosure {
-                                func: [49-234] func (0) unbound[console, someGlobalVar, ] {Block {
+                                func: [49-234] func () unbound[console, someGlobalVar] {Block {
                                     id: block2,
                                     decls: [],
                                     stmts: [
                                         [79-213] Call {
                                             is_new: false,
                                             callee: [79-213] CreateClosure {
-                                                func: [79-213] func (0) unbound[console, someGlobalVar, ] {Block {
+                                                func: [79-213] func () unbound[console, someGlobalVar] {Block {
                                                     id: block3,
                                                     decls: [
                                                         Decl: let someLocalVar,

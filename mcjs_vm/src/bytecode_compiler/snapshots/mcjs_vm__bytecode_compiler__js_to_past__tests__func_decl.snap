@@ -2,14 +2,14 @@
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function
 ---
-[1-71] func (0) unbound[myFunction, ] {Block {
+[1-71] func () unbound[myFunction] {Block {
     id: block0,
     decls: [],
     stmts: [
         [1-71] Assign(
             myFunction,
             [1-71] CreateClosure {
-                func: [1-71] func (0) unbound[] {Block {
+                func: [1-71] func () unbound[] {Block {
                     id: block1,
                     decls: [],
                     stmts: [

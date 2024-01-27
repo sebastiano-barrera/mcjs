@@ -3,19 +3,19 @@ source: mcjs_vm/src/bytecode_compiler/past_to_bytecode.rs
 expression: dump_functions(&compiled_module.functions)
 ---
 fn LocalFnId(0)
-  ClosureNew { dest: v1, fnid: LocalFnId(1), forced_this: None }
-  LoadUndefined(v0)
-  Call { return_value: v2, this: v0, callee: v1 }
+  ClosureNew { dest: v9, fnid: LocalFnId(1), forced_this: None }
+  LoadUndefined(v8)
+  Call { return_value: v10, this: v8, callee: v9 }
 fn LocalFnId(1)
   k0 Number(2.0)
-  ClosureNew { dest: v2, fnid: LocalFnId(2), forced_this: None }
-  ClosureAddCapture(v1)
-  Copy { dst: v0, src: v2 }
-  LoadConst(v3, const[0])
-  Copy { dst: v1, src: v3 }
+  ClosureNew { dest: v10, fnid: LocalFnId(2), forced_this: None }
+  ClosureAddCapture(v9)
+  Copy { dst: v8, src: v10 }
+  LoadConst(v11, const[0])
+  Copy { dst: v9, src: v11 }
 fn LocalFnId(2)
   k0 Number(3.0)
-  LoadCapture(v0, capture[0])
-  LoadConst(v1, const[0])
-  Copy { dst: v0, src: v1 }
+  LoadCapture(v8, capture[0])
+  LoadConst(v9, const[0])
+  Copy { dst: v8, src: v9 }
 
