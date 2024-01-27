@@ -130,6 +130,11 @@ pub enum StmtOp {
 
     ArrayCreate,
     ArrayPush(DeclName, Box<Stmt>),
+    ArrayNth {
+        arr: Box<Stmt>,
+        index: Box<Stmt>,
+    },
+    ArrayLen(Box<Stmt>),
 
     ObjectCreate,
     ObjectGet {
@@ -162,6 +167,7 @@ pub enum StmtOp {
     },
 
     Debugger,
+    ObjectGetKeys(Box<Stmt>),
 }
 
 mod builder {
@@ -207,23 +213,39 @@ mod builder {
         pub fn break_target(&self) -> BlockID {
             self.breakable_blocks.last().copied().unwrap()
         }
+        pub fn push_break_target(&mut self, block_id: BlockID) {
+            self.breakable_blocks.push(block_id)
+        }
+        pub fn pop_break_target(&mut self) {
+            self.breakable_blocks.pop().unwrap();
+        }
 
-        pub(crate) fn gen_block_id(&mut self) -> BlockID {
+        pub(super) fn gen_block_id(&mut self) -> BlockID {
             let blkid = BlockID(self.next_id);
             self.next_id += 1;
             blkid
         }
 
-        pub(crate) fn gen_label_id(&mut self) -> LabelID {
+        pub(super) fn gen_label_id(&mut self) -> LabelID {
             let lblid = LabelID(self.next_id);
             self.next_id += 1;
             lblid
         }
 
-        pub(crate) fn gen_tmp(&mut self) -> TmpID {
+        pub(super) fn gen_tmp(&mut self) -> TmpID {
             let tmpid = TmpID(self.next_id);
             self.next_id += 1;
             tmpid
+        }
+
+        pub(super) fn decl_tmp(&mut self, block: &mut super::Block) -> super::DeclName {
+            let name = super::DeclName::Tmp(self.gen_tmp());
+            block.decls.push(super::Decl {
+                name: name.clone(),
+                is_lexical: true,
+                is_global: false,
+            });
+            name
         }
     }
 }
@@ -571,6 +593,7 @@ fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::S
             }
 
             let mut inner_block = Block::empty(builder.gen_block_id());
+            builder.push_break_target(inner_block.id);
 
             inner_block.stmts.push(Stmt {
                 op: StmtOp::If {
@@ -619,7 +642,193 @@ fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::S
             });
         }
 
-        swc_ecma_ast::Stmt::ForIn(_) => todo!(),
+        swc_ecma_ast::Stmt::ForIn(forin_stmt) => {
+            use swc_ecma_ast::{ForHead, Pat};
+
+            let span = forin_stmt.span;
+
+            /* TODO
+            if is_strict_mode:
+                forbid (element var name == any JS keyword)
+                    // use is_identifier_keyword
+            */
+
+            let mut outer_block = Block::empty(builder.gen_block_id());
+
+            let item_var_decl: Decl = match &forin_stmt.left {
+                ForHead::UsingDecl(_) => unsupported_node!(&forin_stmt.left),
+                ForHead::VarDecl(var_decl) => {
+                    assert_eq!(var_decl.decls.len(), 1);
+                    Decl {
+                        name: compile_name_pat(&var_decl.decls[0].name),
+                        is_lexical: match var_decl.kind {
+                            swc_ecma_ast::VarDeclKind::Var => false,
+                            swc_ecma_ast::VarDeclKind::Let => true,
+                            swc_ecma_ast::VarDeclKind::Const => true,
+                        },
+                        is_global: false,
+                    }
+                }
+                ForHead::Pat(pat) => Decl {
+                    name: compile_name_pat(pat),
+                    is_lexical: true,
+                    is_global: false,
+                },
+            };
+            let item_var = item_var_decl.name.clone();
+            outer_block.decls.push(item_var_decl);
+
+            let key_ndx_tmp = builder.decl_tmp(&mut outer_block);
+            outer_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Assign(
+                    key_ndx_tmp.clone(),
+                    Box::new(Stmt {
+                        span: forin_stmt.span,
+                        op: StmtOp::NumberLiteral(0.0),
+                    }),
+                ),
+            });
+
+            let iteree_tmp = builder.decl_tmp(&mut outer_block);
+            outer_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Assign(
+                    iteree_tmp.clone(),
+                    Box::new(compile_expr(builder, &forin_stmt.right)),
+                ),
+            });
+
+            let keys_tmp = builder.decl_tmp(&mut outer_block);
+            outer_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Assign(
+                    keys_tmp.clone(),
+                    Box::new(Stmt {
+                        span,
+                        op: StmtOp::ObjectGetKeys(Box::new(Stmt {
+                            span,
+                            op: StmtOp::Read(iteree_tmp),
+                        })),
+                    }),
+                ),
+            });
+
+            let key_count_tmp = builder.decl_tmp(&mut outer_block);
+            outer_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Assign(
+                    key_count_tmp.clone(),
+                    Box::new(Stmt {
+                        span: forin_stmt.span,
+                        op: StmtOp::ArrayLen(Box::new(Stmt {
+                            span,
+                            op: StmtOp::Read(keys_tmp.clone()),
+                        })),
+                    }),
+                ),
+            });
+
+            let mut inner_block = Block::empty(builder.gen_block_id());
+            builder.push_break_target(inner_block.id);
+
+            inner_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::If {
+                    test: Box::new(Stmt {
+                        span,
+                        op: StmtOp::Binary(
+                            swc_ecma_ast::BinaryOp::Lt,
+                            Box::new(Stmt {
+                                span,
+                                op: StmtOp::Read(key_ndx_tmp.clone()),
+                            }),
+                            Box::new(Stmt {
+                                span,
+                                op: StmtOp::Read(key_count_tmp),
+                            }),
+                        ),
+                    }),
+                    cons: Box::new(Stmt {
+                        span,
+                        op: StmtOp::Undefined,
+                    }),
+                    alt: Box::new(Stmt {
+                        span,
+                        op: StmtOp::Break(inner_block.id),
+                    }),
+                },
+            });
+
+            inner_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Assign(
+                    item_var,
+                    Box::new(Stmt {
+                        span,
+                        op: StmtOp::ArrayNth {
+                            arr: Box::new(Stmt {
+                                span,
+                                op: StmtOp::Read(keys_tmp),
+                            }),
+                            index: Box::new(Stmt {
+                                span,
+                                op: StmtOp::Read(key_ndx_tmp.clone()),
+                            }),
+                        },
+                    }),
+                ),
+            });
+
+            let body_block =
+                compile_block_single_stmt(builder, Some(&mut outer_block), &forin_stmt.body);
+            inner_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Block(body_block),
+            });
+
+            inner_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Assign(
+                    key_ndx_tmp.clone(),
+                    Box::new(Stmt {
+                        span,
+                        op: StmtOp::Binary(
+                            swc_ecma_ast::BinaryOp::Add,
+                            Box::new(Stmt {
+                                span,
+                                op: StmtOp::Read(key_ndx_tmp.clone()),
+                            }),
+                            Box::new(Stmt {
+                                span,
+                                op: StmtOp::NumberLiteral(1.0),
+                            }),
+                        ),
+                    }),
+                ),
+            });
+
+            inner_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Unshare(outer_block.id),
+            });
+            inner_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Continue(inner_block.id),
+            });
+
+            builder.pop_break_target();
+
+            outer_block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Block(inner_block),
+            });
+
+            block.stmts.push(Stmt {
+                span,
+                op: StmtOp::Block(outer_block),
+            });
+        }
         swc_ecma_ast::Stmt::ForOf(_) => todo!(),
 
         swc_ecma_ast::Stmt::Decl(decl) => match decl {
@@ -1342,6 +1551,13 @@ fn visit_stmts(root: &Stmt, mut handler: impl FnMut(&Stmt)) {
             StmtOp::ArrayPush(_, value_stmt) => {
                 queue.push(value_stmt);
             }
+            StmtOp::ArrayNth { arr, index } => {
+                queue.push(arr);
+                queue.push(index);
+            }
+            StmtOp::ArrayLen(arr) => {
+                queue.push(arr);
+            }
             StmtOp::ObjectCreate => {}
             StmtOp::ObjectGet { obj, key } => {
                 queue.push(obj);
@@ -1352,6 +1568,9 @@ fn visit_stmts(root: &Stmt, mut handler: impl FnMut(&Stmt)) {
                 queue.push(key);
                 queue.push(value);
             }
+            StmtOp::ObjectGetKeys(obj) => {
+                queue.push(obj);
+            },
             StmtOp::CreateClosure { .. } => {}
             StmtOp::Call { callee, args, .. } => {
                 queue.push(callee.as_ref());
@@ -1417,6 +1636,13 @@ fn visit_stmts_mut(root: &mut Stmt, mut handler: impl FnMut(&mut Stmt)) {
             StmtOp::ArrayPush(_, value_stmt) => {
                 queue.push(value_stmt);
             }
+            StmtOp::ArrayNth { arr, index } => {
+                queue.push(arr);
+                queue.push(index);
+            }
+            StmtOp::ArrayLen(arr) => {
+                queue.push(arr);
+            }
             StmtOp::ObjectCreate => {}
             StmtOp::ObjectGet { obj, key } => {
                 queue.push(obj);
@@ -1427,6 +1653,9 @@ fn visit_stmts_mut(root: &mut Stmt, mut handler: impl FnMut(&mut Stmt)) {
                 queue.push(key);
                 queue.push(value);
             }
+            StmtOp::ObjectGetKeys(obj) => {
+                queue.push(obj);
+            },
             StmtOp::CreateClosure { .. } => {}
             StmtOp::Call { callee, args, .. } => {
                 queue.push(callee.as_mut());
