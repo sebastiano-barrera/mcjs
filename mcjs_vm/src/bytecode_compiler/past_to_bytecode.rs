@@ -673,7 +673,7 @@ impl<'a> FnBuilder<'a> {
         FnBuilder {
             instrs: InstrBuffer::new(),
             consts: ConstsBuffer::new(),
-            regs: RegGen::new(),
+            regs: RegGen::new(bytecode::ARGS_COUNT_MAX),
             is_strict_mode: false,
             scopes: Vec::new(),
             lfnid,
@@ -752,8 +752,10 @@ struct RegGen {
     n_regs: u8,
 }
 impl RegGen {
-    fn new() -> Self {
-        RegGen { n_regs: 0 }
+    fn new(first_reg_id: u8) -> Self {
+        RegGen {
+            n_regs: first_reg_id,
+        }
     }
 
     fn gen(&mut self) -> bytecode::VReg {

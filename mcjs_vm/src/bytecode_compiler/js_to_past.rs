@@ -925,7 +925,11 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
         swc_ecma_ast::Expr::Assign(assign_expr) => {
             if let Some(ident) = assign_expr.left.as_ident() {
                 let loc = DeclName::Js(ident.sym.clone());
-                let value = compile_expr(builder, &assign_expr.right);
+                let init_value = Stmt {
+                    op: StmtOp::Read(loc.clone()),
+                    span: ident.span,
+                };
+                let value = compile_assignment(builder, assign_expr, init_value);
                 Stmt {
                     op: StmtOp::Assign(loc, Box::new(value)),
                     span: assign_expr.span,
@@ -937,7 +941,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
                     }
                     // We should have already handled this case in the `if let ... = asm.left.as_ident()`
                     // case
-                    swc_ecma_ast::Expr::Ident(_) => unreachable!(),
+                    swc_ecma_ast::Expr::Ident(_) => panic!("assertion failed"),
                     _ => {
                         panic!("assignment to an expression is unsupported")
                     }
@@ -1083,16 +1087,7 @@ fn compile_member_assignment(
         span: member_expr.span,
     };
 
-    let rhs = compile_expr(builder, &assign_expr.right);
-    let value = match assign_expr.op.to_update() {
-        // regular assignment
-        None => rhs,
-        // updating assignment
-        Some(binop) => Stmt {
-            op: StmtOp::Binary(binop, Box::new(init_value), Box::new(rhs)),
-            span: assign_expr.span,
-        },
-    };
+    let value = compile_assignment(builder, assign_expr, init_value);
     block.stmts.push(Stmt {
         op: StmtOp::ObjectSet {
             obj: Box::new(Stmt {
@@ -1112,6 +1107,24 @@ fn compile_member_assignment(
         op: StmtOp::Block(block),
         span: assign_expr.span,
     }
+}
+
+fn compile_assignment(
+    builder: &mut Builder,
+    assign_expr: &swc_ecma_ast::AssignExpr,
+    init_value: Stmt,
+) -> Stmt {
+    let rhs = compile_expr(builder, &assign_expr.right);
+    let value = match assign_expr.op.to_update() {
+        // regular assignment
+        None => rhs,
+        // updating assignment
+        Some(binop) => Stmt {
+            op: StmtOp::Binary(binop, Box::new(init_value), Box::new(rhs)),
+            span: assign_expr.span,
+        },
+    };
+    value
 }
 
 fn create_tmp(builder: &mut Builder, block: &mut Block, value: Stmt) -> DeclName {
