@@ -17,6 +17,7 @@ pub struct Function {
     pub unbound_names: Vec<JsWord>,
     pub body: Block,
     pub span: swc_common::Span,
+    pub declares_use_strict: bool,
 }
 impl std::fmt::Debug for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -820,10 +821,25 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
 
                                 (key, value)
                             }
+
+                            swc_ecma_ast::Prop::Method(method_prop) => {
+                                let name = method_prop.key.as_ident().expect("object literal: method property syntax, but name is not identifier?");
+                                let key = Stmt {
+                                    span: name.span,
+                                    op: StmtOp::StringLiteral(name.sym.clone()),
+                                };
+                                let func =
+                                    Box::new(compile_function(builder, &method_prop.function));
+                                let value = Stmt {
+                                    span: func.span,
+                                    op: StmtOp::CreateClosure { func },
+                                };
+                                (key, value)
+                            }
+
                             swc_ecma_ast::Prop::Assign(_)
                             | swc_ecma_ast::Prop::Getter(_)
-                            | swc_ecma_ast::Prop::Setter(_)
-                            | swc_ecma_ast::Prop::Method(_) => todo!(),
+                            | swc_ecma_ast::Prop::Setter(_) => todo!(),
                         };
 
                         stmts.push(Stmt {
@@ -1220,8 +1236,8 @@ fn compile_function(builder: &mut Builder, swc_func: &swc_ecma_ast::Function) ->
         panic!("unsupported: TypeScript syntax (return type)");
     }
 
-    let body = &swc_func.body.as_ref().unwrap().stmts;
-    let body = compile_block(builder, None, body);
+    let stmts = &swc_func.body.as_ref().unwrap().stmts;
+    let body = compile_block(builder, None, stmts);
     compile_function_from_parts(builder, swc_func.span, &swc_func.params, body)
 }
 
@@ -1238,10 +1254,19 @@ fn compile_function_from_parts(
         parameters.push(name.clone());
     }
 
+    let declares_use_strict = match body.stmts.first() {
+        Some(Stmt {
+            op: StmtOp::StringLiteral(atom),
+            ..
+        }) => atom == "use strict",
+        _ => false,
+    };
+
     let unbound_names = find_unbound_references(&body);
     Function {
         parameters,
         unbound_names,
+        declares_use_strict,
         body,
         span,
     }

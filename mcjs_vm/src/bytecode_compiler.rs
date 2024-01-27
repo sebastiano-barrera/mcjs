@@ -173,8 +173,13 @@ fn compile_script(
     // At this level, function.unbound_names contains the list of variables that should be accessed
     // via `globalThis`.
     let globals = function.unbound_names.iter().cloned().collect();
-    let root_fnid =
-        past_to_bytecode::compile_function(&mut mod_builder, &globals, Vec::new(), &function)?;
+    let root_fnid = past_to_bytecode::compile_function(
+        &mut mod_builder,
+        &globals,
+        Vec::new(),
+        &function,
+        false, // force_strict
+    )?;
 
     let module = mod_builder.build(root_fnid);
 
@@ -189,6 +194,13 @@ fn trace_dump_module(module: &CompiledModule) {
         use std::fmt::Write;
 
         let mut buf = String::new();
+
+        let mode_name = if func.is_strict_mode() {
+            "strict"
+        } else {
+            "sloppy"
+        };
+        writeln!(buf, "mode: {}", mode_name).unwrap();
 
         writeln!(buf).unwrap();
         writeln!(buf, "-- consts").unwrap();

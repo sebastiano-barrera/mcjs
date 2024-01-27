@@ -2126,9 +2126,36 @@ mod tests {
     }
 
     #[test]
+    fn test_this_basic_nonstrict() {
+        let output = quick_run(
+            r#"
+            function getThis() { return this; }
+            sink(getThis());
+            "#,
+        );
+        // `None` because it's the globalThis object due to "this substitution"
+        assert_eq!(&output.sink, &[None]);
+    }
+
+    #[test]
+    fn test_this_basic_strict() {
+        let output = quick_run(
+            r#"
+            "use strict";
+            function getThis() { return this; }
+            sink(getThis());
+            "#,
+        );
+        // no "this substitution" in strict mode
+        assert_eq!(&output.sink, &[Some(Literal::Undefined)]);
+    }
+
+    #[test]
     fn test_this() {
         let output = quick_run(
             r#"
+            "use strict"
+            
             function getThis() {
                 return this;
             }

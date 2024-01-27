@@ -13,9 +13,11 @@ pub fn compile_function<'a>(
     globals: &'a HashSet<JsWord>,
     captures: Vec<js_to_past::DeclName>,
     func: &js_to_past::Function,
+    force_strict: bool,
 ) -> Result<bytecode::LocalFnId> {
     let lfnid = module_builder.gen_id();
     let mut fnb = FnBuilder::new(lfnid, globals, module_builder);
+    fnb.is_strict_mode = force_strict || func.declares_use_strict;
 
     // We currently only support a limited number of arguments.
     // They're placed in the first (bytecode::ARGS_COUNT_MAX) vregs
@@ -271,7 +273,14 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
                 }
             }
 
-            let lfnid = compile_function(fnb.module_builder, fnb.globals, cap_names, func)?;
+            let force_strict = fnb.is_strict_mode;
+            let lfnid = compile_function(
+                fnb.module_builder,
+                fnb.globals,
+                cap_names,
+                func,
+                force_strict,
+            )?;
             let dest = fnb.regs.gen();
             fnb.instrs.push(Instr::ClosureNew {
                 dest,
@@ -878,9 +887,15 @@ mod tests {
 
         let mut module_builder = super::ModuleBuilder::new(0);
         let globals = past_function.unbound_names.iter().cloned().collect();
-        let root_lfnid =
-            super::compile_function(&mut module_builder, &globals, Vec::new(), &past_function)
-                .expect("past->bytecode compile error");
+        let force_strict = false;
+        let root_lfnid = super::compile_function(
+            &mut module_builder,
+            &globals,
+            Vec::new(),
+            &past_function,
+            force_strict,
+        )
+        .expect("past->bytecode compile error");
 
         module_builder.build(root_lfnid)
     }
