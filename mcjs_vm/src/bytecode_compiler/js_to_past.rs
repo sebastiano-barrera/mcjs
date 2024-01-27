@@ -882,6 +882,8 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
             }
         }
         swc_ecma_ast::Expr::Arrow(arrow_expr) => {
+            let span = arrow_expr.span;
+
             let params: Vec<_> = arrow_expr.params.iter().cloned().map(From::from).collect();
             let body = match &*arrow_expr.body {
                 swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block_stmts) => {
@@ -894,12 +896,41 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
                 }
             };
             let func = compile_function_from_parts(builder, arrow_expr.span, &params, body);
-            Stmt {
+            let func_expr = Stmt {
                 op: StmtOp::CreateClosure {
                     func: Box::new(func),
                 },
-                span: arrow_expr.span,
-            }
+                span,
+            };
+
+            // Unlike regular function declarations/expressions, arrow
+            // expressions inherit the `this` binding from the surrounding
+            // context
+
+            let bind_method = Stmt {
+                op: StmtOp::ObjectGet {
+                    obj: Box::new(func_expr),
+                    key: Box::new(Stmt {
+                        span,
+                        op: StmtOp::StringLiteral("bind".into()),
+                    }),
+                },
+                span,
+            };
+
+            let bind_call = Stmt {
+                op: StmtOp::Call {
+                    is_new: false,
+                    callee: Box::new(bind_method),
+                    args: vec![Stmt {
+                        op: StmtOp::This,
+                        span,
+                    }],
+                },
+                span,
+            };
+
+            bind_call
         }
         swc_ecma_ast::Expr::Unary(unary_expr) => {
             let arg = compile_expr(builder, &unary_expr.arg);

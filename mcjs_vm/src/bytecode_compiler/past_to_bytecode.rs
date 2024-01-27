@@ -332,7 +332,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
                         arg_regs.push(reg);
                     }
 
-                    let (this, callee) = match &callee.as_ref().op {
+                    let (this, callee) = match &callee.op {
                         js_to_past::StmtOp::ObjectGet { obj, key } => {
                             let obj = compile_expr(fnb, obj)?;
                             let key = compile_expr(fnb, key)?;
