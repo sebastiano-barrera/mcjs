@@ -797,7 +797,9 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
                             swc_ecma_ast::Prop::KeyValue(kv) => {
                                 let key = match &kv.key {
                                     swc_ecma_ast::PropName::Ident(ident) => Stmt {
-                                        op: StmtOp::Read(DeclName::Js(ident.sym.clone())),
+                                        op: StmtOp::StringLiteral(JsWord::from(
+                                            ident.sym.to_string(),
+                                        )),
                                         span: ident.span,
                                     },
                                     swc_ecma_ast::PropName::Str(str) => Stmt {
