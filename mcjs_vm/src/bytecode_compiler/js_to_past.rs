@@ -38,15 +38,7 @@ pub struct Block {
     pub id: BlockID,
     pub decls: Vec<Decl>,
     pub stmts: Vec<Stmt>,
-}
-impl Block {
-    fn empty(block_id: BlockID) -> Self {
-        Block {
-            id: block_id,
-            decls: Vec::new(),
-            stmts: Vec::new(),
-        }
-    }
+    pub exprs: Vec<Expr>,
 }
 
 pub struct Decl {
@@ -64,12 +56,12 @@ impl std::fmt::Debug for Decl {
         )
     }
 }
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum DeclName {
     Js(JsWord),
     Tmp(TmpID),
 }
-
 impl DeclName {
     pub fn expect_js_word(&self) -> &JsWord {
         match self {
@@ -101,91 +93,113 @@ impl std::fmt::Debug for Stmt {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct StmtID(u16);
+
+#[derive(Clone, Copy, Debug)]
+pub struct StmtsDistance(i16);
+
+impl std::ops::Sub for StmtID {
+    type Output = StmtsDistance;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        let a: i16 = self.0.try_into().unwrap();
+        let b: i16 = rhs.0.try_into().unwrap();
+        StmtsDistance(a - b)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ExprID(u16);
+
 #[derive(Debug)]
 pub enum StmtOp {
-    Block(Block),
+    Invalid,
     Break(BlockID),
     Continue(BlockID),
-    Unshare(BlockID),
-    If {
-        test: Box<Stmt>,
-        cons: Box<Stmt>,
-        alt: Box<Stmt>,
+    Unshare(DeclName),
+    IfNot {
+        test: ExprID,
+        distance: StmtsDistance,
+    },
+    Jump(StmtsDistance),
+
+    Evaluate(ExprID),
+
+    Assign(DeclName, ExprID),
+
+    ArrayPush(DeclName, ExprID),
+
+    ObjectSet {
+        obj: ExprID,
+        key: ExprID,
+        value: ExprID,
     },
 
+    Return(ExprID),
+
+    Throw(ExprID),
+    TryBegin {
+        dist_to_handler: StmtID,
+    },
+    TryEnd,
+
+    Debugger,
+}
+
+#[derive(Debug)]
+enum Expr {
     Undefined,
     Null,
     This,
     Read(DeclName),
+    ReadArg(u8),
 
-    AssignParam(DeclName, u8),
-
-    Assign(DeclName, Box<Stmt>),
-    Unary(swc_ecma_ast::UnaryOp, Box<Stmt>),
-    Binary(swc_ecma_ast::BinaryOp, Box<Stmt>, Box<Stmt>),
+    Unary(swc_ecma_ast::UnaryOp, ExprID),
+    Binary(swc_ecma_ast::BinaryOp, ExprID, ExprID),
 
     StringLiteral(JsWord),
     NumberLiteral(f64),
     BoolLiteral(bool),
 
     ArrayCreate,
-    ArrayPush(DeclName, Box<Stmt>),
     ArrayNth {
-        arr: Box<Stmt>,
-        index: Box<Stmt>,
+        arr: ExprID,
+        index: ExprID,
     },
-    ArrayLen(Box<Stmt>),
+    ArrayLen(ExprID),
 
     ObjectCreate,
     ObjectGet {
-        obj: Box<Stmt>,
-        key: Box<Stmt>,
+        obj: ExprID,
+        key: ExprID,
     },
-    ObjectSet {
-        obj: Box<Stmt>,
-        key: Box<Stmt>,
-        value: Box<Stmt>,
-    },
+    ObjectGetKeys(ExprID),
 
     CreateClosure {
         func: Box<Function>,
     },
-
     Call {
+        callee: ExprID,
+        args: Vec<ExprID>,
         is_new: bool,
-        callee: Box<Stmt>,
-        args: Vec<Stmt>,
-    },
-    Return(Box<Stmt>),
-
-    Throw(Box<Stmt>),
-    GetCurrentException,
-    Try {
-        main_block: Box<Stmt>,
-        handler_block: Box<Stmt>,
-        finalizer_block: Box<Stmt>,
     },
 
-    Debugger,
-    ObjectGetKeys(Box<Stmt>),
+    CurrentException,
 }
 
+const ZERO: Expr = Expr::NumberLiteral(0.0);
+const ONE: Expr = Expr::NumberLiteral(1.0);
+
 mod builder {
+    use super::{Block, Decl, DeclName, Expr, ExprID, StmtID, StmtOp};
+
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     pub struct BlockID(u32);
 
     impl std::fmt::Debug for BlockID {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "block{}", self.0)
-        }
-    }
-
-    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct LabelID(u32);
-
-    impl std::fmt::Debug for LabelID {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "label{}", self.0)
         }
     }
 
@@ -197,61 +211,184 @@ mod builder {
         }
     }
 
-    pub struct Builder {
-        breakable_blocks: Vec<BlockID>,
+    pub(super) struct Builder {
         next_id: u32,
+    }
+
+    pub(super) struct FnBuilder<'a> {
+        builder: &'a mut Builder,
+
+        /// The stack of currently open nested blocks.
+        ///
+        /// Compilation works by appending Stmt and Expr nodes into the last (innermost) block. As
+        /// compilation progresses, the last block is merged into the previous/parent block, until
+        /// we finish with a single block that constitutes the function's body.
+        blocks: Vec<Block>,
+
+        /// At any given time, the last element of this vector is the ID of the block that would
+        /// be repeated/exited by a continue/break statement.
+        breakable_blocks: Vec<BlockID>,
     }
 
     impl Builder {
         pub fn new() -> Self {
-            Builder {
+            Builder { next_id: 0 }
+        }
+
+        pub fn new_function(&mut self) -> FnBuilder {
+            FnBuilder {
+                builder: self,
+                blocks: Vec::new(),
                 breakable_blocks: Vec::new(),
-                next_id: 0,
             }
         }
+    }
 
-        pub fn break_target(&self) -> BlockID {
+    fn merge_block(outer: &mut Block, mut inner: Block) {
+        outer.decls.append(&mut inner.decls);
+        outer.stmts.append(&mut inner.stmts);
+        outer.exprs.append(&mut inner.exprs);
+    }
+
+    impl<'a> FnBuilder<'a> {
+        pub(super) fn build(self) -> Block {
+            assert!(self.breakable_blocks.is_empty());
+            assert_eq!(self.blocks.len(), 1);
+            self.blocks[0]
+        }
+
+        pub(super) fn suspend(&mut self) -> &mut Builder {
+            self.builder
+        }
+
+        pub(super) fn break_target(&self) -> BlockID {
             self.breakable_blocks.last().copied().unwrap()
         }
-        pub fn push_break_target(&mut self, block_id: BlockID) {
-            self.breakable_blocks.push(block_id)
-        }
-        pub fn pop_break_target(&mut self) {
-            self.breakable_blocks.pop().unwrap();
+        pub(super) fn push_break_target(&mut self) {
+            self.breakable_blocks.push(self.cur_block_id());
         }
 
-        pub(super) fn gen_block_id(&mut self) -> BlockID {
-            let blkid = BlockID(self.next_id);
-            self.next_id += 1;
-            blkid
+        pub(crate) fn cur_block_id(&self) -> BlockID {
+            self.blocks.last().unwrap().id
+        }
+        fn cur_block_mut(&mut self) -> &mut Block {
+            self.blocks.last_mut().unwrap()
         }
 
-        pub(super) fn gen_label_id(&mut self) -> LabelID {
-            let lblid = LabelID(self.next_id);
-            self.next_id += 1;
-            lblid
+        pub(super) fn block<T>(&mut self, builder: impl FnOnce(&mut Self) -> T) -> T {
+            let blkid = BlockID(self.builder.next_id);
+            self.builder.next_id += 1;
+
+            // TODO Reuse allocations and get new Block out of a pool
+            self.blocks.push(Block {
+                id: blkid,
+                decls: Vec::new(),
+                stmts: Vec::new(),
+                exprs: Vec::new(),
+            });
+
+            let ret = builder(self);
+
+            let inner_block = self.blocks.pop().unwrap();
+            if let Some(breakable_blkid) = self.breakable_blocks.last().copied() {
+                if breakable_blkid == inner_block.id {
+                    self.breakable_blocks.pop();
+                }
+            }
+
+            merge_block(self.cur_block_mut(), inner_block);
+
+            // TODO Check redeclarations here
+
+            ret
         }
 
-        pub(super) fn gen_tmp(&mut self) -> TmpID {
-            let tmpid = TmpID(self.next_id);
-            self.next_id += 1;
+        fn gen_tmp(&mut self) -> TmpID {
+            let tmpid = TmpID(self.builder.next_id);
+            self.builder.next_id += 1;
             tmpid
         }
 
-        pub(super) fn decl_tmp(&mut self, block: &mut super::Block) -> super::DeclName {
-            let name = super::DeclName::Tmp(self.gen_tmp());
-            block.decls.push(super::Decl {
+        pub(super) fn add_decl(&mut self, decl: Decl) {
+            self.cur_block_mut().decls.push(decl);
+        }
+
+        pub(super) fn decl_tmp(&mut self) -> DeclName {
+            let name = DeclName::Tmp(self.gen_tmp());
+            self.add_decl(Decl {
                 name: name.clone(),
                 is_lexical: true,
                 is_global: false,
             });
             name
         }
+
+        pub(super) fn peek_stmt_id(&mut self) -> StmtID {
+            let block = self.blocks.last().unwrap();
+            StmtID(block.stmts.len().try_into().unwrap())
+        }
+
+        pub(super) fn add_stmt(&mut self, op: StmtOp) -> StmtID {
+            let block = self.cur_block_mut();
+            let stmt_id_raw = block.stmts.len().try_into().unwrap();
+            block.stmts.push(super::Stmt {
+                // TODO Set the actual span here.
+                // It should be provided implicitly with a separate API
+                span: swc_common::Span::default(),
+                op,
+            });
+
+            StmtID(stmt_id_raw)
+        }
+
+        pub(super) fn set_stmt(&mut self, id: StmtID, op: StmtOp) {
+            let block = self.cur_block_mut();
+            let stmt = block.stmts.get_mut(id.0 as usize).unwrap();
+            *stmt = super::Stmt {
+                // TODO Set the actual span here.
+                // It should be provided implicitly with a separate API
+                span: swc_common::Span::default(),
+                op,
+            };
+        }
+
+        pub(super) fn add_expr(&mut self, expr: Expr) -> ExprID {
+            let block = self.cur_block_mut();
+            let expr_id_raw = block.exprs.len().try_into().unwrap();
+            block.exprs.push(expr);
+            ExprID(expr_id_raw)
+        }
+
+        pub(super) fn add_unshares_up_to(&mut self, block_id: BlockID) {
+            let mut unshared_names = Vec::new();
+
+            let mut block_found = false;
+            for block in self.blocks.iter().rev() {
+                for decl in &block.decls {
+                    unshared_names.push(decl.name.clone());
+                }
+
+                if block.id == block_id {
+                    block_found = true;
+                    break;
+                }
+            }
+
+            assert!(
+                block_found,
+                "past compiler bug: no such block: {:?}",
+                block_id
+            );
+
+            for name in unshared_names {
+                self.add_stmt(StmtOp::Unshare(name));
+            }
+        }
     }
 }
 
-use builder::Builder;
-pub use builder::{BlockID, LabelID, TmpID};
+pub use builder::{BlockID, TmpID};
+use builder::{Builder, FnBuilder};
 
 use crate::{error, util::write_comma_sep};
 
@@ -268,8 +405,12 @@ pub fn compile_script(ast_module: swc_ecma_ast::Module) -> Function {
         .collect();
 
     let mut builder = Builder::new();
-    let block = compile_block(&mut builder, None, &stmts);
-    let mut function = compile_function_from_parts(&mut builder, ast_module.span, &[], block);
+    let mut fnb = builder.new_function();
+    for stmt in &stmts {
+        compile_stmt(&mut fnb, stmt);
+    }
+    let block = fnb.build();
+    let mut function = compile_function_from_parts(ast_module.span, &[], block);
 
     // Toplevel var (non-lexical) definitions in a script are allocated in
     // the `globalThis` object. This can be achieved simply by removing those
@@ -290,94 +431,49 @@ pub fn compile_script(ast_module: swc_ecma_ast::Module) -> Function {
     function
 }
 
-fn compile_block(
-    builder: &mut Builder,
-    outer_block: Option<&mut Block>,
-    swc_stmts: &[swc_ecma_ast::Stmt],
-) -> Block {
-    let block_id = builder.gen_block_id();
-    let mut block = Block {
-        id: block_id,
-        decls: Vec::new(),
-        stmts: Vec::new(),
-    };
-
-    for stmt in swc_stmts {
-        compile_stmt(builder, &mut block, stmt);
-    }
-
-    if let Some(outer_block) = outer_block {
-        hoist_declarations(outer_block, &mut block.decls);
-    }
-    block
-}
-
-fn compile_block_single_stmt(
-    builder: &mut Builder,
-    outer_block: Option<&mut Block>,
-    swc_stmt: &swc_ecma_ast::Stmt,
-) -> Block {
-    let block_id = builder.gen_block_id();
-    let mut block = Block {
-        id: block_id,
-        decls: Vec::new(),
-        stmts: Vec::new(),
-    };
-
-    compile_stmt(builder, &mut block, swc_stmt);
-    if let Some(outer_block) = outer_block {
-        hoist_declarations(outer_block, &mut block.decls);
-    }
-    block
-}
-
-fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::Stmt) {
+fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
+    // TODO stop using `block`, use the FnBuilder API
+    let block: &mut Block = todo!();
     match &stmt {
         swc_ecma_ast::Stmt::Block(block_stmt) => {
-            let inner_block = compile_block(builder, Some(block), &block_stmt.stmts);
-            block.stmts.push(Stmt {
-                span: block_stmt.span,
-                op: StmtOp::Block(inner_block),
+            fnb.block(|fnb| {
+                for stmt in &block_stmt.stmts {
+                    compile_stmt(fnb, stmt);
+                }
             });
         }
         swc_ecma_ast::Stmt::Empty(_) => {}
         swc_ecma_ast::Stmt::Debugger(debugger_stmt) => {
-            block.stmts.push(Stmt {
-                op: StmtOp::Debugger,
-                span: debugger_stmt.span,
-            });
+            fnb.add_stmt(StmtOp::Debugger);
         }
 
         swc_ecma_ast::Stmt::Return(return_stmt) => {
-            let expr = return_stmt
-                .arg
-                .as_ref()
-                .map(|expr| compile_expr(builder, &expr))
-                .unwrap_or(Stmt {
-                    op: StmtOp::Undefined,
-                    span: return_stmt.span,
-                });
-            block.stmts.push(Stmt {
-                op: StmtOp::Return(Box::new(expr)),
-                span: return_stmt.span,
-            });
+            let expr = if let Some(arg) = &return_stmt.arg {
+                compile_expr(fnb, arg)
+            } else {
+                fnb.add_expr(Expr::Undefined)
+            };
+
+            fnb.add_stmt(StmtOp::Return(expr));
         }
 
         swc_ecma_ast::Stmt::Break(break_stmt) => {
+            todo!("break");
             if break_stmt.label.is_some() {
                 panic!("unsupported: labeled break statement");
             }
-            let break_target = builder.break_target();
+            let break_target = fnb.break_target();
             block.stmts.push(Stmt {
                 op: StmtOp::Break(break_target),
                 span: break_stmt.span,
             });
         }
         swc_ecma_ast::Stmt::Continue(continue_stmt) => {
+            todo!("continue");
             if continue_stmt.label.is_some() {
                 panic!("unsupported: labeled continue statement");
             }
-            let break_target = builder.break_target();
+            let break_target = fnb.break_target();
             block.stmts.push(Stmt {
                 op: StmtOp::Continue(break_target),
                 span: continue_stmt.span,
@@ -385,32 +481,27 @@ fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::S
         }
 
         swc_ecma_ast::Stmt::If(if_stmt) => {
-            let test = compile_expr(builder, &if_stmt.test);
+            let test = compile_expr(fnb, &if_stmt.test);
+            let if_not = fnb.add_stmt(StmtOp::Invalid);
 
-            // TODO Avoid these ephemeral Vec's
+            fnb.block(|fnb| compile_stmt(fnb, &if_stmt.cons));
+            let after_cons_jmp = fnb.add_stmt(StmtOp::Invalid);
 
-            let block_cons = compile_block_single_stmt(builder, Some(block), &if_stmt.cons);
-
-            let block_alt = if let Some(alt) = &if_stmt.alt {
-                compile_block_single_stmt(builder, Some(block), alt)
-            } else {
-                Block::empty(builder.gen_block_id())
-            };
-
-            block.stmts.push(Stmt {
-                op: StmtOp::If {
-                    test: Box::new(test),
-                    cons: Box::new(Stmt {
-                        op: StmtOp::Block(block_cons),
-                        span: Default::default(),
-                    }),
-                    alt: Box::new(Stmt {
-                        op: StmtOp::Block(block_alt),
-                        span: Default::default(),
-                    }),
+            let else_target = fnb.peek_stmt_id();
+            fnb.set_stmt(
+                if_not,
+                StmtOp::IfNot {
+                    test,
+                    distance: (else_target - if_not),
                 },
-                span: if_stmt.span,
-            });
+            );
+
+            if let Some(alt) = &if_stmt.alt {
+                fnb.block(|fnb| compile_stmt(fnb, &if_stmt.cons));
+            }
+
+            let after_if = fnb.peek_stmt_id();
+            fnb.set_stmt(after_cons_jmp, StmtOp::Jump(after_if - after_cons_jmp));
         }
 
         swc_ecma_ast::Stmt::Switch(switch_stmt) => {
@@ -427,218 +518,138 @@ fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::S
         }
 
         swc_ecma_ast::Stmt::Throw(throw_stmt) => {
-            let value = compile_expr(builder, &throw_stmt.arg);
-            block.stmts.push(Stmt {
-                op: StmtOp::Throw(Box::new(value)),
-                span: throw_stmt.span,
-            });
+            let exc_value = compile_expr(fnb, &throw_stmt.arg);
+            fnb.add_stmt(StmtOp::Throw(exc_value));
         }
         swc_ecma_ast::Stmt::Try(try_stmt) => {
-            let main_block = Stmt {
-                op: StmtOp::Block(compile_block(builder, Some(block), &try_stmt.block.stmts)),
-                span: try_stmt.block.span,
-            };
+            let try_begin = fnb.add_stmt(StmtOp::Invalid);
+            fnb.block(|fnb| {
+                for stmt in &try_stmt.block.stmts {
+                    compile_stmt(fnb, stmt);
+                }
+            });
+            fnb.add_stmt(StmtOp::TryEnd);
+            let jmp_from_try = fnb.add_stmt(StmtOp::Invalid);
 
-            let finalizer_block = try_stmt
-                .finalizer
-                .as_ref()
-                .map(|block_stmt| Stmt {
-                    op: StmtOp::Block(compile_block(builder, Some(block), &block_stmt.stmts)),
-                    span: block_stmt.span,
-                })
-                .unwrap_or(Stmt {
-                    op: StmtOp::Undefined,
-                    span: swc_common::Span::default(),
-                });
-
-            let handler_block = {
-                let handler_block_id = builder.gen_block_id();
-                if let Some(handler) = &try_stmt.handler {
-                    let mut decls = Vec::new();
-                    let mut stmts = Vec::new();
-
+            let jmp_from_catch = try_stmt.handler.map(|handler| {
+                fnb.block(|fnb| {
                     if let Some(handler_param) = &handler.param {
                         let name = compile_name_pat(handler_param);
-                        decls.push(Decl {
+                        fnb.add_decl(Decl {
                             name: name.clone(),
                             is_lexical: true,
                             is_global: false,
                         });
-                        stmts.push(Stmt {
-                            op: StmtOp::Assign(
-                                name,
-                                Box::new(Stmt {
-                                    op: StmtOp::GetCurrentException,
-                                    span: swc_common::Span::default(),
-                                }),
-                            ),
-                            span: swc_common::Span::default(),
-                        });
+                        let cur_exc = fnb.add_expr(Expr::CurrentException);
+                        fnb.add_stmt(StmtOp::Assign(name, cur_exc));
                     }
 
-                    // The catch clause is converted into two nested blocks:
-                    //  ... catch (exc) { handler_block; }
-                    //  => ... { exc = currentException(); { handler_block; } }
-                    //  - outer block only defines the exception var;
-                    //  - inner block corresponds to the catch clause in the source code
-                    let handler_block = compile_block(builder, Some(block), &handler.body.stmts);
-                    stmts.push(Stmt {
-                        op: StmtOp::Block(handler_block),
-                        span: handler.body.span,
-                    });
-
-                    Stmt {
-                        op: StmtOp::Block(Block {
-                            id: handler_block_id,
-                            decls,
-                            stmts,
-                        }),
-                        span: handler.body.span,
+                    for stmt in &handler.body.stmts {
+                        compile_stmt(fnb, stmt);
                     }
-                } else {
-                    Stmt {
-                        op: StmtOp::Undefined,
-                        span: swc_common::Span::default(),
-                    }
-                }
-            };
+                });
 
-            block.stmts.push(Stmt {
-                op: StmtOp::Try {
-                    main_block: Box::new(main_block),
-                    handler_block: Box::new(handler_block),
-                    finalizer_block: Box::new(finalizer_block),
-                },
-                span: try_stmt.span,
-            })
+                fnb.add_stmt(StmtOp::Invalid)
+            });
+
+            let finally_start = fnb.peek_stmt_id();
+            fnb.set_stmt(jmp_from_try, StmtOp::Jump(finally_start - jmp_from_try));
+            if let Some(jmp) = jmp_from_catch {
+                fnb.set_stmt(jmp, StmtOp::Jump(finally_start - jmp));
+            }
+
+            if let Some(finalizer_block) = &try_stmt.finalizer {
+                fnb.block(|fnb| {
+                    for stmt in &finalizer_block.stmts {
+                        compile_stmt(fnb, stmt);
+                    }
+                });
+            }
         }
         swc_ecma_ast::Stmt::While(while_stmt) => {
-            let mut inner_block = Block::empty(builder.gen_block_id());
+            fnb.block(|fnb| {
+                let start_sid = fnb.peek_stmt_id();
 
-            let test_expr = compile_expr(builder, &while_stmt.test);
-            let test_expr_span = test_expr.span;
-            let test_expr = Stmt {
-                op: StmtOp::Unary(swc_ecma_ast::UnaryOp::Bang, Box::new(test_expr)),
-                span: test_expr_span,
-            };
-            inner_block.stmts.push(Stmt {
-                op: StmtOp::If {
-                    test: Box::new(test_expr),
-                    cons: Box::new(Stmt {
-                        op: StmtOp::Break(inner_block.id),
-                        span: swc_common::Span::default(),
-                    }),
-                    alt: Box::new(Stmt {
-                        op: StmtOp::Undefined,
-                        span: swc_common::Span::default(),
-                    }),
-                },
-                span: swc_common::Span::default(),
-            });
+                let test = compile_expr(fnb, &while_stmt.test);
+                let if_not = fnb.add_stmt(StmtOp::Invalid);
 
-            compile_stmt(builder, &mut inner_block, &while_stmt.body);
+                compile_stmt(fnb, &while_stmt.body);
 
-            inner_block.stmts.push(Stmt {
-                op: StmtOp::Continue(inner_block.id),
-                span: swc_common::Span::default(),
-            });
+                let jump_sid = fnb.peek_stmt_id();
+                fnb.add_stmt(StmtOp::Jump(start_sid - jump_sid));
 
-            block.stmts.push(Stmt {
-                op: StmtOp::Block(inner_block),
-                span: swc_common::Span::default(),
+                let target = fnb.peek_stmt_id();
+                fnb.set_stmt(
+                    if_not,
+                    StmtOp::IfNot {
+                        test,
+                        distance: (target - if_not),
+                    },
+                );
             });
         }
         swc_ecma_ast::Stmt::DoWhile(dowhile_stmt) => {
-            let mut inner_block = Block::empty(builder.gen_block_id());
+            fnb.block(|fnb| {
+                let block_start = fnb.peek_stmt_id();
+                compile_stmt(fnb, &dowhile_stmt.body);
 
-            compile_stmt(builder, &mut inner_block, &dowhile_stmt.body);
+                let test = compile_expr(fnb, &dowhile_stmt.test);
+                fnb.add_stmt(StmtOp::IfNot {
+                    test,
+                    distance: StmtsDistance(2),
+                });
 
-            let test_expr = compile_expr(builder, &dowhile_stmt.test);
-            let test_expr_span = test_expr.span;
-            let test_expr = Stmt {
-                op: StmtOp::Unary(swc_ecma_ast::UnaryOp::Bang, Box::new(test_expr)),
-                span: test_expr_span,
-            };
-            inner_block.stmts.push(Stmt {
-                op: StmtOp::If {
-                    test: Box::new(test_expr),
-                    cons: Box::new(Stmt {
-                        op: StmtOp::Continue(inner_block.id),
-                        span: swc_common::Span::default(),
-                    }),
-                    alt: Box::new(Stmt {
-                        op: StmtOp::Undefined,
-                        span: swc_common::Span::default(),
-                    }),
-                },
-                span: swc_common::Span::default(),
-            });
-
-            block.stmts.push(Stmt {
-                op: StmtOp::Block(inner_block),
-                span: dowhile_stmt.span,
+                let here = fnb.peek_stmt_id();
+                fnb.add_stmt(StmtOp::Jump(block_start - here));
             });
         }
         swc_ecma_ast::Stmt::For(for_stmt) => {
-            let mut outer_block = Block::empty(builder.gen_block_id());
+            fnb.block(|fnb| {
+                let outer_block_id = fnb.cur_block_id();
 
-            match &for_stmt.init {
-                Some(swc_ecma_ast::VarDeclOrExpr::VarDecl(var_decl)) => {
-                    compile_var_decl(builder, &mut outer_block, var_decl)
+                match &for_stmt.init {
+                    Some(swc_ecma_ast::VarDeclOrExpr::VarDecl(var_decl)) => {
+                        compile_var_decl(fnb, var_decl);
+                    }
+                    Some(swc_ecma_ast::VarDeclOrExpr::Expr(expr)) => {
+                        let expr = compile_expr(fnb, expr);
+                        fnb.add_stmt(StmtOp::Evaluate(expr));
+                    }
+                    None => {}
                 }
-                Some(swc_ecma_ast::VarDeclOrExpr::Expr(expr)) => {
-                    outer_block.stmts.push(compile_expr(builder, expr));
-                }
-                None => {}
-            }
 
-            let mut inner_block = Block::empty(builder.gen_block_id());
-            builder.push_break_target(inner_block.id);
+                fnb.block(|fnb| {
+                    let loop_start = fnb.peek_stmt_id();
+                    fnb.push_break_target();
 
-            inner_block.stmts.push(Stmt {
-                op: StmtOp::If {
-                    test: Box::new(
-                        for_stmt
-                            .test
-                            .as_ref()
-                            .map(|expr| compile_expr(builder, &expr))
-                            .unwrap_or_else(|| Stmt {
-                                op: StmtOp::BoolLiteral(true),
-                                span: for_stmt.span,
-                            }),
-                    ),
-                    cons: Box::new(Stmt {
-                        op: StmtOp::Undefined,
-                        span: swc_common::Span::default(),
-                    }),
-                    alt: Box::new(Stmt {
-                        op: StmtOp::Break(outer_block.id),
-                        span: swc_common::Span::default(),
-                    }),
-                },
-                span: for_stmt.span,
-            });
+                    let test_stmt_expr = for_stmt.test.as_ref().map(|test_expr| {
+                        let test = compile_expr(fnb, test_expr);
+                        let stmt = fnb.add_stmt(StmtOp::Invalid);
+                        (stmt, test)
+                    });
 
-            compile_stmt(builder, &mut inner_block, &for_stmt.body);
-            if let Some(update) = &for_stmt.update {
-                inner_block.stmts.push(compile_expr(builder, update));
-            }
-            inner_block.stmts.push(Stmt {
-                op: StmtOp::Unshare(outer_block.id),
-                span: swc_common::Span::default(),
-            });
-            inner_block.stmts.push(Stmt {
-                op: StmtOp::Continue(inner_block.id),
-                span: swc_common::Span::default(),
-            });
+                    compile_stmt(fnb, &for_stmt.body);
 
-            outer_block.stmts.push(Stmt {
-                op: StmtOp::Block(inner_block),
-                span: for_stmt.span,
-            });
-            block.stmts.push(Stmt {
-                op: StmtOp::Block(outer_block),
-                span: for_stmt.span,
+                    if let Some(update) = &for_stmt.update {
+                        let expr = compile_expr(fnb, update);
+                        fnb.add_stmt(StmtOp::Evaluate(expr));
+                    }
+
+                    fnb.add_unshares_up_to(outer_block_id);
+                    let here = fnb.peek_stmt_id();
+                    fnb.add_stmt(StmtOp::Jump(loop_start - here));
+
+                    if let Some((stmt, test)) = test_stmt_expr {
+                        let outta_here = fnb.peek_stmt_id();
+                        fnb.set_stmt(
+                            stmt,
+                            StmtOp::IfNot {
+                                test,
+                                distance: (outta_here - stmt),
+                            },
+                        );
+                    }
+                });
             });
         }
 
@@ -652,8 +663,6 @@ fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::S
                 forbid (element var name == any JS keyword)
                     // use is_identifier_keyword
             */
-
-            let mut outer_block = Block::empty(builder.gen_block_id());
 
             let item_var_decl: Decl = match &forin_stmt.left {
                 ForHead::UsingDecl(_) => unsupported_node!(&forin_stmt.left),
@@ -675,158 +684,66 @@ fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::S
                     is_global: false,
                 },
             };
-            let item_var = item_var_decl.name.clone();
-            outer_block.decls.push(item_var_decl);
 
-            let key_ndx_tmp = builder.decl_tmp(&mut outer_block);
-            outer_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Assign(
-                    key_ndx_tmp.clone(),
-                    Box::new(Stmt {
-                        span: forin_stmt.span,
-                        op: StmtOp::NumberLiteral(0.0),
-                    }),
-                ),
-            });
+            fnb.block(|fnb| {
+                let outer_block_id = fnb.cur_block_id();
 
-            let iteree_tmp = builder.decl_tmp(&mut outer_block);
-            outer_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Assign(
-                    iteree_tmp.clone(),
-                    Box::new(compile_expr(builder, &forin_stmt.right)),
-                ),
-            });
+                let item_var = item_var_decl.name.clone();
+                fnb.add_decl(item_var_decl);
 
-            let keys_tmp = builder.decl_tmp(&mut outer_block);
-            outer_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Assign(
-                    keys_tmp.clone(),
-                    Box::new(Stmt {
-                        span,
-                        op: StmtOp::ObjectGetKeys(Box::new(Stmt {
-                            span,
-                            op: StmtOp::Read(iteree_tmp),
-                        })),
-                    }),
-                ),
-            });
+                let key_ndx_tmp = fnb.decl_tmp();
+                let key_ndx = fnb.add_expr(Expr::Read(key_ndx_tmp.clone()));
+                let zero = fnb.add_expr(ZERO);
+                fnb.add_stmt(StmtOp::Assign(key_ndx_tmp.clone(), zero));
 
-            let key_count_tmp = builder.decl_tmp(&mut outer_block);
-            outer_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Assign(
-                    key_count_tmp.clone(),
-                    Box::new(Stmt {
-                        span: forin_stmt.span,
-                        op: StmtOp::ArrayLen(Box::new(Stmt {
-                            span,
-                            op: StmtOp::Read(keys_tmp.clone()),
-                        })),
-                    }),
-                ),
-            });
+                let iteree = compile_expr(fnb, &forin_stmt.right);
+                let (_, iteree) = create_tmp(fnb, iteree);
 
-            let mut inner_block = Block::empty(builder.gen_block_id());
-            builder.push_break_target(inner_block.id);
+                let keys = fnb.add_expr(Expr::ObjectGetKeys(iteree));
+                let (_, keys) = create_tmp(fnb, keys);
 
-            inner_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::If {
-                    test: Box::new(Stmt {
-                        span,
-                        op: StmtOp::Binary(
-                            swc_ecma_ast::BinaryOp::Lt,
-                            Box::new(Stmt {
-                                span,
-                                op: StmtOp::Read(key_ndx_tmp.clone()),
-                            }),
-                            Box::new(Stmt {
-                                span,
-                                op: StmtOp::Read(key_count_tmp),
-                            }),
-                        ),
-                    }),
-                    cons: Box::new(Stmt {
-                        span,
-                        op: StmtOp::Undefined,
-                    }),
-                    alt: Box::new(Stmt {
-                        span,
-                        op: StmtOp::Break(inner_block.id),
-                    }),
-                },
-            });
+                let key_count = fnb.add_expr(Expr::ArrayLen(keys));
+                let (_, key_count) = create_tmp(fnb, key_count);
 
-            inner_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Assign(
-                    item_var,
-                    Box::new(Stmt {
-                        span,
-                        op: StmtOp::ArrayNth {
-                            arr: Box::new(Stmt {
-                                span,
-                                op: StmtOp::Read(keys_tmp),
-                            }),
-                            index: Box::new(Stmt {
-                                span,
-                                op: StmtOp::Read(key_ndx_tmp.clone()),
-                            }),
+                fnb.block(|fnb| {
+                    let mid_block_id = fnb.cur_block_id();
+
+                    let test =
+                        fnb.add_expr(Expr::Binary(swc_ecma_ast::BinaryOp::Lt, key_ndx, key_count));
+
+                    // IfNot { test, target: after the body }
+                    let if_not = fnb.add_stmt(StmtOp::Invalid);
+
+                    let element = fnb.add_expr(Expr::ArrayNth {
+                        arr: keys,
+                        index: key_ndx,
+                    });
+                    fnb.add_stmt(StmtOp::Assign(item_var, element));
+
+                    fnb.push_break_target();
+                    fnb.block(|fnb| {
+                        compile_stmt(fnb, &forin_stmt.body);
+                    });
+
+                    {
+                        let one = fnb.add_expr(ONE);
+                        let new_val =
+                            fnb.add_expr(Expr::Binary(swc_ecma_ast::BinaryOp::Add, key_ndx, one));
+                        fnb.add_stmt(StmtOp::Assign(key_ndx_tmp, new_val));
+                    }
+
+                    fnb.add_unshares_up_to(outer_block_id);
+                    fnb.add_stmt(StmtOp::Continue(mid_block_id));
+
+                    let after_body = fnb.peek_stmt_id();
+                    fnb.set_stmt(
+                        if_not,
+                        StmtOp::IfNot {
+                            test,
+                            distance: (after_body - if_not),
                         },
-                    }),
-                ),
-            });
-
-            let body_block =
-                compile_block_single_stmt(builder, Some(&mut outer_block), &forin_stmt.body);
-            inner_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Block(body_block),
-            });
-
-            inner_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Assign(
-                    key_ndx_tmp.clone(),
-                    Box::new(Stmt {
-                        span,
-                        op: StmtOp::Binary(
-                            swc_ecma_ast::BinaryOp::Add,
-                            Box::new(Stmt {
-                                span,
-                                op: StmtOp::Read(key_ndx_tmp.clone()),
-                            }),
-                            Box::new(Stmt {
-                                span,
-                                op: StmtOp::NumberLiteral(1.0),
-                            }),
-                        ),
-                    }),
-                ),
-            });
-
-            inner_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Unshare(outer_block.id),
-            });
-            inner_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Continue(inner_block.id),
-            });
-
-            builder.pop_break_target();
-
-            outer_block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Block(inner_block),
-            });
-
-            block.stmts.push(Stmt {
-                span,
-                op: StmtOp::Block(outer_block),
+                    );
+                });
             });
         }
         swc_ecma_ast::Stmt::ForOf(_) => todo!(),
@@ -834,32 +751,29 @@ fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::S
         swc_ecma_ast::Stmt::Decl(decl) => match decl {
             swc_ecma_ast::Decl::Fn(fn_decl) => {
                 let name = DeclName::Js(fn_decl.ident.sym.clone());
-                block.decls.push(Decl {
+                fnb.add_decl(Decl {
                     name: name.clone(),
                     is_lexical: false,
                     is_global: false,
                 });
-                let func = compile_function(builder, &fn_decl.function);
-                block.stmts.push(Stmt {
-                    op: StmtOp::Assign(
-                        name,
-                        Box::new(Stmt {
-                            op: StmtOp::CreateClosure {
-                                func: Box::new(func),
-                            },
-                            span: fn_decl.function.span,
-                        }),
-                    ),
-                    span: fn_decl.function.span,
-                });
+
+                let func = {
+                    let builder = fnb.suspend();
+                    let func = compile_function(builder, &fn_decl.function);
+                    Box::new(func)
+                };
+
+                let closure = fnb.add_expr(Expr::CreateClosure { func });
+                fnb.add_stmt(StmtOp::Assign(name, closure));
             }
-            swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(builder, block, var_decl),
+            swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(fnb, var_decl),
             _ => {
                 unsupported_node!(decl)
             }
         },
         swc_ecma_ast::Stmt::Expr(expr_stmt) => {
-            block.stmts.push(compile_expr(builder, &expr_stmt.expr));
+            let value = compile_expr(fnb, &expr_stmt.expr);
+            fnb.add_stmt(StmtOp::Evaluate(value));
         }
 
         swc_ecma_ast::Stmt::Labeled(_) | swc_ecma_ast::Stmt::With(_) => {
@@ -868,7 +782,7 @@ fn compile_stmt(builder: &mut Builder, block: &mut Block, stmt: &swc_ecma_ast::S
     }
 }
 
-fn compile_var_decl(builder: &mut Builder, block: &mut Block, var_decl: &swc_ecma_ast::VarDecl) {
+fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
     let is_lexical = match var_decl.kind {
         swc_ecma_ast::VarDeclKind::Var => false,
         swc_ecma_ast::VarDeclKind::Let => true,
@@ -877,18 +791,15 @@ fn compile_var_decl(builder: &mut Builder, block: &mut Block, var_decl: &swc_ecm
 
     for declarator in &var_decl.decls {
         let name = compile_name_pat(&declarator.name);
-        block.decls.push(Decl {
+        fnb.add_decl(Decl {
             name: name.clone(),
             is_lexical,
             is_global: false,
         });
 
         if let Some(init) = &declarator.init {
-            let value = compile_expr(builder, init);
-            block.stmts.push(Stmt {
-                op: StmtOp::Assign(name, Box::new(value)),
-                span: declarator.span,
-            });
+            let value = compile_expr(fnb, init);
+            fnb.add_stmt(StmtOp::Assign(name, value));
         }
     }
 }
@@ -907,84 +818,30 @@ fn hoist_declarations(block: &mut Block, decls: &mut Vec<Decl>) {
     // TODO Check redeclarations
 }
 
-fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
+fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
     match expr {
-        swc_ecma_ast::Expr::This(this_expr) => Stmt {
-            op: StmtOp::This,
-            span: this_expr.span,
-        },
-        swc_ecma_ast::Expr::Array(array_expr) => {
-            let block_id = builder.gen_block_id();
-            let mut decls = Vec::new();
-            let mut stmts = Vec::new();
+        swc_ecma_ast::Expr::This(this_expr) => fnb.add_expr(Expr::This),
+        swc_ecma_ast::Expr::Array(array_expr) => fnb.block(|fnb| {
+            let array_init = fnb.add_expr(Expr::ArrayCreate);
+            let (array_tmp, _) = create_tmp(fnb, array_init);
 
-            let tmp = DeclName::Tmp(builder.gen_tmp());
-            decls.push(Decl {
-                name: tmp.clone(),
-                is_lexical: true,
-                is_global: false,
-            });
-
-            stmts.push(Stmt {
-                op: StmtOp::Assign(
-                    tmp.clone(),
-                    Box::new(Stmt {
-                        op: StmtOp::ArrayCreate,
-                        span: Default::default(),
-                    }),
-                ),
-                span: Default::default(),
-            });
             for value in &array_expr.elems {
-                // TODO What does `None` mean here?
                 if let Some(expr_or_spread) = value {
                     if expr_or_spread.spread.is_some() {
                         panic!("unsupported: spread syntax in array literal");
                     }
-
-                    let value = compile_expr(builder, &expr_or_spread.expr);
-                    stmts.push(Stmt {
-                        op: StmtOp::ArrayPush(tmp.clone(), Box::new(value)),
-                        span: Default::default(),
-                    });
+                    let value = compile_expr(fnb, &expr_or_spread.expr);
+                    fnb.add_stmt(StmtOp::ArrayPush(array_tmp, value));
+                } else {
+                    todo!("What does `None` mean here?")
                 }
             }
-            stmts.push(Stmt {
-                op: StmtOp::Read(tmp),
-                span: Default::default(),
-            });
 
-            Stmt {
-                op: StmtOp::Block(Block {
-                    id: block_id,
-                    decls,
-                    stmts,
-                }),
-                span: array_expr.span,
-            }
-        }
+            fnb.add_expr(Expr::Read(array_tmp))
+        }),
         swc_ecma_ast::Expr::Object(object_expr) => {
-            let block_id = builder.gen_block_id();
-            let mut decls = Vec::new();
-            let mut stmts = Vec::new();
-
-            let tmp = DeclName::Tmp(builder.gen_tmp());
-            decls.push(Decl {
-                name: tmp.clone(),
-                is_lexical: true,
-                is_global: false,
-            });
-
-            stmts.push(Stmt {
-                op: StmtOp::Assign(
-                    tmp.clone(),
-                    Box::new(Stmt {
-                        op: StmtOp::ObjectCreate,
-                        span: Default::default(),
-                    }),
-                ),
-                span: Default::default(),
-            });
+            let init_value = fnb.add_expr(Expr::ObjectCreate);
+            let (obj_tmp, obj) = create_tmp(fnb, init_value);
 
             for prop in &object_expr.props {
                 match prop {
@@ -994,55 +851,40 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
                     swc_ecma_ast::PropOrSpread::Prop(prop) => {
                         let (key, value) = match prop.as_ref() {
                             swc_ecma_ast::Prop::Shorthand(name) => {
-                                let key = Stmt {
-                                    op: StmtOp::StringLiteral(name.sym.clone()),
-                                    span: name.span,
-                                };
-                                let value = Stmt {
-                                    op: StmtOp::Read(DeclName::Js(name.sym.clone())),
-                                    span: name.span,
-                                };
+                                let key = fnb.add_expr(Expr::StringLiteral(name.sym.clone()));
+                                let value =
+                                    fnb.add_expr(Expr::Read(DeclName::Js(name.sym.clone())));
                                 (key, value)
                             }
                             swc_ecma_ast::Prop::KeyValue(kv) => {
                                 let key = match &kv.key {
-                                    swc_ecma_ast::PropName::Ident(ident) => Stmt {
-                                        op: StmtOp::StringLiteral(JsWord::from(
-                                            ident.sym.to_string(),
-                                        )),
-                                        span: ident.span,
-                                    },
-                                    swc_ecma_ast::PropName::Str(str) => Stmt {
-                                        op: StmtOp::StringLiteral(JsWord::from(
-                                            str.value.to_string(),
-                                        )),
-                                        span: str.span,
-                                    },
-                                    swc_ecma_ast::PropName::Num(num) => Stmt {
-                                        op: StmtOp::NumberLiteral(num.value),
-                                        span: num.span,
-                                    },
+                                    swc_ecma_ast::PropName::Ident(ident) => fnb.add_expr(
+                                        Expr::StringLiteral(JsWord::from(ident.sym.to_string())),
+                                    ),
+                                    swc_ecma_ast::PropName::Str(str) => fnb.add_expr(
+                                        Expr::StringLiteral(JsWord::from(str.value.to_string())),
+                                    ),
+                                    swc_ecma_ast::PropName::Num(num) => {
+                                        fnb.add_expr(Expr::NumberLiteral(num.value))
+                                    }
                                     _ => {
                                         unsupported_node!(kv.key)
                                     }
                                 };
-                                let value = compile_expr(builder, &kv.value);
+                                let value = compile_expr(fnb, &kv.value);
 
                                 (key, value)
                             }
 
                             swc_ecma_ast::Prop::Method(method_prop) => {
                                 let name = method_prop.key.as_ident().expect("object literal: method property syntax, but name is not identifier?");
-                                let key = Stmt {
-                                    span: name.span,
-                                    op: StmtOp::StringLiteral(name.sym.clone()),
+                                let key = fnb.add_expr(Expr::StringLiteral(name.sym.clone()));
+                                let func = {
+                                    let builder = fnb.suspend();
+                                    let func = compile_function(builder, &method_prop.function);
+                                    Box::new(func)
                                 };
-                                let func =
-                                    Box::new(compile_function(builder, &method_prop.function));
-                                let value = Stmt {
-                                    span: func.span,
-                                    op: StmtOp::CreateClosure { func },
-                                };
+                                let value = fnb.add_expr(Expr::CreateClosure { func });
                                 (key, value)
                             }
 
@@ -1051,151 +893,104 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
                             | swc_ecma_ast::Prop::Setter(_) => todo!(),
                         };
 
-                        stmts.push(Stmt {
-                            op: StmtOp::ObjectSet {
-                                obj: Box::new(Stmt {
-                                    op: StmtOp::Read(tmp.clone()),
-                                    span: Default::default(),
-                                }),
-                                key: Box::new(key),
-                                value: Box::new(value),
-                            },
-                            span: object_expr.span,
-                        });
+                        fnb.add_stmt(StmtOp::ObjectSet { obj, key, value });
                     }
                 }
             }
 
-            stmts.push(Stmt {
-                op: StmtOp::Read(tmp),
-                span: Default::default(),
-            });
-
-            Stmt {
-                op: StmtOp::Block(Block {
-                    id: block_id,
-                    decls,
-                    stmts,
-                }),
-                span: object_expr.span,
-            }
+            obj
         }
 
         swc_ecma_ast::Expr::Fn(fn_expr) => {
-            let func = compile_function(builder, &fn_expr.function);
-            Stmt {
-                op: StmtOp::CreateClosure {
-                    func: Box::new(func),
-                },
-                span: fn_expr.function.span,
-            }
+            let func = {
+                let builder = fnb.suspend();
+                let func = compile_function(builder, &fn_expr.function);
+                Box::new(func)
+            };
+            fnb.add_expr(Expr::CreateClosure { func })
         }
         swc_ecma_ast::Expr::Arrow(arrow_expr) => {
             let span = arrow_expr.span;
 
             let params: Vec<_> = arrow_expr.params.iter().cloned().map(From::from).collect();
-            let body = match &*arrow_expr.body {
-                swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block_stmts) => {
-                    compile_block(builder, None, &block_stmts.stmts)
+
+            let body = {
+                let builder = fnb.suspend();
+                let mut fnb = builder.new_function();
+
+                match &*arrow_expr.body {
+                    swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block_stmts) => fnb.block(|fnb| {
+                        for stmt in &block_stmts.stmts {
+                            compile_stmt(fnb, stmt);
+                        }
+                    }),
+                    swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
+                        fnb.block(|fnb| {
+                            let value = compile_expr(fnb, expr);
+                            fnb.add_stmt(StmtOp::Return(value));
+                        });
+                    }
                 }
-                swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
-                    let mut block = Block::empty(builder.gen_block_id());
-                    block.stmts.push(compile_expr(builder, expr));
-                    block
-                }
+
+                fnb.build()
             };
-            let func = compile_function_from_parts(builder, arrow_expr.span, &params, body);
-            let func_expr = Stmt {
-                op: StmtOp::CreateClosure {
-                    func: Box::new(func),
-                },
-                span,
-            };
+            let func = compile_function_from_parts(arrow_expr.span, &params, body);
+
+            let func_expr = fnb.add_expr(Expr::CreateClosure {
+                func: Box::new(func),
+            });
 
             // Unlike regular function declarations/expressions, arrow
             // expressions inherit the `this` binding from the surrounding
             // context
 
-            let bind_method = Stmt {
-                op: StmtOp::ObjectGet {
-                    obj: Box::new(func_expr),
-                    key: Box::new(Stmt {
-                        span,
-                        op: StmtOp::StringLiteral("bind".into()),
-                    }),
-                },
-                span,
-            };
+            let bind_lit = fnb.add_expr(Expr::StringLiteral("bind".into()));
+            let bind_method = fnb.add_expr(Expr::ObjectGet {
+                obj: func_expr,
+                key: bind_lit,
+            });
 
-            let bind_call = Stmt {
-                op: StmtOp::Call {
-                    is_new: false,
-                    callee: Box::new(bind_method),
-                    args: vec![Stmt {
-                        op: StmtOp::This,
-                        span,
-                    }],
-                },
-                span,
-            };
-
-            bind_call
+            let this = fnb.add_expr(Expr::This);
+            fnb.add_expr(Expr::Call {
+                callee: bind_method,
+                args: vec![this],
+                is_new: false,
+            })
         }
         swc_ecma_ast::Expr::Unary(unary_expr) => {
-            let arg = compile_expr(builder, &unary_expr.arg);
-            Stmt {
-                op: StmtOp::Unary(unary_expr.op, Box::new(arg)),
-                span: unary_expr.span,
-            }
+            let arg = compile_expr(fnb, &unary_expr.arg);
+            fnb.add_expr(Expr::Unary(unary_expr.op, arg))
         }
         swc_ecma_ast::Expr::Update(update_expr) => {
             let loc = compile_name(swc_ecma_ast::PatOrExpr::Expr(update_expr.arg.clone()));
-            let new_value = {
-                let value = Box::new(compile_expr(builder, &update_expr.arg));
-                let one = Box::new(Stmt {
-                    op: StmtOp::NumberLiteral(1.0),
-                    span: Default::default(),
-                });
-                match update_expr.op {
-                    swc_ecma_ast::UpdateOp::PlusPlus => Stmt {
-                        op: StmtOp::Binary(swc_ecma_ast::BinaryOp::Add, value, one),
-                        span: update_expr.span,
-                    },
-                    swc_ecma_ast::UpdateOp::MinusMinus => Stmt {
-                        op: StmtOp::Binary(swc_ecma_ast::BinaryOp::Sub, value, one),
-                        span: update_expr.span,
-                    },
-                }
+
+            let value = compile_expr(fnb, &update_expr.arg);
+            let op = match update_expr.op {
+                swc_ecma_ast::UpdateOp::PlusPlus => swc_ecma_ast::BinaryOp::Add,
+                swc_ecma_ast::UpdateOp::MinusMinus => swc_ecma_ast::BinaryOp::Sub,
             };
-            Stmt {
-                op: StmtOp::Assign(loc, Box::new(new_value)),
-                span: update_expr.span,
-            }
+            let one = fnb.add_expr(ONE);
+            let new_value = fnb.add_expr(Expr::Binary(op, value, one));
+            fnb.add_stmt(StmtOp::Assign(loc, new_value));
+
+            new_value
         }
         swc_ecma_ast::Expr::Bin(bin_expr) => {
-            let left = compile_expr(builder, &bin_expr.left);
-            let right = compile_expr(builder, &bin_expr.right);
-            Stmt {
-                op: StmtOp::Binary(bin_expr.op, Box::new(left), Box::new(right)),
-                span: bin_expr.span,
-            }
+            let left = compile_expr(fnb, &bin_expr.left);
+            let right = compile_expr(fnb, &bin_expr.right);
+            fnb.add_expr(Expr::Binary(bin_expr.op, left, right))
         }
         swc_ecma_ast::Expr::Assign(assign_expr) => {
             if let Some(ident) = assign_expr.left.as_ident() {
                 let loc = DeclName::Js(ident.sym.clone());
-                let init_value = Stmt {
-                    op: StmtOp::Read(loc.clone()),
-                    span: ident.span,
-                };
-                let value = compile_assignment(builder, assign_expr, init_value);
-                Stmt {
-                    op: StmtOp::Assign(loc, Box::new(value)),
-                    span: assign_expr.span,
-                }
+                let init_value = fnb.add_expr(Expr::Read(loc.clone()));
+                let value = compile_assignment(fnb, assign_expr, init_value);
+                fnb.add_stmt(StmtOp::Assign(loc, value));
+                value
             } else if let Some(target_expr) = assign_expr.left.as_expr() {
                 match target_expr {
                     swc_ecma_ast::Expr::Member(member_expr) => {
-                        compile_member_assignment(builder, assign_expr, member_expr)
+                        compile_member_assignment(fnb, assign_expr, member_expr)
                     }
                     // We should have already handled this case in the `if let ... = asm.left.as_ident()`
                     // case
@@ -1212,24 +1007,36 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
             }
         }
         swc_ecma_ast::Expr::Member(member_expr) => {
-            let obj = compile_expr(builder, &member_expr.obj);
-            let key = compile_object_key(builder, &member_expr.prop);
-            Stmt {
-                op: StmtOp::ObjectGet {
-                    obj: Box::new(obj),
-                    key: Box::new(key),
-                },
-                span: member_expr.span,
-            }
+            let obj = compile_expr(fnb, &member_expr.obj);
+            let key = compile_object_key(fnb, &member_expr.prop);
+            fnb.add_expr(Expr::ObjectGet { obj, key })
         }
         swc_ecma_ast::Expr::Cond(cond_expr) => {
-            let test = Box::new(compile_expr(builder, &cond_expr.test));
-            let cons = Box::new(compile_expr(builder, &cond_expr.cons));
-            let alt = Box::new(compile_expr(builder, &cond_expr.alt));
-            Stmt {
-                op: StmtOp::If { test, cons, alt },
-                span: cond_expr.span,
-            }
+            let tmp = fnb.decl_tmp();
+
+            let test = compile_expr(fnb, &cond_expr.test);
+            let if_not = fnb.add_stmt(StmtOp::Invalid);
+
+            let value_cons = compile_expr(fnb, &cond_expr.cons);
+            fnb.add_stmt(StmtOp::Assign(tmp, value_cons));
+            let jmp_to_end = fnb.add_stmt(StmtOp::Invalid);
+
+            let else_target = fnb.peek_stmt_id();
+            fnb.set_stmt(
+                if_not,
+                StmtOp::IfNot {
+                    test,
+                    distance: (else_target - if_not),
+                },
+            );
+
+            let value_alt = compile_expr(fnb, &cond_expr.alt);
+            fnb.add_stmt(StmtOp::Assign(tmp, value_alt));
+
+            let end = fnb.peek_stmt_id();
+            fnb.set_stmt(jmp_to_end, StmtOp::Jump(end - jmp_to_end));
+
+            fnb.add_expr(Expr::Read(tmp))
         }
         swc_ecma_ast::Expr::Call(call_expr) => {
             let callee = match &call_expr.callee {
@@ -1238,7 +1045,7 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
                 }
                 swc_ecma_ast::Callee::Expr(expr) => expr,
             };
-            compile_call(builder, callee, &call_expr.args, false)
+            compile_call(fnb, callee, &call_expr.args, false)
         }
         swc_ecma_ast::Expr::New(new_expr) => {
             let args = new_expr
@@ -1246,52 +1053,36 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
                 .as_ref()
                 .map(|args| args.as_slice())
                 .unwrap_or(&[]);
-            compile_call(builder, &new_expr.callee, args, true)
+            compile_call(fnb, &new_expr.callee, args, true)
         }
         swc_ecma_ast::Expr::Seq(seq_expr) => {
-            let block_id = builder.gen_block_id();
-            let stmts = seq_expr
-                .exprs
-                .iter()
-                .map(|expr| compile_expr(builder, expr))
-                .collect();
-            Stmt {
-                op: StmtOp::Block(Block {
-                    id: block_id,
-                    stmts,
-                    decls: Vec::new(),
-                }),
-                span: seq_expr.span,
-            }
+            let mut last_value = fnb.add_expr(Expr::Undefined);
+
+            fnb.block(|fnb| {
+                for expr in &seq_expr.exprs {
+                    last_value = compile_expr(fnb, expr);
+                }
+            });
+
+            last_value
         }
-        swc_ecma_ast::Expr::Ident(ident) => Stmt {
-            op: StmtOp::Read(DeclName::Js(ident.sym.clone())),
-            span: ident.span,
-        },
+        swc_ecma_ast::Expr::Ident(ident) => {
+            fnb.add_expr(Expr::Read(DeclName::Js(ident.sym.clone())))
+        }
         swc_ecma_ast::Expr::Lit(lit) => match lit {
-            swc_ecma_ast::Lit::Str(str) => Stmt {
-                op: StmtOp::StringLiteral(str.value.to_string().into()),
-                span: str.span,
-            },
-            swc_ecma_ast::Lit::Bool(b) => Stmt {
-                op: StmtOp::BoolLiteral(b.value),
-                span: b.span,
-            },
-            swc_ecma_ast::Lit::Null(null_node) => Stmt {
-                op: StmtOp::Null,
-                span: null_node.span,
-            },
-            swc_ecma_ast::Lit::Num(num) => Stmt {
-                op: StmtOp::NumberLiteral(num.value),
-                span: num.span,
-            },
+            swc_ecma_ast::Lit::Str(str) => {
+                fnb.add_expr(Expr::StringLiteral(str.value.to_string().into()))
+            }
+            swc_ecma_ast::Lit::Bool(b) => fnb.add_expr(Expr::BoolLiteral(b.value)),
+            swc_ecma_ast::Lit::Null(null_node) => fnb.add_expr(Expr::Null),
+            swc_ecma_ast::Lit::Num(num) => fnb.add_expr(Expr::NumberLiteral(num.value)),
             swc_ecma_ast::Lit::BigInt(_)
             | swc_ecma_ast::Lit::Regex(_)
             | swc_ecma_ast::Lit::JSXText(_) => unsupported_node!(lit),
         },
 
         swc_ecma_ast::Expr::Tpl(_) => todo!(),
-        swc_ecma_ast::Expr::Paren(paren_expr) => compile_expr(builder, &paren_expr.expr),
+        swc_ecma_ast::Expr::Paren(paren_expr) => compile_expr(fnb, &paren_expr.expr),
 
         swc_ecma_ast::Expr::SuperProp(_)
         | swc_ecma_ast::Expr::TaggedTpl(_)
@@ -1319,93 +1110,51 @@ fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Stmt {
 }
 
 fn compile_member_assignment(
-    builder: &mut Builder,
+    fnb: &mut FnBuilder,
     assign_expr: &swc_ecma_ast::AssignExpr,
     member_expr: &swc_ecma_ast::MemberExpr,
-) -> Stmt {
-    let mut block = Block::empty(builder.gen_block_id());
+) -> ExprID {
+    fnb.block(|fnb| {
+        let key = compile_object_key(fnb, &member_expr.prop);
+        let obj = compile_expr(fnb, &member_expr.obj);
 
-    let key = compile_object_key(builder, &member_expr.prop);
-    let obj = compile_expr(builder, &member_expr.obj);
+        let (key_tmp, key) = create_tmp(fnb, key);
+        let (obj_tmp, obj) = create_tmp(fnb, obj);
 
-    let tmp_key = create_tmp(builder, &mut block, key);
-    let tmp_obj = create_tmp(builder, &mut block, obj);
+        let init_value = fnb.add_expr(Expr::ObjectGet { obj, key });
+        let value = compile_assignment(fnb, assign_expr, init_value);
+        fnb.add_stmt(StmtOp::ObjectSet { obj, key, value });
 
-    let init_value = Stmt {
-        op: StmtOp::ObjectGet {
-            obj: Box::new(Stmt {
-                op: StmtOp::Read(tmp_obj.clone()),
-                span: Default::default(),
-            }),
-            key: Box::new(Stmt {
-                op: StmtOp::Read(tmp_key.clone()),
-                span: Default::default(),
-            }),
-        },
-        span: member_expr.span,
-    };
-
-    let value = compile_assignment(builder, assign_expr, init_value);
-    block.stmts.push(Stmt {
-        op: StmtOp::ObjectSet {
-            obj: Box::new(Stmt {
-                op: StmtOp::Read(tmp_obj),
-                span: Default::default(),
-            }),
-            key: Box::new(Stmt {
-                op: StmtOp::Read(tmp_key),
-                span: Default::default(),
-            }),
-            value: Box::new(value),
-        },
-        span: assign_expr.span,
-    });
-
-    Stmt {
-        op: StmtOp::Block(block),
-        span: assign_expr.span,
-    }
+        value
+    })
 }
 
 fn compile_assignment(
-    builder: &mut Builder,
+    fnb: &mut FnBuilder,
     assign_expr: &swc_ecma_ast::AssignExpr,
-    init_value: Stmt,
-) -> Stmt {
-    let rhs = compile_expr(builder, &assign_expr.right);
-    let value = match assign_expr.op.to_update() {
+    init_value: ExprID,
+) -> ExprID {
+    let rhs = compile_expr(fnb, &assign_expr.right);
+    match assign_expr.op.to_update() {
         // regular assignment
         None => rhs,
         // updating assignment
-        Some(binop) => Stmt {
-            op: StmtOp::Binary(binop, Box::new(init_value), Box::new(rhs)),
-            span: assign_expr.span,
-        },
-    };
-    value
+        Some(binop) => fnb.add_expr(Expr::Binary(binop, init_value, rhs)),
+    }
 }
 
-fn create_tmp(builder: &mut Builder, block: &mut Block, value: Stmt) -> DeclName {
-    let tmp = DeclName::Tmp(builder.gen_tmp());
-    block.decls.push(Decl {
-        is_lexical: true,
-        name: tmp.clone(),
-        is_global: false,
-    });
-    block.stmts.push(Stmt {
-        op: StmtOp::Assign(tmp.clone(), Box::new(value)),
-        span: Default::default(),
-    });
-    tmp
+fn create_tmp(fnb: &mut FnBuilder, value: ExprID) -> (DeclName, ExprID) {
+    let tmp = fnb.decl_tmp();
+    fnb.add_stmt(StmtOp::Assign(tmp, value));
+    (tmp, fnb.add_expr(Expr::Read(tmp)))
 }
 
-fn compile_object_key(builder: &mut Builder, prop: &swc_ecma_ast::MemberProp) -> Stmt {
+fn compile_object_key(fnb: &mut FnBuilder, prop: &swc_ecma_ast::MemberProp) -> ExprID {
     match prop {
-        swc_ecma_ast::MemberProp::Ident(ident) => Stmt {
-            op: StmtOp::StringLiteral(ident.sym.clone()),
-            span: ident.span,
-        },
-        swc_ecma_ast::MemberProp::Computed(computed) => compile_expr(builder, &computed.expr),
+        swc_ecma_ast::MemberProp::Ident(ident) => {
+            fnb.add_expr(Expr::StringLiteral(ident.sym.clone()))
+        }
+        swc_ecma_ast::MemberProp::Computed(computed) => compile_expr(fnb, &computed.expr),
         swc_ecma_ast::MemberProp::PrivateName(_) => {
             unsupported_node!(prop)
         }
@@ -1432,31 +1181,27 @@ fn compile_name_pat(pat: &swc_ecma_ast::Pat) -> DeclName {
 }
 
 fn compile_call(
-    builder: &mut Builder,
+    fnb: &mut FnBuilder,
     callee: &swc_ecma_ast::Expr,
     args: &[swc_ecma_ast::ExprOrSpread],
     is_new: bool,
-) -> Stmt {
-    let callee = Box::new(compile_expr(builder, callee));
+) -> ExprID {
+    let callee = compile_expr(fnb, callee);
     let args = args
         .iter()
         .map(|expr_or_spread| {
             if expr_or_spread.spread.is_some() {
                 panic!("unsupported: spread syntax in call");
             }
-            compile_expr(builder, &expr_or_spread.expr)
+            compile_expr(fnb, &expr_or_spread.expr)
         })
         .collect();
 
-    let span = callee.span;
-    Stmt {
-        op: StmtOp::Call {
-            is_new,
-            callee,
-            args,
-        },
-        span,
-    }
+    fnb.add_expr(Expr::Call {
+        callee,
+        args,
+        is_new,
+    })
 }
 
 fn compile_function(builder: &mut Builder, swc_func: &swc_ecma_ast::Function) -> Function {
@@ -1477,12 +1222,15 @@ fn compile_function(builder: &mut Builder, swc_func: &swc_ecma_ast::Function) ->
     }
 
     let stmts = &swc_func.body.as_ref().unwrap().stmts;
-    let body = compile_block(builder, None, stmts);
-    compile_function_from_parts(builder, swc_func.span, &swc_func.params, body)
+    let mut fnb = builder.new_function();
+    for stmt in stmts {
+        compile_stmt(&mut fnb, stmt);
+    }
+    let body = fnb.build();
+    compile_function_from_parts(swc_func.span, &swc_func.params, body)
 }
 
 fn compile_function_from_parts(
-    builder: &mut Builder,
     span: swc_common::Span,
     swc_params: &[swc_ecma_ast::Param],
     body: Block,
@@ -1494,13 +1242,7 @@ fn compile_function_from_parts(
         parameters.push(name.clone());
     }
 
-    let declares_use_strict = match body.stmts.first() {
-        Some(Stmt {
-            op: StmtOp::StringLiteral(atom),
-            ..
-        }) => atom == "use strict",
-        _ => false,
-    };
+    let declares_use_strict = block_starts_with_use_strict(&body);
 
     let unbound_names = find_unbound_references(&body);
     Function {
@@ -1512,207 +1254,51 @@ fn compile_function_from_parts(
     }
 }
 
-fn visit_stmts(root: &Stmt, mut handler: impl FnMut(&Stmt)) {
-    let mut queue = vec![root];
+fn block_starts_with_use_strict(block: &Block) -> bool {
+    let expr = match block.stmts.first() {
+        Some(Stmt {
+            op: StmtOp::Evaluate(expr),
+            ..
+        }) => expr,
+        _ => return false,
+    };
 
-    while let Some(stmt) = queue.pop() {
-        handler(stmt);
-        match &stmt.op {
-            StmtOp::Block(block) => {
-                queue.extend(block.stmts.iter());
-            }
-            StmtOp::Break(_) => {}
-            StmtOp::Continue(_) => {}
-            StmtOp::Unshare(_) => {}
-            StmtOp::If { test, cons, alt } => {
-                queue.push(test);
-                queue.push(cons);
-                queue.push(alt);
-            }
-            StmtOp::Undefined => {}
-            StmtOp::Null => {}
-            StmtOp::This => {}
-            StmtOp::Read(_) => {}
-            StmtOp::AssignParam(_, _) => {}
-            StmtOp::Assign(_, value_stmt) => {
-                queue.push(value_stmt);
-            }
-            StmtOp::Unary(_, arg) => {
-                queue.push(arg);
-            }
-            StmtOp::Binary(_, left, right) => {
-                queue.push(left);
-                queue.push(right);
-            }
-            StmtOp::StringLiteral(_) => {}
-            StmtOp::NumberLiteral(_) => {}
-            StmtOp::BoolLiteral(_) => {}
-            StmtOp::ArrayCreate => {}
-            StmtOp::ArrayPush(_, value_stmt) => {
-                queue.push(value_stmt);
-            }
-            StmtOp::ArrayNth { arr, index } => {
-                queue.push(arr);
-                queue.push(index);
-            }
-            StmtOp::ArrayLen(arr) => {
-                queue.push(arr);
-            }
-            StmtOp::ObjectCreate => {}
-            StmtOp::ObjectGet { obj, key } => {
-                queue.push(obj);
-                queue.push(key);
-            }
-            StmtOp::ObjectSet { obj, key, value } => {
-                queue.push(obj);
-                queue.push(key);
-                queue.push(value);
-            }
-            StmtOp::ObjectGetKeys(obj) => {
-                queue.push(obj);
-            },
-            StmtOp::CreateClosure { .. } => {}
-            StmtOp::Call { callee, args, .. } => {
-                queue.push(callee.as_ref());
-                queue.extend(args.iter());
-            }
-            StmtOp::Return(arg) => {
-                queue.push(arg.as_ref());
-            }
-            StmtOp::Throw(arg) => {
-                queue.push(arg);
-            }
-            StmtOp::GetCurrentException => {}
-            StmtOp::Try {
-                main_block,
-                handler_block,
-                finalizer_block,
-            } => {
-                queue.push(main_block.as_ref());
-                queue.push(handler_block.as_ref());
-                queue.push(finalizer_block.as_ref());
-            }
-            StmtOp::Debugger => {}
-        }
+    let expr = &block.exprs[expr.0 as usize];
+    if let Expr::StringLiteral(atom) = expr {
+        return atom == "use strict";
     }
-}
 
-fn visit_stmts_mut(root: &mut Stmt, mut handler: impl FnMut(&mut Stmt)) {
-    let mut queue = vec![root];
-
-    while let Some(stmt) = queue.pop() {
-        handler(stmt);
-        match &mut stmt.op {
-            StmtOp::Block(block) => {
-                queue.extend(block.stmts.iter_mut());
-            }
-            StmtOp::Break(_) => {}
-            StmtOp::Continue(_) => {}
-            StmtOp::Unshare(_) => {}
-            StmtOp::If { test, cons, alt } => {
-                queue.push(test);
-                queue.push(cons);
-                queue.push(alt);
-            }
-            StmtOp::Undefined => {}
-            StmtOp::Null => {}
-            StmtOp::This => {}
-            StmtOp::Read(_) => {}
-            StmtOp::AssignParam(_, _) => {}
-            StmtOp::Assign(_, value_stmt) => {
-                queue.push(value_stmt);
-            }
-            StmtOp::Unary(_, arg) => {
-                queue.push(arg);
-            }
-            StmtOp::Binary(_, left, right) => {
-                queue.push(left);
-                queue.push(right);
-            }
-            StmtOp::StringLiteral(_) => {}
-            StmtOp::NumberLiteral(_) => {}
-            StmtOp::BoolLiteral(_) => {}
-            StmtOp::ArrayCreate => {}
-            StmtOp::ArrayPush(_, value_stmt) => {
-                queue.push(value_stmt);
-            }
-            StmtOp::ArrayNth { arr, index } => {
-                queue.push(arr);
-                queue.push(index);
-            }
-            StmtOp::ArrayLen(arr) => {
-                queue.push(arr);
-            }
-            StmtOp::ObjectCreate => {}
-            StmtOp::ObjectGet { obj, key } => {
-                queue.push(obj);
-                queue.push(key);
-            }
-            StmtOp::ObjectSet { obj, key, value } => {
-                queue.push(obj);
-                queue.push(key);
-                queue.push(value);
-            }
-            StmtOp::ObjectGetKeys(obj) => {
-                queue.push(obj);
-            },
-            StmtOp::CreateClosure { .. } => {}
-            StmtOp::Call { callee, args, .. } => {
-                queue.push(callee.as_mut());
-                queue.extend(args.iter_mut());
-            }
-            StmtOp::Return(arg) => {
-                queue.push(arg.as_mut());
-            }
-            StmtOp::Throw(arg) => {
-                queue.push(arg);
-            }
-            StmtOp::GetCurrentException => {}
-            StmtOp::Try {
-                main_block,
-                handler_block,
-                finalizer_block,
-            } => {
-                queue.push(main_block.as_mut());
-                queue.push(handler_block.as_mut());
-                queue.push(finalizer_block.as_mut());
-            }
-            StmtOp::Debugger => {}
-        }
-    }
+    false
 }
 
 fn find_unbound_references(root: &Block) -> Vec<JsWord> {
     let mut declared = HashSet::new();
     let mut referenced = HashSet::new();
 
-    let mut add_block_decls = |block: &Block| {
-        for decl in &block.decls {
-            if let DeclName::Js(js_name) = &decl.name {
-                declared.insert(js_name.clone());
+    for expr in &root.exprs {
+        match expr {
+            Expr::Read(DeclName::Js(name)) => {
+                referenced.insert(name.clone());
             }
-        }
-    };
-
-    add_block_decls(root);
-    for block_stmt in &root.stmts {
-        visit_stmts(block_stmt, |stmt| match &stmt.op {
-            StmtOp::Block(block) => {
-                add_block_decls(block);
-            }
-            StmtOp::Read(DeclName::Js(js_name)) => {
-                referenced.insert(js_name.clone());
-            }
-            StmtOp::CreateClosure { func } => {
+            Expr::CreateClosure { func } => {
                 for name in &func.unbound_names {
                     referenced.insert(name.clone());
                 }
             }
-            StmtOp::Assign(DeclName::Js(name), _) => {
-                referenced.insert(name.clone());
-            }
             _ => (),
-        });
+        }
+    }
+
+    for stmt in &root.stmts {
+        if let StmtOp::Assign(DeclName::Js(name), _) = &stmt.op {
+            referenced.insert(name.clone());
+        }
+    }
+
+    for decl in &root.decls {
+        if let DeclName::Js(js_name) = &decl.name {
+            declared.insert(js_name.clone());
+        }
     }
 
     #[allow(unused_mut)]
