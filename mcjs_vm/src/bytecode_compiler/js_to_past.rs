@@ -109,8 +109,15 @@ impl std::ops::Sub for StmtID {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct ExprID(u16);
+
+impl std::fmt::Debug for ExprID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "e{}", self.0)
+    }
+}
+
 
 #[derive(Debug)]
 pub enum StmtOp {
@@ -242,10 +249,7 @@ mod builder {
         }
 
         pub fn new_function(&mut self) -> FnBuilder {
-            FnBuilder {
-                builder: self,
-                blocks: Vec::new(),
-            }
+            FnBuilder::new(self)
         }
     }
 
@@ -256,12 +260,25 @@ mod builder {
     }
 
     impl<'a> FnBuilder<'a> {
-        pub(super) fn build(self) -> Block {
-            assert_eq!(self.blocks.len(), 1);
-            
-            let block = self.blocks.into_iter().next().unwrap();
+        fn new(builder: &'a mut Builder) -> Self {
+            let mut fnb = FnBuilder {
+                builder,
+                blocks: Vec::new(),
+            };
+            // The function's outermost block. Will be fetched via `pop_block` by `build`
+            fnb.push_block();
+            fnb
+        }
 
-            assert!(!block.stmts.iter().any(|stmt| stmt.op.is_pending()));
+        pub(super) fn build(mut self) -> Block {
+            let block = self.pop_block();
+            assert!(self.blocks.is_empty());
+
+            // Assert: no pending instruction remaining
+            assert!(
+                !block.stmts.iter().any(|stmt| stmt.op.is_pending()),
+                "js_to_past bug: unresolved pending stmt"
+            );
             block
         }
 
@@ -276,7 +293,7 @@ mod builder {
             self.blocks.last_mut().unwrap()
         }
 
-        pub(super) fn block<T>(&mut self, builder: impl FnOnce(&mut Self) -> T) -> T {
+        fn push_block(&mut self) {
             let blkid = BlockID(self.builder.next_id);
             self.builder.next_id += 1;
 
@@ -287,10 +304,16 @@ mod builder {
                 stmts: Vec::new(),
                 exprs: Vec::new(),
             });
+        }
+        fn pop_block(&mut self) -> Block {
+            self.blocks.pop().unwrap()
+        }
 
+        pub(super) fn block<T>(&mut self, builder: impl FnOnce(&mut Self) -> T) -> T {
+            self.push_block();
             let ret = builder(self);
+            let inner_block = self.pop_block();
 
-            let inner_block = self.blocks.pop().unwrap();
             merge_block(self.cur_block_mut(), inner_block);
 
             // TODO Check redeclarations here
