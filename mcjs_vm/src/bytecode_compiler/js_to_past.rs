@@ -4,6 +4,7 @@
 /// swc_ecma_ast's AST, designed expressly to facilitate compilation to bytecode
 /// and compile-time checks.
 use std::collections::HashSet;
+use std::fmt::Write;
 use swc_atoms::JsWord;
 
 macro_rules! unsupported_node {
@@ -33,6 +34,20 @@ impl std::fmt::Debug for Function {
     }
 }
 
+impl util::Dump for Function {
+    fn dump(&self, f: &mut util::Formatter) -> std::fmt::Result {
+        let lo = self.span.lo.0;
+        let hi = self.span.hi.0;
+
+        write!(f, "[{}-{}] func (", lo, hi)?;
+        write_comma_sep(f, self.parameters.iter())?;
+        write!(f, ") unbound[")?;
+        write_comma_sep(f, self.unbound_names.iter())?;
+        write!(f, "] ")?;
+        self.body.dump(f)
+    }
+}
+
 #[derive(Debug)]
 pub struct Block {
     pub id: BlockID,
@@ -47,8 +62,49 @@ impl Block {
             !self.stmts.iter().any(|stmt| stmt.op.is_pending()),
             "js_to_past bug: unresolved pending stmt"
         );
+    }
+}
 
+impl util::Dump for Block {
+    fn dump(&self, f: &mut util::Formatter) -> std::fmt::Result {
+        writeln!(f, "{:?} {{", self.id)?;
+        f.indent();
 
+        writeln!(f, "decls:")?;
+        f.indent();
+        for decl in &self.decls {
+            writeln!(f, "{:?}", decl)?;
+        }
+        f.dedent();
+
+        writeln!(f, "exprs:")?;
+        f.indent();
+        for (ndx, expr) in self.exprs.iter().enumerate() {
+            write!(f, "e{}: ", ndx)?;
+            match expr {
+                Expr::CreateClosure { func } => {
+                    writeln!(f, "CreateClosure:")?;
+                    f.indent();
+                    func.dump(f)?;
+                    f.dedent();
+                }
+                _ => writeln!(f, "{:?}", expr)?,
+            }
+        }
+        f.dedent();
+
+        writeln!(f, "stmts:")?;
+        f.indent();
+        for stmt in &self.stmts {
+            match &stmt.op {
+                StmtOp::Block(block) => block.dump(f)?,
+                _ => writeln!(f, "{:?}", stmt)?,
+            }
+        }
+        f.dedent();
+
+        f.dedent();
+        writeln!(f, "}}")
     }
 }
 
@@ -460,7 +516,10 @@ mod builder {
 pub use builder::{BlockID, TmpID};
 use builder::{Builder, FnBuilder};
 
-use crate::{error, util::write_comma_sep};
+use crate::{
+    error,
+    util::{self, write_comma_sep},
+};
 
 pub fn compile_script(ast_module: swc_ecma_ast::Module) -> Function {
     use swc_ecma_ast::ModuleItem;
@@ -843,7 +902,7 @@ fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
 fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
     match expr {
         swc_ecma_ast::Expr::This(_) => fnb.add_expr(Expr::This),
-        swc_ecma_ast::Expr::Array(array_expr) => fnb.block(|fnb| {
+        swc_ecma_ast::Expr::Array(array_expr) => {
             let array_init = fnb.add_expr(Expr::ArrayCreate);
             let (array_tmp, array) = create_tmp(fnb, array_init);
 
@@ -860,7 +919,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
             }
 
             array
-        }),
+        }
         swc_ecma_ast::Expr::Object(object_expr) => {
             let init_value = fnb.add_expr(Expr::ObjectCreate);
             let (_, obj) = create_tmp(fnb, init_value);
@@ -1078,6 +1137,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
             fnb.block(|fnb| {
                 for expr in &seq_expr.exprs {
                     last_value = compile_expr(fnb, expr);
+                    fnb.add_stmt(StmtOp::Evaluate(last_value));
                 }
             });
 
@@ -1335,6 +1395,8 @@ mod tests {
 
     use swc_common::SourceMap;
 
+    use crate::util::{self, Dump};
+
     #[test]
     fn test_simple_for() {
         let function = quick_compile(
@@ -1344,7 +1406,8 @@ mod tests {
                 "#
             .to_string(),
         );
-        println!("{:#?}", function);
+
+        function.dump(&mut util::Formatter::default()).unwrap();
     }
 
     #[test]
