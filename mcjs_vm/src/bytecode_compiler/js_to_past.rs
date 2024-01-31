@@ -20,22 +20,10 @@ pub struct Function {
     pub span: swc_common::Span,
     pub declares_use_strict: bool,
 }
-impl std::fmt::Debug for Function {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let lo = self.span.lo.0;
-        let hi = self.span.hi.0;
-        write!(f, "[{}-{}] func (", lo, hi)?;
-        write_comma_sep(f, self.parameters.iter())?;
-        write!(f, ") unbound[")?;
-        write_comma_sep(f, self.unbound_names.iter())?;
-        write!(f, "] {{")?;
-        self.body.fmt(f)?;
-        write!(f, "}}")
-    }
-}
+impl_debug_via_dump!(Function);
 
 impl util::Dump for Function {
-    fn dump(&self, f: &mut util::Formatter) -> std::fmt::Result {
+    fn dump<W: std::fmt::Write>(&self, f: &mut util::Formatter<W>) -> std::fmt::Result {
         let lo = self.span.lo.0;
         let hi = self.span.hi.0;
 
@@ -48,13 +36,14 @@ impl util::Dump for Function {
     }
 }
 
-#[derive(Debug)]
 pub struct Block {
     pub id: BlockID,
     pub decls: Vec<Decl>,
     pub stmts: Vec<Stmt>,
     pub exprs: Vec<Expr>,
 }
+impl_debug_via_dump!(Block);
+
 impl Block {
     fn assert_valid(&self) {
         // no pending instruction remaining
@@ -66,7 +55,7 @@ impl Block {
 }
 
 impl util::Dump for Block {
-    fn dump(&self, f: &mut util::Formatter) -> std::fmt::Result {
+    fn dump<W: std::fmt::Write>(&self, f: &mut util::Formatter<W>) -> std::fmt::Result {
         writeln!(f, "{:?} {{", self.id)?;
         f.indent();
 
@@ -517,7 +506,7 @@ pub use builder::{BlockID, TmpID};
 use builder::{Builder, FnBuilder};
 
 use crate::{
-    error,
+    error, impl_debug_via_dump,
     util::{self, write_comma_sep},
 };
 
@@ -1395,7 +1384,7 @@ mod tests {
 
     use swc_common::SourceMap;
 
-    use crate::util::{self, Dump};
+    use crate::util::{self, Dump, DumpExt};
 
     #[test]
     fn test_simple_for() {
@@ -1406,8 +1395,9 @@ mod tests {
                 "#
             .to_string(),
         );
-
-        function.dump(&mut util::Formatter::default()).unwrap();
+        insta::assert_snapshot!(function.dump_to_string());
+        // TODO fix: the seq expr (closures.push(() => i), i < 5) is compiled to a block, but the
+        // block does not 'return' its value as an expression in the parent block
     }
 
     #[test]
@@ -1425,7 +1415,7 @@ mod tests {
             "
             .to_string(),
         );
-        insta::assert_debug_snapshot!(function);
+        insta::assert_snapshot!(function.dump_to_string());
     }
 
     #[test]
@@ -1439,19 +1429,14 @@ mod tests {
                 "
             .to_string(),
         );
-        insta::assert_debug_snapshot!(function);
+        insta::assert_snapshot!(function.dump_to_string());
     }
 
     #[test]
     fn test_func_decl() {
-        let function = quick_compile(
-            "function myFunction() {
-                    return 3
-                }"
-            .to_string(),
-        );
-
-        insta::assert_debug_snapshot!(function);
+        let src = "function myFunction() { return 3 }".to_string();
+        let function = quick_compile(src);
+        insta::assert_snapshot!(function.dump_to_string());
     }
 
     fn quick_compile(src: String) -> super::Function {
