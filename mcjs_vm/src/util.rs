@@ -70,6 +70,16 @@ pub fn shorten_by<T>(xs: &mut Vec<T>, n: usize) {
     xs.truncate(xs.len() - n);
 }
 
+pub fn pop_while<T>(vec: &mut Vec<T>, pred: impl Fn(&T) -> bool) {
+    while let Some(item) = vec.last() {
+        if pred(item) {
+            vec.pop();
+        } else {
+            break;
+        }
+    }
+}
+
 pub fn write_comma_sep<W, T>(wrt: &mut W, values: impl Iterator<Item = T>) -> std::fmt::Result
 where
     W: std::fmt::Write,
