@@ -40,6 +40,17 @@ pub struct Block {
     pub stmts: Vec<Stmt>,
     pub exprs: Vec<Expr>,
 }
+impl Block {
+    fn assert_valid(&self) {
+        // no pending instruction remaining
+        assert!(
+            !self.stmts.iter().any(|stmt| stmt.op.is_pending()),
+            "js_to_past bug: unresolved pending stmt"
+        );
+
+
+    }
+}
 
 pub struct Decl {
     pub name: DeclName,
@@ -118,37 +129,35 @@ impl std::fmt::Debug for ExprID {
     }
 }
 
-
 #[derive(Debug)]
 pub enum StmtOp {
     Pending,
-    PendingBreak,
-    PendingContinue,
-
-    Unshare(DeclName),
-    IfNot {
-        test: ExprID,
-        distance: StmtsDistance,
-    },
-    Jump(StmtsDistance),
 
     Evaluate(ExprID),
 
+    Break(BlockID),
+    Block(Box<Block>),
+    /// Semantics: "Do the next statement if not ...". Evaluate the `test`
+    /// expression and convert to boolean; if true, skip 1 statement; if false,
+    /// proceed to the next stmt.
+    IfNot {
+        test: ExprID,
+    },
+    Jump(StmtID),
+    Return(ExprID),
+
     Assign(DeclName, ExprID),
-
+    Unshare(DeclName),
     ArrayPush(DeclName, ExprID),
-
     ObjectSet {
         obj: ExprID,
         key: ExprID,
         value: ExprID,
     },
 
-    Return(ExprID),
-
     Throw(ExprID),
     TryBegin {
-        dist_to_handler: StmtID,
+        handler: StmtID,
     },
     TryEnd,
 
@@ -157,10 +166,7 @@ pub enum StmtOp {
 
 impl StmtOp {
     fn is_pending(&self) -> bool {
-        matches!(
-            self,
-            StmtOp::Pending | StmtOp::PendingBreak | StmtOp::PendingContinue
-        )
+        matches!(self, StmtOp::Pending)
     }
 }
 
@@ -209,6 +215,8 @@ const ZERO: Expr = Expr::NumberLiteral(0.0);
 const ONE: Expr = Expr::NumberLiteral(1.0);
 
 mod builder {
+    use crate::util::pop_while;
+
     use super::{Block, Decl, DeclName, Expr, ExprID, StmtID, StmtOp};
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -238,9 +246,12 @@ mod builder {
         /// The stack of currently open nested blocks.
         ///
         /// Compilation works by appending Stmt and Expr nodes into the last (innermost) block. As
-        /// compilation progresses, the last block is merged into the previous/parent block, until
+        /// compilation progresses, the last block is attached into the previous/parent block, until
         /// we finish with a single block that constitutes the function's body.
         blocks: Vec<Block>,
+
+        break_exits: Vec<BlockID>,
+        continue_exits: Vec<BlockID>,
     }
 
     impl Builder {
@@ -253,17 +264,13 @@ mod builder {
         }
     }
 
-    fn merge_block(outer: &mut Block, mut inner: Block) {
-        outer.decls.append(&mut inner.decls);
-        outer.stmts.append(&mut inner.stmts);
-        outer.exprs.append(&mut inner.exprs);
-    }
-
     impl<'a> FnBuilder<'a> {
         fn new(builder: &'a mut Builder) -> Self {
             let mut fnb = FnBuilder {
                 builder,
                 blocks: Vec::new(),
+                break_exits: Vec::new(),
+                continue_exits: Vec::new(),
             };
             // The function's outermost block. Will be fetched via `pop_block` by `build`
             fnb.push_block();
@@ -273,12 +280,6 @@ mod builder {
         pub(super) fn build(mut self) -> Block {
             let block = self.pop_block();
             assert!(self.blocks.is_empty());
-
-            // Assert: no pending instruction remaining
-            assert!(
-                !block.stmts.iter().any(|stmt| stmt.op.is_pending()),
-                "js_to_past bug: unresolved pending stmt"
-            );
             block
         }
 
@@ -306,17 +307,23 @@ mod builder {
             });
         }
         fn pop_block(&mut self) -> Block {
-            self.blocks.pop().unwrap()
+            let block = self.blocks.pop().unwrap();
+            block.assert_valid();
+
+            pop_while(&mut self.break_exits, |target| target == &block.id);
+            pop_while(&mut self.continue_exits, |target| target == &block.id);
+
+            block
         }
 
         pub(super) fn block<T>(&mut self, builder: impl FnOnce(&mut Self) -> T) -> T {
             self.push_block();
             let ret = builder(self);
-            let inner_block = self.pop_block();
+            let mut inner_block = self.pop_block();
 
-            merge_block(self.cur_block_mut(), inner_block);
+            hoist_declarations(&mut self.cur_block_mut().decls, &mut inner_block.decls);
 
-            // TODO Check redeclarations here
+            self.add_stmt(StmtOp::Block(Box::new(inner_block)));
 
             ret
         }
@@ -370,27 +377,6 @@ mod builder {
             };
         }
 
-        pub(crate) fn resolve_break_to_here(&mut self) {
-            let pred = |op: &StmtOp| matches!(op, StmtOp::PendingBreak);
-            let target = self.peek_stmt_id();
-            self.set_jumps(target, pred);
-        }
-
-        pub(crate) fn resolve_continue_to_here(&mut self) {
-            let pred = |op: &StmtOp| matches!(op, StmtOp::PendingContinue);
-            let target = self.peek_stmt_id();
-            self.set_jumps(target, pred);
-        }
-
-        fn set_jumps(&mut self, target: StmtID, pred: impl Fn(&StmtOp) -> bool) {
-            for (i, stmt) in self.cur_block_mut().stmts.iter_mut().enumerate() {
-                let stmt_id = StmtID(i.try_into().unwrap());
-                if pred(&stmt.op) {
-                    stmt.op = StmtOp::Jump(target - stmt_id);
-                }
-            }
-        }
-
         pub(super) fn add_expr(&mut self, expr: Expr) -> ExprID {
             let block = self.cur_block_mut();
             let expr_id_raw = block.exprs.len().try_into().unwrap();
@@ -423,6 +409,51 @@ mod builder {
                 self.add_stmt(StmtOp::Unshare(name));
             }
         }
+
+        /// Set the current block as the target for StmtOp::Break statements
+        /// (added with `add_break_stmt`) appearing within it.
+        ///
+        /// This setting is independent from the one for StmtOp::Continue.
+        ///
+        /// Overrides the break target inherited from parent blocks.
+        pub(super) fn break_exits_this_block(&mut self) {
+            let blkid = self.cur_block_id();
+            self.break_exits.push(blkid);
+        }
+
+        /// Exactly the same as `break_exits_this_block`, but applies to
+        /// StmtOp::Continue statements (added with `add_continue_stmt`)
+        /// instead.
+        ///
+        /// This setting is independent from the one for StmtOp::Break.
+        pub(super) fn continue_exits_this_block(&mut self) {
+            let blkid = self.cur_block_id();
+            self.continue_exits.push(blkid);
+        }
+
+        pub(super) fn add_break_stmt(&mut self) {
+            let target = *self.break_exits.last().expect("no break target");
+            self.add_stmt(StmtOp::Break(target));
+        }
+
+        pub(super) fn add_continue_stmt(&mut self) {
+            let target = *self.continue_exits.last().expect("no continue target");
+            self.add_stmt(StmtOp::Break(target));
+        }
+    }
+
+    fn hoist_declarations(outer: &mut Vec<Decl>, inner: &mut Vec<Decl>) {
+        let all_decls = std::mem::replace(inner, Vec::new());
+
+        for decl in all_decls {
+            if decl.is_lexical {
+                inner.push(decl);
+            } else {
+                outer.push(decl);
+            }
+        }
+
+        // TODO Check redeclarations
     }
 }
 
@@ -498,37 +529,31 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             if break_stmt.label.is_some() {
                 panic!("unsupported: labeled break statement");
             }
-            fnb.add_stmt(StmtOp::PendingBreak);
+            fnb.add_break_stmt();
         }
         swc_ecma_ast::Stmt::Continue(cont_stmt) => {
             if cont_stmt.label.is_some() {
-                panic!("unsupported: labeled break statement");
+                panic!("unsupported: labeled continue statement");
             }
-            fnb.add_stmt(StmtOp::PendingContinue);
+            fnb.add_continue_stmt();
         }
 
         swc_ecma_ast::Stmt::If(if_stmt) => {
             let test = compile_expr(fnb, &if_stmt.test);
-            let if_not = fnb.add_stmt(StmtOp::Pending);
+            fnb.add_stmt(StmtOp::IfNot { test });
+            let if_not_jmp = fnb.add_stmt(StmtOp::Pending);
 
             fnb.block(|fnb| compile_stmt(fnb, &if_stmt.cons));
-            let after_cons_jmp = fnb.add_stmt(StmtOp::Pending);
+            let after_cons = fnb.add_stmt(StmtOp::Pending);
 
-            let else_target = fnb.peek_stmt_id();
-            fnb.set_stmt(
-                if_not,
-                StmtOp::IfNot {
-                    test,
-                    distance: (else_target - if_not),
-                },
-            );
-
+            let else_start = fnb.peek_stmt_id();
             if let Some(alt) = &if_stmt.alt {
                 fnb.block(|fnb| compile_stmt(fnb, alt));
             }
 
-            let after_if = fnb.peek_stmt_id();
-            fnb.set_stmt(after_cons_jmp, StmtOp::Jump(after_if - after_cons_jmp));
+            let end = fnb.peek_stmt_id();
+            fnb.set_stmt(if_not_jmp, StmtOp::Jump(else_start));
+            fnb.set_stmt(after_cons, StmtOp::Jump(end));
         }
 
         swc_ecma_ast::Stmt::Switch(_) => {
@@ -558,6 +583,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             fnb.add_stmt(StmtOp::TryEnd);
             let jmp_from_try = fnb.add_stmt(StmtOp::Pending);
 
+            let handler_start = fnb.peek_stmt_id();
             let jmp_from_catch = try_stmt.handler.as_ref().map(|handler| {
                 fnb.block(|fnb| {
                     if let Some(handler_param) = &handler.param {
@@ -580,11 +606,6 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             });
 
             let finally_start = fnb.peek_stmt_id();
-            fnb.set_stmt(jmp_from_try, StmtOp::Jump(finally_start - jmp_from_try));
-            if let Some(jmp) = jmp_from_catch {
-                fnb.set_stmt(jmp, StmtOp::Jump(finally_start - jmp));
-            }
-
             if let Some(finalizer_block) = &try_stmt.finalizer {
                 fnb.block(|fnb| {
                     for stmt in &finalizer_block.stmts {
@@ -592,47 +613,56 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                     }
                 });
             }
+
+            fnb.set_stmt(
+                try_begin,
+                StmtOp::TryBegin {
+                    handler: handler_start,
+                },
+            );
+            fnb.set_stmt(jmp_from_try, StmtOp::Jump(finally_start));
+            if let Some(jmp_from_catch) = jmp_from_catch {
+                fnb.set_stmt(jmp_from_catch, StmtOp::Jump(finally_start));
+            }
         }
         swc_ecma_ast::Stmt::While(while_stmt) => {
             fnb.block(|fnb| {
-                let start_sid = fnb.peek_stmt_id();
+                fnb.break_exits_this_block();
+                let block_start = fnb.peek_stmt_id();
 
                 let test = compile_expr(fnb, &while_stmt.test);
-                let if_not = fnb.add_stmt(StmtOp::Pending);
+                fnb.add_stmt(StmtOp::IfNot { test });
+                fnb.add_break_stmt();
 
-                compile_stmt(fnb, &while_stmt.body);
+                fnb.block(|fnb| {
+                    fnb.continue_exits_this_block();
+                    compile_stmt(fnb, &while_stmt.body);
+                });
 
-                let jump_sid = fnb.peek_stmt_id();
-                fnb.add_stmt(StmtOp::Jump(start_sid - jump_sid));
-
-                let target = fnb.peek_stmt_id();
-                fnb.set_stmt(
-                    if_not,
-                    StmtOp::IfNot {
-                        test,
-                        distance: (target - if_not),
-                    },
-                );
+                fnb.add_stmt(StmtOp::Jump(block_start));
             });
         }
         swc_ecma_ast::Stmt::DoWhile(dowhile_stmt) => {
             fnb.block(|fnb| {
-                let block_start = fnb.peek_stmt_id();
-                compile_stmt(fnb, &dowhile_stmt.body);
+                fnb.break_exits_this_block();
 
-                let test = compile_expr(fnb, &dowhile_stmt.test);
-                fnb.add_stmt(StmtOp::IfNot {
-                    test,
-                    distance: StmtsDistance(2),
+                let block_start = fnb.peek_stmt_id();
+                fnb.block(|fnb| {
+                    fnb.continue_exits_this_block();
+                    compile_stmt(fnb, &dowhile_stmt.body);
                 });
 
-                let here = fnb.peek_stmt_id();
-                fnb.add_stmt(StmtOp::Jump(block_start - here));
+                let test = compile_expr(fnb, &dowhile_stmt.test);
+                fnb.add_stmt(StmtOp::IfNot { test });
+                fnb.add_break_stmt();
+                fnb.add_stmt(StmtOp::Jump(block_start));
             });
         }
         swc_ecma_ast::Stmt::For(for_stmt) => {
             fnb.block(|fnb| {
                 let outer_block_id = fnb.cur_block_id();
+
+                fnb.break_exits_this_block();
 
                 match &for_stmt.init {
                     Some(swc_ecma_ast::VarDeclOrExpr::VarDecl(var_decl)) => {
@@ -648,13 +678,16 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                 fnb.block(|fnb| {
                     let loop_start = fnb.peek_stmt_id();
 
-                    let test_stmt_expr = for_stmt.test.as_ref().map(|test_expr| {
+                    if let Some(test_expr) = &for_stmt.test {
                         let test = compile_expr(fnb, test_expr);
-                        let stmt = fnb.add_stmt(StmtOp::Pending);
-                        (stmt, test)
-                    });
+                        fnb.add_stmt(StmtOp::IfNot { test });
+                        fnb.add_break_stmt();
+                    }
 
-                    compile_stmt(fnb, &for_stmt.body);
+                    fnb.block(|fnb| {
+                        fnb.continue_exits_this_block();
+                        compile_stmt(fnb, &for_stmt.body);
+                    });
 
                     if let Some(update) = &for_stmt.update {
                         let expr = compile_expr(fnb, update);
@@ -662,21 +695,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                     }
 
                     fnb.add_unshares_up_to(outer_block_id);
-                    let here = fnb.peek_stmt_id();
-                    fnb.add_stmt(StmtOp::Jump(loop_start - here));
-
-                    if let Some((stmt, test)) = test_stmt_expr {
-                        let outta_here = fnb.peek_stmt_id();
-                        fnb.set_stmt(
-                            stmt,
-                            StmtOp::IfNot {
-                                test,
-                                distance: (outta_here - stmt),
-                            },
-                        );
-                    }
-
-                    fnb.resolve_break_to_here();
+                    fnb.add_stmt(StmtOp::Jump(loop_start));
                 });
             });
         }
@@ -715,14 +734,13 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
 
             fnb.block(|fnb| {
                 let outer_block_id = fnb.cur_block_id();
+                fnb.break_exits_this_block();
 
                 let item_var = item_var_decl.name.clone();
                 fnb.add_decl(item_var_decl);
 
-                let key_ndx_tmp = fnb.decl_tmp();
-                let key_ndx = fnb.add_expr(Expr::Read(key_ndx_tmp.clone()));
                 let zero = fnb.add_expr(ZERO);
-                fnb.add_stmt(StmtOp::Assign(key_ndx_tmp.clone(), zero));
+                let (key_ndx_tmp, key_ndx) = create_tmp(fnb, zero);
 
                 let iteree = compile_expr(fnb, &forin_stmt.right);
                 let (_, iteree) = create_tmp(fnb, iteree);
@@ -738,7 +756,8 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
 
                     let test =
                         fnb.add_expr(Expr::Binary(swc_ecma_ast::BinaryOp::Lt, key_ndx, key_count));
-                    let if_not = fnb.add_stmt(StmtOp::Pending);
+                    fnb.add_stmt(StmtOp::IfNot { test });
+                    fnb.add_break_stmt();
 
                     let element = fnb.add_expr(Expr::ArrayNth {
                         arr: keys,
@@ -747,8 +766,8 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                     fnb.add_stmt(StmtOp::Assign(item_var, element));
 
                     fnb.block(|fnb| {
+                        fnb.continue_exits_this_block();
                         compile_stmt(fnb, &forin_stmt.body);
-                        fnb.resolve_continue_to_here();
                     });
 
                     {
@@ -759,19 +778,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                     }
 
                     fnb.add_unshares_up_to(outer_block_id);
-                    let here = fnb.peek_stmt_id();
-                    fnb.add_stmt(StmtOp::Jump(block_start - here));
-
-                    let after_body = fnb.peek_stmt_id();
-                    fnb.set_stmt(
-                        if_not,
-                        StmtOp::IfNot {
-                            test,
-                            distance: (after_body - if_not),
-                        },
-                    );
-
-                    fnb.resolve_break_to_here();
+                    fnb.add_stmt(StmtOp::Jump(block_start));
                 });
             });
         }
@@ -831,20 +838,6 @@ fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
             fnb.add_stmt(StmtOp::Assign(name, value));
         }
     }
-}
-
-fn hoist_declarations(block: &mut Block, decls: &mut Vec<Decl>) {
-    // TODO Surely a lot of allocations are happening here...
-    let inner_decls = std::mem::replace(&mut block.decls, Vec::new());
-    for decl in inner_decls {
-        if decl.is_lexical {
-            block.decls.push(decl);
-        } else {
-            decls.push(decl);
-        }
-    }
-
-    // TODO Check redeclarations
 }
 
 fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
@@ -1044,26 +1037,21 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
             let tmp = fnb.decl_tmp();
 
             let test = compile_expr(fnb, &cond_expr.test);
-            let if_not = fnb.add_stmt(StmtOp::Pending);
+            fnb.add_stmt(StmtOp::IfNot { test });
+            let if_not_jmp = fnb.add_stmt(StmtOp::Pending);
 
             let value_cons = compile_expr(fnb, &cond_expr.cons);
             fnb.add_stmt(StmtOp::Assign(tmp.clone(), value_cons));
-            let jmp_to_end = fnb.add_stmt(StmtOp::Pending);
+            let after_cons_jmp = fnb.add_stmt(StmtOp::Pending);
 
             let else_target = fnb.peek_stmt_id();
-            fnb.set_stmt(
-                if_not,
-                StmtOp::IfNot {
-                    test,
-                    distance: (else_target - if_not),
-                },
-            );
-
             let value_alt = compile_expr(fnb, &cond_expr.alt);
             fnb.add_stmt(StmtOp::Assign(tmp.clone(), value_alt));
 
             let end = fnb.peek_stmt_id();
-            fnb.set_stmt(jmp_to_end, StmtOp::Jump(end - jmp_to_end));
+
+            fnb.set_stmt(after_cons_jmp, StmtOp::Jump(end));
+            fnb.set_stmt(if_not_jmp, StmtOp::Jump(else_target));
 
             fnb.add_expr(Expr::Read(tmp))
         }
