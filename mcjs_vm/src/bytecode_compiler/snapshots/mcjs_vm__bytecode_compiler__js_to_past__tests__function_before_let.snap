@@ -1,48 +1,32 @@
 ---
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
-expression: function
+expression: function.dump_to_string()
 ---
-[18-126] func () unbound[] {Block {
-    id: block0,
-    decls: [],
-    stmts: [
-        [19-123] Call {
-            is_new: false,
-            callee: [19-123] CreateClosure {
-                func: [19-123] func () unbound[] {Block {
-                    id: block1,
-                    decls: [
-                        Decl: var f,
-                        Decl: let x,
-                    ],
-                    stmts: [
-                        [52-74] Assign(
-                            f,
-                            [52-74] CreateClosure {
-                                func: [52-74] func () unbound[x] {Block {
-                                    id: block2,
-                                    decls: [],
-                                    stmts: [
-                                        [67-72] Assign(
-                                            x,
-                                            [71-72] NumberLiteral(
-                                                3.0,
-                                            ),
-                                        ),
-                                    ],
-                                }},
-                            },
-                        ),
-                        [99-104] Assign(
-                            x,
-                            [103-104] NumberLiteral(
-                                2.0,
-                            ),
-                        ),
-                    ],
-                }},
-            },
-            args: [],
-        },
-    ],
-}}
+[18-126] func () unbound[] block0 {
+  decls:
+  exprs:
+    e0: CreateClosure:
+      [19-123] func () unbound[] block1 {
+        decls:
+          Decl: var f
+          Decl: let x
+        exprs:
+          e0: CreateClosure:
+            [52-74] func () unbound[x] block2 {
+              decls:
+              exprs:
+                e0: Read(x)
+                e1: NumberLiteral(3.0)
+              stmts:
+                [0-0] Assign(x, e1)
+                [0-0] Evaluate(e1)
+            }
+          e1: NumberLiteral(2.0)
+        stmts:
+          [0-0] Assign(f, e0)
+          [0-0] Assign(x, e1)
+      }
+    e1: Call { callee: e0, args: [], is_new: false }
+  stmts:
+    [0-0] Evaluate(e1)
+}

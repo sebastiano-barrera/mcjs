@@ -1,26 +1,18 @@
 ---
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
-expression: function
+expression: function.dump_to_string()
 ---
-[1-71] func () unbound[myFunction] {Block {
-    id: block0,
-    decls: [],
-    stmts: [
-        [1-71] Assign(
-            myFunction,
-            [1-71] CreateClosure {
-                func: [1-71] func () unbound[] {Block {
-                    id: block1,
-                    decls: [],
-                    stmts: [
-                        [45-53] Return(
-                            [52-53] NumberLiteral(
-                                3.0,
-                            ),
-                        ),
-                    ],
-                }},
-            },
-        ),
-    ],
-}}
+[1-35] func () unbound[myFunction] block0 {
+  decls:
+  exprs:
+    e0: CreateClosure:
+      [1-35] func () unbound[] block1 {
+        decls:
+        exprs:
+          e0: NumberLiteral(3.0)
+        stmts:
+          [0-0] Return(e0)
+      }
+  stmts:
+    [0-0] Assign(myFunction, e0)
+}

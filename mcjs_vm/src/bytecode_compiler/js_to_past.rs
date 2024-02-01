@@ -182,7 +182,7 @@ pub enum StmtOp {
 
     Break(BlockID),
     Block(Box<Block>),
-    /// Semantics: "Do the next statement if not ...". Evaluate the `test`
+    /// Semantics: "Do the next statement if not <test>": Evaluate the `test`
     /// expression and convert to boolean; if true, skip 1 statement; if false,
     /// proceed to the next stmt.
     IfNot {
@@ -1123,12 +1123,10 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
         swc_ecma_ast::Expr::Seq(seq_expr) => {
             let mut last_value = fnb.add_expr(Expr::Undefined);
 
-            fnb.block(|fnb| {
                 for expr in &seq_expr.exprs {
                     last_value = compile_expr(fnb, expr);
                     fnb.add_stmt(StmtOp::Evaluate(last_value));
                 }
-            });
 
             last_value
         }
