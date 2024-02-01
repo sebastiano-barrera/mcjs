@@ -488,7 +488,7 @@ mod builder {
     }
 
     fn hoist_declarations(outer: &mut Vec<Decl>, inner: &mut Vec<Decl>) {
-        let all_decls = std::mem::replace(inner, Vec::new());
+        let all_decls = std::mem::take(inner);
 
         for decl in all_decls {
             if decl.is_lexical {
@@ -534,7 +534,7 @@ pub fn compile_script(ast_module: swc_ecma_ast::Module) -> Function {
     // the `globalThis` object. This can be achieved simply by removing those
     // declarations.
     let mut kept_decls = Vec::new();
-    for decl in std::mem::replace(&mut function.body.decls, Vec::new()) {
+    for decl in std::mem::take(&mut function.body.decls) {
         match decl.name {
             DeclName::Js(name) if !decl.is_lexical => {
                 function.unbound_names.push(name);
@@ -1113,20 +1113,16 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
             compile_call(fnb, callee, &call_expr.args, false)
         }
         swc_ecma_ast::Expr::New(new_expr) => {
-            let args = new_expr
-                .args
-                .as_ref()
-                .map(|args| args.as_slice())
-                .unwrap_or(&[]);
+            let args = new_expr.args.as_deref().unwrap_or(&[]);
             compile_call(fnb, &new_expr.callee, args, true)
         }
         swc_ecma_ast::Expr::Seq(seq_expr) => {
             let mut last_value = fnb.add_expr(Expr::Undefined);
 
-                for expr in &seq_expr.exprs {
-                    last_value = compile_expr(fnb, expr);
-                    fnb.add_stmt(StmtOp::Evaluate(last_value));
-                }
+            for expr in &seq_expr.exprs {
+                last_value = compile_expr(fnb, expr);
+                fnb.add_stmt(StmtOp::Evaluate(last_value));
+            }
 
             last_value
         }
@@ -1301,7 +1297,7 @@ fn compile_function_from_parts(
     body: Block,
 ) -> Function {
     let mut parameters = Vec::new();
-    for param in swc_params.into_iter() {
+    for param in swc_params.iter() {
         let name = compile_name_pat(&param.pat);
         let name = name.expect_js_word();
         parameters.push(name.clone());

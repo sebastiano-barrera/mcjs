@@ -100,8 +100,7 @@ fn parse_args() -> Config {
     let mut start_shell = false;
     let mut dump_bytecode = false;
 
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
+    for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--shell" | "-s" => {
                 start_shell = true;

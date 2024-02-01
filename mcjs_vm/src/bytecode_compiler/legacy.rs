@@ -411,7 +411,7 @@ impl Scope {
     }
 }
 
-impl<'a> FnBuilder {
+impl FnBuilder {
     fn new(id: LocalFnId) -> Self {
         FnBuilder {
             fnid: id,
@@ -585,7 +585,7 @@ impl<'a> FnBuilder {
     }
 }
 
-impl<'a> Builder {
+impl Builder {
     fn reserve(&mut self) -> IID {
         self.cur_fnb().reserve()
     }
@@ -1043,10 +1043,7 @@ mod declset2 {
     }
 }
 
-fn compile_arrow_function<'a>(
-    builder: &mut Builder,
-    arrow: &'a swc_ecma_ast::ArrowExpr,
-) -> Result<VReg> {
+fn compile_arrow_function(builder: &mut Builder, arrow: &swc_ecma_ast::ArrowExpr) -> Result<VReg> {
     if arrow.is_async {
         panic!("unsupported: async functions");
     }
@@ -1172,7 +1169,7 @@ fn compile_arrow_function<'a>(
 /// Compile the given expression.
 ///
 /// The resulting code implicitly leaves the result in the accumulator register.
-fn compile_expr<'a>(builder: &mut Builder, expr: &'a swc_ecma_ast::Expr) -> Result<VReg> {
+fn compile_expr(builder: &mut Builder, expr: &swc_ecma_ast::Expr) -> Result<VReg> {
     use swc_ecma_ast::{CallExpr, Expr};
 
     let mut builder = builder.with_span(&expr.span());
@@ -1220,9 +1217,7 @@ fn compile_expr<'a>(builder: &mut Builder, expr: &'a swc_ecma_ast::Expr) -> Resu
                     builder.emit(Instr::ImportModule(ret, import_path));
                     Ok(ret)
                 }
-                Expr::Ident(i) if &i.sym == "eval" => {
-                    return Err(error!("`eval` not supported"));
-                }
+                Expr::Ident(i) if &i.sym == "eval" => Err(error!("`eval` not supported")),
                 _ => {
                     let mut arg_regs = Vec::new();
                     for arg in args {
@@ -1690,10 +1685,7 @@ fn compile_prop_name(prop_name: &swc_ecma_ast::PropName) -> Result<Literal> {
     }
 }
 
-fn compile_assignment<'a>(
-    asmt: &'a swc_ecma_ast::AssignExpr,
-    builder: &mut Builder,
-) -> Result<VReg> {
+fn compile_assignment(asmt: &swc_ecma_ast::AssignExpr, builder: &mut Builder) -> Result<VReg> {
     use swc_ecma_ast::{Expr, MemberExpr, MemberProp, PatOrExpr};
 
     if let Some(ident) = asmt.left.as_ident() {
@@ -1730,9 +1722,9 @@ struct MemberAccess {
     key: VReg,
     value: VReg,
 }
-fn compile_member_access<'a>(
+fn compile_member_access(
     builder: &mut Builder,
-    member_expr: &'a swc_ecma_ast::MemberExpr,
+    member_expr: &swc_ecma_ast::MemberExpr,
 ) -> Result<MemberAccess> {
     let member_prop = &member_expr.prop;
     let key = compile_obj_member_prop(builder, member_prop)?;
@@ -1747,9 +1739,9 @@ fn compile_member_access<'a>(
     Ok(MemberAccess { obj, key, value })
 }
 
-fn compile_obj_member_prop<'a>(
+fn compile_obj_member_prop(
     builder: &mut Builder,
-    member_prop: &'a swc_ecma_ast::MemberProp,
+    member_prop: &swc_ecma_ast::MemberProp,
 ) -> Result<VReg> {
     use swc_ecma_ast::{ComputedPropName, MemberProp};
 
@@ -1838,7 +1830,7 @@ fn finish_module(builder: Builder, root_fnid: LocalFnId) -> CompiledModule {
     }
 }
 
-fn compile_stmt<'a>(builder: &mut Builder, stmt: &'a swc_ecma_ast::Stmt) -> Result<()> {
+fn compile_stmt(builder: &mut Builder, stmt: &swc_ecma_ast::Stmt) -> Result<()> {
     use swc_ecma_ast::Stmt;
 
     let mut builder = builder.with_span(&stmt.span());
@@ -2342,9 +2334,9 @@ fn block_start_decls(builder: &mut Builder, decls: Vec<declset2::Decl>) -> Resul
     Ok(())
 }
 
-fn compile_var_decl_assignment<'a>(
+fn compile_var_decl_assignment(
     builder: &mut Builder,
-    var_decl: &'a swc_ecma_ast::VarDecl,
+    var_decl: &swc_ecma_ast::VarDecl,
 ) -> Result<()> {
     use swc_ecma_ast::VarDeclKind;
 
@@ -2374,11 +2366,7 @@ fn compile_var_decl_assignment<'a>(
     Ok(())
 }
 
-fn compile_function<'a>(
-    builder: &mut Builder,
-    name: Option<JsWord>,
-    func: &'a Function,
-) -> Result<VReg> {
+fn compile_function(builder: &mut Builder, name: Option<JsWord>, func: &Function) -> Result<VReg> {
     if !func.decorators.is_empty() {
         panic!("unsupported: function decorators");
     }
