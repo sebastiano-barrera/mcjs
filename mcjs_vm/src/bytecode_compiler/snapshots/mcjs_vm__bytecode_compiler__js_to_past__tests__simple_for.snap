@@ -1,0 +1,74 @@
+---
+source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
+expression: function.dump_to_string()
+---
+[18-104] func () unbound[] block0 {
+  decls:
+    Decl: let closures
+    Decl: let tmp1
+  exprs:
+    e0: ArrayCreate
+    e1: Read(tmp1)
+  stmts:
+    [0-0] Assign(tmp1, e0)
+    [0-0] Assign(closures, e1)
+    block2 {
+      decls:
+        Decl: let i
+      exprs:
+        e0: NumberLiteral(0.0)
+      stmts:
+        [0-0] Assign(i, e0)
+        block3 {
+          decls:
+          exprs:
+            e0: Undefined
+            e1: Read(closures)
+            e2: StringLiteral(Atom('push' type=inline))
+            e3: ObjectGet { obj: e1, key: e2 }
+            e4: CreateClosure:
+              [80-87] func () unbound[] block4 {
+                decls:
+                exprs:
+                stmts:
+                  block5 {
+                    decls:
+                    exprs:
+                      e0: Read(i)
+                    stmts:
+                      [0-0] Return(e0)
+                  }
+              }
+            e5: StringLiteral(Atom('bind' type=inline))
+            e6: ObjectGet { obj: e4, key: e5 }
+            e7: This
+            e8: Call { callee: e6, args: [e7], is_new: false }
+            e9: Call { callee: e3, args: [e8], is_new: false }
+            e10: Read(i)
+            e11: NumberLiteral(5.0)
+            e12: Binary("<", e10, e11)
+            e13: Read(i)
+            e14: NumberLiteral(1.0)
+            e15: Binary("+", e13, e14)
+          stmts:
+            [0-0] Evaluate(e9)
+            [0-0] Evaluate(e12)
+            [0-0] IfNot { test: e12 }
+            [0-0] Break(block2)
+            block6 {
+              decls:
+              exprs:
+              stmts:
+                block7 {
+                  decls:
+                  exprs:
+                  stmts:
+                }
+            }
+            [0-0] Assign(i, e15)
+            [0-0] Evaluate(e15)
+            [0-0] Unshare(i)
+            [0-0] Jump(StmtID(0))
+        }
+    }
+}

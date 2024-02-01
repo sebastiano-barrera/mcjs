@@ -1,73 +1,43 @@
 ---
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
-expression: function
+expression: function.dump_to_string()
 ---
-[18-258] func () unbound[console, someGlobalVar] {Block {
-    id: block0,
-    decls: [],
-    stmts: [
-        [19-255] Call {
-            is_new: false,
-            callee: [19-255] CreateClosure {
-                func: [19-255] func () unbound[console, someGlobalVar] {Block {
-                    id: block1,
-                    decls: [],
-                    stmts: [
-                        [49-234] Call {
-                            is_new: false,
-                            callee: [49-234] CreateClosure {
-                                func: [49-234] func () unbound[console, someGlobalVar] {Block {
-                                    id: block2,
-                                    decls: [],
-                                    stmts: [
-                                        [79-213] Call {
-                                            is_new: false,
-                                            callee: [79-213] CreateClosure {
-                                                func: [79-213] func () unbound[console, someGlobalVar] {Block {
-                                                    id: block3,
-                                                    decls: [
-                                                        Decl: let someLocalVar,
-                                                    ],
-                                                    stmts: [
-                                                        [116-133] Assign(
-                                                            someLocalVar,
-                                                            [131-133] NumberLiteral(
-                                                                23.0,
-                                                            ),
-                                                        ),
-                                                        [155-166] Call {
-                                                            is_new: false,
-                                                            callee: [155-166] ObjectGet {
-                                                                obj: [155-162] Read(
-                                                                    console,
-                                                                ),
-                                                                key: [163-166] StringLiteral(
-                                                                    Atom('log' type=static),
-                                                                ),
-                                                            },
-                                                            args: [
-                                                                [167-180] Read(
-                                                                    someGlobalVar,
-                                                                ),
-                                                                [182-194] Read(
-                                                                    someLocalVar,
-                                                                ),
-                                                            ],
-                                                        },
-                                                    ],
-                                                }},
-                                            },
-                                            args: [],
-                                        },
-                                    ],
-                                }},
-                            },
-                            args: [],
-                        },
-                    ],
-                }},
-            },
-            args: [],
-        },
-    ],
-}}
+[18-258] func () unbound[console, someGlobalVar] block0 {
+  decls:
+  exprs:
+    e0: CreateClosure:
+      [19-255] func () unbound[console, someGlobalVar] block1 {
+        decls:
+        exprs:
+          e0: CreateClosure:
+            [49-234] func () unbound[console, someGlobalVar] block2 {
+              decls:
+              exprs:
+                e0: CreateClosure:
+                  [79-213] func () unbound[console, someGlobalVar] block3 {
+                    decls:
+                      Decl: let someLocalVar
+                    exprs:
+                      e0: NumberLiteral(23.0)
+                      e1: Read(console)
+                      e2: StringLiteral(Atom('log' type=static))
+                      e3: ObjectGet { obj: e1, key: e2 }
+                      e4: Read(someGlobalVar)
+                      e5: Read(someLocalVar)
+                      e6: Call { callee: e3, args: [e4, e5], is_new: false }
+                    stmts:
+                      [0-0] Assign(someLocalVar, e0)
+                      [0-0] Evaluate(e6)
+                  }
+                e1: Call { callee: e0, args: [], is_new: false }
+              stmts:
+                [0-0] Evaluate(e1)
+            }
+          e1: Call { callee: e0, args: [], is_new: false }
+        stmts:
+          [0-0] Evaluate(e1)
+      }
+    e1: Call { callee: e0, args: [], is_new: false }
+  stmts:
+    [0-0] Evaluate(e1)
+}
