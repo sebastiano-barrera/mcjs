@@ -162,13 +162,13 @@ mod formatter {
 
             for (ndx, line) in s.split('\n').enumerate() {
                 if ndx > 0 {
-                    if line.len() > 0 {
+                    if !line.is_empty() {
                         print_indent(&mut self.writer, self.indent_level)?;
                     } else {
                         self.deferred_indent = true;
                     }
                 }
-                self.writer.write_str(&line)?;
+                self.writer.write_str(line)?;
             }
 
             Ok(())

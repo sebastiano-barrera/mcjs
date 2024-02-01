@@ -97,7 +97,7 @@ fn parse_file(
     let path = std::path::PathBuf::from(filename);
     let source_file = source_map.new_source_file(swc_common::FileName::Real(path), content);
 
-    let mut parser = make_parser(&*source_file, &err_handler);
+    let mut parser = make_parser(&source_file, &err_handler);
     parser.parse_module().map_err(|e| {
         e.into_diagnostic(&err_handler).emit();
         error!("parse error")
@@ -112,7 +112,7 @@ fn make_parser<'a>(
     use swc_ecma_ast::EsVersion;
     use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
-    let input = StringInput::from(&*source_file);
+    let input = StringInput::from(source_file);
     let lexer = Lexer::new(
         Syntax::Es(Default::default()),
         EsVersion::Es2015,
@@ -122,7 +122,7 @@ fn make_parser<'a>(
     let mut parser = Parser::new_from(lexer);
 
     for e in parser.take_errors() {
-        e.into_diagnostic(&err_handler).emit();
+        e.into_diagnostic(err_handler).emit();
     }
     parser
 }
