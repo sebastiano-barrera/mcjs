@@ -75,7 +75,7 @@ impl Block {
                     StmtOp::Jump(target) => check_stmt_id(target),
                     StmtOp::Return(eid) => check_expr_id(eid),
                     StmtOp::Assign(_, eid) => check_expr_id(eid),
-                    StmtOp::Unshare(_) => todo!(),
+                    StmtOp::Unshare(_) => {},
                     StmtOp::ArrayPush(_, eid) => check_expr_id(eid),
                     StmtOp::ObjectSet { obj, key, value } => {
                         check_expr_id(obj);
