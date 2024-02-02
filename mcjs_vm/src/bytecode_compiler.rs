@@ -168,51 +168,26 @@ fn compile_script(
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
 
-    let mut mod_builder = past_to_bytecode::ModuleBuilder::new(flags.min_fnid);
-
     // At this level, function.unbound_names contains the list of variables that should be accessed
     // via `globalThis`.
-    let globals = function.unbound_names.iter().cloned().collect();
-    let root_fnid = past_to_bytecode::compile_function(
-        &mut mod_builder,
-        &globals,
-        Vec::new(),
-        &function,
-        false, // force_strict
-    )?;
+    #[cfg(any())]
+    {
+        let mut mod_builder = past_to_bytecode::ModuleBuilder::new(flags.min_fnid);
 
-    let module = mod_builder.build(root_fnid);
+        let globals = function.unbound_names.iter().cloned().collect();
+        let root_fnid = past_to_bytecode::compile_function(
+            &mut mod_builder,
+            &globals,
+            Vec::new(),
+            &function,
+            false, // force_strict
+        )?;
 
-    trace_dump_module(&module);
+        let module = mod_builder.build(root_fnid);
 
-    Ok(module)
-}
-
-fn trace_dump_module(module: &CompiledModule) {
-    let t = tracing::section("bytecode");
-    for (fnid, func) in &module.functions {
-        use std::fmt::Write;
-
-        let mut buf = String::new();
-
-        let mode_name = if func.is_strict_mode() {
-            "strict"
-        } else {
-            "sloppy"
-        };
-        writeln!(buf, "mode: {}", mode_name).unwrap();
-
-        writeln!(buf).unwrap();
-        writeln!(buf, "-- consts").unwrap();
-        for (ndx, lit) in func.consts().iter().enumerate() {
-            writeln!(buf, "  k{:<4} {:?}", ndx, lit).unwrap();
-        }
-
-        writeln!(buf, "-- instrs").unwrap();
-        for (ndx, instr) in func.instrs().iter().enumerate() {
-            writeln!(buf, "  {:4} {:?}", ndx, instr).unwrap();
-        }
-
-        t.log(&format!("{:?}", fnid), &buf);
+        trace_dump_module(&module);
+        Ok(module)
     }
+
+    Ok(todo!())
 }
