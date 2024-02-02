@@ -91,7 +91,6 @@ fn compile_function<'a>(
     compile_block(&mut fnb, &func.body)?;
 
     let lfnid = fnb.build(func.span);
-
     Ok(lfnid)
 }
 
@@ -105,6 +104,7 @@ fn compile_one_stmt<'a>(
         None => return Ok(false),
     };
 
+    let iid_start = fnb.peek_iid();
     fnb.mark_stmt_start();
 
     match &stmt.op {
@@ -220,19 +220,9 @@ fn compile_one_stmt<'a>(
         }
     };
 
-    // TODO Restore breakrange functionality
-    #[cfg(any())]
     if !stmt.span.is_dummy() {
         let iid_end = fnb.peek_iid();
-        fnb.module_builder
-            .breakable_ranges
-            .push(bytecode::BreakRange {
-                lo: stmt.span.lo,
-                hi: stmt.span.hi,
-                local_fnid: fnb.lfnid,
-                iid_start,
-                iid_end,
-            });
+        fnb.add_breakable_range(stmt.span, iid_start, iid_end);
     }
 
     Ok(true)
@@ -632,7 +622,7 @@ mod builder {
             CompiledModule {
                 root_fnid,
                 functions: self.fns,
-                breakable_ranges: self.breakable_ranges, /* TODO */
+                breakable_ranges: self.breakable_ranges,
             }
         }
     }
@@ -649,6 +639,7 @@ mod builder {
 
         globals: &'a HashSet<JsWord>,
         module_builder: &'a mut ModuleBuilder,
+        lfnid: bytecode::LocalFnId,
     }
     struct Block {
         id: BlockID,
@@ -667,6 +658,8 @@ mod builder {
             globals: &'a HashSet<JsWord>,
             module_builder: &'a mut ModuleBuilder,
         ) -> FnBuilder<'a> {
+            let lfnid = module_builder.gen_id();
+
             FnBuilder {
                 instrs: InstrBuffer::new(),
                 consts: ConstsBuffer::new(),
@@ -677,6 +670,7 @@ mod builder {
                 globals,
                 module_builder,
                 deferred_actions: Vec::new(),
+                lfnid,
             }
         }
 
@@ -773,8 +767,24 @@ mod builder {
             &mut self,
             block_id: js_to_past::BlockID,
         ) -> (bytecode::IID, bytecode::IID) {
-            let block = self.blocks.last().unwrap();
-            todo!()
+            self.block_boundaries.get(&block_id).copied().unwrap()
+        }
+
+        pub(super) fn add_breakable_range(
+            &mut self,
+            span: swc_common::Span,
+            iid_start: bytecode::IID,
+            iid_end: bytecode::IID,
+        ) {
+            self.module_builder
+                .breakable_ranges
+                .push(bytecode::BreakRange {
+                    lo: span.lo,
+                    hi: span.hi,
+                    local_fnid: self.lfnid,
+                    iid_start,
+                    iid_end,
+                });
         }
 
         pub(super) fn on_block_completion(
@@ -815,9 +825,8 @@ mod builder {
             }
             .build();
 
-            let lfnid = self.module_builder.gen_id();
-            self.module_builder.put_fn(lfnid, bc_func);
-            lfnid
+            self.module_builder.put_fn(self.lfnid, bc_func);
+            self.lfnid
         }
 
         pub(crate) fn resolve_name(&self, name: &DeclName) -> Loc {

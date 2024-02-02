@@ -30,7 +30,7 @@ pub struct CompiledChunk {
 }
 
 pub struct CompileFlags {
-    pub min_fnid: u16,
+    pub min_lfnid: u16,
     pub source_type: SourceType,
 }
 
@@ -170,24 +170,6 @@ fn compile_script(
 
     // At this level, function.unbound_names contains the list of variables that should be accessed
     // via `globalThis`.
-    #[cfg(any())]
-    {
-        let mut mod_builder = past_to_bytecode::ModuleBuilder::new(flags.min_fnid);
-
-        let globals = function.unbound_names.iter().cloned().collect();
-        let root_fnid = past_to_bytecode::compile_function(
-            &mut mod_builder,
-            &globals,
-            Vec::new(),
-            &function,
-            false, // force_strict
-        )?;
-
-        let module = mod_builder.build(root_fnid);
-
-        trace_dump_module(&module);
-        Ok(module)
-    }
-
-    Ok(todo!())
+    let module = past_to_bytecode::compile_module(&function, flags.min_lfnid)?;
+    Ok(module)
 }

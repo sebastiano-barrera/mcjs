@@ -307,7 +307,7 @@ impl Loader {
 
         let source_map = Rc::new(Default::default());
         let flags = bytecode_compiler::CompileFlags {
-            min_fnid: 1,
+            min_lfnid: 1,
             source_type: bytecode_compiler::SourceType::Module,
         };
         let bytecode_compiler::CompiledChunk {
@@ -369,7 +369,7 @@ impl Loader {
 
         let source_map = Rc::clone(&self.script.source_map);
         let flags = bytecode_compiler::CompileFlags {
-            min_fnid,
+            min_lfnid: min_fnid,
             source_type: bytecode_compiler::SourceType::Script,
         };
         let compiled = bytecode_compiler::compile_file(filename, content, source_map, flags)?;
