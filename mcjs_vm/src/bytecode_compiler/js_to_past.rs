@@ -1273,7 +1273,6 @@ fn compile_member_assignment(
     assign_expr: &swc_ecma_ast::AssignExpr,
     member_expr: &swc_ecma_ast::MemberExpr,
 ) -> ExprID {
-    fnb.block(|fnb| {
         let key = compile_object_key(fnb, &member_expr.prop);
         let obj = compile_expr(fnb, &member_expr.obj);
 
@@ -1285,7 +1284,6 @@ fn compile_member_assignment(
         fnb.add_stmt(StmtOp::ObjectSet { obj, key, value });
 
         value
-    })
 }
 
 fn compile_assignment(
