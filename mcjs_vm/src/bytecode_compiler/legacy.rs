@@ -42,7 +42,7 @@ impl Builder {
     /// `source_map` is used to generate the spans where breakpoints can be set
     /// (`breakable_ranges`).
     fn new(flags: CompileFlags, source_map: Rc<SourceMap>) -> Self {
-        let next_fnid = flags.min_fnid;
+        let next_fnid = flags.min_lfnid;
         assert!(next_fnid >= 1);
         Builder {
             fns: HashMap::new(),
@@ -1814,7 +1814,7 @@ fn finish_module(builder: Builder, root_fnid: LocalFnId) -> CompiledModule {
     // nothing.  Otherwise, we have a bug.
     assert!(builder.fns.get(&root_fnid).unwrap().captures.is_empty());
     for lfnid in builder.fns.keys() {
-        assert!(lfnid.0 >= builder.flags.min_fnid);
+        assert!(lfnid.0 >= builder.flags.min_lfnid);
     }
 
     let functions = builder

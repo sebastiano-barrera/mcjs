@@ -1273,17 +1273,17 @@ fn compile_member_assignment(
     assign_expr: &swc_ecma_ast::AssignExpr,
     member_expr: &swc_ecma_ast::MemberExpr,
 ) -> ExprID {
-        let key = compile_object_key(fnb, &member_expr.prop);
-        let obj = compile_expr(fnb, &member_expr.obj);
+    let key = compile_object_key(fnb, &member_expr.prop);
+    let obj = compile_expr(fnb, &member_expr.obj);
 
-        let (_, key) = create_tmp(fnb, key);
-        let (_, obj) = create_tmp(fnb, obj);
+    let (_, key) = create_tmp(fnb, key);
+    let (_, obj) = create_tmp(fnb, obj);
 
-        let init_value = fnb.add_expr(Expr::ObjectGet { obj, key });
-        let value = compile_assignment(fnb, assign_expr, init_value);
-        fnb.add_stmt(StmtOp::ObjectSet { obj, key, value });
+    let init_value = fnb.add_expr(Expr::ObjectGet { obj, key });
+    let value = compile_assignment(fnb, assign_expr, init_value);
+    fnb.add_stmt(StmtOp::ObjectSet { obj, key, value });
 
-        value
+    value
 }
 
 fn compile_assignment(
@@ -1402,7 +1402,7 @@ fn compile_function_from_parts(
 
     let declares_use_strict = block_starts_with_use_strict(&body);
 
-    let unbound_names = find_unbound_references(&body);
+    let unbound_names = find_unbound_references(&body, &parameters);
     Function {
         parameters,
         unbound_names,
@@ -1429,7 +1429,7 @@ fn block_starts_with_use_strict(block: &Block) -> bool {
     false
 }
 
-fn find_unbound_references(root: &Block) -> Vec<JsWord> {
+fn find_unbound_references(root: &Block, param_names: &[JsWord]) -> Vec<JsWord> {
     let mut declared = HashSet::new();
     let mut referenced = HashSet::new();
 
@@ -1453,9 +1453,24 @@ fn find_unbound_references(root: &Block) -> Vec<JsWord> {
         }
     }
 
+    for js_name in param_names {
+        declared.insert(js_name.clone());
+    }
     for decl in &root.decls {
         if let DeclName::Js(js_name) = &decl.name {
             declared.insert(js_name.clone());
+        }
+    }
+
+    {
+        eprintln!("## referenced ({} names)", referenced.len());
+        for name in &referenced {
+            eprintln!(" - {}", name.to_string());
+        }
+
+        eprintln!("## declared ({} names)", declared.len());
+        for name in &declared {
+            eprintln!(" - {}", name.to_string());
         }
     }
 
