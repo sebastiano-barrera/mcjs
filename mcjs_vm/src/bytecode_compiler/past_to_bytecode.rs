@@ -2,25 +2,67 @@ use std::collections::{HashMap, HashSet};
 
 use swc_atoms::JsWord;
 
-use super::js_to_past;
-use js_to_past::DeclName;
+use super::js_to_past::{self, Block, DeclName, Stmt, StmtID, StmtOp};
+use super::CompiledModule;
 
 use crate::bytecode::{self, Instr, Literal};
 use crate::common::{Context, Error, Result};
-use crate::error;
+use crate::{error, tracing};
 
-use builder::{FnBuilder, ModuleBuilder};
+use builder::{FnBuilder, Loc, ModuleBuilder};
 
-pub fn compile_function<'a>(
-    module_builder: &'a mut ModuleBuilder,
+pub fn compile_module(func: &js_to_past::Function, min_lfnid: u16) -> Result<CompiledModule> {
+    let mut module_builder = builder::ModuleBuilder::new(min_lfnid);
+
+    let globals: HashSet<_> = func.unbound_names.iter().cloned().collect();
+    let captures = Vec::new();
+    let force_strict = false;
+    let root_fnid = compile_function(&globals, &mut module_builder, captures, func, force_strict)?;
+
+    let module = module_builder.build(root_fnid);
+
+    trace_dump_module(&module);
+    Ok(module)
+}
+
+// TODO Refactor into trace_dump and impl util::Dump for CompiledModule
+fn trace_dump_module(module: &CompiledModule) {
+    let t = tracing::section("bytecode");
+    for (fnid, func) in &module.functions {
+        use std::fmt::Write;
+
+        let mut buf = String::new();
+
+        let mode_name = if func.is_strict_mode() {
+            "strict"
+        } else {
+            "sloppy"
+        };
+        writeln!(buf, "mode: {}", mode_name).unwrap();
+
+        writeln!(buf).unwrap();
+        writeln!(buf, "-- consts").unwrap();
+        for (ndx, lit) in func.consts().iter().enumerate() {
+            writeln!(buf, "  k{:<4} {:?}", ndx, lit).unwrap();
+        }
+
+        writeln!(buf, "-- instrs").unwrap();
+        for (ndx, instr) in func.instrs().iter().enumerate() {
+            writeln!(buf, "  {:4} {:?}", ndx, instr).unwrap();
+        }
+
+        t.log(&format!("{:?}", fnid), &buf);
+    }
+}
+
+fn compile_function<'a>(
     globals: &'a HashSet<JsWord>,
-    captures: Vec<js_to_past::DeclName>,
+    module_builder: &'a mut ModuleBuilder,
+    captures: Vec<DeclName>,
     func: &js_to_past::Function,
     force_strict: bool,
 ) -> Result<bytecode::LocalFnId> {
-    let lfnid = module_builder.gen_id();
-
-    let mut fnb = FnBuilder::new(lfnid, globals, module_builder);
+    let mut fnb = builder::FnBuilder::new(globals, module_builder);
     fnb.set_strict_mode(force_strict || func.declares_use_strict);
 
     // We currently only support a limited number of arguments.
@@ -34,7 +76,7 @@ pub fn compile_function<'a>(
         .enumerate()
     {
         let reg = bytecode::VReg(ndx.try_into().unwrap());
-        let decl_name = js_to_past::DeclName::Js(name.clone());
+        let decl_name = DeclName::Js(name.clone());
         fnb.define_name(decl_name, reg);
     }
 
@@ -48,109 +90,278 @@ pub fn compile_function<'a>(
 
     compile_block(&mut fnb, &func.body)?;
 
-    let function = fnb.build(func.span);
-    module_builder.put_fn(lfnid, function);
+    let lfnid = fnb.build(func.span);
 
     Ok(lfnid)
 }
 
-fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<bytecode::VReg>> {
-    let iid_start = fnb.peek_iid();
+fn compile_one_stmt<'a>(
+    fnb: &mut FnBuilder,
+    block: &Block,
+    stmts: &mut impl Iterator<Item = &'a Stmt>,
+) -> Result<bool> {
+    let stmt = match stmts.next() {
+        Some(stmt) => stmt,
+        None => return Ok(false),
+    };
 
-    let ret = match &stmt.op {
-        js_to_past::StmtOp::Break(block_id) => {
-            todo!("StmtOp::Break")
+    fnb.mark_stmt_start();
+
+    match &stmt.op {
+        StmtOp::Pending => {
+            panic!("compiler bug: pending stmt left over")
         }
-        js_to_past::StmtOp::Continue(block_id) => {
-            todo!("StmtOp::Continue")
+        StmtOp::Break(block_id) => {
+            let iid = fnb.reserve_instr();
+
+            let block_id = *block_id;
+            fnb.on_function_completion(move |fnb| {
+                let (_, iid_end) = fnb.block_boundaries(block_id);
+                fnb.set_instr(iid, Instr::Jmp(iid_end));
+            });
         }
-        js_to_past::StmtOp::Unshare(name) => {
-            let reg: bytecode::VReg = fnb.resolve_name(name);
-            fnb.emit(Instr::Unshare(reg));
-            Ok(None)
-        }
-        js_to_past::StmtOp::IfNot { test, distance } => {
-            let test = compile_stmt(fnb, test)?.expect("malformed PAST: if's test has no value");
-            let jmpif = fnb.instrs.reserve();
-
-            let alt_value = compile_stmt(fnb, alt)?;
-            let out_reg = alt_value.unwrap_or_else(|| fnb.regs.gen());
-            let alt_exit = fnb.instrs.reserve();
-
-            let cons_iid = fnb.peek_iid();
-            let cons_value = compile_stmt(fnb, cons)?;
-            match cons_value {
-                Some(reg) => fnb.emit(Instr::Copy {
-                    dst: out_reg,
-                    src: reg,
-                }),
-                None => fnb.emit(Instr::LoadUndefined(out_reg)),
-            }
-
-            let exit_target = fnb.peek_iid();
-            *fnb.instrs.get_mut(alt_exit) = Instr::Jmp(exit_target);
-            *fnb.instrs.get_mut(jmpif) = Instr::JmpIf {
-                cond: test,
-                dest: cons_iid,
+        StmtOp::Unshare(name) => {
+            let loc = fnb.resolve_name(name);
+            let reg = match loc {
+                builder::Loc::Reg(reg) => reg,
+                builder::Loc::Global(_) => {
+                    panic!("malformed PAST: Unshared name must be local, not global")
+                }
             };
 
-            Ok(Some(out_reg))
+            fnb.emit(Instr::Unshare(reg));
         }
-        js_to_past::StmtOp::Undefined => {
-            let reg = fnb.regs.gen();
-            fnb.emit(Instr::LoadUndefined(reg));
-            Ok(Some(reg))
+        StmtOp::IfNot { test } => {
+            // IfNot can be understood as "skip the next op if <test>"
+            let cond = fnb.gen_reg();
+            compile_expr(fnb, Some(cond), block, *test)?;
+            let jmpif = fnb.reserve_instr();
+
+            compile_one_stmt(fnb, block, stmts)?;
+
+            let dest = fnb.peek_iid();
+            fnb.set_instr(jmpif, Instr::JmpIf { cond, dest });
         }
-        js_to_past::StmtOp::Null => {
-            let reg = fnb.regs.gen();
-            fnb.emit(Instr::LoadNull(reg));
-            Ok(Some(reg))
+        StmtOp::Assign(dest, value_eid) => {
+            match fnb.resolve_name(dest) {
+                Loc::Reg(reg) => {
+                    compile_expr(fnb, Some(reg), block, *value_eid)?;
+                }
+                Loc::Global(name) => {
+                    let global_this = fnb.gen_reg();
+                    fnb.emit(Instr::GetGlobalThis(global_this));
+
+                    let key = fnb.gen_reg();
+                    compile_load_const(fnb, key, Literal::JsWord(name));
+
+                    let value = compile_expr(fnb, None, block, *value_eid)?;
+
+                    fnb.emit(Instr::ObjSet {
+                        obj: global_this,
+                        key,
+                        value,
+                    });
+                }
+            };
         }
-        js_to_past::StmtOp::This => {
-            let reg = fnb.regs.gen();
-            fnb.emit(Instr::LoadThis(reg));
-            Ok(Some(reg))
+        StmtOp::ArrayPush(arr, value_eid) => {
+            let arr = compile_read(fnb, arr);
+            let value = compile_expr(fnb, None, block, *value_eid)?;
+            fnb.emit(Instr::ArrayPush { arr, value });
         }
-        js_to_past::StmtOp::Read(name) => {
-            let reg = compile_read(fnb, name);
-            Ok(Some(reg))
+        StmtOp::ObjectSet { obj, key, value } => {
+            let obj_reg = compile_expr(fnb, None, block, *obj)?;
+            let key_reg = compile_expr(fnb, None, block, *key)?;
+            let value_reg = compile_expr(fnb, None, block, *value)?;
+            fnb.emit(Instr::ObjSet {
+                obj: obj_reg,
+                key: key_reg,
+                value: value_reg,
+            });
         }
-        js_to_past::StmtOp::AssignParam(dest, arg_ndx) => {
-            let value = fnb.regs.gen();
-            fnb.instrs
-                .push(Instr::LoadArg(value, bytecode::ArgIndex(*arg_ndx)));
-            compile_write(fnb, dest, value);
-            Ok(None)
+        StmtOp::Return(arg) => {
+            let arg_reg = compile_expr(fnb, None, block, *arg)?;
+            fnb.emit(Instr::Return(arg_reg));
         }
-        js_to_past::StmtOp::Assign(dest, value) => {
-            let value = compile_expr(fnb, value)?;
-            compile_write(fnb, dest, value);
-            Ok(None)
+
+        StmtOp::Throw(arg) => {
+            let arg_reg = compile_expr(fnb, None, block, *arg)?;
+            fnb.emit(Instr::Throw(arg_reg));
         }
-        js_to_past::StmtOp::Unary(op, arg) => {
-            let dest = fnb.regs.gen();
-            let arg = compile_expr(fnb, arg)?;
+        StmtOp::Debugger => {
+            fnb.emit(Instr::Breakpoint);
+        }
+        StmtOp::Evaluate(eid) => {
+            // the dest register is then forgotten
+            let _ = compile_expr(fnb, None, block, *eid)?;
+        }
+        StmtOp::Block(child_block) => {
+            compile_block(fnb, &child_block)?;
+        }
+        StmtOp::Jump(target_sid) => {
+            let iid = fnb.reserve_instr();
+            let target_sid = *target_sid;
+            fnb.on_block_completion(move |fnb| {
+                let target = fnb.iid_of_stmt(target_sid);
+                fnb.set_instr(iid, Instr::Jmp(target));
+            });
+        }
+        StmtOp::TryBegin { handler } => {
+            let iid = fnb.reserve_instr();
+
+            let handler = *handler;
+            fnb.on_block_completion(move |fnb| {
+                let handler_iid = fnb.iid_of_stmt(handler);
+                fnb.set_instr(iid, Instr::PushExcHandler(handler_iid));
+            });
+        }
+        StmtOp::TryEnd => {
+            fnb.emit(Instr::PopExcHandler);
+        }
+    };
+
+    // TODO Restore breakrange functionality
+    #[cfg(any())]
+    if !stmt.span.is_dummy() {
+        let iid_end = fnb.peek_iid();
+        fnb.module_builder
+            .breakable_ranges
+            .push(bytecode::BreakRange {
+                lo: stmt.span.lo,
+                hi: stmt.span.hi,
+                local_fnid: fnb.lfnid,
+                iid_start,
+                iid_end,
+            });
+    }
+
+    Ok(true)
+}
+
+fn compile_read(fnb: &mut FnBuilder<'_>, name: &DeclName) -> bytecode::VReg {
+    match fnb.resolve_name(name) {
+        Loc::Reg(reg) => reg,
+        Loc::Global(name) => compile_read_global(fnb, name),
+    }
+}
+
+fn compile_read_global(fnb: &mut FnBuilder<'_>, name: JsWord) -> bytecode::VReg {
+    let global_this = fnb.gen_reg();
+    let dest = fnb.gen_reg();
+    let key = fnb.gen_reg();
+
+    fnb.emit(Instr::GetGlobalThis(global_this));
+    compile_load_const(fnb, key, Literal::JsWord(name));
+
+    fnb.emit(Instr::ObjGet {
+        dest,
+        obj: global_this,
+        key,
+    });
+
+    dest
+}
+
+fn compile_new(fnb: &mut FnBuilder<'_>, ret: bytecode::VReg, constructor: bytecode::VReg) {
+    let key = fnb.gen_reg();
+    compile_load_const(fnb, key, Literal::String("prototype".into()));
+    // reusing register `constructor` for the prototype
+    fnb.emit(Instr::ObjGet {
+        dest: constructor,
+        obj: constructor,
+        key,
+    });
+
+    let key = fnb.gen_reg();
+    compile_load_const(fnb, key, Literal::String("__proto__".into()));
+    fnb.emit(Instr::ObjSet {
+        obj: ret,
+        key,
+        value: constructor,
+    });
+
+    let key = fnb.gen_reg();
+    compile_load_const(fnb, key, Literal::String("constructor".into()));
+    fnb.emit(Instr::ObjSet {
+        obj: ret,
+        key,
+        value: constructor,
+    });
+}
+
+fn compile_load_const(fnb: &mut FnBuilder, dest: bytecode::VReg, lit: Literal) {
+    // Avoid string clone?
+    let const_ndx = fnb.add_const(lit);
+    fnb.emit(Instr::LoadConst(dest, const_ndx));
+}
+
+fn compile_expr(
+    fnb: &mut FnBuilder,
+    forced_dest: Option<bytecode::VReg>,
+    block: &Block,
+    expr_id: js_to_past::ExprID,
+) -> Result<bytecode::VReg> {
+    use js_to_past::Expr;
+
+    let get_dest = move |fnb: &mut FnBuilder| forced_dest.unwrap_or_else(|| fnb.gen_reg());
+
+    let expr = block.get_expr(expr_id);
+    match expr {
+        Expr::Undefined => {
+            let dest = get_dest(fnb);
+            fnb.emit(Instr::LoadUndefined(dest));
+            Ok(dest)
+        }
+        Expr::Null => {
+            let dest = get_dest(fnb);
+            fnb.emit(Instr::LoadNull(dest));
+            Ok(dest)
+        }
+        Expr::This => {
+            let dest = get_dest(fnb);
+            fnb.emit(Instr::LoadThis(dest));
+            Ok(dest)
+        }
+        Expr::Read(name) => {
+            let src = compile_read(fnb, name);
+            if let Some(forced_dest) = forced_dest {
+                fnb.emit(Instr::Copy {
+                    dst: forced_dest,
+                    src,
+                });
+                Ok(forced_dest)
+            } else {
+                Ok(src)
+            }
+        }
+        Expr::ReadArg(arg_ndx) => {
+            let dest = get_dest(fnb);
+            fnb.emit(Instr::LoadArg(dest, bytecode::ArgIndex(*arg_ndx)));
+            Ok(dest)
+        }
+        Expr::Unary(op, arg_eid) => {
+            let dest = compile_expr(fnb, forced_dest, block, *arg_eid)?;
             match op {
                 swc_ecma_ast::UnaryOp::Minus => {
-                    fnb.emit(Instr::UnaryMinus { dest, arg });
+                    fnb.emit(Instr::UnaryMinus { dest, arg: dest });
                 }
                 swc_ecma_ast::UnaryOp::Plus => {}
                 swc_ecma_ast::UnaryOp::Bang => {
-                    fnb.emit(Instr::BoolNot { dest, arg });
+                    fnb.emit(Instr::BoolNot { dest, arg: dest });
                 }
                 swc_ecma_ast::UnaryOp::TypeOf => {
-                    fnb.emit(Instr::TypeOf { dest, arg });
+                    fnb.emit(Instr::TypeOf { dest, arg: dest });
                 }
                 swc_ecma_ast::UnaryOp::Tilde
                 | swc_ecma_ast::UnaryOp::Void
                 | swc_ecma_ast::UnaryOp::Delete => panic!("unsupported unary op: {:?}", op),
             }
-            Ok(Some(dest))
+            Ok(dest)
         }
-        js_to_past::StmtOp::Binary(op, left, right) => {
-            let dest = fnb.regs.gen();
-            let left = compile_expr(fnb, left)?;
-            let right = compile_expr(fnb, right)?;
+        Expr::Binary(op, left, right) => {
+            let dest = get_dest(fnb);
+            let left = compile_expr(fnb, None, block, *left)?;
+            let right = compile_expr(fnb, None, block, *right)?;
 
             let instr = match op {
                 swc_ecma_ast::BinaryOp::Add => Instr::OpAdd(dest, left, right),
@@ -177,25 +388,28 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
             };
 
             fnb.emit(instr);
-            Ok(Some(dest))
+            Ok(dest)
         }
-        js_to_past::StmtOp::StringLiteral(str_lit) => Ok(Some(compile_load_const(
-            fnb,
-            bytecode::Literal::String(str_lit.to_string()),
-        ))),
-        js_to_past::StmtOp::NumberLiteral(num_lit) => Ok(Some(compile_load_const(
-            fnb,
-            bytecode::Literal::Number(*num_lit),
-        ))),
-        js_to_past::StmtOp::BoolLiteral(bool_lit) => Ok(Some(compile_load_const(
-            fnb,
-            bytecode::Literal::Bool(*bool_lit),
-        ))),
-        js_to_past::StmtOp::ArrayCreate => {
-            let array = fnb.regs.gen();
+        Expr::StringLiteral(lit) => {
+            let dest = get_dest(fnb);
+            compile_load_const(fnb, dest, bytecode::Literal::String(lit.to_string()));
+            Ok(dest)
+        }
+        Expr::NumberLiteral(lit) => {
+            let dest = get_dest(fnb);
+            compile_load_const(fnb, dest, bytecode::Literal::Number(*lit));
+            Ok(dest)
+        }
+        Expr::BoolLiteral(lit) => {
+            let dest = get_dest(fnb);
+            compile_load_const(fnb, dest, bytecode::Literal::Bool(*lit));
+            Ok(dest)
+        }
+        Expr::ArrayCreate => {
+            let array = get_dest(fnb);
 
-            let constructor: bytecode::VReg = compile_read_global(fnb, "Array");
-            let this = fnb.regs.gen();
+            let constructor: bytecode::VReg = compile_read_global(fnb, "Array".into());
+            let this = fnb.gen_reg();
             fnb.emit(Instr::LoadUndefined(this));
             fnb.emit(Instr::Call {
                 return_value: array,
@@ -204,59 +418,47 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
             });
             compile_new(fnb, array, constructor);
 
-            Ok(Some(array))
+            Ok(array)
         }
-        js_to_past::StmtOp::ArrayPush(arr, value) => {
-            let arr = compile_read(fnb, arr);
-            let value = compile_expr(fnb, value)?;
-            fnb.emit(Instr::ArrayPush { arr, value });
-            Ok(None)
-        }
-        js_to_past::StmtOp::ArrayNth { arr, index } => {
-            let arr = compile_expr(fnb, arr)?;
-            let index = compile_expr(fnb, index)?;
-            let dest = fnb.regs.gen();
+        Expr::ArrayNth { arr, index } => {
+            let arr = compile_expr(fnb, None, block, *arr)?;
+            let index = compile_expr(fnb, None, block, *index)?;
+            let dest = get_dest(fnb);
             fnb.emit(Instr::ArrayNth { dest, arr, index });
-            Ok(Some(dest))
+            Ok(dest)
         }
-        js_to_past::StmtOp::ArrayLen(arr) => {
-            let arr = compile_expr(fnb, arr)?;
-            let dest = fnb.regs.gen();
+        Expr::ArrayLen(arr) => {
+            let arr = compile_expr(fnb, None, block, *arr)?;
+            let dest = get_dest(fnb);
             fnb.emit(Instr::ArrayLen { dest, arr });
-            Ok(Some(dest))
+            Ok(dest)
         }
-        js_to_past::StmtOp::ObjectCreate => {
-            let obj = fnb.regs.gen();
+        Expr::ObjectCreate => {
+            let obj = get_dest(fnb);
             fnb.emit(Instr::ObjCreateEmpty(obj));
-            Ok(Some(obj))
+            Ok(obj)
         }
-        js_to_past::StmtOp::ObjectGet { obj, key } => {
-            let obj = compile_expr(fnb, obj.as_ref())?;
-            let key = compile_expr(fnb, key.as_ref())?;
-            let dest = fnb.regs.gen();
+
+        Expr::ObjectGet { obj, key } => {
+            let obj = compile_expr(fnb, None, block, *obj)?;
+            let key = compile_expr(fnb, None, block, *key)?;
+            let dest = get_dest(fnb);
             fnb.emit(Instr::ObjGet { dest, obj, key });
-            Ok(Some(dest))
+            Ok(dest)
         }
-        js_to_past::StmtOp::ObjectSet { obj, key, value } => {
-            let obj = compile_expr(fnb, obj.as_ref())?;
-            let key = compile_expr(fnb, key.as_ref())?;
-            let value = compile_expr(fnb, value.as_ref())?;
-            fnb.emit(Instr::ObjSet { obj, key, value });
-            Ok(None)
-        }
-        js_to_past::StmtOp::ObjectGetKeys(obj) => {
-            let obj = compile_expr(fnb, obj.as_ref())?;
-            let dest = fnb.regs.gen();
+        Expr::ObjectGetKeys(obj) => {
+            let obj = compile_expr(fnb, None, block, *obj)?;
+            let dest = get_dest(fnb);
             fnb.emit(Instr::ObjGetKeys { dest, obj });
-            Ok(Some(dest))
+            Ok(dest)
         }
-        js_to_past::StmtOp::CreateClosure { func } => {
+        Expr::CreateClosure { func } => {
             let mut cap_names = Vec::new();
             let mut cap_regs = Vec::new();
 
             for name in func.unbound_names.iter() {
-                let name = js_to_past::DeclName::Js(name.clone());
-                match resolve_name(fnb, &name) {
+                let name = DeclName::Js(name.clone());
+                match fnb.resolve_name(&name) {
                     Loc::Reg(reg) => {
                         cap_names.push(name.clone());
                         cap_regs.push(reg);
@@ -268,15 +470,12 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
                 }
             }
 
-            let force_strict = fnb.is_strict_mode;
-            let lfnid = compile_function(
-                fnb.module_builder,
-                fnb.globals,
-                cap_names,
-                func,
-                force_strict,
-            )?;
-            let dest = fnb.regs.gen();
+            let force_strict = fnb.is_strict_mode();
+            let lfnid = {
+                let (globals, module_builder) = fnb.suspend();
+                compile_function(*globals, *module_builder, cap_names, func, force_strict)?
+            };
+            let dest = get_dest(fnb);
             fnb.emit(Instr::ClosureNew {
                 dest,
                 fnid: lfnid,
@@ -287,67 +486,68 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
                 fnb.emit(Instr::ClosureAddCapture(reg));
             }
 
-            Ok(Some(dest))
+            Ok(dest)
         }
-        js_to_past::StmtOp::Call {
-            is_new,
-            callee,
+        Expr::Call {
+            callee: callee_eid,
             args,
+            is_new,
         } => {
-            // Some things expressed in the `f(...)` call syntax are not actually calls to
-            // anything, but have a special meaning
-            match &callee.as_ref().op {
-                js_to_past::StmtOp::Read(js_to_past::DeclName::Js(name)) if name == "sink" => {
+            let callee = block.get_expr(*callee_eid);
+            match callee {
+                // Some things expressed in the `f(...)` call syntax are not actually calls to
+                // anything, but have a special meaning
+                Expr::Read(DeclName::Js(name)) if name == "sink" => {
                     for arg in args {
-                        let var = compile_expr(fnb, &arg)?;
+                        let var = compile_expr(fnb, None, block, *arg)?;
                         fnb.emit(Instr::PushToSink(var));
                     }
 
-                    let ret = fnb.regs.gen();
-                    compile_load_const(fnb, Literal::Undefined);
-                    Ok(Some(ret))
+                    let dest = get_dest(fnb);
+                    compile_load_const(fnb, dest, Literal::Undefined);
+                    Ok(dest)
                 }
-                js_to_past::StmtOp::Read(js_to_past::DeclName::Js(name)) if name == "require" => {
+                Expr::Read(DeclName::Js(name)) if name == "require" => {
                     if args.len() != 1 {
                         return Err(error!("`require` takes a single argument only"));
                     }
-                    let import_path = compile_expr(fnb, &args[0])?;
+                    let import_path = compile_expr(fnb, None, block, args[0])?;
 
-                    let ret = fnb.regs.gen();
+                    let ret = get_dest(fnb);
                     fnb.emit(Instr::ImportModule(ret, import_path));
-                    Ok(Some(ret))
+                    Ok(ret)
                 }
-                js_to_past::StmtOp::Read(js_to_past::DeclName::Js(name)) if name == "eval" => {
-                    return Err(error!("`eval` not supported"));
+                Expr::Read(DeclName::Js(name)) if name == "eval" => {
+                    Err(error!("`eval` not supported"))
                 }
                 _ => {
                     let mut arg_regs = Vec::new();
                     for arg in args {
-                        let reg = compile_expr(fnb, arg)?;
+                        let reg = compile_expr(fnb, None, block, *arg)?;
                         arg_regs.push(reg);
                     }
 
-                    let (this, callee) = match &callee.op {
-                        js_to_past::StmtOp::ObjectGet { obj, key } => {
-                            let obj = compile_expr(fnb, obj)?;
-                            let key = compile_expr(fnb, key)?;
-                            let callee = fnb.regs.gen();
+                    let (this, callee) = match callee {
+                        Expr::ObjectGet { obj, key } => {
+                            let this = compile_expr(fnb, None, block, *obj)?;
+                            let key = compile_expr(fnb, None, block, *key)?;
+                            let callee = fnb.gen_reg();
                             fnb.emit(Instr::ObjGet {
                                 dest: callee,
-                                obj,
+                                obj: this,
                                 key,
                             });
-                            (obj, callee)
+                            (this, callee)
                         }
                         _ => {
-                            let this = fnb.regs.gen();
-                            let callee = compile_expr(fnb, callee)?;
+                            let this = fnb.gen_reg();
+                            let callee = compile_expr(fnb, None, block, *callee_eid)?;
                             fnb.emit(Instr::LoadUndefined(this));
                             (this, callee)
                         }
                     };
 
-                    let return_value = fnb.regs.gen();
+                    let return_value = get_dest(fnb);
                     fnb.emit(Instr::Call {
                         return_value,
                         this,
@@ -362,247 +562,32 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &js_to_past::Stmt) -> Result<Option<b
                         compile_new(fnb, return_value, callee);
                     }
 
-                    Ok(Some(return_value))
+                    Ok(return_value)
                 }
             }
         }
-        js_to_past::StmtOp::Return(arg) => {
-            let value = compile_expr(fnb, arg)?;
-            fnb.emit(Instr::Return(value));
-            Ok(None)
-        }
 
-        js_to_past::StmtOp::Throw(arg) => {
-            let arg = compile_expr(fnb, arg)?;
-            fnb.emit(Instr::Throw(arg));
-            Ok(None)
-        }
-        js_to_past::StmtOp::GetCurrentException => {
-            let dest = fnb.regs.gen();
+        Expr::CurrentException => {
+            let dest = get_dest(fnb);
             fnb.emit(Instr::GetCurrentException(dest));
-            Ok(Some(dest))
-        }
-        js_to_past::StmtOp::Try {
-            main_block,
-            handler_block,
-            finalizer_block,
-        } => {
-            // TODO Allow the catch clause to access the exception object
-            // We reunite the cases by *always* having a catch clause (it will run the finalizer)
-            let push_handler_instr = fnb.instrs.reserve();
-            compile_stmt(fnb, main_block)?;
-            fnb.emit(Instr::PopExcHandler);
-            let jmp_after_try = fnb.instrs.reserve();
-
-            let handler_start = fnb.peek_iid();
-            compile_stmt(fnb, handler_block)?;
-
-            let finalizer_start = fnb.peek_iid();
-            compile_stmt(fnb, finalizer_block)?;
-            let cur_exc = fnb.regs.gen();
-            fnb.emit(Instr::GetCurrentException(cur_exc));
-            fnb.emit(Instr::Throw(cur_exc));
-
-            *fnb.instrs.get_mut(push_handler_instr) = Instr::PushExcHandler(handler_start);
-            *fnb.instrs.get_mut(jmp_after_try) = Instr::Jmp(finalizer_start);
-            Ok(None)
-        }
-        js_to_past::StmtOp::Debugger => {
-            fnb.emit(Instr::Breakpoint);
-            Ok(None)
-        }
-    };
-
-    if !stmt.span.is_dummy() {
-        let iid_end = fnb.peek_iid();
-        fnb.module_builder
-            .breakable_ranges
-            .push(bytecode::BreakRange {
-                lo: stmt.span.lo,
-                hi: stmt.span.hi,
-                local_fnid: fnb.lfnid,
-                iid_start,
-                iid_end,
-            });
-    }
-
-    ret
-}
-
-fn compile_unshare(fnb: &mut FnBuilder<'_>, block_id: &js_to_past::BlockID) {
-    let mut block_found = false;
-
-    for scope in fnb.scopes.iter().rev() {
-        for reg in scope.names.values() {
-            fnb.emit(Instr::Unshare(*reg));
-        }
-        if scope.block_id == Some(*block_id) {
-            block_found = true;
-            break;
-        }
-    }
-
-    if !block_found {
-        panic!(
-            "malformed PAST: Unshare({:?}): block ID not found",
-            block_id
-        );
-    }
-}
-
-fn get_block_scope(scopes: &mut [Scope], block_id: js_to_past::BlockID) -> &mut Scope {
-    scopes
-        .iter_mut()
-        .rev()
-        .find(|scope| scope.block_id == Some(block_id))
-        .unwrap()
-}
-
-fn compile_read(fnb: &mut FnBuilder<'_>, name: &js_to_past::DeclName) -> bytecode::VReg {
-    match resolve_name(fnb, name) {
-        Loc::Reg(reg) => reg,
-        Loc::Global(name) => {
-            let global_this = fnb.regs.gen();
-            let dest = fnb.regs.gen();
-
-            fnb.emit(Instr::GetGlobalThis(global_this));
-            let key = compile_load_const(fnb, Literal::JsWord(name));
-            fnb.emit(Instr::ObjGet {
-                dest,
-                obj: global_this,
-                key,
-            });
-
-            dest
+            Ok(dest)
         }
     }
 }
 
-fn compile_write(fnb: &mut FnBuilder, name: &js_to_past::DeclName, value: bytecode::VReg) {
-    match resolve_name(fnb, name) {
-        Loc::Reg(reg) => {
-            // sad, this causes a bunch of extra copies in the bytecode
-            fnb.emit(Instr::Copy {
-                dst: reg,
-                src: value,
-            });
+fn compile_block(fnb: &mut FnBuilder, block: &Block) -> Result<()> {
+    let stmts_count = block.stmts().count();
+    fnb.block(block.id, stmts_count, |fnb| {
+        for decl in block.decls() {
+            let reg = fnb.gen_reg();
+            fnb.define_name(decl.name.clone(), reg);
         }
-        Loc::Global(name) => {
-            let global_this = fnb.regs.gen();
 
-            fnb.emit(Instr::GetGlobalThis(global_this));
-            let key = compile_load_const(fnb, Literal::JsWord(name));
-            fnb.emit(Instr::ObjSet {
-                obj: global_this,
-                key,
-                value,
-            });
-        }
-    }
-}
+        let mut iter = block.stmts();
+        while compile_one_stmt(fnb, block, &mut iter)? {}
 
-fn resolve_name(fnb: &mut FnBuilder, name: &js_to_past::DeclName) -> Loc {
-    let local_reg = fnb
-        .scopes
-        .iter()
-        .rev()
-        .find_map(|scope| scope.names.get(name).copied().map(Loc::Reg));
-
-    if let Some(reg) = local_reg {
-        return reg;
-    }
-
-    if let js_to_past::DeclName::Js(name) = name {
-        if fnb.globals.contains(name) {
-            return Loc::Global(name.clone());
-        }
-    }
-    panic!("malformed PAST: undeclared name: {:?}", name)
-}
-
-fn compile_new(fnb: &mut FnBuilder<'_>, ret: bytecode::VReg, constructor: bytecode::VReg) {
-    let key = compile_load_const(fnb, Literal::String("prototype".into()));
-    // reusing register `constructor` for the prototype
-    fnb.emit(Instr::ObjGet {
-        dest: constructor,
-        obj: constructor,
-        key,
-    });
-
-    let key = compile_load_const(fnb, Literal::String("__proto__".into()));
-    fnb.emit(Instr::ObjSet {
-        obj: ret,
-        key,
-        value: constructor,
-    });
-
-    let key = compile_load_const(fnb, Literal::String("constructor".into()));
-    fnb.emit(Instr::ObjSet {
-        obj: ret,
-        key,
-        value: constructor,
-    });
-}
-
-fn compile_read_global(fnb: &mut FnBuilder, name: &str) -> bytecode::VReg {
-    // TODO Avoid repeating the GetGlobalThis!
-    let global_this = fnb.regs.gen();
-    fnb.emit(Instr::GetGlobalThis(global_this));
-
-    let key = compile_load_const(fnb, Literal::String(name.to_string()));
-    let dest = fnb.regs.gen();
-    fnb.emit(Instr::ObjGet {
-        dest,
-        obj: global_this,
-        key,
-    });
-
-    dest
-}
-
-fn compile_load_const(fnb: &mut FnBuilder, lit: Literal) -> bytecode::VReg {
-    let dest = fnb.regs.gen();
-    // Avoid string clone?
-    let const_ndx = fnb.consts.push(lit);
-    fnb.emit(Instr::LoadConst(dest, const_ndx));
-
-    dest
-}
-
-fn compile_expr(fnb: &mut FnBuilder, value: &js_to_past::Stmt) -> Result<bytecode::VReg> {
-    let vreg = compile_stmt(fnb, value)?.expect("malformed PAST: expression has no value");
-    Ok(vreg)
-}
-
-fn compile_block(fnb: &mut FnBuilder, block: &js_to_past::Block) -> Result<Option<bytecode::VReg>> {
-    let names = block
-        .decls
-        .iter()
-        .map(|decl| (decl.name.clone(), fnb.regs.gen()))
-        .collect();
-    fnb.scopes.push(Scope {
-        block_id: Some(block.id),
-        names,
-        ..Default::default()
-    });
-    let iid_start = fnb.peek_iid();
-
-    let mut last_reg = None;
-    for stmt in &block.stmts {
-        last_reg = compile_stmt(fnb, stmt)?;
-    }
-
-    let scope = fnb.scopes.pop().unwrap();
-
-    let iid_end = fnb.peek_iid();
-    for iid in scope.deferred_break {
-        *fnb.instrs.get_mut(iid) = Instr::Jmp(iid_end);
-    }
-    for iid in scope.deferred_continue {
-        *fnb.instrs.get_mut(iid) = Instr::Jmp(iid_start);
-    }
-
-    Ok(last_reg)
+        Ok(())
+    })
 }
 
 mod builder {
@@ -610,8 +595,14 @@ mod builder {
 
     use swc_atoms::JsWord;
 
-    use super::DeclName;
-    use crate::{bytecode, bytecode_compiler::CompiledModule};
+    use super::{DeclName, StmtID};
+    use crate::{
+        bytecode,
+        bytecode_compiler::{js_to_past, CompiledModule},
+    };
+
+    use bytecode::IID;
+    use js_to_past::BlockID;
 
     pub(super) struct ModuleBuilder {
         fns: HashMap<bytecode::LocalFnId, bytecode::Function>,
@@ -650,26 +641,29 @@ mod builder {
         instrs: InstrBuffer,
         consts: ConstsBuffer,
         regs: RegGen,
-        names: HashMap<DeclName, bytecode::VReg>,
-        pending_fixes: Vec<Fix>,
+        blocks: Vec<Block>,
+        block_boundaries: HashMap<BlockID, (IID, IID)>,
+        deferred_actions: Vec<Box<dyn FnOnce(&mut FnBuilder)>>,
 
         is_strict_mode: bool,
-        lfnid: bytecode::LocalFnId,
 
         globals: &'a HashSet<JsWord>,
         module_builder: &'a mut ModuleBuilder,
     }
-
-    type Fix = Box<dyn FnOnce(&mut FnBuilder)>;
-
-    enum Loc {
+    struct Block {
+        id: BlockID,
+        names: HashMap<DeclName, bytecode::VReg>,
+        iid_of_stmt: Box<[bytecode::IID]>,
+        n_started_stmts: usize,
+        deferred_actions: Vec<Box<dyn FnOnce(&mut FnBuilder)>>,
+    }
+    pub enum Loc {
         Reg(bytecode::VReg),
         Global(JsWord),
     }
 
     impl<'a> FnBuilder<'a> {
         pub(super) fn new(
-            lfnid: bytecode::LocalFnId,
             globals: &'a HashSet<JsWord>,
             module_builder: &'a mut ModuleBuilder,
         ) -> FnBuilder<'a> {
@@ -677,49 +671,139 @@ mod builder {
                 instrs: InstrBuffer::new(),
                 consts: ConstsBuffer::new(),
                 regs: RegGen::new(bytecode::ARGS_COUNT_MAX),
-                names: HashMap::new(),
-                pending_fixes: Vec::new(),
+                blocks: Vec::new(),
+                block_boundaries: HashMap::new(),
                 is_strict_mode: false,
-                lfnid,
                 globals,
                 module_builder,
+                deferred_actions: Vec::new(),
             }
         }
 
         pub(super) fn set_strict_mode(&mut self, value: bool) {
             self.is_strict_mode = value;
         }
+        pub(super) fn is_strict_mode(&self) -> bool {
+            self.is_strict_mode
+        }
+
+        fn push_block(&mut self, block_id: BlockID, stmts_count: usize) {
+            self.blocks.push(Block {
+                id: block_id,
+                names: HashMap::new(),
+                iid_of_stmt: (0..stmts_count).map(|_| bytecode::IID(u16::MAX)).collect(),
+                n_started_stmts: 0,
+                deferred_actions: Vec::new(),
+            })
+        }
+        fn pop_block(&mut self) {
+            let block = self.blocks.pop().unwrap();
+            // check that every stmt has been marked (with `mark_stmt_start`)
+            assert_eq!(block.n_started_stmts, block.iid_of_stmt.len());
+        }
+        fn cur_block_mut(&mut self) -> &mut Block {
+            self.blocks.last_mut().unwrap()
+        }
+        pub(super) fn block<R>(
+            &mut self,
+            block_id: BlockID,
+            stmts_count: usize,
+            action: impl FnOnce(&mut FnBuilder) -> R,
+        ) -> R {
+            self.push_block(block_id, stmts_count);
+
+            let iid_start = self.peek_iid();
+            let ret = action(self);
+            let iid_end = self.peek_iid();
+
+            let block = self.cur_block_mut();
+            let deferred_actions = std::mem::take(&mut block.deferred_actions);
+            let block_id = block.id;
+
+            self.block_boundaries.insert(block_id, (iid_start, iid_end));
+            for action in deferred_actions {
+                action(self);
+            }
+
+            self.pop_block();
+            ret
+        }
+        pub(super) fn define_name(&mut self, decl_name: DeclName, reg: bytecode::VReg) {
+            let block = self.blocks.last_mut().unwrap();
+            block.names.insert(decl_name, reg);
+        }
 
         pub(super) fn gen_reg(&mut self) -> bytecode::VReg {
             self.regs.gen()
         }
 
+        pub(super) fn add_const(&mut self, lit: bytecode::Literal) -> bytecode::ConstIndex {
+            // TODO deduplicate consts
+            self.consts.push(lit)
+        }
+
+        pub(super) fn peek_iid(&self) -> bytecode::IID {
+            self.instrs.peek_iid()
+        }
         pub(super) fn emit(&mut self, instr: bytecode::Instr) {
             self.instrs.push(instr)
         }
-
-        pub(super) fn define_name(&self, decl_name: DeclName, reg: bytecode::VReg) {
-            let prev = self.names.insert(decl_name, reg);
-            assert!(
-                prev.is_none(),
-                "compiler bug: name redefined: {:?}",
-                decl_name
-            );
+        pub(super) fn reserve_instr(&mut self) -> bytecode::IID {
+            self.instrs.reserve()
         }
-        
-        pub(super) fn later(&mut self, fix: Fix) {
-            self.pending_fixes.push(fix)
+        pub(super) fn set_instr(&mut self, iid: bytecode::IID, instr: bytecode::Instr) {
+            *self.instrs.get_mut(iid) = instr;
+        }
+        pub(super) fn mark_stmt_start(&mut self) {
+            let iid = self.peek_iid();
+            let block = self.blocks.last_mut().unwrap();
+
+            let slot = &mut block.iid_of_stmt[block.n_started_stmts];
+            // check that we haven't set the same slot twice
+            debug_assert_eq!(slot.0, u16::MAX);
+            *slot = iid;
+
+            block.n_started_stmts += 1;
+        }
+        pub(super) fn iid_of_stmt(&mut self, stmt_id: StmtID) -> bytecode::IID {
+            let block = self.blocks.last().unwrap();
+            block.iid_of_stmt[stmt_id.numeric() as usize]
+        }
+        pub(super) fn block_boundaries(
+            &mut self,
+            block_id: js_to_past::BlockID,
+        ) -> (bytecode::IID, bytecode::IID) {
+            let block = self.blocks.last().unwrap();
+            todo!()
         }
 
-        pub(super) fn build(self, span: swc_common::Span) -> bytecode::Function {
-            // assert!(
-            //     self.pending_break_instrs.is_empty(),
-            //     "bytecode compiler bug: the function is over, but some break instructions were not placed yet"
-            // );
+        pub(super) fn on_block_completion(
+            &mut self,
+            action: impl 'static + FnOnce(&mut FnBuilder),
+        ) {
+            self.blocks
+                .last_mut()
+                .unwrap()
+                .deferred_actions
+                .push(Box::new(action));
+        }
 
-            todo!("apply pending_fixes");
+        pub(super) fn on_function_completion(
+            &mut self,
+            action: impl 'static + FnOnce(&mut FnBuilder),
+        ) {
+            self.deferred_actions.push(Box::new(action));
+        }
 
-            bytecode::FunctionBuilder {
+        pub(super) fn build(mut self, span: swc_common::Span) -> bytecode::LocalFnId {
+            assert!(self.blocks.is_empty());
+
+            let deferred_actions = std::mem::take(&mut self.deferred_actions);
+            for action in deferred_actions {
+                action(&mut self);
+            }
+
+            let bc_func = bytecode::FunctionBuilder {
                 instrs: self.instrs.build(),
                 consts: self.consts.build(),
                 n_regs: self.regs.count(),
@@ -729,15 +813,35 @@ mod builder {
                 is_strict_mode: self.is_strict_mode,
                 span,
             }
-            .build()
+            .build();
+
+            let lfnid = self.module_builder.gen_id();
+            self.module_builder.put_fn(lfnid, bc_func);
+            lfnid
         }
 
-        pub(super) fn peek_iid(&self) -> bytecode::IID {
-            self.instrs.peek_iid()
+        pub(crate) fn resolve_name(&self, name: &DeclName) -> Loc {
+            let local_reg = self
+                .blocks
+                .iter()
+                .rev()
+                .find_map(|scope| scope.names.get(name).copied().map(Loc::Reg));
+
+            if let Some(reg) = local_reg {
+                return reg;
+            }
+
+            if let DeclName::Js(name) = name {
+                if self.globals.contains(name) {
+                    return Loc::Global(name.clone());
+                }
+            }
+            panic!("malformed PAST: undeclared name: {:?}", name)
         }
 
-        pub(crate) fn resolve_name(&self, name: &DeclName) -> bytecode::VReg {
-            self.names.get(name).copied().unwrap()
+        // this sucks lol
+        pub(super) fn suspend(&mut self) -> (&mut &'a HashSet<JsWord>, &mut &'a mut ModuleBuilder) {
+            (&mut self.globals, &mut self.module_builder)
         }
     }
 
@@ -757,7 +861,7 @@ mod builder {
             self.instrs.push(bytecode::Instr::Nop);
             iid
         }
-        fn peek_iid(&mut self) -> bytecode::IID {
+        fn peek_iid(&self) -> bytecode::IID {
             bytecode::IID(self.instrs.len().try_into().unwrap())
         }
         fn get_mut(&mut self, iid: bytecode::IID) -> &mut bytecode::Instr {
@@ -920,8 +1024,8 @@ mod tests {
         let globals = past_function.unbound_names.iter().cloned().collect();
         let force_strict = false;
         let root_lfnid = super::compile_function(
-            &mut module_builder,
             &globals,
+            &mut module_builder,
             Vec::new(),
             &past_function,
             force_strict,

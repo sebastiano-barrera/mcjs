@@ -38,9 +38,15 @@ impl util::Dump for Function {
 
 pub struct Block {
     pub id: BlockID,
-    pub decls: Vec<Decl>,
-    pub stmts: Vec<Stmt>,
-    pub exprs: Vec<Expr>,
+
+    // These are all Vec's, but they have somewhat different semantics. This is
+    // reflected in Block's public API
+    /// Set of declarations. No ordering.
+    decls: Vec<Decl>,
+    /// Ordered sequence of statements.  Indexable via StmtID.
+    stmts: Vec<Stmt>,
+    /// Mapping of ExprID -> Expr. No ordering.
+    exprs: Vec<Expr>,
 }
 impl_debug_via_dump!(Block);
 
@@ -51,6 +57,18 @@ impl Block {
             !self.stmts.iter().any(|stmt| stmt.op.is_pending()),
             "js_to_past bug: unresolved pending stmt"
         );
+    }
+
+    pub fn stmts(&self) -> impl ExactSizeIterator<Item = &Stmt> {
+        self.stmts.iter()
+    }
+
+    pub fn get_expr(&self, expr_id: ExprID) -> &Expr {
+        &self.exprs[expr_id.0 as usize]
+    }
+
+    pub fn decls(&self) -> impl ExactSizeIterator<Item = &Decl> {
+        self.decls.iter()
     }
 }
 
@@ -126,7 +144,6 @@ impl DeclName {
         }
     }
 }
-
 impl std::fmt::Debug for DeclName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
@@ -152,16 +169,9 @@ impl std::fmt::Debug for Stmt {
 #[derive(Clone, Copy, Debug)]
 pub struct StmtID(u16);
 
-#[derive(Clone, Copy, Debug)]
-pub struct StmtsDistance(i16);
-
-impl std::ops::Sub for StmtID {
-    type Output = StmtsDistance;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        let a: i16 = self.0.try_into().unwrap();
-        let b: i16 = rhs.0.try_into().unwrap();
-        StmtsDistance(a - b)
+impl StmtID {
+    pub fn numeric(&self) -> u16 {
+        self.0
     }
 }
 
@@ -182,9 +192,10 @@ pub enum StmtOp {
 
     Break(BlockID),
     Block(Box<Block>),
-    /// Semantics: "Do the next statement if not <test>": Evaluate the `test`
-    /// expression and convert to boolean; if true, skip 1 statement; if false,
-    /// proceed to the next stmt.
+    /// Semantics: "Do the next statement if not <test>" or, equivalently,
+    /// "Skip the next statement if <test>". Evaluate the `test` expression and
+    /// convert to boolean; if true, skip 1 statement; if false, proceed to the
+    /// next stmt.
     IfNot {
         test: ExprID,
     },
