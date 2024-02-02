@@ -1462,18 +1462,6 @@ fn find_unbound_references(root: &Block, param_names: &[JsWord]) -> Vec<JsWord> 
         }
     }
 
-    {
-        eprintln!("## referenced ({} names)", referenced.len());
-        for name in &referenced {
-            eprintln!(" - {}", name.to_string());
-        }
-
-        eprintln!("## declared ({} names)", declared.len());
-        for name in &declared {
-            eprintln!(" - {}", name.to_string());
-        }
-    }
-
     #[allow(unused_mut)]
     let mut unbound: Vec<_> = referenced.difference(&declared).cloned().collect();
 

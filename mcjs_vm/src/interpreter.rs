@@ -795,8 +795,10 @@ impl<'a> Interpreter<'a> {
                     forced_this,
                 } => {
                     let mut upvalues = Vec::new();
-                    while let Instr::ClosureAddCapture(cap) = func.instrs()[next_ndx as usize] {
-                        let upv_id = self.data.top_mut().ensure_in_upvalue(cap);
+                    while let Some(Instr::ClosureAddCapture(cap)) =
+                        func.instrs().get(next_ndx as usize)
+                    {
+                        let upv_id = self.data.top_mut().ensure_in_upvalue(*cap);
                         upvalues.push(upv_id);
                         next_ndx += 1;
                     }
