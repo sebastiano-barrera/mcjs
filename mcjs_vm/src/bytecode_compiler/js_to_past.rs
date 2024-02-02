@@ -57,6 +57,77 @@ impl Block {
             !self.stmts.iter().any(|stmt| stmt.op.is_pending()),
             "js_to_past bug: unresolved pending stmt"
         );
+
+        #[cfg(debug_assertions)]
+        {
+            let check_stmt_id = |stmt_id: &StmtID| debug_assert_eq!(stmt_id.1, self.id);
+            let check_expr_id = |expr_id: &ExprID| debug_assert_eq!(expr_id.1, self.id);
+
+            for stmt in &self.stmts {
+                match &stmt.op {
+                    StmtOp::Pending
+                    | StmtOp::Break(_)
+                    | StmtOp::Block(_)
+                    | StmtOp::TryEnd
+                    | StmtOp::Debugger => {}
+                    StmtOp::Evaluate(eid) => check_expr_id(eid),
+                    StmtOp::IfNot { test } => check_expr_id(test),
+                    StmtOp::Jump(target) => check_stmt_id(target),
+                    StmtOp::Return(eid) => check_expr_id(eid),
+                    StmtOp::Assign(_, eid) => check_expr_id(eid),
+                    StmtOp::Unshare(_) => todo!(),
+                    StmtOp::ArrayPush(_, eid) => check_expr_id(eid),
+                    StmtOp::ObjectSet { obj, key, value } => {
+                        check_expr_id(obj);
+                        check_expr_id(key);
+                        check_expr_id(value);
+                    }
+                    StmtOp::Throw(eid) => check_expr_id(eid),
+                    StmtOp::TryBegin { handler } => check_stmt_id(handler),
+                }
+            }
+
+            for expr in &self.exprs {
+                match expr {
+                    Expr::Undefined
+                    | Expr::Null
+                    | Expr::This
+                    | Expr::Read(_)
+                    | Expr::ReadArg(_)
+                    | Expr::StringLiteral(_)
+                    | Expr::NumberLiteral(_)
+                    | Expr::BoolLiteral(_)
+                    | Expr::ArrayCreate
+                    | Expr::ObjectCreate
+                    | Expr::CreateClosure { func: _ }
+                    | Expr::CurrentException => {}
+
+                    Expr::Unary(_, eid) => check_expr_id(eid),
+                    Expr::Binary(_, l, r) => {
+                        check_expr_id(l);
+                        check_expr_id(r);
+                    }
+                    Expr::ArrayNth { arr, index } => {
+                        check_expr_id(arr);
+                        check_expr_id(index);
+                    }
+                    Expr::ArrayLen(eid) => check_expr_id(eid),
+                    Expr::ObjectGet { obj, key } => {
+                        check_expr_id(obj);
+                        check_expr_id(key);
+                    }
+                    Expr::ObjectGetKeys(eid) => check_expr_id(eid),
+                    Expr::Call {
+                        callee,
+                        args,
+                        is_new: _,
+                    } => {
+                        check_expr_id(callee);
+                        args.iter().for_each(&check_expr_id);
+                    }
+                }
+            }
+        }
     }
 
     pub fn stmts(&self) -> impl ExactSizeIterator<Item = &Stmt> {
@@ -166,8 +237,12 @@ impl std::fmt::Debug for Stmt {
     }
 }
 
+// The BlockID of origin for each StmtID and ExprID in #[cfg(debug_assertions)]
+// to check for a common type of bug where the StmtID/ExprID is used in the
+// wrong block
+
 #[derive(Clone, Copy, Debug)]
-pub struct StmtID(u16);
+pub struct StmtID(u16, #[cfg(debug_assertions)] BlockID);
 
 impl StmtID {
     pub fn numeric(&self) -> u16 {
@@ -176,7 +251,7 @@ impl StmtID {
 }
 
 #[derive(Clone, Copy)]
-pub struct ExprID(u16);
+pub struct ExprID(u16, #[cfg(debug_assertions)] BlockID);
 
 impl std::fmt::Debug for ExprID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -406,7 +481,12 @@ mod builder {
 
         pub(super) fn peek_stmt_id(&mut self) -> StmtID {
             let block = self.blocks.last().unwrap();
-            StmtID(block.stmts.len().try_into().unwrap())
+            let stmt_ndx = block.stmts.len().try_into().unwrap();
+            StmtID(
+                stmt_ndx,
+                #[cfg(debug_assertions)]
+                self.cur_block_id(),
+            )
         }
 
         pub(super) fn add_stmt(&mut self, op: StmtOp) -> StmtID {
@@ -419,7 +499,11 @@ mod builder {
                 op,
             });
 
-            StmtID(stmt_id_raw)
+            StmtID(
+                stmt_id_raw,
+                #[cfg(debug_assertions)]
+                self.cur_block_id(),
+            )
         }
 
         pub(super) fn set_stmt(&mut self, id: StmtID, op: StmtOp) {
@@ -437,7 +521,11 @@ mod builder {
             let block = self.cur_block_mut();
             let expr_id_raw = block.exprs.len().try_into().unwrap();
             block.exprs.push(expr);
-            ExprID(expr_id_raw)
+            ExprID(
+                expr_id_raw,
+                #[cfg(debug_assertions)]
+                self.cur_block_id(),
+            )
         }
 
         pub(super) fn add_unshares_up_to(&mut self, block_id: BlockID) {
