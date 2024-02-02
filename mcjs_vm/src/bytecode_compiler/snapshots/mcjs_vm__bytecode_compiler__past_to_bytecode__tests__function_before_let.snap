@@ -8,14 +8,13 @@ fn LocalFnId(0)
   Call { return_value: v10, this: v8, callee: v9 }
 fn LocalFnId(1)
   k0 Number(2.0)
-  ClosureNew { dest: v10, fnid: LocalFnId(2), forced_this: None }
+  ClosureNew { dest: v8, fnid: LocalFnId(2), forced_this: None }
   ClosureAddCapture(v9)
-  Copy { dst: v8, src: v10 }
-  LoadConst(v11, const[0])
-  Copy { dst: v9, src: v11 }
+  LoadConst(v9, const[0])
 fn LocalFnId(2)
   k0 Number(3.0)
+  k1 Number(3.0)
   LoadCapture(v8, capture[0])
-  LoadConst(v9, const[0])
-  Copy { dst: v8, src: v9 }
+  LoadConst(v8, const[0])
+  LoadConst(v9, const[1])
 

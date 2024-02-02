@@ -4,10 +4,10 @@ expression: dump_functions(&compiled_module.functions)
 ---
 fn LocalFnId(0)
   k0 JsWord(Atom('myFunction' type=dynamic))
-  ClosureNew { dest: v8, fnid: LocalFnId(1), forced_this: None }
-  GetGlobalThis(v9)
-  LoadConst(v10, const[0])
-  ObjSet { obj: v9, key: v10, value: v8 }
+  GetGlobalThis(v8)
+  LoadConst(v9, const[0])
+  ClosureNew { dest: v10, fnid: LocalFnId(1), forced_this: None }
+  ObjSet { obj: v8, key: v9, value: v10 }
 fn LocalFnId(1)
   k0 Number(3.0)
   LoadConst(v8, const[0])
