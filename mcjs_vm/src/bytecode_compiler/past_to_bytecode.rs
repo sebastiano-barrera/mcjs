@@ -479,6 +479,29 @@ fn compile_expr(
                 fnb.emit(Instr::ClosureAddCapture(reg));
             }
 
+            {
+                let key = fnb.gen_reg();
+
+                // <function_object>.prototype = {}
+                compile_load_const(fnb, key, Literal::String("prototype".to_string()));
+                let proto = fnb.gen_reg();
+                fnb.emit(Instr::ObjCreateEmpty(proto));
+                fnb.emit(Instr::ObjSet {
+                    obj: dest,
+                    key,
+                    value: proto,
+                });
+
+                // <function_object>.prototype = globalThis.Function
+                let ctor = compile_read_global(fnb, "Function".into());
+                compile_load_const(fnb, key, Literal::String("constructor".to_string()));
+                fnb.emit(Instr::ObjSet {
+                    obj: dest,
+                    key,
+                    value: ctor,
+                });
+            }
+
             Ok(dest)
         }
         Expr::Call {

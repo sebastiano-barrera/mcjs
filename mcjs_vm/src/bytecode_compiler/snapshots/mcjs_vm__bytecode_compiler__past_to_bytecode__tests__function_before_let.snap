@@ -3,14 +3,36 @@ source: mcjs_vm/src/bytecode_compiler/past_to_bytecode.rs
 expression: dump_functions(&compiled_module.functions)
 ---
 fn LocalFnId(0)
+  k0 String("prototype")
+  k1 JsWord(Atom('Function' type=static))
+  k2 String("constructor")
   ClosureNew { dest: v9, fnid: LocalFnId(1), forced_this: None }
+  LoadConst(v10, const[0])
+  ObjCreateEmpty(v11)
+  ObjSet { obj: v9, key: v10, value: v11 }
+  GetGlobalThis(v12)
+  LoadConst(v14, const[1])
+  ObjGet { dest: v13, obj: v12, key: v14 }
+  LoadConst(v10, const[2])
+  ObjSet { obj: v9, key: v10, value: v13 }
   LoadUndefined(v8)
-  Call { return_value: v10, this: v8, callee: v9 }
+  Call { return_value: v15, this: v8, callee: v9 }
 fn LocalFnId(1)
-  k0 Number(2.0)
+  k0 String("prototype")
+  k1 JsWord(Atom('Function' type=static))
+  k2 String("constructor")
+  k3 Number(2.0)
   ClosureNew { dest: v8, fnid: LocalFnId(2), forced_this: None }
   ClosureAddCapture(v9)
-  LoadConst(v9, const[0])
+  LoadConst(v10, const[0])
+  ObjCreateEmpty(v11)
+  ObjSet { obj: v8, key: v10, value: v11 }
+  GetGlobalThis(v12)
+  LoadConst(v14, const[1])
+  ObjGet { dest: v13, obj: v12, key: v14 }
+  LoadConst(v10, const[2])
+  ObjSet { obj: v8, key: v10, value: v13 }
+  LoadConst(v9, const[3])
 fn LocalFnId(2)
   k0 Number(3.0)
   k1 Number(3.0)
