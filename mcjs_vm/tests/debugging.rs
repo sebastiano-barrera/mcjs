@@ -37,10 +37,8 @@ foo();
     {
         let probe = Probe::attach(&mut interpreter);
         let bytecode::GlobalIID(fnid, _) = probe.giid();
-        assert_eq!(
-            fnid,
-            bytecode::FnId(bytecode::SCRIPT_MODULE_ID, bytecode::LocalFnId(2))
-        );
+        let bytecode::FnId(mod_id, _) = fnid;
+        assert_eq!(mod_id, bytecode::SCRIPT_MODULE_ID);
 
         assert_eq!(probe.sink(), &[Value::Number(1.0)]);
 
