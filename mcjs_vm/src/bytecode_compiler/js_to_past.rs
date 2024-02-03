@@ -912,41 +912,33 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                     let key_count = fnb.add_expr(Expr::ArrayLen(keys));
                     let (_, key_count) = create_tmp(fnb, key_count);
 
-                    fnb.block(|fnb| {
-                        let block_start = fnb.peek_stmt_id();
+                    let loop_start = fnb.peek_stmt_id();
 
-                        let test = fnb.add_expr(Expr::Binary(
-                            swc_ecma_ast::BinaryOp::Lt,
-                            key_ndx,
-                            key_count,
-                        ));
-                        fnb.add_stmt(StmtOp::IfNot { test });
-                        fnb.add_break_stmt();
+                    let test =
+                        fnb.add_expr(Expr::Binary(swc_ecma_ast::BinaryOp::Lt, key_ndx, key_count));
+                    fnb.add_stmt(StmtOp::IfNot { test });
+                    fnb.add_break_stmt();
 
-                        let element = fnb.add_expr(Expr::ArrayNth {
-                            arr: keys,
-                            index: key_ndx,
-                        });
-                        fnb.add_stmt(StmtOp::Assign(item_var, element));
-
-                        fnb.block(|fnb| {
-                            fnb.continue_exits_this_block();
-                            compile_stmt(fnb, &forin_stmt.body);
-                        });
-
-                        {
-                            let one = fnb.add_expr(ONE);
-                            let new_val = fnb.add_expr(Expr::Binary(
-                                swc_ecma_ast::BinaryOp::Add,
-                                key_ndx,
-                                one,
-                            ));
-                            fnb.add_stmt(StmtOp::Assign(key_ndx_tmp, new_val));
-                        }
-
-                        fnb.add_unshares_up_to(outer_block_id);
-                        fnb.add_stmt(StmtOp::Jump(block_start));
+                    let element = fnb.add_expr(Expr::ArrayNth {
+                        arr: keys,
+                        index: key_ndx,
                     });
+                    fnb.add_stmt(StmtOp::Assign(item_var, element));
+
+                    fnb.block(|fnb| {
+                        fnb.continue_exits_this_block();
+                        compile_stmt(fnb, &forin_stmt.body);
+                    });
+
+                    {
+                        let one = fnb.add_expr(ONE);
+                        let new_val =
+                            fnb.add_expr(Expr::Binary(swc_ecma_ast::BinaryOp::Add, key_ndx, one));
+                        fnb.add_stmt(StmtOp::Assign(key_ndx_tmp, new_val));
+                    }
+
+                    fnb.add_unshares_up_to(outer_block_id);
+                    fnb.add_stmt(StmtOp::Jump(loop_start));
                 });
             }
             swc_ecma_ast::Stmt::ForOf(_) => todo!(),
