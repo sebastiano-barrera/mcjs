@@ -715,7 +715,8 @@ mod builder {
             self.blocks.push(Block {
                 id: block_id,
                 names: HashMap::new(),
-                iid_of_stmt: (0..stmts_count).map(|_| bytecode::IID(u16::MAX)).collect(),
+                // '+ 1' because we also map the one-past-the-end StmtID
+                iid_of_stmt: (0..stmts_count + 1).map(|_| bytecode::IID(u16::MAX)).collect(),
                 n_started_stmts: 0,
                 deferred_actions: Vec::new(),
             })
@@ -738,7 +739,13 @@ mod builder {
 
             let iid_start = self.peek_iid();
             let ret = action(self);
+            // Start one more statement and consider a StmtID that points to
+            // one-past-the-end the list of stmts; it's still valid and its
+            // corresponding IID is iid_end, which is one-past-the-end the list
+            // of instructions.
+            self.mark_stmt_start();
             let iid_end = self.peek_iid();
+
 
             let block = self.cur_block_mut();
             let deferred_actions = std::mem::take(&mut block.deferred_actions);
