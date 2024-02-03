@@ -15,11 +15,23 @@ pub fn compile_module(func: &js_to_past::Function, min_lfnid: u16) -> Result<Com
     let mut module_builder = builder::ModuleBuilder::new(min_lfnid);
 
     let globals: HashSet<_> = func.unbound_names.iter().cloned().collect();
-    let captures = Vec::new();
-    let force_strict = false;
-    let root_fnid = compile_function(&globals, &mut module_builder, captures, func, force_strict)?;
 
-    let module = module_builder.build(root_fnid);
+    // Similar to `compile_function`, but we have no parameters, no captures,
+    // and we define 'globalThis' at the root scope
+    let mut fnb = builder::FnBuilder::new(&globals, &mut module_builder);
+    fnb.set_strict_mode(func.declares_use_strict);
+
+    let stmts_count = func.body.stmts().count();
+    fnb.block(func.body.id, stmts_count, |fnb| {
+        let reg = fnb.gen_reg();
+        fnb.emit(Instr::GetGlobalThis(reg));
+        fnb.define_name(DeclName::Js("globalThis".into()), reg);
+
+        compile_block_internal(fnb, &func.body)
+    })?;
+
+    let root_lfnid = fnb.build(func.span);
+    let module = module_builder.build(root_lfnid);
 
     trace_dump_module(&module);
     Ok(module)
@@ -716,7 +728,9 @@ mod builder {
                 id: block_id,
                 names: HashMap::new(),
                 // '+ 1' because we also map the one-past-the-end StmtID
-                iid_of_stmt: (0..stmts_count + 1).map(|_| bytecode::IID(u16::MAX)).collect(),
+                iid_of_stmt: (0..stmts_count + 1)
+                    .map(|_| bytecode::IID(u16::MAX))
+                    .collect(),
                 n_started_stmts: 0,
                 deferred_actions: Vec::new(),
             })
@@ -745,7 +759,6 @@ mod builder {
             // of instructions.
             self.mark_stmt_start();
             let iid_end = self.peek_iid();
-
 
             let block = self.cur_block_mut();
             let deferred_actions = std::mem::take(&mut block.deferred_actions);
