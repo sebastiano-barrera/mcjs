@@ -11,8 +11,8 @@ expression: function.dump_to_string()
         exprs:
           e0: NumberLiteral(3.0)
         stmts:
-          [0-0] Return(e0)
+          [25-33] Return(e0)
       }
   stmts:
-    [0-0] Assign(myFunction, e0)
+    [1-35] Assign(myFunction, e0)
 }

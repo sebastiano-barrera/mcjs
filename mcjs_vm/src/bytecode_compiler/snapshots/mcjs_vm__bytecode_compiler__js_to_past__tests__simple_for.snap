@@ -10,15 +10,15 @@ expression: function.dump_to_string()
     e0: ArrayCreate
     e1: Read(tmp1)
   stmts:
-    [0-0] Assign(tmp1, e0)
-    [0-0] Assign(closures, e1)
+    [33-35] Assign(tmp1, e0)
+    [18-35] Assign(closures, e1)
     block2 {
       decls:
         Decl: let i
       exprs:
         e0: NumberLiteral(0.0)
       stmts:
-        [0-0] Assign(i, e0)
+        [52-104] Assign(i, e0)
         block3 {
           decls:
           exprs:
@@ -51,10 +51,10 @@ expression: function.dump_to_string()
             e14: NumberLiteral(1.0)
             e15: Binary("+", e13, e14)
           stmts:
-            [0-0] Evaluate(e9)
-            [0-0] Evaluate(e12)
-            [0-0] IfNot { test: e12 }
-            [0-0] Break(block2)
+            [66-95] Evaluate(e9)
+            [66-95] Evaluate(e12)
+            [52-104] IfNot { test: e12 }
+            [52-104] Break(block2)
             block6 {
               decls:
               exprs:
@@ -65,10 +65,10 @@ expression: function.dump_to_string()
                   stmts:
                 }
             }
-            [0-0] Assign(i, e15)
-            [0-0] Evaluate(e15)
-            [0-0] Unshare(i)
-            [0-0] Jump(StmtID(0))
+            [97-100] Assign(i, e15)
+            [52-104] Evaluate(e15)
+            [52-104] Unshare(i)
+            [52-104] Jump(StmtID(0, block3))
         }
     }
 }
