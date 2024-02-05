@@ -26,7 +26,7 @@ expression: function.dump_to_string()
           [52-74] Assign(f, e0)
           [95-105] Assign(x, e1)
       }
-    e1: Call { callee: e0, args: [], is_new: false }
+    e1: Call { callee: e0, args: [] }
   stmts:
     [18-126] Evaluate(e1)
 }

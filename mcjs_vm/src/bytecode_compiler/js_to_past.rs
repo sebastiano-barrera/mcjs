@@ -84,6 +84,7 @@ impl Block {
                     }
                     StmtOp::Throw(eid) => check_expr_id(eid),
                     StmtOp::TryBegin { handler } => check_stmt_id(handler),
+                    StmtOp::StrAppend(_, eid) => check_expr_id(eid),
                 }
             }
 
@@ -125,6 +126,9 @@ impl Block {
                         check_expr_id(callee);
                         args.iter().for_each(&check_expr_id);
                     }
+                    Expr::ImportModule { import_path: _ } => {}
+                    Expr::StringCreate => {}
+                    Expr::RegexLiteral { .. } => {}
                 }
             }
         }
@@ -293,6 +297,7 @@ pub enum StmtOp {
     TryEnd,
 
     Debugger,
+    StrAppend(DeclName, ExprID),
 }
 
 impl StmtOp {
@@ -340,6 +345,15 @@ pub enum Expr {
     },
 
     CurrentException,
+
+    ImportModule {
+        import_path: JsWord,
+    },
+    StringCreate,
+    RegexLiteral {
+        pattern: String,
+        flags: String,
+    },
 }
 
 const ZERO: Expr = Expr::NumberLiteral(0.0);
@@ -618,29 +632,20 @@ use builder::{Builder, FnBuilder};
 use swc_common::Spanned;
 
 use crate::{
-    error, impl_debug_via_dump,
+    error, impl_debug_via_dump, tracing,
     util::{self, write_comma_sep},
 };
 
-pub fn compile_script(ast_module: swc_ecma_ast::Module) -> Function {
+pub fn compile_script(script_ast: &swc_ecma_ast::Script) -> Function {
     use swc_ecma_ast::ModuleItem;
-
-    let stmts: Vec<_> = ast_module
-        .body
-        .into_iter()
-        .map(|item| match item {
-            ModuleItem::ModuleDecl(_) => panic!("invalid input: module decl in script"),
-            ModuleItem::Stmt(stmt) => stmt,
-        })
-        .collect();
 
     let mut builder = Builder::new();
     let mut fnb = builder.new_function();
-    for stmt in &stmts {
+    for stmt in &script_ast.body {
         compile_stmt(&mut fnb, stmt);
     }
     let block = fnb.build();
-    let mut function = compile_function_from_parts(ast_module.span, &[], block);
+    let mut function = compile_function_from_parts(script_ast.span, &[], block);
 
     // Toplevel var (non-lexical) definitions in a script are allocated in
     // the `globalThis` object. This can be achieved simply by removing those
@@ -657,6 +662,148 @@ pub fn compile_script(ast_module: swc_ecma_ast::Module) -> Function {
         }
     }
     function.body.decls = kept_decls;
+
+    function
+}
+
+pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> Function {
+    use swc_ecma_ast::ModuleItem;
+
+    let mut builder = Builder::new();
+    let mut fnb = builder.new_function();
+
+    let lit_named = fnb.add_expr(Expr::StringLiteral("__named".into()));
+    let lit_default = fnb.add_expr(Expr::StringLiteral("__default".into()));
+    let module_obj = fnb.add_expr(Expr::ObjectCreate);
+    let (_, module_obj) = create_tmp(&mut fnb, module_obj);
+
+    let named_exports_obj = fnb.add_expr(Expr::ObjectCreate);
+    let (_, named_exports_obj) = create_tmp(&mut fnb, named_exports_obj);
+    fnb.add_stmt(StmtOp::ObjectSet {
+        obj: module_obj,
+        key: lit_named,
+        value: named_exports_obj,
+    });
+
+    // -- process imports
+    for module_item in &script_ast.body {
+        if let ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::Import(import_decl)) = module_item {
+            if import_decl.type_only {
+                // TODO(small feat) make up a system for warnings
+                eprintln!("bytecode_compiler: warning: discarding type-only import statement");
+                continue;
+            }
+
+            let module_path: JsWord = import_decl.src.value.to_string().into();
+            let module = fnb.add_expr(Expr::ImportModule {
+                import_path: module_path,
+            });
+            let (_, module) = create_tmp(&mut fnb, module);
+            let named_exports = fnb.add_expr(Expr::ObjectGet {
+                obj: module,
+                key: lit_named,
+            });
+            let default_export = fnb.add_expr(Expr::ObjectGet {
+                obj: module,
+                key: lit_default,
+            });
+
+            for spec in &import_decl.specifiers {
+                match spec {
+                    // import { foo } from './a/b/c/module.js'
+                    //
+                    // We compile it as:
+                    //    (mod) = GetModule <module id>
+                    //    const foo = (mod).foo
+                    swc_ecma_ast::ImportSpecifier::Named(d) => {
+                        if d.is_type_only {
+                            eprintln!(
+                                "bytecode_compiler: warning: discarding type-only import specifier"
+                            );
+                            continue;
+                        }
+                        if d.imported.is_some() {
+                            todo!("import specifier with rename");
+                        }
+
+                        let var_name: JsWord = d.local.sym.clone();
+
+                        let key = fnb.add_expr(Expr::StringLiteral(var_name.clone()));
+                        let imported_value = fnb.add_expr(Expr::ObjectGet {
+                            obj: named_exports,
+                            key,
+                        });
+
+                        let decl_name = DeclName::Js(var_name);
+                        fnb.add_decl(Decl {
+                            name: decl_name.clone(),
+                            is_lexical: true,
+                            is_global: false,
+                        });
+                        fnb.add_stmt(StmtOp::Assign(decl_name, imported_value));
+                    }
+                    swc_ecma_ast::ImportSpecifier::Default(d) => {
+                        let name = DeclName::Js(d.local.sym.clone());
+                        fnb.add_decl(Decl {
+                            name: name.clone(),
+                            is_lexical: true,
+                            is_global: false,
+                        });
+                        fnb.add_stmt(StmtOp::Assign(name, default_export));
+                    }
+                    swc_ecma_ast::ImportSpecifier::Namespace(d) => {
+                        let name = DeclName::Js(d.local.sym.clone());
+                        fnb.add_decl(Decl {
+                            name: name.clone(),
+                            is_lexical: true,
+                            is_global: false,
+                        });
+                        fnb.add_stmt(StmtOp::Assign(name, named_exports));
+                    }
+                }
+            }
+        }
+    }
+
+    // -- process module body (stmts) & exports
+    for module_item in &script_ast.body {
+        match module_item {
+            ModuleItem::Stmt(stmt) => {
+                compile_stmt(&mut fnb, stmt);
+            }
+            ModuleItem::ModuleDecl(module_decl) => match module_decl {
+                swc_ecma_ast::ModuleDecl::ExportDecl(export_decl) => {
+                    compile_decl(&mut fnb, &export_decl.decl);
+                }
+                swc_ecma_ast::ModuleDecl::ExportDefaultDecl(export_default_decl) => {
+                    match &export_default_decl.decl {
+                        swc_ecma_ast::DefaultDecl::Class(_) => {
+                            unsupported_node!(export_default_decl)
+                        }
+                        swc_ecma_ast::DefaultDecl::Fn(fn_expr) => {
+                            compile_fn_expr(&mut fnb, &fn_expr);
+                        }
+                        swc_ecma_ast::DefaultDecl::TsInterfaceDecl(_) => {}
+                    }
+                }
+
+                swc_ecma_ast::ModuleDecl::ExportDefaultExpr(_)
+                | swc_ecma_ast::ModuleDecl::ExportNamed(_)
+                | swc_ecma_ast::ModuleDecl::ExportAll(_) => unsupported_node!(module_decl),
+
+                swc_ecma_ast::ModuleDecl::Import(_)
+                | swc_ecma_ast::ModuleDecl::TsImportEquals(_)
+                | swc_ecma_ast::ModuleDecl::TsExportAssignment(_)
+                | swc_ecma_ast::ModuleDecl::TsNamespaceExport(_) => {}
+            },
+        }
+    }
+
+    let block = fnb.build();
+    let mut function = compile_function_from_parts(script_ast.span, &[], block);
+
+    // modules are always strict, no matter what
+    function.declares_use_strict = true;
 
     function
 }
@@ -943,29 +1090,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             }
             swc_ecma_ast::Stmt::ForOf(_) => todo!(),
 
-            swc_ecma_ast::Stmt::Decl(decl) => match decl {
-                swc_ecma_ast::Decl::Fn(fn_decl) => {
-                    let name = DeclName::Js(fn_decl.ident.sym.clone());
-                    fnb.add_decl(Decl {
-                        name: name.clone(),
-                        is_lexical: false,
-                        is_global: false,
-                    });
-
-                    let func = {
-                        let builder = fnb.suspend();
-                        let func = compile_function(builder, &fn_decl.function);
-                        Box::new(func)
-                    };
-
-                    let closure = fnb.add_expr(Expr::CreateClosure { func });
-                    fnb.add_stmt(StmtOp::Assign(name, closure));
-                }
-                swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(fnb, var_decl),
-                _ => {
-                    unsupported_node!(decl)
-                }
-            },
+            swc_ecma_ast::Stmt::Decl(decl) => compile_decl(fnb, decl),
             swc_ecma_ast::Stmt::Expr(expr_stmt) => {
                 let value = compile_expr(fnb, &expr_stmt.expr);
                 fnb.add_stmt(StmtOp::Evaluate(value));
@@ -976,6 +1101,32 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             }
         }
     })
+}
+
+fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
+    match decl {
+        swc_ecma_ast::Decl::Fn(fn_decl) => {
+            let name = DeclName::Js(fn_decl.ident.sym.clone());
+            fnb.add_decl(Decl {
+                name: name.clone(),
+                is_lexical: false,
+                is_global: false,
+            });
+
+            let func = {
+                let builder = fnb.suspend();
+                let func = compile_function(builder, &fn_decl.function);
+                Box::new(func)
+            };
+
+            let closure = fnb.add_expr(Expr::CreateClosure { func });
+            fnb.add_stmt(StmtOp::Assign(name, closure));
+        }
+        swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(fnb, var_decl),
+        _ => {
+            unsupported_node!(decl)
+        }
+    }
 }
 
 fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
@@ -1001,6 +1152,8 @@ fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
 }
 
 fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
+    let t = tracing::section("compile_expr");
+
     fnb.with_span(expr.span(), |fnb| {
         match expr {
             swc_ecma_ast::Expr::This(_) => fnb.add_expr(Expr::This),
@@ -1016,7 +1169,8 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                         let value = compile_expr(fnb, &expr_or_spread.expr);
                         fnb.add_stmt(StmtOp::ArrayPush(array_tmp.clone(), value));
                     } else {
-                        todo!("What does `None` mean here?")
+                        t.log("unsupported_array_expr", &format!("{:?}", array_expr.span));
+                        // todo!("What does `None` mean here? {:?}", array_expr.span)
                     }
                 }
 
@@ -1085,12 +1239,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
             }
 
             swc_ecma_ast::Expr::Fn(fn_expr) => {
-                let func = {
-                    let builder = fnb.suspend();
-                    let func = compile_function(builder, &fn_expr.function);
-                    Box::new(func)
-                };
-                fnb.add_expr(Expr::CreateClosure { func })
+                compile_fn_expr(fnb, fn_expr)
             }
             swc_ecma_ast::Expr::Arrow(arrow_expr) => {
                 // let span = arrow_expr.span;
@@ -1249,12 +1398,37 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 swc_ecma_ast::Lit::Bool(b) => fnb.add_expr(Expr::BoolLiteral(b.value)),
                 swc_ecma_ast::Lit::Null(_) => fnb.add_expr(Expr::Null),
                 swc_ecma_ast::Lit::Num(num) => fnb.add_expr(Expr::NumberLiteral(num.value)),
+                swc_ecma_ast::Lit::Regex(re) => {
+                    fnb.add_expr(Expr::RegexLiteral {
+                        pattern: re.exp.to_string(),
+                        flags: re.flags.to_string(),
+                    })
+                },
+
                 swc_ecma_ast::Lit::BigInt(_)
-                | swc_ecma_ast::Lit::Regex(_)
                 | swc_ecma_ast::Lit::JSXText(_) => unsupported_node!(lit),
             },
 
-            swc_ecma_ast::Expr::Tpl(_) => todo!(),
+            swc_ecma_ast::Expr::Tpl(tpl) => {
+                assert_eq!(tpl.quasis.len(), tpl.exprs.len() + 1);
+
+                let create_str = fnb.add_expr(Expr::StringCreate);
+                let (tmp_var, read_tmp) = create_tmp(fnb, create_str);
+
+                for (quasi, expr) in tpl.quasis.iter().zip(tpl.exprs.iter()) {
+                    let quasi = fnb.add_expr(Expr::StringLiteral(quasi.raw.to_string().into()));
+                    fnb.add_stmt(StmtOp::StrAppend(tmp_var.clone(), quasi));
+
+                    let value = compile_expr(fnb, expr);
+                    fnb.add_stmt(StmtOp::StrAppend(tmp_var.clone(), value));
+                }
+
+                let last_quasi = tpl.quasis.last().unwrap().raw.to_string();
+                let quasi = fnb.add_expr(Expr::StringLiteral(last_quasi.into()));
+                fnb.add_stmt(StmtOp::StrAppend(tmp_var, quasi));
+
+                read_tmp
+            },
             swc_ecma_ast::Expr::Paren(paren_expr) => compile_expr(fnb, &paren_expr.expr),
 
             swc_ecma_ast::Expr::SuperProp(_)
@@ -1281,6 +1455,15 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
             }
         }
     })
+}
+
+fn compile_fn_expr(fnb: &mut FnBuilder, fn_expr: &swc_ecma_ast::FnExpr) -> ExprID {
+    let func = {
+        let builder = fnb.suspend();
+        let func = compile_function(builder, &fn_expr.function);
+        Box::new(func)
+    };
+    fnb.add_expr(Expr::CreateClosure { func })
 }
 
 fn compile_member_assignment(
@@ -1445,40 +1628,54 @@ fn block_starts_with_use_strict(block: &Block) -> bool {
 }
 
 fn find_unbound_references(root: &Block, param_names: &[JsWord]) -> Vec<JsWord> {
-    let mut declared = HashSet::new();
-    let mut referenced = HashSet::new();
+    type Names = HashSet<JsWord>;
 
-    for expr in &root.exprs {
-        match expr {
-            Expr::Read(DeclName::Js(name)) => {
-                referenced.insert(name.clone());
-            }
-            Expr::CreateClosure { func } => {
-                for name in &func.unbound_names {
+    fn process_block(block: &Block) -> Names {
+        let mut referenced = Names::new();
+
+        for expr in &block.exprs {
+            match expr {
+                Expr::Read(DeclName::Js(name)) => {
                     referenced.insert(name.clone());
                 }
+                Expr::CreateClosure { func } => {
+                    for name in &func.unbound_names {
+                        referenced.insert(name.clone());
+                    }
+                }
+                _ => {}
             }
-            _ => (),
         }
+
+        for stmt in &block.stmts {
+            match &stmt.op {
+                StmtOp::Assign(DeclName::Js(name), _) => {
+                    referenced.insert(name.clone());
+                }
+                StmtOp::Block(block) => {
+                    referenced.extend(process_block(block).into_iter());
+                }
+                _ => {}
+            }
+        }
+
+        for decl in &block.decls {
+            if let DeclName::Js(js_name) = &decl.name {
+                referenced.remove(js_name);
+            }
+        }
+
+        referenced
     }
 
-    for stmt in &root.stmts {
-        if let StmtOp::Assign(DeclName::Js(name), _) = &stmt.op {
-            referenced.insert(name.clone());
-        }
-    }
+    let mut referenced = process_block(root);
 
     for js_name in param_names {
-        declared.insert(js_name.clone());
-    }
-    for decl in &root.decls {
-        if let DeclName::Js(js_name) = &decl.name {
-            declared.insert(js_name.clone());
-        }
+        referenced.remove(&js_name);
     }
 
     #[allow(unused_mut)]
-    let mut unbound: Vec<_> = referenced.difference(&declared).cloned().collect();
+    let mut unbound: Vec<_> = referenced.into_iter().collect();
 
     // Helps with insta tests
     #[cfg(test)]
@@ -1549,10 +1746,8 @@ mod tests {
     }
 
     fn quick_compile(src: String) -> super::Function {
-        let source_map = Rc::new(SourceMap::default());
-        let swc_ast =
-            super::super::parse_file("<input>".to_string(), src, source_map).expect("parse error");
-        let function = super::compile_script(swc_ast);
+        let swc_ast = crate::bytecode_compiler::quick_parse_script(src);
+        let function = super::compile_script(&swc_ast);
         function
     }
 }

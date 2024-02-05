@@ -838,7 +838,7 @@ impl<'a> Interpreter<'a> {
 
                     let root_fnid = self
                         .loader
-                        .load_import(&module_path, import_site)
+                        .load_import(&module_path, Some(import_site))
                         .with_context(error!("while trying to import '{}'", module_path))?;
 
                     if let Some(module_oid) = self.realm.module_objs.get(&root_fnid.0) {
@@ -2274,7 +2274,7 @@ mod tests {
 
     #[test]
     fn test_constructor_prototype() {
-        let output = quick_run(
+        quick_run(
             r#"
                 function Test262Error(message) {
                   this.message = message || "";

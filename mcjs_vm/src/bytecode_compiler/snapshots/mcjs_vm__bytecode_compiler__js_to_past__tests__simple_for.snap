@@ -27,7 +27,7 @@ expression: function.dump_to_string()
             e2: StringLiteral(Atom('push' type=inline))
             e3: ObjectGet { obj: e1, key: e2 }
             e4: CreateClosure:
-              [80-87] func () unbound[] block4 {
+              [80-87] func () unbound[i] block4 {
                 decls:
                 exprs:
                 stmts:
@@ -42,8 +42,8 @@ expression: function.dump_to_string()
             e5: StringLiteral(Atom('bind' type=inline))
             e6: ObjectGet { obj: e4, key: e5 }
             e7: This
-            e8: Call { callee: e6, args: [e7], is_new: false }
-            e9: Call { callee: e3, args: [e8], is_new: false }
+            e8: Call { callee: e6, args: [e7] }
+            e9: Call { callee: e3, args: [e8] }
             e10: Read(i)
             e11: NumberLiteral(5.0)
             e12: Binary("<", e10, e11)

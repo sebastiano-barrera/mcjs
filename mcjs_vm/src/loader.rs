@@ -206,15 +206,21 @@ impl Loader {
     pub fn load_import(
         &mut self,
         import_path: &str,
-        import_site: bytecode::ModuleId,
+        import_site: Option<bytecode::ModuleId>,
     ) -> Result<bytecode::FnId> {
         // The starting point is the module's parent package
         let base_path = match import_site {
-            bytecode::SCRIPT_MODULE_ID =>
-                self.base_path.as_deref()
-                    .ok_or_else(|| error!("imports not allowed in script context, because no base path configured for this Loader"))?,
+            None => self
+                .base_path
+                .as_deref()
+                .expect("no base path configured for this Loader"),
 
-            import_site => self.get_module(import_site)?
+            Some(bytecode::SCRIPT_MODULE_ID) => {
+                return Err(error!("imports not allowed in script context"));
+            }
+
+            Some(import_site) => self
+                .get_module(import_site)?
                 .abs_path
                 .parent()
                 .expect("loader bug: module path has no parent"),

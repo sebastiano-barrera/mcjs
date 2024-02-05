@@ -24,20 +24,20 @@ expression: function.dump_to_string()
                       e3: ObjectGet { obj: e1, key: e2 }
                       e4: Read(someGlobalVar)
                       e5: Read(someLocalVar)
-                      e6: Call { callee: e3, args: [e4, e5], is_new: false }
+                      e6: Call { callee: e3, args: [e4, e5] }
                     stmts:
                       [112-134] Assign(someLocalVar, e0)
                       [155-195] Evaluate(e6)
                   }
-                e1: Call { callee: e0, args: [], is_new: false }
+                e1: Call { callee: e0, args: [] }
               stmts:
                 [78-216] Evaluate(e1)
             }
-          e1: Call { callee: e0, args: [], is_new: false }
+          e1: Call { callee: e0, args: [] }
         stmts:
           [48-237] Evaluate(e1)
       }
-    e1: Call { callee: e0, args: [], is_new: false }
+    e1: Call { callee: e0, args: [] }
   stmts:
     [18-258] Evaluate(e1)
 }
