@@ -2,17 +2,17 @@
 
 extern crate mcjs_vm;
 
-use mcjs_vm::{bytecode::LocalFnId, interpreter::debugger, FnId, Literal, ModuleId};
+use mcjs_vm::{interpreter::debugger, Literal};
 use std::path::PathBuf;
 
 #[test]
 fn test_load_json5_stringify() {
-    test_integration_script("test_stringify.mjs");
+    test_integration_script("./test_stringify.mjs");
 }
 
 #[test]
 fn test_load_json5_parse() {
-    test_integration_script("test_parse.mjs");
+    test_integration_script("./test_parse.mjs");
 }
 
 /// Check that the instruction breakpoint associated to a new source
@@ -20,12 +20,9 @@ fn test_load_json5_parse() {
 #[test]
 fn test_remove_ibkpt_with_sbkpt() {
     // Just load *some* code
-    let mut prereq = prepare_vm("test_parse.mjs");
+    let mut prereq = prepare_vm("./test_parse.mjs");
 
-    let fnid = prereq
-        .loader
-        .load_import("json5", mcjs_vm::bytecode::SCRIPT_MODULE_ID)
-        .unwrap();
+    let fnid = prereq.loader.load_import("json5", None).unwrap();
 
     let branges: Vec<_> = prereq.loader.function_breakranges(fnid).unwrap().collect();
     let brid = branges[1].0;
@@ -46,12 +43,9 @@ fn test_remove_ibkpt_with_sbkpt() {
 #[test]
 fn test_remove_sbkpt_with_ibkpt() {
     // Just load *some* code
-    let mut prereq = prepare_vm("test_parse.mjs");
+    let mut prereq = prepare_vm("./test_parse.mjs");
 
-    let fnid = prereq
-        .loader
-        .load_import("json5", mcjs_vm::bytecode::SCRIPT_MODULE_ID)
-        .unwrap();
+    let fnid = prereq.loader.load_import("json5", None).unwrap();
 
     let branges: Vec<_> = prereq.loader.function_breakranges(fnid).unwrap().collect();
     let brid = branges[1].0;
@@ -109,13 +103,8 @@ fn prepare_vm(filename: &str) -> VMPrereq {
     let root_path = manifest_dir.join("test-resources/test-scripts/json5/");
 
     let mut loader = mcjs_vm::Loader::new(Some(root_path.clone()));
-
-    let script_path = root_path.join(filename);
-    assert!(script_path.starts_with(&root_path));
-
-    let content = std::fs::read_to_string(&script_path).expect("error while reading file");
     let root_fnid = loader
-        .load_script(Some(filename.to_string()), content)
+        .load_import(filename, None)
         .expect("error while compiling script");
 
     let realm = mcjs_vm::Realm::new(&mut loader);

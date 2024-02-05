@@ -233,6 +233,12 @@ fn compile_one_stmt<'a>(
         StmtOp::TryEnd => {
             fnb.emit(Instr::PopExcHandler);
         }
+
+        StmtOp::StrAppend(buf, chunk) => {
+            let buf = compile_read(fnb, buf);
+            let chunk = compile_expr(fnb, None, block, *chunk)?;
+            fnb.emit(Instr::StrAppend(buf, chunk));
+        }
     };
 
     if !stmt.span.is_dummy() {
@@ -267,28 +273,27 @@ fn compile_read_global(fnb: &mut FnBuilder<'_>, name: JsWord) -> bytecode::VReg 
     dest
 }
 
-fn compile_new(fnb: &mut FnBuilder<'_>, ret: bytecode::VReg, constructor: bytecode::VReg) {
+fn compile_new(fnb: &mut FnBuilder<'_>, obj: bytecode::VReg, constructor: bytecode::VReg) {
     let key = fnb.gen_reg();
+
+    let prototype = fnb.gen_reg();
     compile_load_const(fnb, key, Literal::String("prototype".into()));
-    // reusing register `constructor` for the prototype
     fnb.emit(Instr::ObjGet {
-        dest: constructor,
+        dest: prototype,
         obj: constructor,
         key,
     });
 
-    let key = fnb.gen_reg();
     compile_load_const(fnb, key, Literal::String("__proto__".into()));
     fnb.emit(Instr::ObjSet {
-        obj: ret,
+        obj,
         key,
-        value: constructor,
+        value: prototype,
     });
 
-    let key = fnb.gen_reg();
     compile_load_const(fnb, key, Literal::String("constructor".into()));
     fnb.emit(Instr::ObjSet {
-        obj: ret,
+        obj,
         key,
         value: constructor,
     });
@@ -557,6 +562,7 @@ fn compile_expr(
 
                     let (this, callee) = match callee {
                         Expr::ObjectGet { obj, key } => {
+                            assert!(!is_new, "malformed PAST: a.b(c) syntax must not be a 'new'");
                             let this = compile_expr(fnb, None, block, *obj)?;
                             let key = compile_expr(fnb, None, block, *key)?;
                             let callee = fnb.gen_reg();
@@ -567,12 +573,13 @@ fn compile_expr(
                             });
                             (this, callee)
                         }
-                        _ => {
+                        _  => {
                             let this = fnb.gen_reg();
                             let callee = compile_expr(fnb, None, block, *callee_eid)?;
                             fnb.emit(Instr::LoadUndefined(this));
                             (this, callee)
                         }
+                        
                     };
 
                     let return_value = get_dest(fnb);
@@ -598,6 +605,27 @@ fn compile_expr(
         Expr::CurrentException => {
             let dest = get_dest(fnb);
             fnb.emit(Instr::GetCurrentException(dest));
+            Ok(dest)
+        }
+
+        Expr::ImportModule { import_path } => {
+            let dest = get_dest(fnb);
+            let import_path_reg = fnb.gen_reg();
+            compile_load_const(fnb, import_path_reg, Literal::JsWord(import_path.clone()));
+            fnb.emit(Instr::ImportModule(dest, import_path_reg));
+            Ok(dest)
+        }
+
+        Expr::StringCreate => {
+            let dest = get_dest(fnb);
+            fnb.emit(Instr::StrCreateEmpty(dest));
+            Ok(dest)
+        }
+
+        Expr::RegexLiteral { pattern, flags } => {
+            let dest = get_dest(fnb);
+            let ctor = compile_read_global(fnb, "RegExp".into());
+            todo!("compile a new here.  I don't remember how to do it right now and it's late night");
             Ok(dest)
         }
     }
@@ -1074,10 +1102,8 @@ mod tests {
     }
 
     fn quick_compile(src: String) -> CompiledModule {
-        let source_map = Rc::new(SourceMap::default());
-        let swc_ast =
-            super::super::parse_file("<input>".to_string(), src, source_map).expect("parse error");
-        let past_function = super::js_to_past::compile_script(swc_ast);
+        let swc_ast = crate::bytecode_compiler::quick_parse_script(src);
+        let past_function = super::js_to_past::compile_script(&swc_ast);
 
         let mut module_builder = super::ModuleBuilder::new(0);
         let globals = past_function.unbound_names.iter().cloned().collect();

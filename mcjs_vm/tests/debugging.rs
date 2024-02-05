@@ -63,9 +63,7 @@ fn test_pos_breakpoint() {
     // Simulate `import ... from 'test_pkg'` from a script
     let mut loader = mcjs_vm::Loader::new(Some(base_path));
 
-    let main_fnid = loader
-        .load_import("./breakme-0.js", bytecode::SCRIPT_MODULE_ID)
-        .unwrap();
+    let main_fnid = loader.load_import("./breakme-0.js", None).unwrap();
 
     let module_id = main_fnid.0;
     assert_ne!(module_id, bytecode::SCRIPT_MODULE_ID);
