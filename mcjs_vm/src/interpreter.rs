@@ -693,19 +693,17 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::ObjGetKeys { dest, obj } => {
                     // TODO Something more efficient?
-                    let keys: Vec<String> = {
-                        let obj = self.get_operand_object(*obj)?;
-                        obj.own_properties()
-                    };
-                    let keys = keys
+                    let obj = self.get_operand_object(*obj)?;
+                    let keys = obj
+                        .own_properties()
                         .into_iter()
-                        .map(|name| {
-                            let oid = self.realm.heap.new_string(name);
-                            Value::Object(oid)
-                        })
+                        .map(|name| Value::Object(self.realm.heap.new_string(name)))
                         .collect();
-                    let keys = Value::Object(self.realm.heap.new_array(keys));
-                    self.data.top_mut().set_result(*dest, keys);
+
+                    let keys_oid = self.realm.heap.new_array(keys);
+                    self.data
+                        .top_mut()
+                        .set_result(*dest, Value::Object(keys_oid));
                 }
                 Instr::ObjDelete { dest, obj, key } => {
                     // TODO Adjust return value: true for all cases except when the property is an
@@ -812,7 +810,7 @@ impl<'a> Interpreter<'a> {
                         forced_this,
                     });
 
-                    let oid = self.realm.heap.new_function(closure, HashMap::new());
+                    let oid = self.realm.heap.new_function(closure);
                     self.data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 // This is always handled in the code for ClosureNew
@@ -1276,32 +1274,33 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let mut global = HashMap::new();
 
     {
-        let Array_push = heap.new_function(Closure::Native(nf_Array_push), HashMap::new());
-        let Array_pop = heap.new_function(Closure::Native(nf_Array_pop), HashMap::new());
-        let mut array_proto = HashMap::new();
-        array_proto.insert("push".to_string(), Value::Object(Array_push));
-        array_proto.insert("pop".to_string(), Value::Object(Array_pop));
-        let array_proto = heap.new_ordinary_object(array_proto);
+        let Array_push = heap.new_function(Closure::Native(nf_Array_push));
+        let Array_pop = heap.new_function(Closure::Native(nf_Array_pop));
+        let array_proto_oid = heap.array_proto();
+        {
+            let mut array_proto = heap.get(array_proto_oid).unwrap().borrow_mut();
+            array_proto.set_own_element_or_property("push".into(), Value::Object(Array_push));
+            array_proto.set_own_element_or_property("pop".into(), Value::Object(Array_pop));
+        }
 
-        let Array_isArray = heap.new_function(Closure::Native(nf_Array_isArray), HashMap::new());
-        let mut array_cons = HashMap::new();
-        array_cons.insert("isArray".to_string(), Value::Object(Array_isArray));
-        array_cons.insert("prototype".to_string(), Value::Object(array_proto));
-        let array_cons = heap.new_function(Closure::Native(nf_Array), array_cons);
+        let Array_isArray = heap.new_function(Closure::Native(nf_Array_isArray));
+        let mut array_ctor_props = HashMap::new();
+        array_ctor_props.insert("isArray".to_string(), Value::Object(Array_isArray));
+        array_ctor_props.insert("prototype".to_string(), Value::Object(array_proto_oid));
+        let array_ctor = heap.new_ordinary_object(array_ctor_props);
+        heap.init_function(array_ctor, Closure::Native(nf_Array));
 
-        global.insert("Array".to_string(), Value::Object(array_cons));
+        global.insert("Array".to_string(), Value::Object(array_ctor));
     }
 
-    let RegExp = heap.new_function(Closure::Native(nf_RegExp), HashMap::new());
+    let RegExp = heap.new_function(Closure::Native(nf_RegExp));
     global.insert("RegExp".to_string(), Value::Object(RegExp));
 
     let mut number_cons_props = HashMap::new();
     number_cons_props.insert("prototype".to_string(), Value::Object(heap.number_proto()));
     {
-        let Number_prototype_toString = heap.new_function(
-            Closure::Native(nf_Number_prototype_toString),
-            HashMap::new(),
-        );
+        let Number_prototype_toString =
+            heap.new_function(Closure::Native(nf_Number_prototype_toString));
         let oid = heap.number_proto();
         let mut number_proto = heap.get(oid).unwrap().borrow_mut();
         number_proto.set_own_element_or_property(
@@ -1309,24 +1308,26 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
             Value::Object(Number_prototype_toString),
         )
     }
-    let Number = heap.new_function(Closure::Native(nf_Number), number_cons_props);
+    let Number = heap.new_ordinary_object(number_cons_props);
+    heap.init_function(Number, Closure::Native(nf_Number));
     global.insert("Number".to_string(), Value::Object(Number));
 
-    let String = heap.new_function(Closure::Native(nf_String), HashMap::new());
+    let String = heap.new_function(Closure::Native(nf_String));
     global.insert("String".to_string(), Value::Object(String));
 
-    let Boolean = heap.new_function(Closure::Native(nf_Boolean), HashMap::new());
+    let Boolean = heap.new_function(Closure::Native(nf_Boolean));
     global.insert("Boolean".to_string(), Value::Object(Boolean));
 
     let mut func_cons_props = HashMap::new();
     func_cons_props.insert("prototype".to_string(), Value::Object(heap.func_proto()));
-    let Function = heap.new_function(Closure::Native(nf_Function), func_cons_props);
+    let Function = heap.new_ordinary_object(func_cons_props);
+    heap.init_function(Function, Closure::Native(nf_Function));
     global.insert("Function".to_string(), Value::Object(Function));
 
-    let cash_print = heap.new_function(Closure::Native(nf_cash_print), HashMap::new());
+    let cash_print = heap.new_function(Closure::Native(nf_cash_print));
     global.insert("$print".to_string(), Value::Object(cash_print));
 
-    let func_bind = heap.new_function(Closure::Native(nf_Function_bind), HashMap::new());
+    let func_bind = heap.new_function(Closure::Native(nf_Function_bind));
     {
         let mut func_proto = heap.get(heap.func_proto()).unwrap().borrow_mut();
         func_proto.set_own_element_or_property("bind".into(), Value::Object(func_bind));
@@ -1383,10 +1384,11 @@ fn nf_RegExp(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Valu
 }
 
 #[allow(non_snake_case)]
-fn nf_Array(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Value> {
-    // TODO
-    let oid = intrp.realm.heap.new_array(Vec::new());
-    Ok(Value::Object(oid))
+fn nf_Array(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
+    let this = this.expect_obj().expect("compiler bug: new Array(...): non-object this");
+    // args directly go as values
+    intrp.realm.heap.init_array(this, args.to_vec());
+    Ok(Value::Undefined)
 }
 
 #[allow(non_snake_case)]
@@ -1496,7 +1498,7 @@ fn nf_Function_bind(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Re
         ..js_closure
     });
 
-    let new_obj_id = intrp.realm.heap.new_function(new_closure, HashMap::new());
+    let new_obj_id = intrp.realm.heap.new_function(new_closure);
     Ok(Value::Object(new_obj_id))
 }
 
@@ -2288,6 +2290,32 @@ mod tests {
                   throw new Test262Error(message);
                 };
             "#,
+        );
+    }
+
+    #[test]
+    fn test_new() {
+        let output = quick_run(
+            r#"
+                function MyConstructor(inner) {
+                    this.inner = inner
+                    return 'lol'
+                }
+
+                const obj = new MyConstructor(123)
+                sink(obj.inner === 123)
+                sink(obj.__proto__ === MyConstructor.prototype)
+                sink(obj.constructor === MyConstructor)
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+            ],
         );
     }
 }

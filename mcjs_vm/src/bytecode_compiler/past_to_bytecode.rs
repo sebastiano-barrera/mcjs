@@ -272,33 +272,6 @@ fn compile_read_global(fnb: &mut FnBuilder<'_>, name: JsWord) -> bytecode::VReg 
 
     dest
 }
-
-fn compile_new(fnb: &mut FnBuilder<'_>, obj: bytecode::VReg, constructor: bytecode::VReg) {
-    let key = fnb.gen_reg();
-
-    let prototype = fnb.gen_reg();
-    compile_load_const(fnb, key, Literal::String("prototype".into()));
-    fnb.emit(Instr::ObjGet {
-        dest: prototype,
-        obj: constructor,
-        key,
-    });
-
-    compile_load_const(fnb, key, Literal::String("__proto__".into()));
-    fnb.emit(Instr::ObjSet {
-        obj,
-        key,
-        value: prototype,
-    });
-
-    compile_load_const(fnb, key, Literal::String("constructor".into()));
-    fnb.emit(Instr::ObjSet {
-        obj,
-        key,
-        value: constructor,
-    });
-}
-
 fn compile_load_const(fnb: &mut FnBuilder, dest: bytecode::VReg, lit: Literal) {
     // Avoid string clone?
     let const_ndx = fnb.add_const(lit);
@@ -417,17 +390,8 @@ fn compile_expr(
         }
         Expr::ArrayCreate => {
             let array = get_dest(fnb);
-
             let constructor: bytecode::VReg = compile_read_global(fnb, "Array".into());
-            let this = fnb.gen_reg();
-            fnb.emit(Instr::LoadUndefined(this));
-            fnb.emit(Instr::Call {
-                return_value: array,
-                this,
-                callee: constructor,
-            });
-            compile_new(fnb, array, constructor);
-
+            compile_new(fnb, array, constructor, &[]);
             Ok(array)
         }
         Expr::ArrayNth { arr, index } => {
@@ -524,10 +488,8 @@ fn compile_expr(
         Expr::Call {
             callee: callee_eid,
             args,
-            is_new,
         } => {
-            let callee = block.get_expr(*callee_eid);
-            match callee {
+            match block.get_expr(*callee_eid) {
                 // Some things expressed in the `f(...)` call syntax are not actually calls to
                 // anything, but have a special meaning
                 Expr::Read(DeclName::Js(name)) if name == "sink" => {
@@ -553,7 +515,7 @@ fn compile_expr(
                 Expr::Read(DeclName::Js(name)) if name == "eval" => {
                     Err(error!("`eval` not supported"))
                 }
-                _ => {
+                callee => {
                     let mut arg_regs = Vec::new();
                     for arg in args {
                         let reg = compile_expr(fnb, None, block, *arg)?;
@@ -562,7 +524,6 @@ fn compile_expr(
 
                     let (this, callee) = match callee {
                         Expr::ObjectGet { obj, key } => {
-                            assert!(!is_new, "malformed PAST: a.b(c) syntax must not be a 'new'");
                             let this = compile_expr(fnb, None, block, *obj)?;
                             let key = compile_expr(fnb, None, block, *key)?;
                             let callee = fnb.gen_reg();
@@ -573,13 +534,13 @@ fn compile_expr(
                             });
                             (this, callee)
                         }
-                        _  => {
+                        _ => {
                             let this = fnb.gen_reg();
                             let callee = compile_expr(fnb, None, block, *callee_eid)?;
+                            // TODO 'this substitution'
                             fnb.emit(Instr::LoadUndefined(this));
                             (this, callee)
                         }
-                        
                     };
 
                     let return_value = get_dest(fnb);
@@ -592,14 +553,22 @@ fn compile_expr(
                     for reg in arg_regs {
                         fnb.emit(Instr::CallArg(reg));
                     }
-
-                    if *is_new {
-                        compile_new(fnb, return_value, callee);
-                    }
-
                     Ok(return_value)
                 }
             }
+        }
+
+        Expr::New { constructor, args } => {
+            let constructor = compile_expr(fnb, None, block, *constructor)?;
+            let arg_regs: Vec<_> = args
+                .into_iter()
+                .flat_map(|arg| compile_expr(fnb, None, block, *arg))
+                .collect();
+
+            let obj = get_dest(fnb);
+            compile_new(fnb, obj, constructor, &arg_regs);
+
+            Ok(obj)
         }
 
         Expr::CurrentException => {
@@ -623,12 +592,67 @@ fn compile_expr(
         }
 
         Expr::RegexLiteral { pattern, flags } => {
-            let dest = get_dest(fnb);
-            let ctor = compile_read_global(fnb, "RegExp".into());
-            todo!("compile a new here.  I don't remember how to do it right now and it's late night");
-            Ok(dest)
+            let obj = get_dest(fnb);
+            let constructor = compile_read_global(fnb, "RegExp".into());
+
+            let pattern_reg = fnb.gen_reg();
+            compile_load_const(fnb, pattern_reg, Literal::String(pattern.clone()));
+
+            let flags_reg = fnb.gen_reg();
+            compile_load_const(fnb, flags_reg, Literal::String(flags.clone()));
+
+            compile_new(fnb, obj, constructor, &[pattern_reg, flags_reg]);
+            
+            Ok(obj)
         }
     }
+}
+
+fn compile_new(
+    fnb: &mut FnBuilder,
+    obj: bytecode::VReg,
+    constructor: bytecode::VReg,
+    arg_regs: &[bytecode::VReg],
+) {
+    fnb.emit(Instr::ObjCreateEmpty(obj));
+
+    {
+        // return value is discarded
+        let return_value = fnb.gen_reg();
+        fnb.emit(Instr::Call {
+            return_value,
+            this: obj,
+            callee: constructor,
+        });
+    }
+
+    for reg in arg_regs {
+        fnb.emit(Instr::CallArg(*reg));
+    }
+
+    let key = fnb.gen_reg();
+
+    let prototype = fnb.gen_reg();
+    compile_load_const(fnb, key, Literal::String("prototype".into()));
+    fnb.emit(Instr::ObjGet {
+        dest: prototype,
+        obj: constructor,
+        key,
+    });
+
+    compile_load_const(fnb, key, Literal::String("__proto__".into()));
+    fnb.emit(Instr::ObjSet {
+        obj,
+        key,
+        value: prototype,
+    });
+
+    compile_load_const(fnb, key, Literal::String("constructor".into()));
+    fnb.emit(Instr::ObjSet {
+        obj,
+        key,
+        value: constructor,
+    });
 }
 
 fn compile_block(fnb: &mut FnBuilder, block: &Block) -> Result<()> {

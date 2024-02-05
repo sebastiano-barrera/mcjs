@@ -134,30 +134,43 @@ impl Heap {
             exotic_part: Exotic::None,
         }))
     }
-    pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectId {
-        self.objects.insert(RefCell::new(HeapObject {
-            proto_id: Some(self.array_proto),
-            properties: HashMap::new(),
-            exotic_part: Exotic::Array { elements },
-        }))
+
+    // Weird property of these functions: their purpose is to *create* an exotic
+    // object, but they actually *modify* an existing object. This is to align
+    // them to the property of JavaScript constructors, which act on a
+    // pre-created (ordinary) object passed as `this`.
+
+    fn init_exotic(&mut self, oid: ObjectId, proto_oid: ObjectId, exotic_part: Exotic) {
+        let mut obj = self.objects.get(oid).unwrap().borrow_mut();
+        assert!(matches!(obj.exotic_part, Exotic::None));
+        obj.proto_id = Some(proto_oid);
+        obj.exotic_part = exotic_part;
     }
-    pub(crate) fn new_function(
-        &mut self,
-        closure: Closure,
-        properties: HashMap<String, Value>,
-    ) -> ObjectId {
-        self.objects.insert(RefCell::new(HeapObject {
-            proto_id: Some(self.func_proto),
-            properties,
-            exotic_part: Exotic::Function { closure },
-        }))
+
+    pub(crate) fn init_array(&mut self, oid: ObjectId, elements: Vec<Value>) {
+        self.init_exotic(oid, self.array_proto, Exotic::Array { elements });
+    }
+    pub(crate) fn init_function(&mut self, oid: ObjectId, closure: Closure) {
+        self.init_exotic(oid, self.func_proto, Exotic::Function { closure });
+    }
+    pub(crate) fn init_string(&mut self, oid: ObjectId, string: String) {
+        self.init_exotic(oid, self.string_proto, Exotic::String { string });
+    }
+
+    pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectId {
+        let oid = self.new_ordinary_object(HashMap::new());
+        self.init_array(oid, elements);
+        oid
+    }
+    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectId {
+        let oid = self.new_ordinary_object(HashMap::new());
+        self.init_function(oid, closure);
+        oid
     }
     pub(crate) fn new_string(&mut self, string: String) -> ObjectId {
-        self.objects.insert(RefCell::new(HeapObject {
-            proto_id: Some(self.string_proto),
-            properties: HashMap::new(),
-            exotic_part: Exotic::String { string },
-        }))
+        let oid = self.new_ordinary_object(HashMap::new());
+        self.init_string(oid, string);
+        oid
     }
 
     pub fn is_instance_of<O: ?Sized + Object>(&self, obj: &O, sup_oid: ObjectId) -> bool {
