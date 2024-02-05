@@ -118,11 +118,7 @@ impl Block {
                         check_expr_id(key);
                     }
                     Expr::ObjectGetKeys(eid) => check_expr_id(eid),
-                    Expr::Call {
-                        callee,
-                        args,
-                        is_new: _,
-                    } => {
+                    Expr::Call { callee, args } | Expr::New { constructor: callee, args } => {
                         check_expr_id(callee);
                         args.iter().for_each(&check_expr_id);
                     }
@@ -322,38 +318,22 @@ pub enum Expr {
     BoolLiteral(bool),
 
     ArrayCreate,
-    ArrayNth {
-        arr: ExprID,
-        index: ExprID,
-    },
+    ArrayNth { arr: ExprID, index: ExprID },
     ArrayLen(ExprID),
 
     ObjectCreate,
-    ObjectGet {
-        obj: ExprID,
-        key: ExprID,
-    },
+    ObjectGet { obj: ExprID, key: ExprID },
     ObjectGetKeys(ExprID),
 
-    CreateClosure {
-        func: Box<Function>,
-    },
-    Call {
-        callee: ExprID,
-        args: Vec<ExprID>,
-        is_new: bool,
-    },
+    CreateClosure { func: Box<Function> },
+    Call { callee: ExprID, args: Vec<ExprID> },
+    New { constructor: ExprID, args: Vec<ExprID> },
 
     CurrentException,
 
-    ImportModule {
-        import_path: JsWord,
-    },
+    ImportModule { import_path: JsWord },
     StringCreate,
-    RegexLiteral {
-        pattern: String,
-        flags: String,
-    },
+    RegexLiteral { pattern: String, flags: String },
 }
 
 const ZERO: Expr = Expr::NumberLiteral(0.0);
@@ -1286,7 +1266,6 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 fnb.add_expr(Expr::Call {
                     callee: bind_method,
                     args: vec![this],
-                    is_new: false,
                 })
             }
             swc_ecma_ast::Expr::Unary(unary_expr) => {
@@ -1372,11 +1351,11 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                     }
                     swc_ecma_ast::Callee::Expr(expr) => expr,
                 };
-                compile_call(fnb, callee, &call_expr.args, false)
+                compile_call(fnb, callee, &call_expr.args)
             }
             swc_ecma_ast::Expr::New(new_expr) => {
                 let args = new_expr.args.as_deref().unwrap_or(&[]);
-                compile_call(fnb, &new_expr.callee, args, true)
+                compile_new(fnb, &new_expr.callee, args)
             }
             swc_ecma_ast::Expr::Seq(seq_expr) => {
                 let mut last_value = fnb.add_expr(Expr::Undefined);
@@ -1540,24 +1519,31 @@ fn compile_call(
     fnb: &mut FnBuilder,
     callee: &swc_ecma_ast::Expr,
     args: &[swc_ecma_ast::ExprOrSpread],
-    is_new: bool,
 ) -> ExprID {
     let callee = compile_expr(fnb, callee);
-    let args = args
-        .iter()
+    let args = compile_args(fnb, args);
+    fnb.add_expr(Expr::Call { callee, args })
+}
+
+fn compile_new(
+    fnb: &mut FnBuilder,
+    callee: &swc_ecma_ast::Expr,
+    args: &[swc_ecma_ast::ExprOrSpread],
+) -> ExprID {
+    let callee = compile_expr(fnb, callee);
+    let args = compile_args(fnb, args);
+    fnb.add_expr(Expr::New { constructor: callee, args })
+}
+
+fn compile_args(fnb: &mut FnBuilder, args: &[swc_ecma_ast::ExprOrSpread]) -> Vec<ExprID> {
+    args.iter()
         .map(|expr_or_spread| {
             if expr_or_spread.spread.is_some() {
                 panic!("unsupported: spread syntax in call");
             }
             compile_expr(fnb, &expr_or_spread.expr)
         })
-        .collect();
-
-    fnb.add_expr(Expr::Call {
-        callee,
-        args,
-        is_new,
-    })
+        .collect()
 }
 
 fn compile_function(builder: &mut Builder, swc_func: &swc_ecma_ast::Function) -> Function {
