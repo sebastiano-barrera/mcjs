@@ -309,7 +309,7 @@ class SourceInst
   end
 
   def all_commits
-    @repo.log.between(@first_commit, "HEAD")
+    @repo.log(count = nil).between(@first_commit, "HEAD")
   end
 
   def tested_commits_set
