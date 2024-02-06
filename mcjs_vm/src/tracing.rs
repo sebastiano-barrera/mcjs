@@ -24,11 +24,10 @@ mod internal {
 mod internal {
     use lazy_static::lazy_static;
 
-    use std::borrow::BorrowMut;
     use std::cell::RefCell;
     use std::fmt::Debug;
     use std::fs::File;
-    use std::io::{Result, Write};
+    use std::io::Write;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, MutexGuard};
     use std::thread_local;

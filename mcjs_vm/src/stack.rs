@@ -1,7 +1,5 @@
-use std::{cell::Cell, marker::PhantomData, sync::atomic::AtomicUsize};
-
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX, IID};
-use crate::interpreter::{self, UpvalueId, Value};
+use crate::interpreter::{UpvalueId, Value};
 
 /// The interpreter's stack.
 ///
