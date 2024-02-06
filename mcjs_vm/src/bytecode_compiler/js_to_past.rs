@@ -6,6 +6,12 @@
 use std::collections::HashSet;
 use std::fmt::Write;
 use swc_atoms::JsWord;
+use swc_common::Spanned;
+use crate::{
+    error, impl_debug_via_dump, tracing,
+    util::{self, write_comma_sep},
+};
+
 
 macro_rules! unsupported_node {
     ($value:expr) => {{
@@ -339,6 +345,9 @@ pub enum Expr {
 const ZERO: Expr = Expr::NumberLiteral(0.0);
 const ONE: Expr = Expr::NumberLiteral(1.0);
 
+pub use builder::{BlockID, TmpID};
+use builder::{Builder, FnBuilder};
+
 mod builder {
     use crate::util::pop_while;
 
@@ -607,15 +616,6 @@ mod builder {
     }
 }
 
-pub use builder::{BlockID, TmpID};
-use builder::{Builder, FnBuilder};
-use swc_common::Spanned;
-
-use crate::{
-    error, impl_debug_via_dump, tracing,
-    util::{self, write_comma_sep},
-};
-
 pub fn compile_script(script_ast: &swc_ecma_ast::Script) -> Function {
     use swc_ecma_ast::ModuleItem;
 
@@ -761,7 +761,7 @@ pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> Function {
                             unsupported_node!(export_default_decl)
                         }
                         swc_ecma_ast::DefaultDecl::Fn(fn_expr) => {
-                            compile_fn_expr(&mut fnb, &fn_expr);
+                            compile_fn_expr(&mut fnb, fn_expr);
                         }
                         swc_ecma_ast::DefaultDecl::TsInterfaceDecl(_) => {}
                     }
@@ -1657,7 +1657,7 @@ fn find_unbound_references(root: &Block, param_names: &[JsWord]) -> Vec<JsWord> 
     let mut referenced = process_block(root);
 
     for js_name in param_names {
-        referenced.remove(&js_name);
+        referenced.remove(js_name);
     }
 
     #[allow(unused_mut)]

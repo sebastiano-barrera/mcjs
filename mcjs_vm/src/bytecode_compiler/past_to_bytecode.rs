@@ -211,7 +211,7 @@ fn compile_one_stmt<'a>(
             let _ = compile_expr(fnb, None, block, *eid)?;
         }
         StmtOp::Block(child_block) => {
-            compile_block(fnb, &child_block)?;
+            compile_block(fnb, child_block)?;
         }
         StmtOp::Jump(target_sid) => {
             let iid = fnb.reserve_instr();
@@ -447,7 +447,7 @@ fn compile_expr(
             let force_strict = fnb.is_strict_mode();
             let lfnid = {
                 let (globals, module_builder) = fnb.suspend();
-                compile_function(*globals, *module_builder, cap_names, func, force_strict)?
+                compile_function(globals, module_builder, cap_names, func, force_strict)?
             };
             let dest = get_dest(fnb);
             fnb.emit(Instr::ClosureNew {
@@ -561,7 +561,7 @@ fn compile_expr(
         Expr::New { constructor, args } => {
             let constructor = compile_expr(fnb, None, block, *constructor)?;
             let arg_regs: Vec<_> = args
-                .into_iter()
+                .iter()
                 .flat_map(|arg| compile_expr(fnb, None, block, *arg))
                 .collect();
 
@@ -727,7 +727,7 @@ mod builder {
         regs: RegGen,
         blocks: Vec<Block>,
         block_boundaries: HashMap<BlockID, (IID, IID)>,
-        deferred_actions: Vec<Box<dyn FnOnce(&mut FnBuilder)>>,
+        deferred_actions: Vec<BoxedAction>,
 
         is_strict_mode: bool,
 
@@ -735,13 +735,17 @@ mod builder {
         module_builder: &'a mut ModuleBuilder,
         lfnid: bytecode::LocalFnId,
     }
+
+    type BoxedAction = Box<dyn FnOnce(&mut FnBuilder)>;
+
     struct Block {
         id: BlockID,
         names: HashMap<DeclName, bytecode::VReg>,
         iid_of_stmt: Box<[bytecode::IID]>,
         n_started_stmts: usize,
-        deferred_actions: Vec<Box<dyn FnOnce(&mut FnBuilder)>>,
+        deferred_actions: Vec<BoxedAction>,
     }
+
     pub enum Loc {
         Reg(bytecode::VReg),
         Global(JsWord),
@@ -1013,7 +1017,7 @@ mod builder {
         }
 
         fn gen(&mut self) -> bytecode::VReg {
-            let reg = bytecode::VReg(self.n_regs.try_into().unwrap());
+            let reg = bytecode::VReg(self.n_regs);
             self.n_regs += 1;
             reg
         }
