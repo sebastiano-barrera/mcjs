@@ -1,9 +1,6 @@
-use std::{
-    borrow::Cow,
-    cell::{Ref, RefCell, RefMut},
-    collections::HashMap,
-    ops::{Deref, DerefMut},
-};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::Deref;
 
 use crate::interpreter::{Closure, Value};
 
@@ -487,6 +484,8 @@ impl<'h> Object for ValueObjectRef<'h> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::ops::DerefMut;
 
     #[test]
     fn test_number_properties() {

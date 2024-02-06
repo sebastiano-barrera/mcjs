@@ -1,21 +1,12 @@
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use swc_atoms::JsWord;
-use swc_common::BytePos;
-use swc_common::{sync::Lrc, Span, Spanned};
-use swc_ecma_ast::{
-    ArrowExpr, AssignOp, BinaryOp, BlockStmt, Decl, EsVersion, ExportDecl, Expr, FnDecl, ForHead,
-    Function, Lit, ModuleItem, Pat, ReturnStmt, Stmt, UpdateOp, VarDecl, VarDeclKind,
-    VarDeclarator,
-};
-use swc_ecma_parser::lexer::Lexer;
-use swc_ecma_parser::{Parser, StringInput, Syntax};
+use swc_common::sync::Lrc;
+use swc_ecma_ast::EsVersion;
+use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
-use crate::bytecode::{self, IdentAsmt, Instr, Literal, LocalFnId, NativeFnId, VReg, IID};
-use crate::common::{Context, Error, Result};
-use crate::util::Mask;
+use crate::bytecode::{self, LocalFnId};
+use crate::common::Result;
 use crate::{error, tracing};
 
 pub use swc_common::SourceMap;
@@ -23,7 +14,6 @@ pub use swc_common::SourceMap;
 use std::rc::Rc;
 
 mod js_to_past;
-mod legacy;
 mod past_to_bytecode;
 
 pub struct CompiledChunk {
@@ -137,9 +127,6 @@ fn mk_error_handler(source_map: &Rc<SourceMap>) -> swc_common::errors::Handler {
 
 #[cfg(test)]
 pub(crate) fn quick_parse_script(src: String) -> swc_ecma_ast::Script {
-    use swc_ecma_ast::EsVersion;
-    use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
-
     let source_map = Rc::new(SourceMap::default());
     let err_handler = crate::bytecode_compiler::mk_error_handler(&source_map);
 
@@ -177,8 +164,6 @@ fn compile_module(
     ast_module: &swc_ecma_ast::Module,
     flags: CompileFlags,
 ) -> Result<CompiledModule> {
-    use swc_ecma_ast::{ExportDecl, Expr, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
-
     let t = tracing::section("compile_script");
 
     let function = js_to_past::compile_module(ast_module);
@@ -192,8 +177,6 @@ fn compile_module(
 }
 
 fn compile_script(script_ast: swc_ecma_ast::Script, flags: CompileFlags) -> Result<CompiledModule> {
-    use swc_ecma_ast::{ExportDecl, Expr, ModuleDecl, ModuleItem, Stmt, VarDeclKind};
-
     let t = tracing::section("compile_script");
 
     let function = js_to_past::compile_script(&script_ast);

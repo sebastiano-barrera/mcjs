@@ -1,12 +1,8 @@
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-};
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 use strum::IntoStaticStr;
-use swc_common::{BytePos, SourceMap, Span};
+use swc_common::Span;
 
 pub use swc_atoms::JsWord;
 
@@ -281,12 +277,6 @@ pub enum Instr {
     Breakpoint,
 }
 
-impl Instr {
-    const MAX_OPERANDS: usize = 4;
-}
-
-type Operands = crate::util::LimVec<{ Instr::MAX_OPERANDS }, VReg>;
-
 pub trait InstrAnalyzer {
     fn start(&mut self, opcode_name: &'static str);
     fn read_vreg_labeled(&mut self, vreg: VReg, description: Option<&'static str>);
@@ -309,8 +299,6 @@ pub trait InstrAnalyzer {
 
 impl Instr {
     pub fn analyze<A: InstrAnalyzer>(&self, an: &mut A) {
-        use std::convert::AsRef;
-
         let opcode: &'static str = self.into();
         an.start(opcode);
 
@@ -412,8 +400,6 @@ impl From<String> for Literal {
     }
 }
 
-type Vars = crate::util::LimVec<{ Instr::MAX_OPERANDS }, IID>;
-
 /// Correspondence between source code and bytecode.
 ///
 /// The source code range is represented by the members `lo` and `hi`, with the
@@ -451,6 +437,7 @@ pub struct LoopInfo {
     // Variables that change in value during each cycle, in such a way that
     // each cycle sees the value in  the previous cycle.  Phi instructions are
     // added based on this set.
+    #[cfg_attr(not(enable_jit), allow(dead_code))]
     interloop_vars: HashSet<IID>,
 }
 
@@ -528,7 +515,7 @@ impl Function {
     pub fn span(&self) -> &Span {
         &self.span
     }
-    
+
     pub fn dump(&self) {
         println!("-- consts");
         for (ndx, literal) in self.consts.iter().enumerate() {

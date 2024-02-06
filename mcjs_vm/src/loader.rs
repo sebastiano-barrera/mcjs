@@ -1,7 +1,5 @@
-use std::cell::OnceCell;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Mutex;
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::bytecode;
@@ -88,16 +86,6 @@ struct Script {
     // already).
     source_map: Rc<swc_common::SourceMap>,
     breakable_ranges: Vec<bytecode::BreakRange>,
-}
-
-/// Represent where an import statement comes from (i.e., from a specific module or a
-/// script). Determines the resolution of a module path to a specific file in
-/// `Loader::load_module`.
-pub enum ImportSite<'a> {
-    /// Import comes from a specific module, which has this ID.
-    Module(bytecode::ModuleId),
-    /// Import comes from a script.
-    Script(&'a Path),
 }
 
 impl Loader {
@@ -202,7 +190,8 @@ impl Loader {
     ///      package's main module is loaded.
     ///
     ///  - `import_site`: the ID of the module where the import is taking place. This is
-    ///    used to resolve relative paths, among other things.
+    ///    used to resolve relative paths, among other things. `None` means that the 'base path'
+    ///    passed to `Loader::new` is used.
     pub fn load_import(
         &mut self,
         import_path: &str,

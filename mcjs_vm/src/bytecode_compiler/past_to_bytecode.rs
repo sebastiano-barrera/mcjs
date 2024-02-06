@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use swc_atoms::JsWord;
 
@@ -6,7 +6,7 @@ use super::js_to_past::{self, Block, DeclName, Stmt, StmtID, StmtOp};
 use super::CompiledModule;
 
 use crate::bytecode::{self, Instr, Literal};
-use crate::common::{Context, Error, Result};
+use crate::common::Result;
 use crate::{error, tracing};
 
 use builder::{FnBuilder, Loc, ModuleBuilder};
@@ -317,11 +317,6 @@ fn compile_expr(
                 Ok(src)
             }
         }
-        Expr::ReadArg(arg_ndx) => {
-            let dest = get_dest(fnb);
-            fnb.emit(Instr::LoadArg(dest, bytecode::ArgIndex(*arg_ndx)));
-            Ok(dest)
-        }
         Expr::Unary(op, arg_eid) => {
             let dest = compile_expr(fnb, forced_dest, block, *arg_eid)?;
             match op {
@@ -602,7 +597,7 @@ fn compile_expr(
             compile_load_const(fnb, flags_reg, Literal::String(flags.clone()));
 
             compile_new(fnb, obj, constructor, &[pattern_reg, flags_reg]);
-            
+
             Ok(obj)
         }
     }
@@ -722,9 +717,9 @@ mod builder {
     }
 
     pub(super) struct FnBuilder<'a> {
-        instrs: InstrBuffer,
-        consts: ConstsBuffer,
-        regs: RegGen,
+        instrs: Vec<bytecode::Instr>,
+        consts: Vec<bytecode::Literal>,
+        n_regs: u8,
         blocks: Vec<Block>,
         block_boundaries: HashMap<BlockID, (IID, IID)>,
         deferred_actions: Vec<BoxedAction>,
@@ -759,9 +754,11 @@ mod builder {
             let lfnid = module_builder.gen_id();
 
             FnBuilder {
-                instrs: InstrBuffer::new(),
-                consts: ConstsBuffer::new(),
-                regs: RegGen::new(bytecode::ARGS_COUNT_MAX),
+                instrs: Vec::new(),
+                consts: Vec::new(),
+                // The first ARGS_COUNT_MAX register are reserved for the first few function
+                // arguments
+                n_regs: bytecode::ARGS_COUNT_MAX,
                 blocks: Vec::new(),
                 block_boundaries: HashMap::new(),
                 is_strict_mode: false,
@@ -834,25 +831,31 @@ mod builder {
         }
 
         pub(super) fn gen_reg(&mut self) -> bytecode::VReg {
-            self.regs.gen()
+            let reg = bytecode::VReg(self.n_regs);
+            self.n_regs += 1;
+            reg
         }
 
         pub(super) fn add_const(&mut self, lit: bytecode::Literal) -> bytecode::ConstIndex {
             // TODO deduplicate consts
-            self.consts.push(lit)
+            let index = self.consts.len();
+            self.consts.push(lit);
+            bytecode::ConstIndex(index.try_into().unwrap())
         }
 
         pub(super) fn peek_iid(&self) -> bytecode::IID {
-            self.instrs.peek_iid()
+            bytecode::IID(self.instrs.len().try_into().unwrap())
         }
         pub(super) fn emit(&mut self, instr: bytecode::Instr) {
-            self.instrs.push(instr)
+            self.instrs.push(instr);
         }
         pub(super) fn reserve_instr(&mut self) -> bytecode::IID {
-            self.instrs.reserve()
+            let iid = self.peek_iid();
+            self.instrs.push(bytecode::Instr::Nop);
+            iid
         }
         pub(super) fn set_instr(&mut self, iid: bytecode::IID, instr: bytecode::Instr) {
-            *self.instrs.get_mut(iid) = instr;
+            self.instrs[iid.0 as usize] = instr;
         }
         pub(super) fn mark_stmt_start(&mut self) {
             let iid = self.peek_iid();
@@ -920,9 +923,9 @@ mod builder {
             }
 
             let bc_func = bytecode::FunctionBuilder {
-                instrs: self.instrs.build(),
-                consts: self.consts.build(),
-                n_regs: self.regs.count(),
+                instrs: self.instrs.into_boxed_slice(),
+                consts: self.consts.into_boxed_slice(),
+                n_regs: self.n_regs,
                 // TODO TODO This is all yet to be implemented:
                 ident_history: Vec::new(),
                 trace_anchors: HashMap::new(),
@@ -959,80 +962,11 @@ mod builder {
             (&mut self.globals, &mut self.module_builder)
         }
     }
-
-    #[derive(Default)]
-    struct InstrBuffer {
-        instrs: Vec<bytecode::Instr>,
-    }
-    impl InstrBuffer {
-        fn new() -> Self {
-            Self::default()
-        }
-        fn push(&mut self, instr: bytecode::Instr) {
-            self.instrs.push(instr);
-        }
-        fn reserve(&mut self) -> bytecode::IID {
-            let iid = self.peek_iid();
-            self.instrs.push(bytecode::Instr::Nop);
-            iid
-        }
-        fn peek_iid(&self) -> bytecode::IID {
-            bytecode::IID(self.instrs.len().try_into().unwrap())
-        }
-        fn get_mut(&mut self, iid: bytecode::IID) -> &mut bytecode::Instr {
-            self.instrs.get_mut(iid.0 as usize).unwrap()
-        }
-
-        fn build(self) -> Box<[bytecode::Instr]> {
-            self.instrs.into_boxed_slice()
-        }
-    }
-
-    struct ConstsBuffer {
-        consts: Vec<bytecode::Literal>,
-    }
-    impl ConstsBuffer {
-        fn new() -> Self {
-            ConstsBuffer { consts: Vec::new() }
-        }
-        fn push(&mut self, lit: bytecode::Literal) -> bytecode::ConstIndex {
-            let index = self.consts.len();
-            self.consts.push(lit);
-            bytecode::ConstIndex(index.try_into().unwrap())
-        }
-        fn build(self) -> Box<[bytecode::Literal]> {
-            self.consts.into_boxed_slice()
-        }
-    }
-
-    #[derive(Default)]
-    struct RegGen {
-        n_regs: u8,
-    }
-    impl RegGen {
-        fn new(first_reg_id: u8) -> Self {
-            RegGen {
-                n_regs: first_reg_id,
-            }
-        }
-
-        fn gen(&mut self) -> bytecode::VReg {
-            let reg = bytecode::VReg(self.n_regs);
-            self.n_regs += 1;
-            reg
-        }
-
-        fn count(&self) -> u8 {
-            self.n_regs
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, rc::Rc};
-
-    use swc_common::SourceMap;
+    use std::collections::HashMap;
 
     use crate::{bytecode, bytecode_compiler::CompiledModule};
 

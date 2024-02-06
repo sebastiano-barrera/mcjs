@@ -1,8 +1,3 @@
-// Temporary; delete these directives for cleanup
-#![allow(dead_code)]
-#![allow(unreachable_code)]
-#![allow(unused_imports)]
-
 pub mod bytecode;
 mod bytecode_compiler;
 mod common;

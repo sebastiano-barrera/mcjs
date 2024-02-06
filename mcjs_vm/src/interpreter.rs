@@ -1,28 +1,16 @@
-use lazy_static::lazy_static;
-use swc_atoms::JsWord;
-
-use std::{
-    borrow::{BorrowMut, Cow},
-    cell::{Ref, RefCell, RefMut},
-    cmp::Ordering,
-    collections::{HashMap, HashSet, VecDeque},
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    path::{Path, PathBuf},
-    rc::Rc,
-    sync::{Arc, Mutex},
-};
+use std::cell::Ref;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::{
     bytecode::{self, FnId, GlobalIID, Instr, VReg, IID},
-    bytecode_compiler,
     common::{Context, Result},
     error,
     heap::{self, Heap, IndexOrKey, Object},
     loader::{self, BreakRangeID},
     // jit::{self, InterpreterStep},
     stack,
-    util::Mask,
 };
 
 pub use crate::common::Error;
@@ -64,7 +52,6 @@ macro_rules! gen_value_expect {
     };
 }
 
-gen_value_expect!(expect_bool, Bool, bool);
 gen_value_expect!(expect_num, Number, f64);
 gen_value_expect!(expect_obj, Object, heap::ObjectId);
 
@@ -108,6 +95,7 @@ impl std::fmt::Debug for Closure {
 
 slotmap::new_key_type! { pub struct UpvalueId; }
 
+#[cfg_attr(not(enable_jit), allow(dead_code))]
 #[derive(Clone, Default)]
 pub struct Options {
     #[cfg(enable_jit)]
@@ -1129,7 +1117,6 @@ impl<'a> Interpreter<'a> {
     }
 
     fn js_typeof(&mut self, value: &Value) -> Value {
-        use heap::Object;
         let ty_s = match value {
             Value::Number(_) => "number",
             Value::Bool(_) => "boolean",
@@ -1385,7 +1372,9 @@ fn nf_RegExp(intrp: &mut Interpreter, _this: &Value, _: &[Value]) -> Result<Valu
 
 #[allow(non_snake_case)]
 fn nf_Array(intrp: &mut Interpreter, this: &Value, args: &[Value]) -> Result<Value> {
-    let this = this.expect_obj().expect("compiler bug: new Array(...): non-object this");
+    let this = this
+        .expect_obj()
+        .expect("compiler bug: new Array(...): non-object this");
     // args directly go as values
     intrp.realm.heap.init_array(this, args.to_vec());
     Ok(Value::Undefined)
@@ -1523,11 +1512,9 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 #[cfg(any(test, feature = "debugger"))]
 pub mod debugger {
     use std::cell::Ref;
-    use std::collections::HashSet;
 
-    use crate::common::Result;
+    use crate::heap;
     use crate::{bytecode, InterpreterValue};
-    use crate::{error, heap};
 
     use super::{Fuel, InstrBreakpoint, Interpreter, SourceBreakpoint};
 
