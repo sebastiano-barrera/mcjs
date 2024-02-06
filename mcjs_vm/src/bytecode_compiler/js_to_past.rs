@@ -7,11 +7,8 @@ use std::collections::HashSet;
 use std::fmt::Write;
 use swc_atoms::JsWord;
 use swc_common::Spanned;
-use crate::{
-    error, impl_debug_via_dump, tracing,
-    util::{self, write_comma_sep},
-};
 
+use crate::{impl_debug_via_dump, tracing, util};
 
 macro_rules! unsupported_node {
     ($value:expr) => {{
@@ -34,9 +31,9 @@ impl util::Dump for Function {
         let hi = self.span.hi.0;
 
         write!(f, "[{}-{}] func (", lo, hi)?;
-        write_comma_sep(f, self.parameters.iter())?;
+        util::write_comma_sep(f, self.parameters.iter())?;
         write!(f, ") unbound[")?;
-        write_comma_sep(f, self.unbound_names.iter())?;
+        util::write_comma_sep(f, self.unbound_names.iter())?;
         write!(f, "] ")?;
         self.body.dump(f)
     }
@@ -100,7 +97,6 @@ impl Block {
                     | Expr::Null
                     | Expr::This
                     | Expr::Read(_)
-                    | Expr::ReadArg(_)
                     | Expr::StringLiteral(_)
                     | Expr::NumberLiteral(_)
                     | Expr::BoolLiteral(_)
@@ -124,7 +120,11 @@ impl Block {
                         check_expr_id(key);
                     }
                     Expr::ObjectGetKeys(eid) => check_expr_id(eid),
-                    Expr::Call { callee, args } | Expr::New { constructor: callee, args } => {
+                    Expr::Call { callee, args }
+                    | Expr::New {
+                        constructor: callee,
+                        args,
+                    } => {
                         check_expr_id(callee);
                         args.iter().for_each(&check_expr_id);
                     }
@@ -195,7 +195,6 @@ impl util::Dump for Block {
 pub struct Decl {
     pub name: DeclName,
     pub is_lexical: bool,
-    is_global: bool,
 }
 impl std::fmt::Debug for Decl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -314,7 +313,6 @@ pub enum Expr {
     Null,
     This,
     Read(DeclName),
-    ReadArg(u8),
 
     Unary(swc_ecma_ast::UnaryOp, ExprID),
     Binary(swc_ecma_ast::BinaryOp, ExprID, ExprID),
@@ -324,22 +322,41 @@ pub enum Expr {
     BoolLiteral(bool),
 
     ArrayCreate,
-    ArrayNth { arr: ExprID, index: ExprID },
+    ArrayNth {
+        arr: ExprID,
+        index: ExprID,
+    },
     ArrayLen(ExprID),
 
     ObjectCreate,
-    ObjectGet { obj: ExprID, key: ExprID },
+    ObjectGet {
+        obj: ExprID,
+        key: ExprID,
+    },
     ObjectGetKeys(ExprID),
 
-    CreateClosure { func: Box<Function> },
-    Call { callee: ExprID, args: Vec<ExprID> },
-    New { constructor: ExprID, args: Vec<ExprID> },
+    CreateClosure {
+        func: Box<Function>,
+    },
+    Call {
+        callee: ExprID,
+        args: Vec<ExprID>,
+    },
+    New {
+        constructor: ExprID,
+        args: Vec<ExprID>,
+    },
 
     CurrentException,
 
-    ImportModule { import_path: JsWord },
+    ImportModule {
+        import_path: JsWord,
+    },
     StringCreate,
-    RegexLiteral { pattern: String, flags: String },
+    RegexLiteral {
+        pattern: String,
+        flags: String,
+    },
 }
 
 const ZERO: Expr = Expr::NumberLiteral(0.0);
@@ -481,7 +498,6 @@ mod builder {
             self.add_decl(Decl {
                 name: name.clone(),
                 is_lexical: true,
-                is_global: false,
             });
             name
         }
@@ -617,8 +633,6 @@ mod builder {
 }
 
 pub fn compile_script(script_ast: &swc_ecma_ast::Script) -> Function {
-    use swc_ecma_ast::ModuleItem;
-
     let mut builder = Builder::new();
     let mut fnb = builder.new_function();
     for stmt in &script_ast.body {
@@ -718,7 +732,6 @@ pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> Function {
                         fnb.add_decl(Decl {
                             name: decl_name.clone(),
                             is_lexical: true,
-                            is_global: false,
                         });
                         fnb.add_stmt(StmtOp::Assign(decl_name, imported_value));
                     }
@@ -727,7 +740,6 @@ pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> Function {
                         fnb.add_decl(Decl {
                             name: name.clone(),
                             is_lexical: true,
-                            is_global: false,
                         });
                         fnb.add_stmt(StmtOp::Assign(name, default_export));
                     }
@@ -736,7 +748,6 @@ pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> Function {
                         fnb.add_decl(Decl {
                             name: name.clone(),
                             is_lexical: true,
-                            is_global: false,
                         });
                         fnb.add_stmt(StmtOp::Assign(name, named_exports));
                     }
@@ -879,7 +890,6 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                             fnb.add_decl(Decl {
                                 name: name.clone(),
                                 is_lexical: true,
-                                is_global: false,
                             });
                             let cur_exc = fnb.add_expr(Expr::CurrentException);
                             fnb.add_stmt(StmtOp::Assign(name, cur_exc));
@@ -989,7 +999,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             }
 
             swc_ecma_ast::Stmt::ForIn(forin_stmt) => {
-                use swc_ecma_ast::{ForHead, Pat};
+                use swc_ecma_ast::ForHead;
 
                 // let span = forin_stmt.span;
 
@@ -1010,13 +1020,11 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                                 swc_ecma_ast::VarDeclKind::Let => true,
                                 swc_ecma_ast::VarDeclKind::Const => true,
                             },
-                            is_global: false,
                         }
                     }
                     ForHead::Pat(pat) => Decl {
                         name: compile_name_pat(pat),
                         is_lexical: true,
-                        is_global: false,
                     },
                 };
 
@@ -1090,7 +1098,6 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
             fnb.add_decl(Decl {
                 name: name.clone(),
                 is_lexical: false,
-                is_global: false,
             });
 
             let func = {
@@ -1121,7 +1128,6 @@ fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
         fnb.add_decl(Decl {
             name: name.clone(),
             is_lexical,
-            is_global: false,
         });
 
         if let Some(init) = &declarator.init {
@@ -1532,7 +1538,10 @@ fn compile_new(
 ) -> ExprID {
     let callee = compile_expr(fnb, callee);
     let args = compile_args(fnb, args);
-    fnb.add_expr(Expr::New { constructor: callee, args })
+    fnb.add_expr(Expr::New {
+        constructor: callee,
+        args,
+    })
 }
 
 fn compile_args(fnb: &mut FnBuilder, args: &[swc_ecma_ast::ExprOrSpread]) -> Vec<ExprID> {
@@ -1672,11 +1681,7 @@ fn find_unbound_references(root: &Block, param_names: &[JsWord]) -> Vec<JsWord> 
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-
-    use swc_common::SourceMap;
-
-    use crate::util::{self, Dump, DumpExt};
+    use crate::util::DumpExt;
 
     #[test]
     fn test_simple_for() {
