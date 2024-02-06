@@ -10,7 +10,7 @@ use crate::{
     heap::{self, Heap, IndexOrKey, Object},
     loader::{self, BreakRangeID},
     // jit::{self, InterpreterStep},
-    stack,
+    stack, util::pop_while,
 };
 
 pub use crate::common::Error;
@@ -1025,6 +1025,9 @@ impl<'a> Interpreter<'a> {
         let return_value = callee_retval_reg
             .map(|vreg| self.get_operand(vreg))
             .unwrap_or(Value::Undefined);
+
+        let height = self.data.len();
+        pop_while(&mut self.exc_handler_stack, |handler| handler.stack_height == height);
 
         self.data.pop();
         if !self.data.is_empty() {
