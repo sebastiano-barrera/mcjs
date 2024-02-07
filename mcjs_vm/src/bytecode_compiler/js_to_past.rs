@@ -516,10 +516,7 @@ mod builder {
             let span = self.spans.last().copied().unwrap_or_default();
             let block = self.cur_block_mut();
             let stmt_id_raw = block.stmts.len().try_into().unwrap();
-            block.stmts.push(super::Stmt {
-                span,
-                op,
-            });
+            block.stmts.push(super::Stmt { span, op });
 
             StmtID(
                 stmt_id_raw,
@@ -1524,9 +1521,62 @@ fn compile_call(
     callee: &swc_ecma_ast::Expr,
     args: &[swc_ecma_ast::ExprOrSpread],
 ) -> ExprID {
+    // We special-case the eval('string literal') syntax to remove the call to eval, because
+    // several tests in test262 rely on it, and this is simpler than alternatives.
+    //
+    // Any form of 'eval' that doesn't match these if's trickles through and gets compiled as a
+    // regular function call, where it will fail at the PAST stage.
+    if let swc_ecma_ast::Expr::Ident(ident) = callee {
+        if &ident.sym == "eval" {
+            if let Some(arg) = args.first() {
+                if let Some(swc_ecma_ast::Lit::Str(str_lit)) = arg.expr.as_lit() {
+                    compile_eval_literal_arg(fnb, str_lit.value.to_string());
+                    return fnb.add_expr(Expr::Undefined);
+                }
+            }
+        }
+    }
+
     let callee = compile_expr(fnb, callee);
     let args = compile_args(fnb, args);
     fnb.add_expr(Expr::Call { callee, args })
+}
+
+fn compile_eval_literal_arg(fnb: &mut FnBuilder, src: String) {
+    use std::rc::Rc;
+    use swc_common::SourceMap;
+    use swc_ecma_ast::EsVersion;
+    use swc_ecma_parser::{lexer::Lexer, Parser, Syntax};
+
+    let source_map = Rc::new(SourceMap::default());
+    let err_handler = crate::bytecode_compiler::mk_error_handler(&source_map);
+
+    let filename = swc_common::FileName::Anon;
+
+    let source_file = source_map.new_source_file(filename, src);
+    let input = swc_ecma_parser::StringInput::from(source_file.as_ref());
+
+    let lexer = Lexer::new(
+        Syntax::Es(Default::default()),
+        EsVersion::Es2015,
+        input,
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+
+    // error management not particularly refined here, but we don't care about eval
+    // that much
+    let swc_ast = match parser.parse_script() {
+        Ok(swc_ast) => swc_ast,
+        Err(err) => {
+            err.into_diagnostic(&err_handler).emit();
+            panic!("parse error");
+        }
+    };
+
+    for stmt in &swc_ast.body {
+        compile_stmt(fnb, stmt);
+    }
 }
 
 fn compile_new(
