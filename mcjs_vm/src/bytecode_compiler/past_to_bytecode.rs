@@ -1,3 +1,30 @@
+//! PAST->Bytecode compiler.
+//!
+//! This is the second and last phase of the bytecode compiler, after the JavaScript->PAST step.
+//!
+//! It works pretty much as you'd expect, taking full advantage of knowing the full set of
+//! declarations of each scope/block.
+//!
+
+// ## Error handling
+//
+// Compilation errors arising in this phase are to be considered fully unexpected, and are handled
+// exclusively by panicking. (The panic is only caught at the topmost level in `compile_module` so
+// that the entire application does not have to crash.) The motivation for this is twofold.
+//
+// First, a malformed PAST can come *exclusively* from a bug in the JavaScript->PAST phase, not
+// from any mistake made by our user in their JavaScript code. Such user errors should be caught
+// and reported by the JavaScript->PAST phase, in which case that phase terminates with an error,
+// without producing any PAST.  If a PAST comes out of that phase, then it's supposed to be fully
+// correct. There is no point in continuing the compilation in the presence of a certified bug.
+//
+// Second, interrupting the compilation 'in the middle' would leave our internal data structures in
+// a logically invalid state, missing some invariants (details in the `builder` module). There is
+// no easy way to prevent the ensuing problems, only hard ones (e.g. putting changes in an
+// auxiliary structure to be committed/rolled-back afterwards; copying the FnBuilder, changing only
+// one of the two copies and then discarding one of them).  But there is no point: if a compiler
+// bug is detected, we might as well throw the entire thing out with just a message.
+
 use std::collections::HashSet;
 
 use swc_atoms::JsWord;
@@ -12,29 +39,46 @@ use crate::{error, tracing};
 use builder::{FnBuilder, Loc, ModuleBuilder};
 
 pub fn compile_module(func: &js_to_past::Function, min_lfnid: u16) -> Result<CompiledModule> {
-    let mut module_builder = builder::ModuleBuilder::new(min_lfnid);
+    let res = std::panic::catch_unwind(move || {
+        let mut module_builder = builder::ModuleBuilder::new(min_lfnid);
 
-    let globals: HashSet<_> = func.unbound_names.iter().cloned().collect();
+        let globals: HashSet<_> = func.unbound_names.iter().cloned().collect();
 
-    // Similar to `compile_function`, but we have no parameters, no captures,
-    // and we define 'globalThis' at the root scope
-    let mut fnb = builder::FnBuilder::new(&globals, &mut module_builder);
-    fnb.set_strict_mode(func.declares_use_strict);
+        // Similar to `compile_function`, but we have no parameters, no captures,
+        // and we define 'globalThis' at the root scope
+        let mut fnb = builder::FnBuilder::new(&globals, &mut module_builder);
+        fnb.set_strict_mode(func.declares_use_strict);
 
-    let stmts_count = func.body.stmts().count();
-    fnb.block(func.body.id, stmts_count, |fnb| {
-        let reg = fnb.gen_reg();
-        fnb.emit(Instr::GetGlobalThis(reg));
-        fnb.define_name(DeclName::Js("globalThis".into()), reg);
+        let stmts_count = func.body.stmts().count();
+        fnb.block(func.body.id, stmts_count, |fnb| {
+            let reg = fnb.gen_reg();
+            fnb.emit(Instr::GetGlobalThis(reg));
+            fnb.define_name(DeclName::Js("globalThis".into()), reg);
 
-        compile_block_internal(fnb, &func.body)
-    })?;
+            compile_block_internal(fnb, &func.body)
+        });
 
-    let root_lfnid = fnb.build(func.span);
-    let module = module_builder.build(root_lfnid);
+        let root_lfnid = fnb.build(func.span);
+        module_builder.build(root_lfnid)
+    });
 
-    trace_dump_module(&module);
-    Ok(module)
+    match res {
+        Ok(module) => {
+            trace_dump_module(&module);
+            Ok(module)
+        }
+        Err(payload) => {
+            let message = if let Some(message) = payload.downcast_ref::<String>() {
+                message
+            } else {
+                "<not a string>"
+            };
+            Err(error!(
+                "past->bytecode internal module compilation error: {}",
+                message
+            ))
+        }
+    }
 }
 
 // TODO Refactor into trace_dump and impl util::Dump for CompiledModule
@@ -73,7 +117,7 @@ fn compile_function<'a>(
     captures: Vec<DeclName>,
     func: &js_to_past::Function,
     force_strict: bool,
-) -> Result<bytecode::LocalFnId> {
+) -> bytecode::LocalFnId {
     let mut fnb = builder::FnBuilder::new(globals, module_builder);
     fnb.set_strict_mode(force_strict || func.declares_use_strict);
 
@@ -103,20 +147,19 @@ fn compile_function<'a>(
         }
 
         compile_block_internal(fnb, &func.body)
-    })?;
+    });
 
-    let lfnid = fnb.build(func.span);
-    Ok(lfnid)
+    fnb.build(func.span)
 }
 
 fn compile_one_stmt<'a>(
     fnb: &mut FnBuilder,
     block: &Block,
     stmts: &mut impl Iterator<Item = &'a Stmt>,
-) -> Result<bool> {
+) -> bool {
     let stmt = match stmts.next() {
         Some(stmt) => stmt,
-        None => return Ok(false),
+        None => return false,
     };
 
     let iid_start = fnb.peek_iid();
@@ -124,7 +167,7 @@ fn compile_one_stmt<'a>(
 
     match &stmt.op {
         StmtOp::Pending => {
-            panic!("compiler bug: pending stmt left over")
+            panic!("compiler bug: pending stmt left over from previous stage")
         }
         StmtOp::Break(block_id) => {
             let iid = fnb.reserve_instr();
@@ -149,10 +192,10 @@ fn compile_one_stmt<'a>(
         StmtOp::IfNot { test } => {
             // IfNot can be understood as "skip the next op if <test>"
             let cond = fnb.gen_reg();
-            compile_expr(fnb, Some(cond), block, *test)?;
+            compile_expr(fnb, Some(cond), block, *test);
             let jmpif = fnb.reserve_instr();
 
-            compile_one_stmt(fnb, block, stmts)?;
+            compile_one_stmt(fnb, block, stmts);
 
             let dest = fnb.peek_iid();
             fnb.set_instr(jmpif, Instr::JmpIf { cond, dest });
@@ -160,7 +203,7 @@ fn compile_one_stmt<'a>(
         StmtOp::Assign(dest, value_eid) => {
             match fnb.resolve_name(dest) {
                 Loc::Reg(reg) => {
-                    compile_expr(fnb, Some(reg), block, *value_eid)?;
+                    compile_expr(fnb, Some(reg), block, *value_eid);
                 }
                 Loc::Global(name) => {
                     let global_this = fnb.gen_reg();
@@ -169,7 +212,7 @@ fn compile_one_stmt<'a>(
                     let key = fnb.gen_reg();
                     compile_load_const(fnb, key, Literal::JsWord(name));
 
-                    let value = compile_expr(fnb, None, block, *value_eid)?;
+                    let value = compile_expr(fnb, None, block, *value_eid);
 
                     fnb.emit(Instr::ObjSet {
                         obj: global_this,
@@ -181,13 +224,13 @@ fn compile_one_stmt<'a>(
         }
         StmtOp::ArrayPush(arr, value_eid) => {
             let arr = compile_read(fnb, arr);
-            let value = compile_expr(fnb, None, block, *value_eid)?;
+            let value = compile_expr(fnb, None, block, *value_eid);
             fnb.emit(Instr::ArrayPush { arr, value });
         }
         StmtOp::ObjectSet { obj, key, value } => {
-            let obj_reg = compile_expr(fnb, None, block, *obj)?;
-            let key_reg = compile_expr(fnb, None, block, *key)?;
-            let value_reg = compile_expr(fnb, None, block, *value)?;
+            let obj_reg = compile_expr(fnb, None, block, *obj);
+            let key_reg = compile_expr(fnb, None, block, *key);
+            let value_reg = compile_expr(fnb, None, block, *value);
             fnb.emit(Instr::ObjSet {
                 obj: obj_reg,
                 key: key_reg,
@@ -195,12 +238,12 @@ fn compile_one_stmt<'a>(
             });
         }
         StmtOp::Return(arg) => {
-            let arg_reg = compile_expr(fnb, None, block, *arg)?;
+            let arg_reg = compile_expr(fnb, None, block, *arg);
             fnb.emit(Instr::Return(arg_reg));
         }
 
         StmtOp::Throw(arg) => {
-            let arg_reg = compile_expr(fnb, None, block, *arg)?;
+            let arg_reg = compile_expr(fnb, None, block, *arg);
             fnb.emit(Instr::Throw(arg_reg));
         }
         StmtOp::Debugger => {
@@ -208,10 +251,10 @@ fn compile_one_stmt<'a>(
         }
         StmtOp::Evaluate(eid) => {
             // the dest register is then forgotten
-            let _ = compile_expr(fnb, None, block, *eid)?;
+            let _ = compile_expr(fnb, None, block, *eid);
         }
         StmtOp::Block(child_block) => {
-            compile_block(fnb, child_block)?;
+            compile_block(fnb, child_block);
         }
         StmtOp::Jump(target_sid) => {
             let iid = fnb.reserve_instr();
@@ -236,7 +279,7 @@ fn compile_one_stmt<'a>(
 
         StmtOp::StrAppend(buf, chunk) => {
             let buf = compile_read(fnb, buf);
-            let chunk = compile_expr(fnb, None, block, *chunk)?;
+            let chunk = compile_expr(fnb, None, block, *chunk);
             fnb.emit(Instr::StrAppend(buf, chunk));
         }
     };
@@ -246,7 +289,7 @@ fn compile_one_stmt<'a>(
         fnb.add_breakable_range(stmt.span, iid_start, iid_end);
     }
 
-    Ok(true)
+    true
 }
 
 fn compile_read(fnb: &mut FnBuilder<'_>, name: &DeclName) -> bytecode::VReg {
@@ -283,7 +326,7 @@ fn compile_expr(
     forced_dest: Option<bytecode::VReg>,
     block: &Block,
     expr_id: js_to_past::ExprID,
-) -> Result<bytecode::VReg> {
+) -> bytecode::VReg {
     use js_to_past::Expr;
 
     let get_dest = move |fnb: &mut FnBuilder| forced_dest.unwrap_or_else(|| fnb.gen_reg());
@@ -293,17 +336,17 @@ fn compile_expr(
         Expr::Undefined => {
             let dest = get_dest(fnb);
             fnb.emit(Instr::LoadUndefined(dest));
-            Ok(dest)
+            dest
         }
         Expr::Null => {
             let dest = get_dest(fnb);
             fnb.emit(Instr::LoadNull(dest));
-            Ok(dest)
+            dest
         }
         Expr::This => {
             let dest = get_dest(fnb);
             fnb.emit(Instr::LoadThis(dest));
-            Ok(dest)
+            dest
         }
         Expr::Read(name) => {
             let src = compile_read(fnb, name);
@@ -312,13 +355,13 @@ fn compile_expr(
                     dst: forced_dest,
                     src,
                 });
-                Ok(forced_dest)
+                forced_dest
             } else {
-                Ok(src)
+                src
             }
         }
         Expr::Unary(op, arg_eid) => {
-            let dest = compile_expr(fnb, forced_dest, block, *arg_eid)?;
+            let dest = compile_expr(fnb, forced_dest, block, *arg_eid);
             match op {
                 swc_ecma_ast::UnaryOp::Minus => {
                     fnb.emit(Instr::UnaryMinus { dest, arg: dest });
@@ -334,12 +377,12 @@ fn compile_expr(
                 | swc_ecma_ast::UnaryOp::Void
                 | swc_ecma_ast::UnaryOp::Delete => panic!("unsupported unary op: {:?}", op),
             }
-            Ok(dest)
+            dest
         }
         Expr::Binary(op, left, right) => {
             let dest = get_dest(fnb);
-            let left = compile_expr(fnb, None, block, *left)?;
-            let right = compile_expr(fnb, None, block, *right)?;
+            let left = compile_expr(fnb, None, block, *left);
+            let right = compile_expr(fnb, None, block, *right);
 
             let instr = match op {
                 swc_ecma_ast::BinaryOp::Add => Instr::OpAdd(dest, left, right),
@@ -366,60 +409,60 @@ fn compile_expr(
             };
 
             fnb.emit(instr);
-            Ok(dest)
+            dest
         }
         Expr::StringLiteral(lit) => {
             let dest = get_dest(fnb);
             compile_load_const(fnb, dest, bytecode::Literal::String(lit.to_string()));
-            Ok(dest)
+            dest
         }
         Expr::NumberLiteral(lit) => {
             let dest = get_dest(fnb);
             compile_load_const(fnb, dest, bytecode::Literal::Number(*lit));
-            Ok(dest)
+            dest
         }
         Expr::BoolLiteral(lit) => {
             let dest = get_dest(fnb);
             compile_load_const(fnb, dest, bytecode::Literal::Bool(*lit));
-            Ok(dest)
+            dest
         }
         Expr::ArrayCreate => {
             let array = get_dest(fnb);
             let constructor: bytecode::VReg = compile_read_global(fnb, "Array".into());
             compile_new(fnb, array, constructor, &[]);
-            Ok(array)
+            array
         }
         Expr::ArrayNth { arr, index } => {
-            let arr = compile_expr(fnb, None, block, *arr)?;
-            let index = compile_expr(fnb, None, block, *index)?;
+            let arr = compile_expr(fnb, None, block, *arr);
+            let index = compile_expr(fnb, None, block, *index);
             let dest = get_dest(fnb);
             fnb.emit(Instr::ArrayNth { dest, arr, index });
-            Ok(dest)
+            dest
         }
         Expr::ArrayLen(arr) => {
-            let arr = compile_expr(fnb, None, block, *arr)?;
+            let arr = compile_expr(fnb, None, block, *arr);
             let dest = get_dest(fnb);
             fnb.emit(Instr::ArrayLen { dest, arr });
-            Ok(dest)
+            dest
         }
         Expr::ObjectCreate => {
             let obj = get_dest(fnb);
             fnb.emit(Instr::ObjCreateEmpty(obj));
-            Ok(obj)
+            obj
         }
 
         Expr::ObjectGet { obj, key } => {
-            let obj = compile_expr(fnb, None, block, *obj)?;
-            let key = compile_expr(fnb, None, block, *key)?;
+            let obj = compile_expr(fnb, None, block, *obj);
+            let key = compile_expr(fnb, None, block, *key);
             let dest = get_dest(fnb);
             fnb.emit(Instr::ObjGet { dest, obj, key });
-            Ok(dest)
+            dest
         }
         Expr::ObjectGetKeys(obj) => {
-            let obj = compile_expr(fnb, None, block, *obj)?;
+            let obj = compile_expr(fnb, None, block, *obj);
             let dest = get_dest(fnb);
             fnb.emit(Instr::ObjGetKeys { dest, obj });
-            Ok(dest)
+            dest
         }
         Expr::CreateClosure { func } => {
             let mut cap_names = Vec::new();
@@ -442,7 +485,7 @@ fn compile_expr(
             let force_strict = fnb.is_strict_mode();
             let lfnid = {
                 let (globals, module_builder) = fnb.suspend();
-                compile_function(globals, module_builder, cap_names, func, force_strict)?
+                compile_function(globals, module_builder, cap_names, func, force_strict)
             };
             let dest = get_dest(fnb);
             fnb.emit(Instr::ClosureNew {
@@ -478,7 +521,7 @@ fn compile_expr(
                 });
             }
 
-            Ok(dest)
+            dest
         }
         Expr::Call {
             callee: callee_eid,
@@ -489,38 +532,28 @@ fn compile_expr(
                 // anything, but have a special meaning
                 Expr::Read(DeclName::Js(name)) if name == "sink" => {
                     for arg in args {
-                        let var = compile_expr(fnb, None, block, *arg)?;
+                        let var = compile_expr(fnb, None, block, *arg);
                         fnb.emit(Instr::PushToSink(var));
                     }
 
                     let dest = get_dest(fnb);
                     compile_load_const(fnb, dest, Literal::Undefined);
-                    Ok(dest)
-                }
-                Expr::Read(DeclName::Js(name)) if name == "require" => {
-                    if args.len() != 1 {
-                        return Err(error!("`require` takes a single argument only"));
-                    }
-                    let import_path = compile_expr(fnb, None, block, args[0])?;
-
-                    let ret = get_dest(fnb);
-                    fnb.emit(Instr::ImportModule(ret, import_path));
-                    Ok(ret)
+                    dest
                 }
                 Expr::Read(DeclName::Js(name)) if name == "eval" => {
-                    Err(error!("`eval` not supported"))
+                    panic!("`eval` not supported")
                 }
                 callee => {
                     let mut arg_regs = Vec::new();
                     for arg in args {
-                        let reg = compile_expr(fnb, None, block, *arg)?;
+                        let reg = compile_expr(fnb, None, block, *arg);
                         arg_regs.push(reg);
                     }
 
                     let (this, callee) = match callee {
                         Expr::ObjectGet { obj, key } => {
-                            let this = compile_expr(fnb, None, block, *obj)?;
-                            let key = compile_expr(fnb, None, block, *key)?;
+                            let this = compile_expr(fnb, None, block, *obj);
+                            let key = compile_expr(fnb, None, block, *key);
                             let callee = fnb.gen_reg();
                             fnb.emit(Instr::ObjGet {
                                 dest: callee,
@@ -531,7 +564,7 @@ fn compile_expr(
                         }
                         _ => {
                             let this = fnb.gen_reg();
-                            let callee = compile_expr(fnb, None, block, *callee_eid)?;
+                            let callee = compile_expr(fnb, None, block, *callee_eid);
                             // TODO 'this substitution'
                             fnb.emit(Instr::LoadUndefined(this));
                             (this, callee)
@@ -548,28 +581,28 @@ fn compile_expr(
                     for reg in arg_regs {
                         fnb.emit(Instr::CallArg(reg));
                     }
-                    Ok(return_value)
+                    return_value
                 }
             }
         }
 
         Expr::New { constructor, args } => {
-            let constructor = compile_expr(fnb, None, block, *constructor)?;
+            let constructor = compile_expr(fnb, None, block, *constructor);
             let arg_regs: Vec<_> = args
                 .iter()
-                .flat_map(|arg| compile_expr(fnb, None, block, *arg))
+                .map(|arg| compile_expr(fnb, None, block, *arg))
                 .collect();
 
             let obj = get_dest(fnb);
             compile_new(fnb, obj, constructor, &arg_regs);
 
-            Ok(obj)
+            obj
         }
 
         Expr::CurrentException => {
             let dest = get_dest(fnb);
             fnb.emit(Instr::GetCurrentException(dest));
-            Ok(dest)
+            dest
         }
 
         Expr::ImportModule { import_path } => {
@@ -577,13 +610,13 @@ fn compile_expr(
             let import_path_reg = fnb.gen_reg();
             compile_load_const(fnb, import_path_reg, Literal::JsWord(import_path.clone()));
             fnb.emit(Instr::ImportModule(dest, import_path_reg));
-            Ok(dest)
+            dest
         }
 
         Expr::StringCreate => {
             let dest = get_dest(fnb);
             fnb.emit(Instr::StrCreateEmpty(dest));
-            Ok(dest)
+            dest
         }
 
         Expr::RegexLiteral { pattern, flags } => {
@@ -598,7 +631,7 @@ fn compile_expr(
 
             compile_new(fnb, obj, constructor, &[pattern_reg, flags_reg]);
 
-            Ok(obj)
+            obj
         }
     }
 }
@@ -650,23 +683,21 @@ fn compile_new(
     });
 }
 
-fn compile_block(fnb: &mut FnBuilder, block: &Block) -> Result<()> {
+fn compile_block(fnb: &mut FnBuilder, block: &Block) {
     let stmts_count = block.stmts().count();
     fnb.block(block.id, stmts_count, |fnb| {
         compile_block_internal(fnb, block)
     })
 }
 
-fn compile_block_internal(fnb: &mut FnBuilder, block: &Block) -> Result<()> {
+fn compile_block_internal(fnb: &mut FnBuilder, block: &Block) {
     for decl in block.decls() {
         let reg = fnb.gen_reg();
         fnb.define_name(decl.name.clone(), reg);
     }
 
     let mut iter = block.stmts();
-    while compile_one_stmt(fnb, block, &mut iter)? {}
-
-    Ok(())
+    while compile_one_stmt(fnb, block, &mut iter) {}
 }
 
 mod builder {
@@ -1076,8 +1107,7 @@ mod tests {
             Vec::new(),
             &past_function,
             force_strict,
-        )
-        .expect("past->bytecode compile error");
+        );
 
         module_builder.build(root_lfnid)
     }
