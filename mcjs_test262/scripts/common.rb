@@ -158,7 +158,7 @@ class Database
     @runs.insert record
   end
 
-  def recreate_views
+  def recreate_extras
     @db.execute 'drop view if exists general'
     @db.execute '
       create view general as 
@@ -272,7 +272,7 @@ class Database
     STDERR.puts "initing schema"
     @runs.recreate
     @testcases.recreate
-    self.recreate_views
+    self.recreate_extras
   end
 end
 
