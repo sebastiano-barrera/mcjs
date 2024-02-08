@@ -172,6 +172,12 @@ class Database
       , tc.expected_error
       from runs r left join testcases tc on (r.path_hash = tc.path_hash)
     '
+
+    @db.execute '
+      drop index runs__version if exists;        CREATE INDEX runs__version on runs (version);
+      drop index testcases__dirname if exists;   CREATE INDEX testcases__dirname on testcases (dirname);
+      drop index testcases__path_hash if exists; CREATE INDEX testcases__path_hash on testcases (path_hash);
+    '
   end
     
   def scan_test262(root_dir)
