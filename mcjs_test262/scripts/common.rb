@@ -172,30 +172,6 @@ class Database
       , tc.expected_error
       from runs r left join testcases tc on (r.path_hash = tc.path_hash)
     '
-
-    @db.execute 'drop view if exists status'
-    @db.execute '
-      create view status as
-      with q as (
-      	select version
-        , dirname
-      	, success
-      	, count(*) as count
-      	from general
-      	group by version, dirname, success 
-      	order by version, dirname, success
-      )
-      , q2 as (
-      	select version, dirname
-      	, ifnull(sum(count) filter (where success = 1), 0) as ok
-      	, ifnull(sum(count) filter (where success = 0), 0) as fail
-      	from q
-      	group by version, dirname
-      )
-      select *
-      , cast(ok as real) * 100 / (ok + fail) as progress
-      from q2
-    '
   end
     
   def scan_test262(root_dir)
