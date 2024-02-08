@@ -24,7 +24,10 @@ fn main() {
         frame_ndx: 0,
     };
 
-    let native_options = eframe::NativeOptions::default();
+    let mut native_options = eframe::NativeOptions::default();
+    native_options.viewport = native_options
+        .viewport
+        .with_inner_size(egui::Vec2::new(1000.0, 800.0));
     eframe::run_native("mcjs tools", native_options, Box::new(|_cc| Box::new(app))).unwrap();
 }
 
