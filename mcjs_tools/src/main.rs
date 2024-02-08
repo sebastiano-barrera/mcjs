@@ -193,9 +193,61 @@ impl eframe::App for AppData {
             })
             .inner;
 
+        egui::SidePanel::left("bytecode")
+            .min_width(400.0)
+            .show(ctx, |ui| {
+                let probe = self.si.probe_mut().unwrap();
+
+                let frame = probe.frames().nth(self.frame_ndx).unwrap();
+                let vm_giid = probe.frame_giid(self.frame_ndx);
+                let fnid = vm_giid.0;
+                let func = probe.loader().get_function(fnid).unwrap();
+
+                let mut bkpt_to_set = None;
+
+                egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
+                    let preview_bkpt_iid = self
+                        .source_code_view
+                        .preview_breakrange()
+                        .map(|br| br.iid_start);
+
+                    for (ndx, instr) in func.instrs().iter().enumerate() {
+                        let is_current = ndx == vm_giid.1 .0 as usize;
+                        let res = ui.horizontal(|ui| {
+                            let iid = bytecode::IID(ndx.try_into().unwrap());
+                            let giid = bytecode::GlobalIID(fnid, iid);
+
+                            if instr_bkpts.contains(&giid) {
+                                ui.label("•");
+                            }
+                            if preview_bkpt_iid == Some(iid) {
+                                ui.label(" >> ");
+                            }
+
+                            let instr_repr = format!("{:4} {:?}", ndx, instr);
+
+                            let res = ui.selectable_label(is_current, instr_repr);
+                            if res.clicked() {
+                                bkpt_to_set = Some(giid);
+                            }
+
+                            inline_value_view::show(ui, &frame, func, instr);
+                        });
+
+                        if recent_state_change && is_current {
+                            res.response.scroll_to_me(None);
+                        }
+                    }
+                });
+
+                if let Some(giid) = bkpt_to_set {
+                    action = Action::SetInstrBreakpoint { giid };
+                }
+            });
+
         if let Some(probe) = self.si.probe_mut() {
-            let res = egui::SidePanel::right("source_code")
-                .min_width(300.0)
+            let res = egui::CentralPanel::default()
                 .show(ctx, |ui| {
                     source_code_view::show(ui, &mut self.source_code_view)
                 })
@@ -208,57 +260,6 @@ impl eframe::App for AppData {
                 action = Action::SetSourceBreakpoint { brange_id };
             }
         }
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let probe = self.si.probe_mut().unwrap();
-
-            let frame = probe.frames().nth(self.frame_ndx).unwrap();
-            let vm_giid = probe.frame_giid(self.frame_ndx);
-            let fnid = vm_giid.0;
-            let func = probe.loader().get_function(fnid).unwrap();
-
-            let mut bkpt_to_set = None;
-
-            egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
-                let preview_bkpt_iid = self
-                    .source_code_view
-                    .preview_breakrange()
-                    .map(|br| br.iid_start);
-
-                for (ndx, instr) in func.instrs().iter().enumerate() {
-                    let is_current = ndx == vm_giid.1 .0 as usize;
-                    let res = ui.horizontal(|ui| {
-                        let iid = bytecode::IID(ndx.try_into().unwrap());
-                        let giid = bytecode::GlobalIID(fnid, iid);
-
-                        if instr_bkpts.contains(&giid) {
-                            ui.label("•");
-                        }
-                        if preview_bkpt_iid == Some(iid) {
-                            ui.label(" >> ");
-                        }
-
-                        let instr_repr = format!("{:4} {:?}", ndx, instr);
-
-                        let res = ui.selectable_label(is_current, instr_repr);
-                        if res.clicked() {
-                            bkpt_to_set = Some(giid);
-                        }
-
-                        inline_value_view::show(ui, &frame, func, instr);
-                    });
-
-                    if recent_state_change && is_current {
-                        res.response.scroll_to_me(None);
-                    }
-                }
-            });
-
-            if let Some(giid) = bkpt_to_set {
-                action = Action::SetInstrBreakpoint { giid };
-            }
-        });
 
         match action {
             Action::None => {}
