@@ -208,38 +208,46 @@ impl eframe::App for AppData {
 
                 let mut bkpt_to_set = None;
 
-                egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                    let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
-                    let preview_bkpt_iid = self
-                        .source_code_view
-                        .preview_breakrange()
-                        .map(|br| br.iid_start);
+                let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
+                let preview_bkpt_iid = self
+                    .source_code_view
+                    .preview_breakrange()
+                    .map(|br| br.iid_start);
 
-                    for (ndx, instr) in func.instrs().iter().enumerate() {
-                        let is_current = ndx == vm_giid.1 .0 as usize;
-                        let res = ui.horizontal(|ui| {
-                            let iid = bytecode::IID(ndx.try_into().unwrap());
-                            let giid = bytecode::GlobalIID(fnid, iid);
+                let instrs = func.instrs();
+                egui::ScrollArea::both().auto_shrink(false).show_rows(
+                    ui,
+                    16.0,
+                    instrs.len(),
+                    |ui, ndx_range| {
+                        for ndx in ndx_range {
+                            let instr = &instrs[ndx];
+                            let is_current = ndx == vm_giid.1 .0 as usize;
+                            let res = ui.horizontal(|ui| {
+                                let iid = bytecode::IID(ndx.try_into().unwrap());
+                                let giid = bytecode::GlobalIID(fnid, iid);
 
-                            if instr_bkpts.contains(&giid) {
-                                ui.label("•");
+                                if instr_bkpts.contains(&giid) {
+                                    ui.label("•");
+                                }
+                                if preview_bkpt_iid == Some(iid) {
+                                    ui.label(" >> ");
+                                }
+
+                                ui.label(format!("{:4}", ndx));
+                                let res =
+                                    instr_view::show_labels(ui, &frame, func, instr, is_current);
+                                if res.clicked {
+                                    bkpt_to_set = Some(giid);
+                                }
+                            });
+
+                            if recent_state_change && is_current {
+                                res.response.scroll_to_me(None);
                             }
-                            if preview_bkpt_iid == Some(iid) {
-                                ui.label(" >> ");
-                            }
-
-                            ui.label(format!("{:4}", ndx));
-                            let res = instr_view::show(ui, &frame, func, instr, is_current);
-                            if res.clicked {
-                                bkpt_to_set = Some(giid);
-                            }
-                        });
-
-                        if recent_state_change && is_current {
-                            res.response.scroll_to_me(None);
                         }
-                    }
-                });
+                    },
+                );
 
                 if let Some(giid) = bkpt_to_set {
                     action = Action::SetInstrBreakpoint { giid };
@@ -304,7 +312,6 @@ mod instr_view {
         func: &'a bytecode::Function,
         frame: &'a Frame<'b>,
         checked: bool,
-        buffer: String,
     }
 
     // Narrows a &str from "xyz(whatever)" into "whatever". (Panics if
@@ -352,7 +359,6 @@ mod instr_view {
                 }
 
                 let value = self.frame.get_result(vreg);
-                self.buffer.clear();
                 let text: Cow<str> = match value {
                     InterpreterValue::Number(n) => format!("{}", n).into(),
                     InterpreterValue::Bool(true) => "true".into(),
@@ -374,7 +380,8 @@ mod instr_view {
 
     impl<'a, 'b> bytecode::InstrAnalyzer for Analyzer<'a, 'b> {
         fn start(&mut self, opcode_name: &'static str) {
-            self.ui.selectable_label(self.checked, opcode_name);
+            let res = self.ui.selectable_label(self.checked, opcode_name);
+            self.checked = res.clicked();
         }
 
         fn read_vreg_labeled(&mut self, vreg: bytecode::VReg, description: Option<&'static str>) {
@@ -436,26 +443,23 @@ mod instr_view {
         pub clicked: bool,
     }
 
-    pub fn show(
+    pub fn show_labels(
         ui: &mut egui::Ui,
         frame: &Frame,
         func: &bytecode::Function,
         instr: &bytecode::Instr,
         is_current: bool,
     ) -> Response {
-        let res = ui.horizontal(move |ui| {
-            let mut analyzer = Analyzer {
-                ui,
-                func,
-                frame,
-                checked: is_current,
-                buffer: "xyz".to_string(),
-            };
-            instr.analyze(&mut analyzer);
-        });
+        let mut analyzer = Analyzer {
+            ui,
+            func,
+            frame,
+            checked: is_current,
+        };
+        instr.analyze(&mut analyzer);
 
         Response {
-            clicked: res.response.clicked(),
+            clicked: analyzer.checked,
         }
     }
 }
