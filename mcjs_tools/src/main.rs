@@ -22,6 +22,7 @@ fn main() {
         recent_state_change: false,
         source_code_view: Default::default(),
         frame_ndx: 0,
+        highlight: Default::default(),
     };
 
     let mut native_options = eframe::NativeOptions::default();
@@ -62,6 +63,7 @@ struct AppData {
     recent_state_change: bool,
     source_code_view: source_code_view::Cache,
     frame_ndx: usize,
+    highlight: instr_view::Highlighted,
 }
 
 impl eframe::App for AppData {
@@ -235,8 +237,14 @@ impl eframe::App for AppData {
                                 }
 
                                 ui.label(format!("{:4}", ndx));
-                                let res =
-                                    instr_view::show_labels(ui, &frame, func, instr, is_current);
+                                let res = instr_view::show_labels(
+                                    ui,
+                                    &frame,
+                                    func,
+                                    instr,
+                                    is_current,
+                                    &mut self.highlight,
+                                );
                                 if res.clicked {
                                     bkpt_to_set = Some(giid);
                                 }
@@ -312,6 +320,7 @@ mod instr_view {
         func: &'a bytecode::Function,
         frame: &'a Frame<'b>,
         checked: bool,
+        highlighted: &'a mut Highlighted,
     }
 
     // Narrows a &str from "xyz(whatever)" into "whatever". (Panics if
@@ -338,9 +347,16 @@ mod instr_view {
             description: Option<&'static str>,
             mode: Mode,
         ) {
-            let stroke = self.ui.ctx().style().visuals.window_stroke;
+            let highlight_color = egui::Color32::GOLD;
 
-            egui::Frame::none()
+            let is_highlighted = Some(vreg) == self.highlighted.vreg;
+            let stroke = if is_highlighted {
+                egui::Stroke::new(1.0, highlight_color)
+            } else {
+                self.ui.ctx().style().visuals.window_stroke
+            };
+
+            let res = egui::Frame::none()
                 .stroke(stroke)
                 .rounding(egui::Rounding::same(2.0))
                 .inner_margin(egui::Margin::symmetric(3.0, 0.0))
@@ -349,9 +365,11 @@ mod instr_view {
                         ui.label(format!("{}: ", description));
                     }
 
-                    let text_color = match mode {
-                        Mode::Read => ui.ctx().style().visuals.text_color(),
-                        Mode::Write => egui::Color32::LIGHT_RED,
+                    let text_color = match (is_highlighted, mode) {
+                        (false, Mode::Read) => ui.ctx().style().visuals.text_color(),
+                        (false, Mode::Write) => egui::Color32::LIGHT_RED,
+                        (true, Mode::Read) => highlight_color,
+                        (true, Mode::Write) => egui::Color32::GOLD,
                     };
 
                     ui.label(egui::RichText::new(format!("v{}", vreg.0)).color(text_color));
@@ -378,6 +396,10 @@ mod instr_view {
                     };
                     ui.label(text);
                 });
+
+            if res.response.hovered() {
+                self.highlighted.vreg = Some(vreg);
+            }
         }
     }
 
@@ -437,13 +459,17 @@ mod instr_view {
         fn end(&mut self, _instr: &bytecode::Instr) {}
     }
 
-    pub struct Cache {
-        instrs: Vec<InstrView>,
-    }
-    pub struct InstrView {}
-
     pub struct Response {
         pub clicked: bool,
+    }
+
+    pub struct Highlighted {
+        vreg: Option<bytecode::VReg>,
+    }
+    impl Default for Highlighted {
+        fn default() -> Self {
+            Highlighted { vreg: None }
+        }
     }
 
     pub fn show_labels(
@@ -452,12 +478,14 @@ mod instr_view {
         func: &bytecode::Function,
         instr: &bytecode::Instr,
         is_current: bool,
+        highlighted: &mut Highlighted,
     ) -> Response {
         let mut analyzer = Analyzer {
             ui,
             func,
             frame,
             checked: is_current,
+            highlighted,
         };
         instr.analyze(&mut analyzer);
 
