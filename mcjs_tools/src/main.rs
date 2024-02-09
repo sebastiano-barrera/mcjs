@@ -311,7 +311,6 @@ impl eframe::App for AppData {
 }
 
 mod instr_view {
-    use std::borrow::Cow;
 
     use mcjs_vm::{
         bytecode, interpreter::debugger::ObjectId, stack::Frame, InterpreterValue, Literal,
@@ -341,6 +340,12 @@ mod instr_view {
         Read,
         Write,
     }
+
+    const COLOR_BLUE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
+    const COLOR_ROSE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
+    const COLOR_MAGENTA: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
+    const COLOR_GREEN: egui::Color32 = egui::Color32::GREEN;
+    const COLOR_YELLOW: egui::Color32 = egui::Color32::from_rgb(220, 220, 170);
 
     impl<'a, 'b> Analyzer<'a, 'b> {
         fn show_value(
@@ -390,17 +395,26 @@ mod instr_view {
                         ui.label(format!("{:?} »", upv_id));
                     }
 
-                    let text: Cow<str> = match value {
-                        InterpreterValue::Number(n) => format!("{}", n).into(),
-                        InterpreterValue::Bool(true) => "true".into(),
-                        InterpreterValue::Bool(false) => "false".into(),
+                    let text: egui::RichText = match value {
+                        InterpreterValue::Number(n) => {
+                            egui::RichText::new(n.to_string()).color(COLOR_GREEN)
+                        }
+                        InterpreterValue::Bool(true) => {
+                            egui::RichText::new("true").color(COLOR_ROSE)
+                        }
+                        InterpreterValue::Bool(false) => {
+                            egui::RichText::new("false").color(COLOR_ROSE)
+                        }
                         InterpreterValue::Object(obj_id) => {
                             let obj_id = format!("{:?}", obj_id);
                             let obj_id = peel_parens(&obj_id);
-                            format!("obj{}", obj_id).into()
+                            let obj_id = format!("obj{}", obj_id);
+                            egui::RichText::new(obj_id).color(COLOR_YELLOW)
                         }
-                        InterpreterValue::Null => "null".into(),
-                        InterpreterValue::Undefined => "undefined".into(),
+                        InterpreterValue::Null => egui::RichText::new("null").color(COLOR_BLUE),
+                        InterpreterValue::Undefined => {
+                            egui::RichText::new("undefined").color(COLOR_BLUE)
+                        }
                         InterpreterValue::SelfFunction => panic!(),
                         InterpreterValue::Internal(_) => panic!(),
                     };
@@ -440,14 +454,16 @@ mod instr_view {
 
         fn load_const(&mut self, item: bytecode::ConstIndex) {
             let value = &self.func.consts()[item.0 as usize];
-            let text: Cow<str> = match value {
-                Literal::Number(n) => format!("{}", n).into(),
-                Literal::String(s) => format!("{:?}", s).into(),
-                Literal::JsWord(jsw) => format!("{}", jsw.to_string()).into(),
-                Literal::Bool(true) => "true".into(),
-                Literal::Bool(false) => "false".into(),
-                Literal::Null => "null".into(),
-                Literal::Undefined => "undefined".into(),
+            let text: egui::RichText = match value {
+                Literal::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_GREEN),
+                Literal::String(s) => egui::RichText::new(format!("{:?}", s)).color(COLOR_ROSE),
+                Literal::JsWord(jsw) => {
+                    egui::RichText::new(format!("{:?}", jsw.to_string())).color(COLOR_MAGENTA)
+                }
+                Literal::Bool(true) => egui::RichText::new("true").color(COLOR_ROSE),
+                Literal::Bool(false) => egui::RichText::new("false").color(COLOR_ROSE),
+                Literal::Null => egui::RichText::new("null").color(COLOR_BLUE),
+                Literal::Undefined => egui::RichText::new("undefined").color(COLOR_BLUE),
                 Literal::SelfFunction => {
                     panic!("I really gotta delete Literal::SelfFunction one of these days")
                 }
