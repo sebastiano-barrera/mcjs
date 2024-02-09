@@ -313,7 +313,9 @@ impl eframe::App for AppData {
 mod instr_view {
     use std::borrow::Cow;
 
-    use mcjs_vm::{bytecode, stack::Frame, InterpreterValue, Literal};
+    use mcjs_vm::{
+        bytecode, interpreter::debugger::ObjectId, stack::Frame, InterpreterValue, Literal,
+    };
 
     struct Analyzer<'a, 'b> {
         ui: &'a mut egui::Ui,
@@ -347,11 +349,21 @@ mod instr_view {
             description: Option<&'static str>,
             mode: Mode,
         ) {
-            let highlight_color = egui::Color32::GOLD;
+            const HIGHLIGHT_COLOR: egui::Color32 = egui::Color32::GOLD;
 
-            let is_highlighted = Some(vreg) == self.highlighted.vreg;
+            let slot = self.frame.get_slot(vreg);
+            let value = self.frame.get_result(vreg);
+
+            let is_highlighted = {
+                let is_vreg_hl = Some(vreg) == self.highlighted.vreg;
+                let is_obj_id_hl = matches!(value, InterpreterValue::Object(value_obj_id) if {
+                    Some(value_obj_id) == self.highlighted.obj_id
+                });
+                is_vreg_hl || is_obj_id_hl
+            };
+
             let stroke = if is_highlighted {
-                egui::Stroke::new(1.0, highlight_color)
+                egui::Stroke::new(1.0, HIGHLIGHT_COLOR)
             } else {
                 self.ui.ctx().style().visuals.window_stroke
             };
@@ -368,18 +380,16 @@ mod instr_view {
                     let text_color = match (is_highlighted, mode) {
                         (false, Mode::Read) => ui.ctx().style().visuals.text_color(),
                         (false, Mode::Write) => egui::Color32::LIGHT_RED,
-                        (true, Mode::Read) => highlight_color,
-                        (true, Mode::Write) => egui::Color32::GOLD,
+                        (true, Mode::Read) => HIGHLIGHT_COLOR,
+                        (true, Mode::Write) => egui::Color32::from_rgb(255, 140, 0),
                     };
 
                     ui.label(egui::RichText::new(format!("v{}", vreg.0)).color(text_color));
 
-                    let slot = self.frame.get_slot(vreg);
                     if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
                         ui.label(format!("{:?} »", upv_id));
                     }
 
-                    let value = self.frame.get_result(vreg);
                     let text: Cow<str> = match value {
                         InterpreterValue::Number(n) => format!("{}", n).into(),
                         InterpreterValue::Bool(true) => "true".into(),
@@ -395,10 +405,19 @@ mod instr_view {
                         InterpreterValue::Internal(_) => panic!(),
                     };
                     ui.label(text);
+
+                    if let InterpreterValue::Object(obj_id) = value {
+                        Some(obj_id)
+                    } else {
+                        None
+                    }
                 });
 
             if res.response.hovered() {
-                self.highlighted.vreg = Some(vreg);
+                *self.highlighted = Highlighted {
+                    vreg: Some(vreg),
+                    obj_id: res.inner,
+                };
             }
         }
     }
@@ -465,10 +484,14 @@ mod instr_view {
 
     pub struct Highlighted {
         vreg: Option<bytecode::VReg>,
+        obj_id: Option<ObjectId>,
     }
     impl Default for Highlighted {
         fn default() -> Self {
-            Highlighted { vreg: None }
+            Highlighted {
+                vreg: None,
+                obj_id: None,
+            }
         }
     }
 
