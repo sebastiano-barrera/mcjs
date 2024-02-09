@@ -228,14 +228,11 @@ impl eframe::App for AppData {
                                 ui.label(" >> ");
                             }
 
-                            let instr_repr = format!("{:4} {:?}", ndx, instr);
-
-                            let res = ui.selectable_label(is_current, instr_repr);
-                            if res.clicked() {
+                            ui.label(format!("{:4}", ndx));
+                            let res = instr_view::show(ui, &frame, func, instr, is_current);
+                            if res.clicked {
                                 bkpt_to_set = Some(giid);
                             }
-
-                            inline_value_view::show(ui, &frame, func, instr);
                         });
 
                         if recent_state_change && is_current {
@@ -297,7 +294,7 @@ impl eframe::App for AppData {
     }
 }
 
-mod inline_value_view {
+mod instr_view {
     use std::borrow::Cow;
 
     use mcjs_vm::{bytecode, stack::Frame, InterpreterValue, Literal};
@@ -306,6 +303,8 @@ mod inline_value_view {
         ui: &'a mut egui::Ui,
         func: &'a bytecode::Function,
         frame: &'a Frame<'b>,
+        checked: bool,
+        buffer: String,
     }
 
     // Narrows a &str from "xyz(whatever)" into "whatever". (Panics if
@@ -320,34 +319,70 @@ mod inline_value_view {
         inside
     }
 
-    impl<'a, 'b> bytecode::InstrAnalyzer for Analyzer<'a, 'b> {
-        fn start(&mut self, _opcode_name: &'static str) {}
+    enum Mode {
+        Read,
+        Write,
+    }
 
-        fn read_vreg_labeled(&mut self, _vreg: bytecode::VReg, _description: Option<&'static str>) {
+    impl<'a, 'b> Analyzer<'a, 'b> {
+        fn show_value(
+            &mut self,
+            vreg: bytecode::VReg,
+            description: Option<&'static str>,
+            mode: Mode,
+        ) {
+            let stroke = self.ui.ctx().style().visuals.window_stroke;
+            egui::Frame::none().stroke(stroke).show(self.ui, |ui| {
+                match mode {
+                    Mode::Read => {}
+                    Mode::Write => {
+                        ui.label("w>");
+                    }
+                }
+
+                if let Some(description) = description {
+                    ui.label(format!("{}: ", description));
+                }
+
+                ui.label(format!("v{}", vreg.0));
+
+                let slot = self.frame.get_slot(vreg);
+                if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
+                    ui.label(format!("{:?} »", upv_id));
+                }
+
+                let value = self.frame.get_result(vreg);
+                self.buffer.clear();
+                let text: Cow<str> = match value {
+                    InterpreterValue::Number(n) => format!("{}", n).into(),
+                    InterpreterValue::Bool(true) => "true".into(),
+                    InterpreterValue::Bool(false) => "false".into(),
+                    InterpreterValue::Object(obj_id) => {
+                        let obj_id = format!("{:?}", obj_id);
+                        let obj_id = peel_parens(&obj_id);
+                        format!("obj{}", obj_id).into()
+                    }
+                    InterpreterValue::Null => "null".into(),
+                    InterpreterValue::Undefined => "undefined".into(),
+                    InterpreterValue::SelfFunction => panic!(),
+                    InterpreterValue::Internal(_) => panic!(),
+                };
+                ui.label(text);
+            });
+        }
+    }
+
+    impl<'a, 'b> bytecode::InstrAnalyzer for Analyzer<'a, 'b> {
+        fn start(&mut self, opcode_name: &'static str) {
+            self.ui.selectable_label(self.checked, opcode_name);
         }
 
-        fn write_vreg_labeled(&mut self, vreg: bytecode::VReg, _description: Option<&'static str>) {
-            let slot = self.frame.get_slot(vreg);
-            if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
-                self.ui.label(format!("{:?} »", upv_id));
-            }
+        fn read_vreg_labeled(&mut self, vreg: bytecode::VReg, description: Option<&'static str>) {
+            self.show_value(vreg, description, Mode::Read)
+        }
 
-            let value = self.frame.get_result(vreg);
-            let text: Cow<str> = match value {
-                InterpreterValue::Number(n) => format!("{}", n).into(),
-                InterpreterValue::Bool(true) => "true".into(),
-                InterpreterValue::Bool(false) => "false".into(),
-                InterpreterValue::Object(obj_id) => {
-                    let obj_id = format!("{:?}", obj_id);
-                    let obj_id = peel_parens(&obj_id);
-                    format!("obj{}", obj_id).to_string().into()
-                }
-                InterpreterValue::Null => "null".into(),
-                InterpreterValue::Undefined => "undefined".into(),
-                InterpreterValue::SelfFunction => panic!(),
-                InterpreterValue::Internal(_) => panic!(),
-            };
-            self.ui.label(text);
+        fn write_vreg_labeled(&mut self, vreg: bytecode::VReg, description: Option<&'static str>) {
+            self.show_value(vreg, description, Mode::Write)
         }
 
         fn jump_target(&mut self, _iid: mcjs_vm::IID) {}
@@ -392,16 +427,36 @@ mod inline_value_view {
         fn end(&mut self, _instr: &bytecode::Instr) {}
     }
 
+    pub struct Cache {
+        instrs: Vec<InstrView>,
+    }
+    pub struct InstrView {}
+
+    pub struct Response {
+        pub clicked: bool,
+    }
+
     pub fn show(
         ui: &mut egui::Ui,
         frame: &Frame,
         func: &bytecode::Function,
         instr: &bytecode::Instr,
-    ) {
-        ui.horizontal(move |ui| {
-            let mut analyzer = Analyzer { ui, func, frame };
+        is_current: bool,
+    ) -> Response {
+        let res = ui.horizontal(move |ui| {
+            let mut analyzer = Analyzer {
+                ui,
+                func,
+                frame,
+                checked: is_current,
+                buffer: "xyz".to_string(),
+            };
             instr.analyze(&mut analyzer);
         });
+
+        Response {
+            clicked: res.response.clicked(),
+        }
     }
 }
 
