@@ -339,42 +339,45 @@ mod instr_view {
             mode: Mode,
         ) {
             let stroke = self.ui.ctx().style().visuals.window_stroke;
-            egui::Frame::none().stroke(stroke).show(self.ui, |ui| {
-                match mode {
-                    Mode::Read => {}
-                    Mode::Write => {
-                        ui.label("w>");
+
+            egui::Frame::none()
+                .stroke(stroke)
+                .rounding(egui::Rounding::same(2.0))
+                .inner_margin(egui::Margin::symmetric(3.0, 0.0))
+                .show(self.ui, |ui| {
+                    if let Some(description) = description {
+                        ui.label(format!("{}: ", description));
                     }
-                }
 
-                if let Some(description) = description {
-                    ui.label(format!("{}: ", description));
-                }
+                    let text_color = match mode {
+                        Mode::Read => ui.ctx().style().visuals.text_color(),
+                        Mode::Write => egui::Color32::LIGHT_RED,
+                    };
 
-                ui.label(format!("v{}", vreg.0));
+                    ui.label(egui::RichText::new(format!("v{}", vreg.0)).color(text_color));
 
-                let slot = self.frame.get_slot(vreg);
-                if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
-                    ui.label(format!("{:?} »", upv_id));
-                }
-
-                let value = self.frame.get_result(vreg);
-                let text: Cow<str> = match value {
-                    InterpreterValue::Number(n) => format!("{}", n).into(),
-                    InterpreterValue::Bool(true) => "true".into(),
-                    InterpreterValue::Bool(false) => "false".into(),
-                    InterpreterValue::Object(obj_id) => {
-                        let obj_id = format!("{:?}", obj_id);
-                        let obj_id = peel_parens(&obj_id);
-                        format!("obj{}", obj_id).into()
+                    let slot = self.frame.get_slot(vreg);
+                    if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
+                        ui.label(format!("{:?} »", upv_id));
                     }
-                    InterpreterValue::Null => "null".into(),
-                    InterpreterValue::Undefined => "undefined".into(),
-                    InterpreterValue::SelfFunction => panic!(),
-                    InterpreterValue::Internal(_) => panic!(),
-                };
-                ui.label(text);
-            });
+
+                    let value = self.frame.get_result(vreg);
+                    let text: Cow<str> = match value {
+                        InterpreterValue::Number(n) => format!("{}", n).into(),
+                        InterpreterValue::Bool(true) => "true".into(),
+                        InterpreterValue::Bool(false) => "false".into(),
+                        InterpreterValue::Object(obj_id) => {
+                            let obj_id = format!("{:?}", obj_id);
+                            let obj_id = peel_parens(&obj_id);
+                            format!("obj{}", obj_id).into()
+                        }
+                        InterpreterValue::Null => "null".into(),
+                        InterpreterValue::Undefined => "undefined".into(),
+                        InterpreterValue::SelfFunction => panic!(),
+                        InterpreterValue::Internal(_) => panic!(),
+                    };
+                    ui.label(text);
+                });
         }
     }
 
