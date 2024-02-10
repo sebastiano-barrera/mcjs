@@ -28,7 +28,9 @@ fn main() {
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = native_options
         .viewport
-        .with_inner_size(egui::Vec2::new(1000.0, 800.0));
+        .with_inner_size(egui::Vec2::new(1000.0, 800.0))
+        .with_app_id("mcjs_tools")
+        .with_title("mcjs Dev Tools");
     eframe::run_native("mcjs tools", native_options, Box::new(|_cc| Box::new(app))).unwrap();
 }
 
@@ -469,7 +471,8 @@ mod instr_view {
         let text = format!("{:4}", iid);
         let base = egui::RichText::new(text).monospace();
         if is_highlighted {
-            base.background_color(COLOR_GREY).color(egui::Color32::BLACK)
+            base.background_color(COLOR_GREY)
+                .color(egui::Color32::BLACK)
         } else {
             base.color(COLOR_IID)
         }
