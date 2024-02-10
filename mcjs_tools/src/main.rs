@@ -60,7 +60,7 @@ struct AppData {
     source_code_view: source_code_view::Cache,
     frame_ndx: usize,
     highlight: instr_view::Highlighted,
-    object_windows: HashMap<ObjectId, ObjectWindow>,
+    object_windows: HashMap<ObjectId, object_view::ObjectWindow>,
 }
 
 impl AppData {
@@ -78,7 +78,7 @@ impl AppData {
     fn open_object_window(&mut self, obj_id: ObjectId) {
         self.object_windows
             .entry(obj_id)
-            .or_insert_with(|| ObjectWindow::new(obj_id));
+            .or_insert_with(|| object_view::ObjectWindow::new(obj_id));
     }
 }
 
@@ -126,8 +126,21 @@ impl eframe::App for AppData {
             _ => {}
         };
 
-        for obj_win in self.object_windows.values_mut() {
-            obj_win.show(ctx);
+        {
+            let probe = self.si.probe_mut().unwrap();
+            let mut window_to_close = None;
+
+            for (obj_id, obj_win) in self.object_windows.iter_mut() {
+                let mut stay_open = true;
+                obj_win.show(ctx, &probe, &mut stay_open);
+                if !stay_open {
+                    window_to_close = Some(*obj_id);
+                }
+            }
+
+            if let Some(obj_id) = window_to_close {
+                self.object_windows.remove(&obj_id);
+            }
         }
 
         egui::SidePanel::left("sidebar")
@@ -335,24 +348,6 @@ impl eframe::App for AppData {
     }
 }
 
-struct ObjectWindow {
-    id: String,
-    obj_id: ObjectId,
-}
-
-impl ObjectWindow {
-    fn new(obj_id: ObjectId) -> Self {
-        let id = format!("{:?}", obj_id);
-        ObjectWindow { id, obj_id }
-    }
-
-    fn show(&mut self, ctx: &egui::Context) {
-        egui::Window::new(&self.id).show(ctx, |ui| {
-            ui.label("hey");
-        });
-    }
-}
-
 mod instr_view {
     use mcjs_vm::{
         bytecode,
@@ -548,8 +543,6 @@ mod instr_view {
                     let value_text = richtext_for_value(value);
 
                     if let InterpreterValue::Object(obj_id) = value {
-                        use mcjs_vm::interpreter::Closure;
-
                         let res = ui.add(
                             egui::Button::new(value_text)
                                 .small()
@@ -558,19 +551,11 @@ mod instr_view {
                         );
                         clicked = res.clicked();
 
-                        let obj = self.probe.get_object(obj_id).unwrap();
+                        let probe = &self.probe;
 
-                        if let Some(str_val) = obj.as_str() {
-                            ui.label(format!("{:?}", str_val));
-                        } else if let Some(closure) = obj.as_closure() {
-                            match closure {
-                                Closure::Native(_) => ui.label("[Function Native]"),
-                                Closure::JS(jsc) => {
-                                    ui.label(format!("[Function {:?}]", jsc.fnid()))
-                                }
-                            };
-                        } else if let Some(_) = obj.array_elements() {
-                            ui.label("[Array]");
+                        if let Some(text) = super::object_view::short_text_for_object(probe, obj_id)
+                        {
+                            ui.label(text);
                         }
                     } else {
                         ui.label(value_text);
@@ -787,6 +772,57 @@ mod instr_view {
 
         if res.hovered() {
             highlighted.set_iid(fnid, iid);
+        }
+    }
+}
+
+mod object_view {
+    use std::borrow::Cow;
+
+    use mcjs_vm::interpreter::{
+        debugger::{ObjectId, Probe},
+        Closure,
+    };
+
+    pub struct ObjectWindow {
+        id: String,
+        obj_id: ObjectId,
+    }
+
+    impl ObjectWindow {
+        pub fn new(obj_id: ObjectId) -> Self {
+            let id = format!("{:?}", obj_id);
+            ObjectWindow { id, obj_id }
+        }
+
+        pub fn show(&mut self, ctx: &egui::Context, probe: &Probe, open_flag: &mut bool) {
+            egui::Window::new(&self.id).open(open_flag).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("exotic part");
+                    if let Some(text) = short_text_for_object(probe, self.obj_id) {
+                        ui.label(text);
+                    } else {
+                        ui.label("<none>");
+                    }
+                });
+            });
+        }
+    }
+
+    pub fn short_text_for_object<'a>(probe: &'a Probe, obj_id: ObjectId) -> Option<Cow<'a, str>> {
+        let obj = probe.get_object(obj_id).unwrap();
+
+        if let Some(str_val) = obj.as_str() {
+            Some(format!("{:?}", str_val).into())
+        } else if let Some(closure) = obj.as_closure() {
+            match closure {
+                Closure::Native(_) => Some("[Function Native]".into()),
+                Closure::JS(jsc) => Some(format!("[Function {:?}]", jsc.fnid()).into()),
+            }
+        } else if let Some(_) = obj.array_elements() {
+            Some("[Array]".into())
+        } else {
+            None
         }
     }
 }
