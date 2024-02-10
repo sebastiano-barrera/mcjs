@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_must_use)]
-
 use std::path::PathBuf;
 use std::pin::Pin;
 
@@ -109,12 +106,6 @@ impl eframe::App for AppData {
                 });
                 return;
             }
-            State::Failed(interpreter_manager::Error::Generic(err)) => {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.label(format!("Error: {:?}", err));
-                });
-                return;
-            }
             _ => {}
         };
 
@@ -134,7 +125,8 @@ impl eframe::App for AppData {
                 if ui.button("RESTART").clicked() {
                     action = Action::Restart;
                 }
-                ui.button("DELETE");
+                // TODO implement 'delete'!
+                let _ = ui.button("DELETE");
 
                 ui.horizontal(|ui| {
                     ui.label("State:");
@@ -1001,26 +993,6 @@ mod source_code_view {
 
         fonts.layout_job(layout_job)
     }
-
-    fn fetch_source_code<'a>(
-        probe: &'a Probe<'a, '_>,
-        giid: bytecode::GlobalIID,
-    ) -> Option<Rc<String>> {
-        let fnid = giid.0;
-
-        let loader = probe.loader();
-        let source_map = loader.get_source_map(fnid.0)?;
-        let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
-
-        // All break ranges must belong to the same file, so we just peek one and use it to get a
-        // ptr to that swc_common::SourceFile.
-        // Then we use source file's offset in the source map to make sure that the markers are
-        // expressed in file-local offsets.
-        let (_, brange) = break_ranges.peek()?;
-        let source_file = source_map.lookup_byte_offset(brange.lo).sf;
-
-        Some(Rc::clone(&source_file.src))
-    }
 }
 
 mod interpreter_manager {
@@ -1045,7 +1017,6 @@ mod interpreter_manager {
 
     #[derive(Debug)]
     pub enum Error<'a> {
-        Generic(anyhow::Error),
         Interpreter(InterpreterError<'a>),
     }
 
@@ -1200,7 +1171,7 @@ mod interpreter_manager {
 
             if let Some(intrp) = self_.interpreter_mut() {
                 let mut probe = Probe::attach(intrp);
-                probe.set_instr_breakpoint(giid);
+                Self::check_breakpoint_result(probe.set_instr_breakpoint(giid))
             }
         }
 
@@ -1211,7 +1182,14 @@ mod interpreter_manager {
 
             if let Some(intrp) = self_.interpreter_mut() {
                 let mut probe = Probe::attach(intrp);
-                probe.set_source_breakpoint(brange_id);
+                Self::check_breakpoint_result(probe.set_source_breakpoint(brange_id));
+            }
+        }
+
+        fn check_breakpoint_result<T>(res: Result<T, BreakpointError>) {
+            match res {
+                Ok(_) | Err(BreakpointError::AlreadyThere) => {}
+                Err(err) => panic!("unexpected error while setting breakpoint: {:?}", err),
             }
         }
 
