@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 
 use anyhow::Result;
+use mcjs_vm::interpreter::debugger::ObjectId;
 use mcjs_vm::interpreter::Fuel;
 use mcjs_vm::{bytecode, BreakRangeID, GlobalIID};
 
@@ -14,13 +16,8 @@ fn main() {
     let mut si = interpreter_manager::StandaloneInterpreter::new(params)
         .expect("could not create interpreter");
     si.resume();
-    let app = AppData {
-        si,
-        recent_state_change: false,
-        source_code_view: Default::default(),
-        frame_ndx: 0,
-        highlight: Default::default(),
-    };
+
+    let app = AppData::new(si);
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = native_options
@@ -63,6 +60,26 @@ struct AppData {
     source_code_view: source_code_view::Cache,
     frame_ndx: usize,
     highlight: instr_view::Highlighted,
+    object_windows: HashMap<ObjectId, ObjectWindow>,
+}
+
+impl AppData {
+    fn new(si: Pin<Box<interpreter_manager::StandaloneInterpreter>>) -> Self {
+        AppData {
+            si,
+            recent_state_change: false,
+            source_code_view: Default::default(),
+            frame_ndx: 0,
+            highlight: Default::default(),
+            object_windows: HashMap::new(),
+        }
+    }
+
+    fn open_object_window(&mut self, obj_id: ObjectId) {
+        self.object_windows
+            .entry(obj_id)
+            .or_insert_with(|| ObjectWindow::new(obj_id));
+    }
 }
 
 impl eframe::App for AppData {
@@ -108,6 +125,10 @@ impl eframe::App for AppData {
             }
             _ => {}
         };
+
+        for obj_win in self.object_windows.values_mut() {
+            obj_win.show(ctx);
+        }
 
         egui::SidePanel::left("sidebar")
             .show(ctx, |ui| {
@@ -211,6 +232,7 @@ impl eframe::App for AppData {
                     .map(|br| br.iid_start);
 
                 let instrs = func.instrs();
+                let mut clicked_obj_id = None;
                 egui::ScrollArea::both().auto_shrink(false).show_rows(
                     ui,
                     16.0,
@@ -243,9 +265,11 @@ impl eframe::App for AppData {
                                 }
                                 .show(ui);
 
-                                if res.clicked {
+                                if res.label_clicked {
                                     bkpt_to_set = Some(giid);
                                 }
+
+                                clicked_obj_id = clicked_obj_id.or(res.clicked_obj_id);
                             });
 
                             if recent_state_change && is_current {
@@ -255,6 +279,9 @@ impl eframe::App for AppData {
                     },
                 );
 
+                if let Some(obj_id) = clicked_obj_id {
+                    self.open_object_window(obj_id);
+                }
                 if let Some(giid) = bkpt_to_set {
                     action = Action::SetInstrBreakpoint { giid };
                 }
@@ -308,6 +335,24 @@ impl eframe::App for AppData {
     }
 }
 
+struct ObjectWindow {
+    id: String,
+    obj_id: ObjectId,
+}
+
+impl ObjectWindow {
+    fn new(obj_id: ObjectId) -> Self {
+        let id = format!("{:?}", obj_id);
+        ObjectWindow { id, obj_id }
+    }
+
+    fn show(&mut self, ctx: &egui::Context) {
+        egui::Window::new(&self.id).show(ctx, |ui| {
+            ui.label("hey");
+        });
+    }
+}
+
 mod instr_view {
     use mcjs_vm::{
         bytecode,
@@ -335,7 +380,9 @@ mod instr_view {
             let desc: InstrDescriptor = analyzer.describe();
 
             let res = ui.selectable_label(self.is_current, desc.opcode);
-            let clicked = res.clicked();
+            let label_clicked = res.clicked();
+
+            let mut clicked_obj_id = None;
 
             for operand in desc.operands {
                 match operand {
@@ -344,10 +391,18 @@ mod instr_view {
                         ui.label(format!("{}=", description));
                     }
                     OperandDescriptor::VRegRead(vreg) => {
-                        self.show_value(ui, vreg, None, Mode::Read)
+                        let res = self.show_value(ui, vreg, None, Mode::Read);
+                        if res.clicked {
+                            eprintln!("value clicked");
+                            clicked_obj_id = res.obj_id;
+                        }
                     }
                     OperandDescriptor::VRegWrite(vreg) => {
-                        self.show_value(ui, vreg, None, Mode::Write)
+                        let res = self.show_value(ui, vreg, None, Mode::Write);
+                        if res.clicked {
+                            eprintln!("value clicked");
+                            clicked_obj_id = res.obj_id;
+                        }
                     }
                     OperandDescriptor::IID(iid) => show_iid(ui, fnid, iid, self.highlighted),
                     OperandDescriptor::Const(const_ndx) => {
@@ -377,7 +432,10 @@ mod instr_view {
                 }
             }
 
-            Response { clicked }
+            Response {
+                label_clicked,
+                clicked_obj_id,
+            }
         }
     }
 
@@ -433,6 +491,11 @@ mod instr_view {
     const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
     const COLOR_IID: egui::Color32 = COLOR_GREY;
 
+    struct ValueResponse {
+        obj_id: Option<ObjectId>,
+        clicked: bool,
+    }
+
     impl<'a, 'b, 'c> InstrView<'a, 'b, 'c> {
         fn show_value(
             &mut self,
@@ -440,7 +503,7 @@ mod instr_view {
             vreg: bytecode::VReg,
             description: Option<&'static str>,
             mode: Mode,
-        ) {
+        ) -> ValueResponse {
             let slot = self.frame.get_slot(vreg);
             let value = self.frame.get_result(vreg);
 
@@ -463,6 +526,8 @@ mod instr_view {
                 ui.ctx().style().visuals.window_stroke
             };
 
+            let mut clicked = false;
+
             let res = egui::Frame::none()
                 .stroke(stroke)
                 .rounding(egui::Rounding::same(10.0))
@@ -480,10 +545,18 @@ mod instr_view {
                         ui.label(format!("upv{} »", upv_id));
                     }
 
-                    ui.label(richtext_for_value(value));
+                    let value_text = richtext_for_value(value);
 
                     if let InterpreterValue::Object(obj_id) = value {
                         use mcjs_vm::interpreter::Closure;
+
+                        let res = ui.add(
+                            egui::Button::new(value_text)
+                                .small()
+                                .stroke(egui::Stroke::NONE)
+                                .rounding(egui::Rounding::same(10.0)),
+                        );
+                        clicked = res.clicked();
 
                         let obj = self.probe.get_object(obj_id).unwrap();
 
@@ -499,20 +572,24 @@ mod instr_view {
                         } else if let Some(_) = obj.array_elements() {
                             ui.label("[Array]");
                         }
-
-                        Some(obj_id)
                     } else {
-                        None
+                        ui.label(value_text);
                     }
                 });
 
+            let obj_id = match value {
+                InterpreterValue::Object(obj_id) => Some(obj_id),
+                _ => None,
+            };
             if res.response.hovered() {
-                if let Some(obj_id) = res.inner {
+                if let Some(obj_id) = obj_id {
                     self.highlighted.set_obj_id(fnid, obj_id);
                 } else {
                     self.highlighted.set_vreg(fnid, vreg);
                 }
             }
+
+            ValueResponse { clicked, obj_id }
         }
     }
 
@@ -661,7 +738,8 @@ mod instr_view {
     }
 
     pub struct Response {
-        pub clicked: bool,
+        pub label_clicked: bool,
+        pub clicked_obj_id: Option<ObjectId>,
     }
 
     pub enum Highlighted {
