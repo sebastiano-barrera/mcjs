@@ -805,7 +805,40 @@ mod object_view {
                         ui.label("<none>");
                     }
                 });
+
+                self.show_attributes(ui, probe, self.obj_id);
             });
+        }
+
+        fn show_attributes(&mut self, ui: &mut egui::Ui, probe: &Probe, obj_id: ObjectId) {
+            use mcjs_vm::interpreter::debugger::{IndexOrKey, Object};
+            use mcjs_vm::interpreter::Value as InterpreterValue;
+
+            let obj = probe.get_object(obj_id).unwrap();
+            // TODO Inefficient!
+            let props = obj.own_properties();
+
+            for prop in props {
+                let value = obj
+                    .get_own_element_or_property(IndexOrKey::Key(&prop))
+                    .unwrap();
+
+                match value {
+                    InterpreterValue::Object(obj_id) => {
+                        let header = format!(
+                            "{} = {}",
+                            prop,
+                            short_text_for_object(probe, obj_id).unwrap_or("<object>".into())
+                        );
+                        ui.collapsing(header, |ui| {
+                            self.show_attributes(ui, probe, obj_id);
+                        });
+                    }
+                    _ => {
+                        ui.label(format!("{} = {:?}", prop, value));
+                    }
+                }
+            }
         }
     }
 
