@@ -231,7 +231,7 @@ impl eframe::App for AppData {
                                 let iid = bytecode::IID(ndx.try_into().unwrap());
                                 let giid = bytecode::GlobalIID(fnid, iid);
 
-                                instr_view::show_iid(ui, iid, &mut self.highlight);
+                                instr_view::show_iid(ui, fnid, iid, &mut self.highlight);
 
                                 if instr_bkpts.contains(&giid) {
                                     ui.label("•");
@@ -377,11 +377,16 @@ mod instr_view {
             let slot = self.frame.get_slot(vreg);
             let value = self.frame.get_result(vreg);
 
+            let fnid = self.probe.giid().0;
             let is_highlighted = {
-                let is_vreg_hl = Some(vreg) == self.highlighted.vreg;
-                let is_obj_id_hl = matches!(value, InterpreterValue::Object(value_obj_id) if {
-                    Some(value_obj_id) == self.highlighted.obj_id
-                });
+                let is_vreg_hl = self.highlighted.match_vreg(fnid, vreg);
+                let is_obj_id_hl = match value {
+                    InterpreterValue::Object(value_obj_id) => {
+                        self.highlighted.match_obj_id(fnid, value_obj_id)
+                    }
+                    _ => false,
+                };
+
                 is_vreg_hl || is_obj_id_hl
             };
 
@@ -435,8 +440,11 @@ mod instr_view {
                 });
 
             if res.response.hovered() {
-                self.highlighted.vreg = Some(vreg);
-                self.highlighted.obj_id = res.inner;
+                if let Some(obj_id) = res.inner {
+                    self.highlighted.set_obj_id(fnid, obj_id);
+                } else {
+                    self.highlighted.set_vreg(fnid, vreg);
+                }
             }
         }
     }
@@ -493,7 +501,8 @@ mod instr_view {
         }
 
         fn jump_target(&mut self, iid: mcjs_vm::IID) {
-            show_iid(self.ui, iid, self.highlighted);
+            let fnid = self.probe.giid().0;
+            show_iid(self.ui, fnid, iid, self.highlighted);
         }
 
         fn load_const(&mut self, item: bytecode::ConstIndex) {
@@ -548,18 +557,37 @@ mod instr_view {
         pub clicked: bool,
     }
 
-    pub struct Highlighted {
-        vreg: Option<bytecode::VReg>,
-        obj_id: Option<ObjectId>,
-        iid: Option<bytecode::IID>,
+    pub enum Highlighted {
+        None,
+        VReg((bytecode::FnId, bytecode::VReg)),
+        Object((bytecode::FnId, ObjectId)),
+        IID((bytecode::FnId, bytecode::IID)),
     }
     impl Default for Highlighted {
         fn default() -> Self {
-            Highlighted {
-                vreg: None,
-                obj_id: None,
-                iid: None,
-            }
+            Highlighted::None
+        }
+    }
+    impl Highlighted {
+        fn match_vreg(&self, fnid: bytecode::FnId, vreg: bytecode::VReg) -> bool {
+            matches!(self, Highlighted::VReg(h) if *h == (fnid, vreg))
+        }
+        fn set_vreg(&mut self, fnid: bytecode::FnId, vreg: bytecode::VReg) {
+            *self = Highlighted::VReg((fnid, vreg));
+        }
+
+        fn match_obj_id(&self, fnid: bytecode::FnId, obj_id: ObjectId) -> bool {
+            matches!(self, Highlighted::Object(h) if *h == (fnid, obj_id))
+        }
+        fn set_obj_id(&mut self, fnid: bytecode::FnId, obj_id: ObjectId) {
+            *self = Highlighted::Object((fnid, obj_id));
+        }
+
+        fn match_iid(&self, fnid: bytecode::FnId, iid: bytecode::IID) -> bool {
+            matches!(self, Highlighted::IID(h) if *h == (fnid, iid))
+        }
+        fn set_iid(&mut self, fnid: bytecode::FnId, iid: bytecode::IID) {
+            *self = Highlighted::IID((fnid, iid));
         }
     }
 
@@ -587,12 +615,17 @@ mod instr_view {
         }
     }
 
-    pub fn show_iid(ui: &mut egui::Ui, iid: bytecode::IID, highlighted: &mut Highlighted) {
-        let is_highlighted = Some(iid) == highlighted.iid;
+    pub fn show_iid(
+        ui: &mut egui::Ui,
+        fnid: bytecode::FnId,
+        iid: bytecode::IID,
+        highlighted: &mut Highlighted,
+    ) {
+        let is_highlighted = highlighted.match_iid(fnid, iid);
         let res = ui.label(richtext_for_iid(iid, is_highlighted));
 
         if res.hovered() {
-            highlighted.iid = Some(iid);
+            highlighted.set_iid(fnid, iid);
         }
     }
 }
