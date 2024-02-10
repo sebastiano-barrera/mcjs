@@ -342,10 +342,20 @@ mod instr_view {
     }
 
     const COLOR_BLUE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
-    const COLOR_ROSE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
+    const COLOR_LIGHT_BLUE: egui::Color32 = egui::Color32::from_rgb(156, 220, 254);
+    const COLOR_ROSE: egui::Color32 = egui::Color32::from_rgb(206, 145, 120);
     const COLOR_MAGENTA: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
-    const COLOR_GREEN: egui::Color32 = egui::Color32::GREEN;
+    const COLOR_GREEN: egui::Color32 = egui::Color32::from_rgb(78, 201, 176);
     const COLOR_YELLOW: egui::Color32 = egui::Color32::from_rgb(220, 220, 170);
+
+    const COLOR_VREG_READ: egui::Color32 = COLOR_YELLOW;
+    const COLOR_VREG_WRITE: egui::Color32 = egui::Color32::LIGHT_RED;
+    const COLOR_HIGHLIGHTED: egui::Color32 = egui::Color32::GOLD;
+    const COLOR_NUMBER: egui::Color32 = COLOR_GREEN;
+    const COLOR_SINGLETON: egui::Color32 = COLOR_BLUE;
+    const COLOR_OBJECT: egui::Color32 = COLOR_LIGHT_BLUE;
+    const COLOR_STRING: egui::Color32 = COLOR_ROSE;
+    const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
 
     impl<'a, 'b> Analyzer<'a, 'b> {
         fn show_value(
@@ -354,8 +364,6 @@ mod instr_view {
             description: Option<&'static str>,
             mode: Mode,
         ) {
-            const HIGHLIGHT_COLOR: egui::Color32 = egui::Color32::GOLD;
-
             let slot = self.frame.get_slot(vreg);
             let value = self.frame.get_result(vreg);
 
@@ -368,7 +376,7 @@ mod instr_view {
             };
 
             let stroke = if is_highlighted {
-                egui::Stroke::new(1.0, HIGHLIGHT_COLOR)
+                egui::Stroke::new(1.0, COLOR_HIGHLIGHTED)
             } else {
                 self.ui.ctx().style().visuals.window_stroke
             };
@@ -382,13 +390,7 @@ mod instr_view {
                         ui.label(format!("{}: ", description));
                     }
 
-                    let text_color = match (is_highlighted, mode) {
-                        (false, Mode::Read) => ui.ctx().style().visuals.text_color(),
-                        (false, Mode::Write) => egui::Color32::LIGHT_RED,
-                        (true, Mode::Read) => HIGHLIGHT_COLOR,
-                        (true, Mode::Write) => egui::Color32::from_rgb(255, 140, 0),
-                    };
-                    ui.label(egui::RichText::new(format!("v{}", vreg.0)).color(text_color));
+                    ui.label(richtext_for_vreg(vreg, mode));
 
                     if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
                         let upv_id = format!("{:?}", upv_id);
@@ -396,30 +398,7 @@ mod instr_view {
                         ui.label(format!("upv{} »", upv_id));
                     }
 
-                    let text: egui::RichText = match value {
-                        InterpreterValue::Number(n) => {
-                            egui::RichText::new(n.to_string()).color(COLOR_GREEN)
-                        }
-                        InterpreterValue::Bool(true) => {
-                            egui::RichText::new("true").color(COLOR_ROSE)
-                        }
-                        InterpreterValue::Bool(false) => {
-                            egui::RichText::new("false").color(COLOR_ROSE)
-                        }
-                        InterpreterValue::Object(obj_id) => {
-                            let obj_id = format!("{:?}", obj_id);
-                            let obj_id = peel_parens(&obj_id);
-                            let obj_id = format!("obj{}", obj_id);
-                            egui::RichText::new(obj_id).color(COLOR_YELLOW)
-                        }
-                        InterpreterValue::Null => egui::RichText::new("null").color(COLOR_BLUE),
-                        InterpreterValue::Undefined => {
-                            egui::RichText::new("undefined").color(COLOR_BLUE)
-                        }
-                        InterpreterValue::SelfFunction => panic!(),
-                        InterpreterValue::Internal(_) => panic!(),
-                    };
-                    ui.label(text);
+                    ui.label(richtext_for_value(value));
 
                     if let InterpreterValue::Object(obj_id) = value {
                         Some(obj_id)
@@ -434,6 +413,32 @@ mod instr_view {
                     obj_id: res.inner,
                 };
             }
+        }
+    }
+
+    fn richtext_for_vreg(vreg: bytecode::VReg, mode: Mode) -> egui::RichText {
+        let text_color = match mode {
+            Mode::Read => COLOR_VREG_READ,
+            Mode::Write => COLOR_VREG_WRITE,
+        };
+        egui::RichText::new(format!("v{}", vreg.0)).color(text_color)
+    }
+
+    fn richtext_for_value(value: InterpreterValue) -> egui::RichText {
+        match value {
+            InterpreterValue::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_NUMBER),
+            InterpreterValue::Bool(true) => egui::RichText::new("true").color(COLOR_SINGLETON),
+            InterpreterValue::Bool(false) => egui::RichText::new("false").color(COLOR_SINGLETON),
+            InterpreterValue::Object(obj_id) => {
+                let obj_id = format!("{:?}", obj_id);
+                let obj_id = peel_parens(&obj_id);
+                let obj_id = format!("obj{}", obj_id);
+                egui::RichText::new(obj_id).color(COLOR_OBJECT)
+            }
+            InterpreterValue::Null => egui::RichText::new("null").color(COLOR_SINGLETON),
+            InterpreterValue::Undefined => egui::RichText::new("undefined").color(COLOR_SINGLETON),
+            InterpreterValue::SelfFunction => panic!(),
+            InterpreterValue::Internal(_) => panic!(),
         }
     }
 
@@ -456,15 +461,15 @@ mod instr_view {
         fn load_const(&mut self, item: bytecode::ConstIndex) {
             let value = &self.func.consts()[item.0 as usize];
             let text: egui::RichText = match value {
-                Literal::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_GREEN),
-                Literal::String(s) => egui::RichText::new(format!("{:?}", s)).color(COLOR_ROSE),
+                Literal::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_NUMBER),
+                Literal::String(s) => egui::RichText::new(format!("{:?}", s)).color(COLOR_STRING),
                 Literal::JsWord(jsw) => {
-                    egui::RichText::new(format!("{:?}", jsw.to_string())).color(COLOR_MAGENTA)
+                    egui::RichText::new(format!("{:?}", jsw.to_string())).color(COLOR_KEYWORD)
                 }
-                Literal::Bool(true) => egui::RichText::new("true").color(COLOR_ROSE),
-                Literal::Bool(false) => egui::RichText::new("false").color(COLOR_ROSE),
-                Literal::Null => egui::RichText::new("null").color(COLOR_BLUE),
-                Literal::Undefined => egui::RichText::new("undefined").color(COLOR_BLUE),
+                Literal::Bool(true) => egui::RichText::new("true").color(COLOR_SINGLETON),
+                Literal::Bool(false) => egui::RichText::new("false").color(COLOR_SINGLETON),
+                Literal::Null => egui::RichText::new("null").color(COLOR_SINGLETON),
+                Literal::Undefined => egui::RichText::new("undefined").color(COLOR_SINGLETON),
                 Literal::SelfFunction => {
                     panic!("I really gotta delete Literal::SelfFunction one of these days")
                 }
