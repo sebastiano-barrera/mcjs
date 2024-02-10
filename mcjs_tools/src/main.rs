@@ -229,6 +229,8 @@ impl eframe::App for AppData {
                                 let iid = bytecode::IID(ndx.try_into().unwrap());
                                 let giid = bytecode::GlobalIID(fnid, iid);
 
+                                instr_view::show_iid(ui, iid, &mut self.highlight);
+
                                 if instr_bkpts.contains(&giid) {
                                     ui.label("•");
                                 }
@@ -236,7 +238,6 @@ impl eframe::App for AppData {
                                     ui.label(" >> ");
                                 }
 
-                                ui.label(format!("{:4}", ndx));
                                 let res = instr_view::show_labels(
                                     ui,
                                     instr,
@@ -352,6 +353,7 @@ mod instr_view {
     const COLOR_MAGENTA: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
     const COLOR_GREEN: egui::Color32 = egui::Color32::from_rgb(78, 201, 176);
     const COLOR_YELLOW: egui::Color32 = egui::Color32::from_rgb(220, 220, 170);
+    const COLOR_GREY: egui::Color32 = egui::Color32::GRAY;
 
     const COLOR_VREG_READ: egui::Color32 = COLOR_YELLOW;
     const COLOR_VREG_WRITE: egui::Color32 = egui::Color32::LIGHT_RED;
@@ -361,6 +363,7 @@ mod instr_view {
     const COLOR_OBJECT: egui::Color32 = COLOR_LIGHT_BLUE;
     const COLOR_STRING: egui::Color32 = COLOR_ROSE;
     const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
+    const COLOR_IID: egui::Color32 = COLOR_GREY;
 
     impl<'a, 'b, 'c> Analyzer<'a, 'b, 'c> {
         fn show_value(
@@ -415,7 +418,9 @@ mod instr_view {
                         } else if let Some(closure) = obj.as_closure() {
                             match closure {
                                 Closure::Native(_) => ui.label("[Function Native]"),
-                                Closure::JS(jsc) => ui.label(format!("[Function {:?}]", jsc.fnid())),
+                                Closure::JS(jsc) => {
+                                    ui.label(format!("[Function {:?}]", jsc.fnid()))
+                                }
                             };
                         } else if let Some(_) = obj.array_elements() {
                             ui.label("[Array]");
@@ -428,10 +433,8 @@ mod instr_view {
                 });
 
             if res.response.hovered() {
-                *self.highlighted = Highlighted {
-                    vreg: Some(vreg),
-                    obj_id: res.inner,
-                };
+                self.highlighted.vreg = Some(vreg);
+                self.highlighted.obj_id = res.inner;
             }
         }
     }
@@ -462,6 +465,16 @@ mod instr_view {
         }
     }
 
+    pub fn richtext_for_iid(iid: bytecode::IID, is_highlighted: bool) -> egui::RichText {
+        let text = format!("{:4}", iid);
+        let base = egui::RichText::new(text).monospace();
+        if is_highlighted {
+            base.background_color(COLOR_GREY).color(egui::Color32::BLACK)
+        } else {
+            base.color(COLOR_IID)
+        }
+    }
+
     impl<'a, 'b, 'c> bytecode::InstrAnalyzer for Analyzer<'a, 'b, 'c> {
         fn start(&mut self, opcode_name: &'static str) {
             let res = self.ui.selectable_label(self.checked, opcode_name);
@@ -476,7 +489,9 @@ mod instr_view {
             self.show_value(vreg, description, Mode::Write)
         }
 
-        fn jump_target(&mut self, _iid: mcjs_vm::IID) {}
+        fn jump_target(&mut self, iid: mcjs_vm::IID) {
+            show_iid(self.ui, iid, self.highlighted);
+        }
 
         fn load_const(&mut self, item: bytecode::ConstIndex) {
             let value = &self.func.consts()[item.0 as usize];
@@ -498,23 +513,29 @@ mod instr_view {
         }
 
         fn load_null(&mut self) {
-            self.ui.label("null");
+            self.ui.label(richtext_for_value(InterpreterValue::Null));
         }
 
         fn load_undefined(&mut self) {
-            self.ui.label("undefined");
+            self.ui
+                .label(richtext_for_value(InterpreterValue::Undefined));
         }
 
         fn load_capture(&mut self, item: bytecode::CaptureIndex) {
+            // NOTE I assume that Instr::LoadCapture is going to be removed soon, replaced
+            // completely by the implicit inline/upvalue state of stack slots
             self.ui.label(format!("{:?}", item));
         }
 
         fn load_arg(&mut self, item: bytecode::ArgIndex) {
+            // NOTE I assume that Instr::LoadArg is going to be removed soon, replaced completely
+            // by the implicit allocation of the first bytecode::ARGS_COUNT_MAX vregs
             self.ui.label(format!("{:?}", item));
         }
 
         fn load_this(&mut self) {
-            self.ui.label("this");
+            self.ui
+                .label(egui::RichText::new("this").color(COLOR_KEYWORD));
         }
 
         fn end(&mut self, _instr: &bytecode::Instr) {}
@@ -527,12 +548,14 @@ mod instr_view {
     pub struct Highlighted {
         vreg: Option<bytecode::VReg>,
         obj_id: Option<ObjectId>,
+        iid: Option<bytecode::IID>,
     }
     impl Default for Highlighted {
         fn default() -> Self {
             Highlighted {
                 vreg: None,
                 obj_id: None,
+                iid: None,
             }
         }
     }
@@ -558,6 +581,15 @@ mod instr_view {
 
         Response {
             clicked: analyzer.checked,
+        }
+    }
+
+    pub fn show_iid(ui: &mut egui::Ui, iid: bytecode::IID, highlighted: &mut Highlighted) {
+        let is_highlighted = Some(iid) == highlighted.iid;
+        let res = ui.label(richtext_for_iid(iid, is_highlighted));
+
+        if res.hovered() {
+            highlighted.iid = Some(iid);
         }
     }
 }
