@@ -72,6 +72,11 @@ pub struct JSClosure {
 }
 
 impl JSClosure {
+    #[cfg(feature = "debugger")]
+    pub fn fnid(&self) -> FnId {
+        self.fnid
+    }
+
     pub fn upvalues(&self) -> &[UpvalueId] {
         &self.upvalues
     }
