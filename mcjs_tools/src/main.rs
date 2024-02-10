@@ -388,11 +388,12 @@ mod instr_view {
                         (true, Mode::Read) => HIGHLIGHT_COLOR,
                         (true, Mode::Write) => egui::Color32::from_rgb(255, 140, 0),
                     };
-
                     ui.label(egui::RichText::new(format!("v{}", vreg.0)).color(text_color));
 
                     if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
-                        ui.label(format!("{:?} »", upv_id));
+                        let upv_id = format!("{:?}", upv_id);
+                        let upv_id = peel_parens(&upv_id);
+                        ui.label(format!("upv{} »", upv_id));
                     }
 
                     let text: egui::RichText = match value {
