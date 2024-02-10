@@ -239,9 +239,10 @@ impl eframe::App for AppData {
                                 ui.label(format!("{:4}", ndx));
                                 let res = instr_view::show_labels(
                                     ui,
+                                    instr,
                                     &frame,
                                     func,
-                                    instr,
+                                    &probe,
                                     is_current,
                                     &mut self.highlight,
                                 );
@@ -313,13 +314,17 @@ impl eframe::App for AppData {
 mod instr_view {
 
     use mcjs_vm::{
-        bytecode, interpreter::debugger::ObjectId, stack::Frame, InterpreterValue, Literal,
+        bytecode,
+        interpreter::debugger::{ObjectId, Probe},
+        stack::Frame,
+        InterpreterValue, Literal,
     };
 
-    struct Analyzer<'a, 'b> {
+    struct Analyzer<'a, 'b, 'c> {
         ui: &'a mut egui::Ui,
         func: &'a bytecode::Function,
         frame: &'a Frame<'b>,
+        probe: &'a Probe<'b, 'c>,
         checked: bool,
         highlighted: &'a mut Highlighted,
     }
@@ -357,7 +362,7 @@ mod instr_view {
     const COLOR_STRING: egui::Color32 = COLOR_ROSE;
     const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
 
-    impl<'a, 'b> Analyzer<'a, 'b> {
+    impl<'a, 'b, 'c> Analyzer<'a, 'b, 'c> {
         fn show_value(
             &mut self,
             vreg: bytecode::VReg,
@@ -401,6 +406,21 @@ mod instr_view {
                     ui.label(richtext_for_value(value));
 
                     if let InterpreterValue::Object(obj_id) = value {
+                        use mcjs_vm::interpreter::Closure;
+
+                        let obj = self.probe.get_object(obj_id).unwrap();
+
+                        if let Some(str_val) = obj.as_str() {
+                            ui.label(format!("{:?}", str_val));
+                        } else if let Some(closure) = obj.as_closure() {
+                            match closure {
+                                Closure::Native(_) => ui.label("[Function Native]"),
+                                Closure::JS(jsc) => ui.label(format!("[Function {:?}]", jsc.fnid())),
+                            };
+                        } else if let Some(_) = obj.array_elements() {
+                            ui.label("[Array]");
+                        }
+
                         Some(obj_id)
                     } else {
                         None
@@ -442,7 +462,7 @@ mod instr_view {
         }
     }
 
-    impl<'a, 'b> bytecode::InstrAnalyzer for Analyzer<'a, 'b> {
+    impl<'a, 'b, 'c> bytecode::InstrAnalyzer for Analyzer<'a, 'b, 'c> {
         fn start(&mut self, opcode_name: &'static str) {
             let res = self.ui.selectable_label(self.checked, opcode_name);
             self.checked = res.clicked();
@@ -519,9 +539,10 @@ mod instr_view {
 
     pub fn show_labels(
         ui: &mut egui::Ui,
+        instr: &bytecode::Instr,
         frame: &Frame,
         func: &bytecode::Function,
-        instr: &bytecode::Instr,
+        probe: &Probe,
         is_current: bool,
         highlighted: &mut Highlighted,
     ) -> Response {
@@ -529,6 +550,7 @@ mod instr_view {
             ui,
             func,
             frame,
+            probe,
             checked: is_current,
             highlighted,
         };
