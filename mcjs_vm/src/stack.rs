@@ -5,12 +5,12 @@ use crate::interpreter::{UpvalueId, Value};
 ///
 /// Mostly stores local variables.
 pub struct InterpreterData {
-    upv_alloc: Heap,
+    upv_alloc: Upvalues,
     headers: Vec<FrameHeader>,
     values: Vec<Slot>,
 }
 
-type Heap = slotmap::SlotMap<UpvalueId, Value>;
+type Upvalues = slotmap::SlotMap<UpvalueId, Value>;
 
 #[derive(Clone, Copy)]
 enum Slot {
@@ -164,12 +164,12 @@ impl InterpreterData {
 pub struct Frame<'a> {
     header: &'a FrameHeader,
     values: &'a [Slot],
-    upv_alloc: &'a Heap,
+    upv_alloc: &'a Upvalues,
 }
 pub struct FrameMut<'a> {
     header: &'a mut FrameHeader,
     values: &'a mut [Slot],
-    upv_alloc: &'a mut Heap,
+    upv_alloc: &'a mut Upvalues,
 }
 
 impl<'a> Frame<'a> {
