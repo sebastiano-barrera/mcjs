@@ -240,15 +240,17 @@ impl eframe::App for AppData {
                                     ui.label(" >> ");
                                 }
 
-                                let res = instr_view::show_labels(
-                                    ui,
+                                let res = instr_view::InstrView {
                                     instr,
-                                    &frame,
+                                    frame: &frame,
                                     func,
-                                    &probe,
+                                    probe: &probe,
+                                    giid,
                                     is_current,
-                                    &mut self.highlight,
-                                );
+                                    highlighted: &mut self.highlight,
+                                }
+                                .show(ui);
+
                                 if res.clicked {
                                     bkpt_to_set = Some(giid);
                                 }
@@ -315,7 +317,6 @@ impl eframe::App for AppData {
 }
 
 mod instr_view {
-
     use mcjs_vm::{
         bytecode,
         interpreter::debugger::{ObjectId, Probe},
@@ -323,13 +324,86 @@ mod instr_view {
         InterpreterValue, Literal,
     };
 
-    struct Analyzer<'a, 'b, 'c> {
-        ui: &'a mut egui::Ui,
-        func: &'a bytecode::Function,
-        frame: &'a Frame<'b>,
-        probe: &'a Probe<'b, 'c>,
-        checked: bool,
-        highlighted: &'a mut Highlighted,
+    pub struct InstrView<'a, 'b, 'c> {
+        pub instr: &'a bytecode::Instr,
+        pub frame: &'a Frame<'b>,
+        pub func: &'a bytecode::Function,
+        pub giid: bytecode::GlobalIID,
+        pub probe: &'a Probe<'b, 'c>,
+        pub is_current: bool,
+        pub highlighted: &'a mut Highlighted,
+    }
+
+    impl<'a, 'b, 'c> InstrView<'a, 'b, 'c> {
+        pub fn show(mut self, ui: &mut egui::Ui) -> Response {
+            let bytecode::GlobalIID(fnid, _) = self.giid;
+
+            let mut analyzer = Analyzer::default();
+            self.instr.analyze(&mut analyzer);
+            let desc: InstrDescriptor = analyzer.describe();
+
+            let res = ui.selectable_label(self.is_current, desc.opcode);
+            let clicked = res.clicked();
+
+            for operand in desc.operands {
+                match operand {
+                    OperandDescriptor::None => {}
+                    OperandDescriptor::Description(description) => {
+                        ui.label(format!("{}=", description));
+                    }
+                    OperandDescriptor::VRegRead(vreg) => {
+                        self.show_value(ui, vreg, None, Mode::Read)
+                    }
+                    OperandDescriptor::VRegWrite(vreg) => {
+                        self.show_value(ui, vreg, None, Mode::Write)
+                    }
+                    OperandDescriptor::IID(iid) => show_iid(ui, fnid, iid, self.highlighted),
+                    OperandDescriptor::Const(const_ndx) => {
+                        let value = &self.func.consts()[const_ndx.0 as usize];
+                        let text = richtext_for_literal(value);
+                        ui.label(text);
+                    }
+                    OperandDescriptor::Capture(cap_ndx) => {
+                        // NOTE I assume that Instr::LoadCapture is going to be removed soon, replaced
+                        // completely by the implicit inline/upvalue state of stack slots
+                        ui.label(format!("{:?}", cap_ndx));
+                    }
+                    OperandDescriptor::Arg(arg_ndx) => {
+                        // NOTE I assume that Instr::LoadArg is going to be removed soon, replaced completely
+                        // by the implicit allocation of the first bytecode::ARGS_COUNT_MAX vregs
+                        ui.label(format!("{:?}", arg_ndx));
+                    }
+                    OperandDescriptor::Null => {
+                        ui.label(richtext_for_value(InterpreterValue::Null));
+                    }
+                    OperandDescriptor::Undefined => {
+                        ui.label(richtext_for_value(InterpreterValue::Undefined));
+                    }
+                    OperandDescriptor::This => {
+                        ui.label(egui::RichText::new("this").color(COLOR_KEYWORD));
+                    }
+                }
+            }
+
+            Response { clicked }
+        }
+    }
+
+    fn richtext_for_literal(value: &Literal) -> egui::RichText {
+        match value {
+            Literal::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_NUMBER),
+            Literal::String(s) => egui::RichText::new(format!("{:?}", s)).color(COLOR_STRING),
+            Literal::JsWord(jsw) => {
+                egui::RichText::new(format!("{:?}", jsw.to_string())).color(COLOR_KEYWORD)
+            }
+            Literal::Bool(true) => egui::RichText::new("true").color(COLOR_SINGLETON),
+            Literal::Bool(false) => egui::RichText::new("false").color(COLOR_SINGLETON),
+            Literal::Null => egui::RichText::new("null").color(COLOR_SINGLETON),
+            Literal::Undefined => egui::RichText::new("undefined").color(COLOR_SINGLETON),
+            Literal::SelfFunction => {
+                panic!("I really gotta delete Literal::SelfFunction one of these days")
+            }
+        }
     }
 
     // Narrows a &str from "xyz(whatever)" into "whatever". (Panics if
@@ -367,9 +441,10 @@ mod instr_view {
     const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
     const COLOR_IID: egui::Color32 = COLOR_GREY;
 
-    impl<'a, 'b, 'c> Analyzer<'a, 'b, 'c> {
+    impl<'a, 'b, 'c> InstrView<'a, 'b, 'c> {
         fn show_value(
             &mut self,
+            ui: &mut egui::Ui,
             vreg: bytecode::VReg,
             description: Option<&'static str>,
             mode: Mode,
@@ -393,14 +468,14 @@ mod instr_view {
             let stroke = if is_highlighted {
                 egui::Stroke::new(1.0, COLOR_HIGHLIGHTED)
             } else {
-                self.ui.ctx().style().visuals.window_stroke
+                ui.ctx().style().visuals.window_stroke
             };
 
             let res = egui::Frame::none()
                 .stroke(stroke)
                 .rounding(egui::Rounding::same(10.0))
                 .inner_margin(egui::Margin::symmetric(10.0, 0.0))
-                .show(self.ui, |ui| {
+                .show(ui, |ui| {
                     if let Some(description) = description {
                         ui.label(format!("{}: ", description));
                     }
@@ -486,68 +561,108 @@ mod instr_view {
         }
     }
 
-    impl<'a, 'b, 'c> bytecode::InstrAnalyzer for Analyzer<'a, 'b, 'c> {
+    struct Analyzer {
+        desc: InstrDescriptor,
+        n_operands: usize,
+    }
+    impl Default for Analyzer {
+        fn default() -> Self {
+            Analyzer {
+                desc: InstrDescriptor::default(),
+                n_operands: 0,
+            }
+        }
+    }
+    impl Analyzer {
+        fn describe(self) -> InstrDescriptor {
+            self.desc
+        }
+    }
+
+    // TODO Might be a good idea to remove the InstrAnalyzer middleman and just put this 'analysis'
+    // resulting into an InstrDescriptor directly into mcjs_vm::bytecode
+    struct InstrDescriptor {
+        opcode: &'static str,
+        operands: [OperandDescriptor; Self::MAX_OPERANDS],
+    }
+    #[derive(Clone, Copy)]
+    enum OperandDescriptor {
+        None,
+        Description(&'static str),
+        VRegRead(bytecode::VReg),
+        VRegWrite(bytecode::VReg),
+        IID(bytecode::IID),
+        Const(bytecode::ConstIndex),
+        Capture(bytecode::CaptureIndex),
+        Arg(bytecode::ArgIndex),
+        Null,
+        Undefined,
+        This,
+    }
+
+    impl InstrDescriptor {
+        const MAX_OPERANDS: usize = 8;
+    }
+    impl Default for InstrDescriptor {
+        fn default() -> Self {
+            InstrDescriptor {
+                opcode: "",
+                operands: [OperandDescriptor::None; Self::MAX_OPERANDS],
+            }
+        }
+    }
+
+    impl Analyzer {
+        fn append_operand(&mut self, op_desc: OperandDescriptor) {
+            self.desc.operands[self.n_operands] = op_desc;
+            self.n_operands += 1;
+        }
+    }
+    impl bytecode::InstrAnalyzer for Analyzer {
         fn start(&mut self, opcode_name: &'static str) {
-            let res = self.ui.selectable_label(self.checked, opcode_name);
-            self.checked = res.clicked();
+            self.desc.opcode = opcode_name;
         }
 
         fn read_vreg_labeled(&mut self, vreg: bytecode::VReg, description: Option<&'static str>) {
-            self.show_value(vreg, description, Mode::Read)
+            if let Some(description) = description {
+                self.append_operand(OperandDescriptor::Description(description));
+            }
+            self.append_operand(OperandDescriptor::VRegRead(vreg));
         }
 
         fn write_vreg_labeled(&mut self, vreg: bytecode::VReg, description: Option<&'static str>) {
-            self.show_value(vreg, description, Mode::Write)
+            if let Some(description) = description {
+                self.append_operand(OperandDescriptor::Description(description));
+            }
+            self.append_operand(OperandDescriptor::VRegWrite(vreg));
         }
 
         fn jump_target(&mut self, iid: mcjs_vm::IID) {
-            let fnid = self.probe.giid().0;
-            show_iid(self.ui, fnid, iid, self.highlighted);
+            self.append_operand(OperandDescriptor::IID(iid));
         }
 
-        fn load_const(&mut self, item: bytecode::ConstIndex) {
-            let value = &self.func.consts()[item.0 as usize];
-            let text: egui::RichText = match value {
-                Literal::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_NUMBER),
-                Literal::String(s) => egui::RichText::new(format!("{:?}", s)).color(COLOR_STRING),
-                Literal::JsWord(jsw) => {
-                    egui::RichText::new(format!("{:?}", jsw.to_string())).color(COLOR_KEYWORD)
-                }
-                Literal::Bool(true) => egui::RichText::new("true").color(COLOR_SINGLETON),
-                Literal::Bool(false) => egui::RichText::new("false").color(COLOR_SINGLETON),
-                Literal::Null => egui::RichText::new("null").color(COLOR_SINGLETON),
-                Literal::Undefined => egui::RichText::new("undefined").color(COLOR_SINGLETON),
-                Literal::SelfFunction => {
-                    panic!("I really gotta delete Literal::SelfFunction one of these days")
-                }
-            };
-            self.ui.label(text);
+        fn load_const(&mut self, const_ndx: bytecode::ConstIndex) {
+            self.append_operand(OperandDescriptor::Const(const_ndx));
         }
 
         fn load_null(&mut self) {
-            self.ui.label(richtext_for_value(InterpreterValue::Null));
+            self.append_operand(OperandDescriptor::Null);
         }
 
         fn load_undefined(&mut self) {
-            self.ui
-                .label(richtext_for_value(InterpreterValue::Undefined));
+            self.append_operand(OperandDescriptor::Undefined);
         }
 
         fn load_capture(&mut self, item: bytecode::CaptureIndex) {
-            // NOTE I assume that Instr::LoadCapture is going to be removed soon, replaced
-            // completely by the implicit inline/upvalue state of stack slots
-            self.ui.label(format!("{:?}", item));
+            self.append_operand(OperandDescriptor::Capture(item));
         }
 
         fn load_arg(&mut self, item: bytecode::ArgIndex) {
-            // NOTE I assume that Instr::LoadArg is going to be removed soon, replaced completely
-            // by the implicit allocation of the first bytecode::ARGS_COUNT_MAX vregs
-            self.ui.label(format!("{:?}", item));
+            self.append_operand(OperandDescriptor::Arg(item));
         }
 
         fn load_this(&mut self) {
-            self.ui
-                .label(egui::RichText::new("this").color(COLOR_KEYWORD));
+            self.append_operand(OperandDescriptor::This);
         }
 
         fn end(&mut self, _instr: &bytecode::Instr) {}
@@ -588,30 +703,6 @@ mod instr_view {
         }
         fn set_iid(&mut self, fnid: bytecode::FnId, iid: bytecode::IID) {
             *self = Highlighted::IID((fnid, iid));
-        }
-    }
-
-    pub fn show_labels(
-        ui: &mut egui::Ui,
-        instr: &bytecode::Instr,
-        frame: &Frame,
-        func: &bytecode::Function,
-        probe: &Probe,
-        is_current: bool,
-        highlighted: &mut Highlighted,
-    ) -> Response {
-        let mut analyzer = Analyzer {
-            ui,
-            func,
-            frame,
-            probe,
-            checked: is_current,
-            highlighted,
-        };
-        instr.analyze(&mut analyzer);
-
-        Response {
-            clicked: analyzer.checked,
         }
     }
 
