@@ -375,8 +375,8 @@ mod instr_view {
 
             let res = egui::Frame::none()
                 .stroke(stroke)
-                .rounding(egui::Rounding::same(2.0))
-                .inner_margin(egui::Margin::symmetric(3.0, 0.0))
+                .rounding(egui::Rounding::same(10.0))
+                .inner_margin(egui::Margin::symmetric(10.0, 0.0))
                 .show(self.ui, |ui| {
                     if let Some(description) = description {
                         ui.label(format!("{}: ", description));
