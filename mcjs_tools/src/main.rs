@@ -485,6 +485,7 @@ mod instr_view {
     const COLOR_STRING: egui::Color32 = COLOR_ROSE;
     const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
     const COLOR_IID: egui::Color32 = COLOR_GREY;
+    const COLOR_INVALID: egui::Color32 = egui::Color32::RED;
 
     struct ValueResponse {
         obj_id: Option<ObjectId>,
@@ -500,13 +501,13 @@ mod instr_view {
             mode: Mode,
         ) -> ValueResponse {
             let slot = self.frame.get_slot(vreg);
-            let value = self.frame.get_result(vreg);
+            let read_result = self.frame.get_result(vreg);
 
             let fnid = self.probe.giid().0;
             let is_highlighted = {
                 let is_vreg_hl = self.highlighted.match_vreg(fnid, vreg);
-                let is_obj_id_hl = match value {
-                    InterpreterValue::Object(value_obj_id) => {
+                let is_obj_id_hl = match read_result {
+                    Ok(InterpreterValue::Object(value_obj_id)) => {
                         self.highlighted.match_obj_id(fnid, value_obj_id)
                     }
                     _ => false,
@@ -540,6 +541,13 @@ mod instr_view {
                         ui.label(format!("upv{} »", upv_id));
                     }
 
+                    let value = if let Ok(value) = read_result {
+                        value
+                    } else {
+                        ui.label(egui::RichText::new("TDZ").color(COLOR_INVALID));
+                        return;
+                    };
+
                     let value_text = richtext_for_value(value);
 
                     if let InterpreterValue::Object(obj_id) = value {
@@ -562,8 +570,8 @@ mod instr_view {
                     }
                 });
 
-            let obj_id = match value {
-                InterpreterValue::Object(obj_id) => Some(obj_id),
+            let obj_id = match read_result {
+                Ok(InterpreterValue::Object(obj_id)) => Some(obj_id),
                 _ => None,
             };
             if res.response.hovered() {

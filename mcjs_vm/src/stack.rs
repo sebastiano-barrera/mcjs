@@ -1,6 +1,19 @@
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX, IID};
 use crate::interpreter::{UpvalueId, Value};
 
+pub type Result<T> = std::result::Result<T, Error>;
+pub enum Error {
+    UninitializedRead,
+}
+
+impl Error {
+    pub fn into_common_error(self) -> crate::common::Error {
+        match self {
+            Error::UninitializedRead => crate::error!("variable read before initialization"),
+        }
+    }
+}
+
 /// The interpreter's stack.
 ///
 /// Mostly stores local variables.
@@ -14,6 +27,16 @@ type Upvalues = slotmap::SlotMap<UpvalueId, Value>;
 
 #[derive(Clone, Copy)]
 enum Slot {
+    /// The initial state of all local variables.
+    ///
+    /// This state is observable from JavaScript code if the variable is declared via
+    /// `let`/`const`. Any read while the variable is still in this state is supposed to result in
+    /// an exception. At the user/source level this is referred to as the variable's "temporal dead
+    /// zone".
+    ///
+    /// Variables declared with `var`/`function` are immediately initialized (to `undefined` or to
+    /// a closure, respectively), so they have no temporal dead zone.
+    Uninitialized,
     Inline(Value),
     Upvalue(UpvalueId),
 }
@@ -21,6 +44,7 @@ enum Slot {
 #[cfg(feature = "debugger")]
 #[derive(Debug)]
 pub enum SlotDebug {
+    Uninitialized,
     Inline(Value),
     Upvalue(UpvalueId),
 }
@@ -28,6 +52,7 @@ pub enum SlotDebug {
 impl From<Slot> for SlotDebug {
     fn from(value: Slot) -> Self {
         match value {
+            Slot::Uninitialized => SlotDebug::Uninitialized,
             Slot::Inline(x) => SlotDebug::Inline(x),
             Slot::Upvalue(x) => SlotDebug::Upvalue(x),
         }
@@ -182,24 +207,28 @@ impl<'a> Frame<'a> {
         self.values[vreg.0 as usize].into()
     }
 
-    pub fn get_result(&self, vreg: bytecode::VReg) -> Value {
+    /// Read the given virtual register.
+    ///
+    /// Returns `None` if the register (varirable) is still uninitialized (in the temporal dead zone).
+    pub fn get_result(&self, vreg: bytecode::VReg) -> Result<Value> {
         let slot = &self.values[vreg.0 as usize];
         match slot {
-            Slot::Inline(value) => *value,
-            Slot::Upvalue(upv_id) => *self
+            Slot::Inline(value) => Ok(*value),
+            Slot::Upvalue(upv_id) => Ok(*self
                 .upv_alloc
                 .get(*upv_id)
-                .expect("gc bug: value deleted but still referenced by stack"),
+                .expect("gc bug: value deleted but still referenced by stack")),
+            Slot::Uninitialized => Err(Error::UninitializedRead),
         }
     }
-    pub fn results(&self) -> impl '_ + ExactSizeIterator<Item = Value> {
+    pub fn results(&self) -> impl '_ + ExactSizeIterator<Item = Result<Value>> {
         (0..self.values.len()).map(|i| {
             let vreg = bytecode::VReg(i.try_into().unwrap());
             self.get_result(vreg)
         })
     }
 
-    pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Option<Value> {
+    pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Result<Value> {
         // TODO to support more than ARGS_MAX_COUNT arguments, the plan is to
         // have an external array of 'extra arguments', managed as part of the
         // FrameHeader
@@ -208,9 +237,9 @@ impl<'a> Frame<'a> {
             "not yet implemented: call with >= {} arguments",
             ARGS_COUNT_MAX
         );
-        Some(self.get_result(bytecode::VReg(argndx.0)))
+        self.get_result(bytecode::VReg(argndx.0))
     }
-    pub fn args(&self) -> impl '_ + ExactSizeIterator<Item = Option<Value>> {
+    pub fn args(&self) -> impl '_ + ExactSizeIterator<Item = Result<Value>> {
         (0..ARGS_COUNT_MAX).map(|i| self.get_arg(bytecode::ArgIndex(i)))
     }
 
@@ -249,6 +278,9 @@ impl<'a> FrameMut<'a> {
                     .expect("gc bug: value deleted but still referenced by stack");
                 *heap_value = value;
             }
+            Slot::Uninitialized => {
+                *slot = Slot::Inline(value);
+            }
         };
     }
 
@@ -262,22 +294,23 @@ impl<'a> FrameMut<'a> {
         self.set_result(bytecode::VReg(argndx.0), value)
     }
 
-    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {
+    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> Result<UpvalueId> {
         let slot = &mut self.values[var.0 as usize];
         match slot {
             Slot::Inline(value) => {
                 let upv_id = self.upv_alloc.insert(*value);
                 *slot = Slot::Upvalue(upv_id);
-                upv_id
+                Ok(upv_id)
             }
-            Slot::Upvalue(upv_id) => *upv_id,
+            Slot::Upvalue(upv_id) => Ok(*upv_id),
+            Slot::Uninitialized => Err(Error::UninitializedRead),
         }
     }
 
     pub(crate) fn ensure_inline(&mut self, var: bytecode::VReg) {
         let slot = &mut self.values[var.0 as usize];
         match slot {
-            Slot::Inline(_) => {}
+            Slot::Uninitialized | Slot::Inline(_) => {}
             Slot::Upvalue(upv_id) => {
                 let value = *self.upv_alloc.get(*upv_id).unwrap();
                 *slot = Slot::Inline(value);
