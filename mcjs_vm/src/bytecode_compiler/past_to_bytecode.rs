@@ -352,7 +352,7 @@ fn compile_expr(
             let dest = get_dest(fnb);
             compile_load_const(fnb, dest, Literal::Number(f64::INFINITY));
             dest
-        },
+        }
         Expr::Read(name) => {
             let src = compile_read(fnb, name);
             if let Some(forced_dest) = forced_dest {

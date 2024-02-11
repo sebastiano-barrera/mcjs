@@ -1369,7 +1369,10 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 last_value
             }
             swc_ecma_ast::Expr::Ident(ident) => {
-                fnb.add_expr(Expr::Read(DeclName::Js(ident.sym.clone())))
+                match ident.sym.as_ref() {
+                    "undefined" => fnb.add_expr(Expr::Undefined),
+                    _ => fnb.add_expr(Expr::Read(DeclName::Js(ident.sym.clone())))
+                }
             }
             swc_ecma_ast::Expr::Lit(lit) => match lit {
                 swc_ecma_ast::Lit::Str(str) => {
