@@ -412,7 +412,7 @@ impl<'a> Interpreter<'a> {
                 n_instrs
             );
             if self.iid.0 as usize == n_instrs {
-                self.exit_function(None);
+                self.exit_function(None)?;
                 continue;
             }
 
@@ -465,44 +465,44 @@ impl<'a> Interpreter<'a> {
                     self.data.top_mut().set_result(*dest, value);
                 }
 
-                Instr::OpAdd(dest, a, b) => match self.get_operand(*a) {
-                    Value::Number(_) => self.with_numbers(*dest, *a, *b, |x, y| x + y),
+                Instr::OpAdd(dest, a, b) => match self.get_operand(*a)? {
+                    Value::Number(_) => self.with_numbers(*dest, *a, *b, |x, y| x + y)?,
                     Value::Object(_) => {
                         let value = self.str_append(a, b)?;
                         self.data.top_mut().set_result(*dest, value);
                     }
                     other => return Err(error!("unsupported operator '+' for: {:?}", other)),
                 },
-                Instr::ArithSub(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x - y),
-                Instr::ArithMul(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x * y),
-                Instr::ArithDiv(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x / y),
+                Instr::ArithSub(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x - y)?,
+                Instr::ArithMul(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x * y)?,
+                Instr::ArithDiv(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x / y)?,
 
                 Instr::PushToSink(operand) => {
-                    let value = self.get_operand(*operand);
+                    let value = self.get_operand(*operand)?;
                     self.sink.push(value);
                 }
 
                 Instr::CmpGE(dest, a, b) => self.compare(*dest, *a, *b, |ord| {
                     ord == ValueOrdering::Greater || ord == ValueOrdering::Equal
-                }),
+                })?,
                 Instr::CmpGT(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Greater)
+                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Greater)?
                 }
                 Instr::CmpLT(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Less)
+                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Less)?
                 }
                 Instr::CmpLE(dest, a, b) => self.compare(*dest, *a, *b, |ord| {
                     ord == ValueOrdering::Less || ord == ValueOrdering::Equal
-                }),
+                })?,
                 Instr::CmpEQ(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Equal)
+                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Equal)?
                 }
                 Instr::CmpNE(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |ord| ord != ValueOrdering::Equal)
+                    self.compare(*dest, *a, *b, |ord| ord != ValueOrdering::Equal)?
                 }
 
                 Instr::JmpIf { cond, dest } => {
-                    let cond_value = self.get_operand(*cond);
+                    let cond_value = self.get_operand(*cond)?;
                     match cond_value {
                         Value::Bool(true) => {
                             next_ndx = dest.0;
@@ -515,7 +515,7 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::Copy { dst, src } => {
-                    let value = self.get_operand(*src);
+                    let value = self.get_operand(*src)?;
                     self.data.top_mut().set_result(*dst, value);
                 }
                 Instr::LoadCapture(dest, cap_ndx) => {
@@ -524,7 +524,7 @@ impl<'a> Interpreter<'a> {
 
                 Instr::Nop => {}
                 Instr::BoolNot { dest, arg } => {
-                    let value = self.get_operand(*arg);
+                    let value = self.get_operand(*arg)?;
                     let value = Value::Bool(!self.to_boolean(value));
                     self.data.top_mut().set_result(*dest, value);
                 }
@@ -532,7 +532,7 @@ impl<'a> Interpreter<'a> {
                     next_ndx = *dest_ndx;
                 }
                 Instr::Return(value) => {
-                    self.exit_function(Some(*value));
+                    self.exit_function(Some(*value))?;
                     continue;
                 }
                 Instr::Call {
@@ -540,7 +540,7 @@ impl<'a> Interpreter<'a> {
                     this,
                     return_value,
                 } => {
-                    let oid = self.get_operand(*callee).expect_obj()?;
+                    let oid = self.get_operand(*callee)?.expect_obj()?;
                     let ho_ref = self
                         .realm
                         .heap
@@ -563,7 +563,7 @@ impl<'a> Interpreter<'a> {
                             Instr::CallArg(arg_reg) => Some(*arg_reg),
                             _ => None,
                         })
-                        .map(|vreg| self.get_operand(vreg))
+                        .flat_map(|vreg| self.get_operand(vreg))
                         .collect();
                     let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
                     let return_to_iid = IID(self.iid.0 + n_args_u16 + 1);
@@ -590,7 +590,8 @@ impl<'a> Interpreter<'a> {
 
                             let this = closure
                                 .forced_this
-                                .unwrap_or_else(|| self.get_operand(*this));
+                                .map(Ok)
+                                .unwrap_or_else(|| self.get_operand(*this))?;
                             // "this" substitution: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
                             // If I understand this correctly, we don't need to box anything right
                             // now.  We just pass the value, and the callee will box it when
@@ -632,7 +633,7 @@ impl<'a> Interpreter<'a> {
                             let nf = *nf;
                             drop(ho_ref);
 
-                            let this = self.get_operand(*this);
+                            let this = self.get_operand(*this)?;
                             let ret_val = nf(self, &this, &arg_vals)?;
                             self.data.top_mut().set_result(*return_value, ret_val);
                             next_ndx = return_to_iid.0;
@@ -660,16 +661,16 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::ObjSet { obj, key, value } => {
                     let mut obj = self.get_operand_object_mut(*obj)?;
-                    let key = self.get_operand(*key);
+                    let key = self.get_operand(*key)?;
                     let key = Self::value_to_index_or_key(&self.realm.heap, &key)
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = self.get_operand(*value);
+                    let value = self.get_operand(*value)?;
 
                     obj.set_own_element_or_property(key.to_ref(), value);
                 }
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = self.get_operand_object(*obj)?;
-                    let key = self.get_operand(*key);
+                    let key = self.get_operand(*key)?;
                     let key = Self::value_to_index_or_key(&self.realm.heap, &key);
 
                     let value = match key {
@@ -705,7 +706,7 @@ impl<'a> Interpreter<'a> {
                     // mode. (Source: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/delete)
                     {
                         let mut obj = self.get_operand_object_mut(*obj)?;
-                        let key = self.get_operand(*key);
+                        let key = self.get_operand(*key)?;
                         let key = Self::value_to_index_or_key(&self.realm.heap, &key)
                             .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                         obj.delete_own_element_or_property(key.to_ref());
@@ -715,7 +716,7 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::ArrayPush { arr, value } => {
-                    let value = self.get_operand(*value);
+                    let value = self.get_operand(*value)?;
                     let mut arr = self
                         .get_operand_object_mut(*arr)?
                         .into_heap_cell()
@@ -734,7 +735,7 @@ impl<'a> Interpreter<'a> {
                             .borrow();
                         let elements = arr.array_elements().unwrap();
 
-                        let num = self.get_operand(*index).expect_num()?;
+                        let num = self.get_operand(*index)?.expect_num()?;
                         let num_trunc = num.trunc();
                         if num_trunc == num {
                             let ndx = num_trunc as usize;
@@ -761,21 +762,21 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::TypeOf { dest, arg: value } => {
-                    let value = self.get_operand(*value);
+                    let value = self.get_operand(*value)?;
                     let result = self.js_typeof(&value);
                     self.data.top_mut().set_result(*dest, result);
                 }
 
                 Instr::BoolOpAnd(dest, a, b) => {
-                    let a = self.get_operand(*a);
-                    let b = self.get_operand(*b);
+                    let a = self.get_operand(*a)?;
+                    let b = self.get_operand(*b)?;
                     let a_bool = self.to_boolean(a);
                     let res = if a_bool { b } else { Value::Bool(false) };
                     self.data.top_mut().set_result(*dest, res);
                 }
                 Instr::BoolOpOr(dest, a, b) => {
-                    let a = self.get_operand(*a);
-                    let b = self.get_operand(*b);
+                    let a = self.get_operand(*a)?;
+                    let b = self.get_operand(*b)?;
                     let a_bool = self.to_boolean(a);
                     let res = if a_bool { a } else { b };
                     self.data.top_mut().set_result(*dest, res);
@@ -790,12 +791,16 @@ impl<'a> Interpreter<'a> {
                     while let Some(Instr::ClosureAddCapture(cap)) =
                         func.instrs().get(next_ndx as usize)
                     {
-                        let upv_id = self.data.top_mut().ensure_in_upvalue(*cap);
+                        let upv_id = self
+                            .data
+                            .top_mut()
+                            .ensure_in_upvalue(*cap)
+                            .map_err(stack::Error::into_common_error)?;
                         upvalues.push(upv_id);
                         next_ndx += 1;
                     }
 
-                    let forced_this = forced_this.map(|reg| self.get_operand(reg));
+                    let forced_this = forced_this.map(|reg| self.get_operand(reg)).transpose()?;
                     let module_id = self.data.top().header().fn_id.0;
                     let fnid = bytecode::FnId(module_id, *fnid);
                     let closure = Closure::JS(JSClosure {
@@ -818,7 +823,7 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Instr::UnaryMinus { dest, arg } => {
-                    let arg_val: f64 = self.get_operand(*arg).expect_num()?;
+                    let arg_val: f64 = self.get_operand(*arg)?.expect_num()?;
                     self.data
                         .top_mut()
                         .set_result(*dest, Value::Number(-arg_val));
@@ -869,7 +874,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::ArithInc(dest, src) => {
                     let val = self
-                        .get_operand(*src)
+                        .get_operand(*src)?
                         .expect_num()
                         .map_err(|_| error!("bytecode bug: ArithInc on non-number"))?;
                     self.data
@@ -878,7 +883,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Instr::ArithDec(dest, src) => {
                     let val = self
-                        .get_operand(*src)
+                        .get_operand(*src)?
                         .expect_num()
                         .map_err(|_| error!("bytecode bug: ArithDec on non-number"))?;
                     self.data
@@ -886,7 +891,7 @@ impl<'a> Interpreter<'a> {
                         .set_result(*dest, Value::Number(val - 1.0));
                 }
                 Instr::IsInstanceOf(dest, obj, sup) => {
-                    let result = self.is_instance_of(*obj, *sup);
+                    let result = self.is_instance_of(*obj, *sup)?;
                     self.data.top_mut().set_result(*dest, Value::Bool(result));
                 }
                 Instr::NewIterator { dest: _, obj: _ } => todo!(),
@@ -920,7 +925,7 @@ impl<'a> Interpreter<'a> {
                     self.data.top_mut().set_result(*dest, current_exc);
                 }
                 Instr::Throw(exc_value) => {
-                    self.current_exc = Some(self.get_operand(*exc_value));
+                    self.current_exc = Some(self.get_operand(*exc_value)?);
                     let handler = self
                         .exc_handler_stack
                         .pop()
@@ -991,7 +996,7 @@ impl<'a> Interpreter<'a> {
 
     fn str_append(&mut self, a: &VReg, b: &VReg) -> Result<Value> {
         // TODO Make this at least *decently* efficient!
-        let b = self.get_operand(*b);
+        let b = self.get_operand(*b)?;
 
         let mut buf = self.get_operand_string(*a)?.to_owned();
         let tail = value_to_string(b, &self.realm.heap);
@@ -1000,17 +1005,17 @@ impl<'a> Interpreter<'a> {
         Ok(value)
     }
 
-    fn is_instance_of(&mut self, obj: VReg, sup: VReg) -> bool {
-        let sup_oid = match self.get_operand(sup) {
+    fn is_instance_of(&mut self, obj: VReg, sup: VReg) -> Result<bool> {
+        let sup_oid = match self.get_operand(sup)? {
             Value::Object(oid) => oid,
-            _ => return false,
+            _ => return Ok(false),
         };
 
         let obj = match self.get_operand_object(obj) {
             Ok(obj) => obj,
-            Err(_) => return false,
+            Err(_) => return Ok(false),
         };
-        self.realm.heap.is_instance_of(&obj, sup_oid)
+        Ok(self.realm.heap.is_instance_of(&obj, sup_oid))
     }
 
     fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<str>> {
@@ -1027,10 +1032,10 @@ impl<'a> Interpreter<'a> {
         FinishedData { sink }
     }
 
-    fn exit_function(&mut self, callee_retval_reg: Option<VReg>) {
+    fn exit_function(&mut self, callee_retval_reg: Option<VReg>) -> Result<()> {
         let return_value = callee_retval_reg
             .map(|vreg| self.get_operand(vreg))
-            .unwrap_or(Value::Undefined);
+            .unwrap_or(Ok(Value::Undefined))?;
 
         let height = self.data.len();
         pop_while(&mut self.exc_handler_stack, |handler| {
@@ -1052,14 +1057,16 @@ impl<'a> Interpreter<'a> {
             // The stack is now empty, so execution can't continue
             // This instance of Interpreter must be decommissioned
         }
+
+        Ok(())
     }
 
-    fn with_numbers<F>(&mut self, dest: VReg, a: VReg, b: VReg, op: F)
+    fn with_numbers<F>(&mut self, dest: VReg, a: VReg, b: VReg, op: F) -> Result<()>
     where
         F: FnOnce(f64, f64) -> f64,
     {
-        let a = self.get_operand(a).expect_num();
-        let b = self.get_operand(b).expect_num();
+        let a = self.get_operand(a)?.expect_num();
+        let b = self.get_operand(b)?.expect_num();
         match (a, b) {
             (Ok(a), Ok(b)) => {
                 self.data
@@ -1073,11 +1080,18 @@ impl<'a> Interpreter<'a> {
                 );
             }
         }
+        Ok(())
     }
 
-    fn compare(&mut self, dest: VReg, a: VReg, b: VReg, test: impl Fn(ValueOrdering) -> bool) {
-        let a = self.get_operand(a);
-        let b = self.get_operand(b);
+    fn compare(
+        &mut self,
+        dest: VReg,
+        a: VReg,
+        b: VReg,
+        test: impl Fn(ValueOrdering) -> bool,
+    ) -> Result<()> {
+        let a = self.get_operand(a)?;
+        let b = self.get_operand(b)?;
 
         let ordering = match (&a, &b) {
             (Value::Bool(a), Value::Bool(b)) => a.cmp(b).into(),
@@ -1109,15 +1123,19 @@ impl<'a> Interpreter<'a> {
         self.data
             .top_mut()
             .set_result(dest, Value::Bool(test(ordering)));
+        Ok(())
     }
 
     // TODO(cleanup) inline this function? It now adds nothing
-    fn get_operand(&self, vreg: bytecode::VReg) -> Value {
-        self.data.top().get_result(vreg)
+    fn get_operand(&self, vreg: bytecode::VReg) -> Result<Value> {
+        self.data
+            .top()
+            .get_result(vreg)
+            .map_err(stack::Error::into_common_error)
     }
 
     fn get_operand_object(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectRef> {
-        let value = self.get_operand(vreg);
+        let value = self.get_operand(vreg)?;
         as_object_ref(value, &self.realm.heap)
             .ok_or_else(|| error!("could not use as object: {:?}", vreg))
     }
@@ -2314,6 +2332,18 @@ mod tests {
                 Some(Literal::Bool(true)),
                 Some(Literal::Bool(true)),
             ],
+        );
+    }
+
+    #[test]
+    fn test_temporal_dead_zone() {
+        let output = quick_run(
+            r#"
+                "use strict"
+                sink(foo())
+                let x = 12
+                function foo() { return x }
+            "#,
         );
     }
 }
