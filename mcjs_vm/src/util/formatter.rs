@@ -44,10 +44,7 @@ impl<W: std::fmt::Write> Formatter<W> {
 
 impl<W: std::fmt::Write> std::fmt::Write for Formatter<W> {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        fn print_indent<W: std::fmt::Write>(
-            wrt: &mut W,
-            indent_level: usize,
-        ) -> std::fmt::Result {
+        fn print_indent<W: std::fmt::Write>(wrt: &mut W, indent_level: usize) -> std::fmt::Result {
             wrt.write_str("\n")?;
             for _ in 0..indent_level {
                 wrt.write_str("  ")?;
@@ -86,4 +83,3 @@ impl<T: Dump> DumpExt for T {
         fmter.finish()
     }
 }
-
