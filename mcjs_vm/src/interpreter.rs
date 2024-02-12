@@ -791,10 +791,7 @@ impl<'a> Interpreter<'a> {
                     while let Some(Instr::ClosureAddCapture(cap)) =
                         func.instrs().get(next_ndx as usize)
                     {
-                        let upv_id = self
-                            .data
-                            .top_mut()
-                            .ensure_in_upvalue(*cap);
+                        let upv_id = self.data.top_mut().ensure_in_upvalue(*cap);
                         upvalues.push(upv_id);
                         next_ndx += 1;
                     }
@@ -1066,19 +1063,17 @@ impl<'a> Interpreter<'a> {
     {
         let a = self.get_operand(a)?.expect_num();
         let b = self.get_operand(b)?.expect_num();
-        match (a, b) {
-            (Ok(a), Ok(b)) => {
-                self.data
-                    .top_mut()
-                    .set_result(dest, Value::Number(op(a, b)));
+        let value = match (a, b) {
+            (Ok(a), Ok(b)) => Value::Number(op(a, b)),
+            (_, _) => {
+                // TODO: Try to convert values to numbers. For example:
+                //   { valueOf() { return 42; } } => 42
+                //   "10" => 10
+                Value::Number(f64::NAN)
             }
-            (a, b) => {
-                eprintln!(
-                    ">>>> WARNING: failed number op: {:?}, {:?}, {:?}",
-                    dest, a, b
-                );
-            }
-        }
+        };
+
+        self.data.top_mut().set_result(dest, value);
         Ok(())
     }
 
