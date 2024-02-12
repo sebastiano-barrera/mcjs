@@ -299,20 +299,10 @@ fn compile_read(fnb: &mut FnBuilder<'_>, name: &DeclName) -> bytecode::VReg {
     }
 }
 
-fn compile_read_global(fnb: &mut FnBuilder<'_>, name: JsWord) -> bytecode::VReg {
-    let global_this = fnb.gen_reg();
+fn compile_read_global(fnb: &mut FnBuilder<'_>, name_lit: JsWord) -> bytecode::VReg {
     let dest = fnb.gen_reg();
-    let key = fnb.gen_reg();
-
-    fnb.emit(Instr::GetGlobalThis(global_this));
-    compile_load_const(fnb, key, Literal::JsWord(name));
-
-    fnb.emit(Instr::ObjGet {
-        dest,
-        obj: global_this,
-        key,
-    });
-
+    let name = fnb.add_const(Literal::JsWord(name_lit));
+    fnb.emit(Instr::GetGlobal { dest, name });
     dest
 }
 fn compile_load_const(fnb: &mut FnBuilder, dest: bytecode::VReg, lit: Literal) {

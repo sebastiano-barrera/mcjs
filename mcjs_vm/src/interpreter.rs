@@ -908,6 +908,45 @@ impl<'a> Interpreter<'a> {
                     let value = Value::Object(self.realm.global_obj);
                     self.data.top_mut().set_result(*dest, value);
                 }
+                Instr::GetGlobal {
+                    dest,
+                    name: bytecode::ConstIndex(name_cndx),
+                } => {
+                    let literal = func.consts()[*name_cndx as usize].clone();
+                    let key = {
+                        let str_literal = match &literal {
+                            bytecode::Literal::String(s) => &s,
+                            bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
+                            _ => panic!("malformed bytecode: GetGlobal argument `name` not a string literal"),
+                        };
+                        heap::IndexOrKey::Key(str_literal)
+                    };
+
+                    let global_this = self.realm.heap.get(self.realm.global_obj).unwrap().borrow();
+                    let lookup_result = global_this.get_own_element_or_property(key);
+
+                    match lookup_result {
+                        None | Some(Value::Undefined) => {
+                            let exc_proto = global_this
+                                .get_own_element_or_property(IndexOrKey::Key("ReferenceError"))
+                                .expect("missing required builtin: ReferenceError")
+                                .expect_obj()
+                                .expect("bug: ReferenceError is not an object?!");
+                            // sadly, the borrowck needs some hand-holding here
+                            drop(global_this);
+                            let exc_oid = self.realm.heap.new_ordinary_object(HashMap::new());
+                            {
+                                let mut exc = self.realm.heap.get(exc_oid).unwrap().borrow_mut();
+                                exc.set_proto(Some(exc_proto));
+                            }
+                            self.handle_exception(Value::Object(exc_oid))?;
+                            continue;
+                        }
+                        Some(value) => {
+                            self.data.top_mut().set_result(*dest, value);
+                        }
+                    }
+                }
 
                 Instr::Breakpoint => {
                     // We must update self.iid now, or the Interpreter will be back here on resume,
@@ -921,22 +960,8 @@ impl<'a> Interpreter<'a> {
                     self.data.top_mut().set_result(*dest, current_exc);
                 }
                 Instr::Throw(exc_value) => {
-                    self.current_exc = Some(self.get_operand(*exc_value)?);
-                    let handler = self
-                        .exc_handler_stack
-                        .pop()
-                        .ok_or_else(|| error!("unhandled exception: {:?}", exc_value))?;
-
-                    assert!(handler.stack_height <= self.data.len());
-                    while handler.stack_height < self.data.len() {
-                        // like return, but ignore the return value
-                        self.data.pop();
-                        let (tgt_iid, _) = self.data.top_mut().take_return_target();
-                        self.iid = tgt_iid;
-                    }
-                    assert_eq!(handler.stack_height, self.data.len());
-
-                    self.iid = handler.target_iid;
+                    let exception = self.get_operand(*exc_value)?;
+                    self.handle_exception(exception)?;
                     continue;
                 }
                 Instr::PopExcHandler => {
@@ -988,6 +1013,24 @@ impl<'a> Interpreter<'a> {
         }
 
         Ok(ExitInternal::Finished)
+    }
+
+    fn handle_exception(&mut self, exception: Value) -> Result<()> {
+        self.current_exc = Some(exception);
+        let handler = self
+            .exc_handler_stack
+            .pop()
+            .ok_or_else(|| error!("unhandled exception: {:?}", exception))?;
+        assert!(handler.stack_height <= self.data.len());
+        while handler.stack_height < self.data.len() {
+            // like return, but ignore the return value
+            self.data.pop();
+            let (tgt_iid, _) = self.data.top_mut().take_return_target();
+            self.iid = tgt_iid;
+        }
+        assert_eq!(handler.stack_height, self.data.len());
+        self.iid = handler.target_iid;
+        Ok(())
     }
 
     fn str_append(&mut self, a: &VReg, b: &VReg) -> Result<Value> {
@@ -1341,6 +1384,11 @@ fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     {
         let mut func_proto = heap.get(heap.func_proto()).unwrap().borrow_mut();
         func_proto.set_own_element_or_property("bind".into(), Value::Object(func_bind));
+    }
+
+    {
+        let oid = heap.new_ordinary_object(HashMap::new());
+        global.insert("ReferenceError".to_string(), Value::Object(oid));
     }
 
     // builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
@@ -2340,5 +2388,20 @@ mod tests {
                 function foo() { return x }
             "#,
         );
+    }
+
+    #[test]
+    fn test_reference_error() {
+        let output = quick_run(
+            r#"
+                try {
+                    aVariableThatDoesNotExist;
+                } catch (e) {
+                    sink(e instanceof ReferenceError);
+                }
+            "#,
+        );
+
+        assert_eq!(&output.sink, &[Some(Literal::Bool(true))]);
     }
 }
