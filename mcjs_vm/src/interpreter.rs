@@ -551,11 +551,16 @@ impl<'a> Interpreter<'a> {
                         .as_closure()
                         .ok_or_else(|| error!("can't call non-closure"))?;
 
-                    // The arguments have to be "read" before adding the stack frame;
+                    // NOTE The arguments have to be "read" before adding the stack frame;
                     // they will no longer be accessible
                     // afterwards
+                    //
                     // TODO make the above fact false, and avoid this allocation
-                    let mut arg_vals: Vec<_> = func
+                    //
+                    // NOTE Note that we collect into Result<Vec<_>>, and *then* try (?). This is
+                    // to ensure that, if get_operand fails, we return early. otherwise we
+                    // would risk that arg_vals.len() != the number of CallArg instructions
+                    let res: Result<Vec<_>> = func
                         .instrs()
                         .iter()
                         .skip(self.iid.0 as usize + 1)
@@ -563,8 +568,9 @@ impl<'a> Interpreter<'a> {
                             Instr::CallArg(arg_reg) => Some(*arg_reg),
                             _ => None,
                         })
-                        .flat_map(|vreg| self.get_operand(vreg))
+                        .map(|vreg| self.get_operand(vreg))
                         .collect();
+                    let mut arg_vals = res?;
                     let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
                     let return_to_iid = IID(self.iid.0 + n_args_u16 + 1);
 
