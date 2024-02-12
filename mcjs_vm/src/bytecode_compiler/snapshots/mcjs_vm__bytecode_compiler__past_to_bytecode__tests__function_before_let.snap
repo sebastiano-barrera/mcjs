@@ -20,6 +20,7 @@ fn LocalFnId(1)
   k1 JsWord(Atom('Function' type=static))
   k2 String("constructor")
   k3 Number(2.0)
+  LoadUndefined(v8)
   ClosureNew { dest: v8, fnid: LocalFnId(2), forced_this: None }
   ClosureAddCapture(v9)
   LoadConst(v10, const[0])

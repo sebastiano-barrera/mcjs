@@ -690,6 +690,12 @@ fn compile_block_internal(fnb: &mut FnBuilder, block: &Block) {
     for decl in block.decls() {
         let reg = fnb.gen_reg();
         fnb.define_name(decl.name.clone(), reg);
+
+        if !decl.is_lexical {
+            // `var` declarations are implicitly initialized as `undefined` at the beginning of the
+            // block (assuming hoisting has been done already)
+            fnb.emit(Instr::LoadUndefined(reg));
+        }
     }
 
     let mut iter = block.stmts();
