@@ -183,7 +183,7 @@ impl MultiError {
     }
 
     pub fn into_single(self) -> Error {
-        assert!(self.0.len() >= 1);
+        assert!(!self.0.is_empty());
         if self.0.len() == 1 {
             self.0.into_iter().next().unwrap()
         } else {

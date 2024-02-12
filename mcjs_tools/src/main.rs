@@ -143,88 +143,86 @@ impl eframe::App for AppData {
             }
         }
 
-        egui::SidePanel::left("sidebar")
-            .show(ctx, |ui| {
-                if let Some(err_message) = self.si.error_message() {
-                    ui.heading("interpreter failed");
-                    ui.label(&err_message);
-                }
+        egui::SidePanel::left("sidebar").show(ctx, |ui| {
+            if let Some(err_message) = self.si.error_message() {
+                ui.heading("interpreter failed");
+                ui.label(&err_message);
+            }
 
-                if ui.button("NEXT").clicked() {
-                    action = Action::Next;
-                }
-                if ui.button("CONTINUE").clicked() {
-                    action = Action::Continue;
-                }
-                if ui.button("RESTART").clicked() {
-                    action = Action::Restart;
-                }
-                // TODO implement 'delete'!
-                let _ = ui.button("DELETE");
+            if ui.button("NEXT").clicked() {
+                action = Action::Next;
+            }
+            if ui.button("CONTINUE").clicked() {
+                action = Action::Continue;
+            }
+            if ui.button("RESTART").clicked() {
+                action = Action::Restart;
+            }
+            // TODO implement 'delete'!
+            let _ = ui.button("DELETE");
 
-                ui.horizontal(|ui| {
-                    ui.label("State:");
-                    let text = match self.si.state_mut() {
-                        State::Ready => "Ready",
-                        State::Finished => "Finished",
-                        State::Suspended(_) => "Suspended",
-                        State::Failed(_) => "Failed",
+            ui.horizontal(|ui| {
+                ui.label("State:");
+                let text = match self.si.state_mut() {
+                    State::Ready => "Ready",
+                    State::Finished => "Finished",
+                    State::Suspended(_) => "Suspended",
+                    State::Failed(_) => "Failed",
+                };
+                ui.label(text);
+            });
+
+            let probe = self.si.probe_mut().unwrap();
+            let status_text = format!("suspended at {:?}", probe.giid());
+
+            ui.separator();
+            ui.label(status_text);
+
+            ui.separator();
+            ui.label("Double click on a <source code range> to set a breakpoint");
+
+            ui.heading("SOURCE BREAKPOINTS");
+            let loader = probe.loader();
+            ui.vertical(|ui| {
+                for (brid, _) in probe.source_breakpoints() {
+                    let break_range = loader.get_break_range(brid).unwrap();
+                    let source_map = loader.get_source_map(brid.module_id()).unwrap();
+                    let loc = source_map.lookup_char_pos(break_range.lo);
+                    let filename = loc.file.name.to_string();
+                    ui.label(format!("{}:{}", filename, loc.line));
+                }
+            });
+
+            ui.heading("INSTR. BREAKPOINTS");
+            ui.vertical(|ui| {
+                for giid in probe.instr_breakpoints() {
+                    ui.label(format!("{:?}", giid));
+                }
+            });
+
+            ui.heading("STACK");
+            ui.vertical(|ui| {
+                for (ndx, frame) in probe.frames().enumerate() {
+                    let iid = if ndx == 0 {
+                        probe.giid().1
+                    } else {
+                        frame.header().return_target.unwrap().0
                     };
-                    ui.label(text);
-                });
 
-                let probe = self.si.probe_mut().unwrap();
-                let status_text = format!("suspended at {:?}", probe.giid());
+                    let text = format!("{:?}:{:?}", frame.header().fn_id, iid);
+                    let bg = if ndx == self.frame_ndx {
+                        ctx.style().visuals.selection.bg_fill
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
 
-                ui.separator();
-                ui.label(status_text);
-
-                ui.separator();
-                ui.label("Double click on a <source code range> to set a breakpoint");
-
-                ui.heading("SOURCE BREAKPOINTS");
-                let loader = probe.loader();
-                ui.vertical(|ui| {
-                    for (brid, _) in probe.source_breakpoints() {
-                        let break_range = loader.get_break_range(brid).unwrap();
-                        let source_map = loader.get_source_map(brid.module_id()).unwrap();
-                        let loc = source_map.lookup_char_pos(break_range.lo);
-                        let filename = loc.file.name.to_string();
-                        ui.label(format!("{}:{}", filename, loc.line));
+                    let res = ui.add(egui::Button::new(text).frame(false).fill(bg));
+                    if res.clicked() {
+                        action = Action::SetStackFrame { index: ndx };
                     }
-                });
-
-                ui.heading("INSTR. BREAKPOINTS");
-                ui.vertical(|ui| {
-                    for giid in probe.instr_breakpoints() {
-                        ui.label(format!("{:?}", giid));
-                    }
-                });
-
-                ui.heading("STACK");
-                ui.vertical(|ui| {
-                    for (ndx, frame) in probe.frames().enumerate() {
-                        let iid = if ndx == 0 {
-                            probe.giid().1
-                        } else {
-                            frame.header().return_target.unwrap().0
-                        };
-
-                        let text = format!("{:?}:{:?}", frame.header().fn_id, iid);
-                        let bg = if ndx == self.frame_ndx {
-                            ctx.style().visuals.selection.bg_fill
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        };
-
-                        let res = ui.add(egui::Button::new(text).frame(false).fill(bg));
-                        if res.clicked() {
-                            action = Action::SetStackFrame { index: ndx };
-                        }
-                    }
-                });
-            })
-            .inner;
+                }
+            });
+        });
 
         egui::SidePanel::left("bytecode")
             .min_width(400.0)
@@ -312,9 +310,7 @@ impl eframe::App for AppData {
 
         if let Some(probe) = self.si.probe_mut() {
             let res = egui::CentralPanel::default()
-                .show(ctx, |ui| {
-                    source_code_view::show(ui, &mut self.source_code_view)
-                })
+                .show(ctx, |ui| source_code_view::show(ui, &self.source_code_view))
                 .inner;
 
             ctx.fonts(|fonts| {
@@ -637,17 +633,10 @@ mod instr_view {
         }
     }
 
+    #[derive(Default)]
     struct Analyzer {
         desc: InstrDescriptor,
         n_operands: usize,
-    }
-    impl Default for Analyzer {
-        fn default() -> Self {
-            Analyzer {
-                desc: InstrDescriptor::default(),
-                n_operands: 0,
-            }
-        }
     }
     impl Analyzer {
         fn describe(self) -> InstrDescriptor {
@@ -749,16 +738,14 @@ mod instr_view {
         pub clicked_obj_id: Option<ObjectId>,
     }
 
+    #[allow(clippy::upper_case_acronyms)]
+    #[derive(Default)]
     pub enum Highlighted {
+        #[default]
         None,
         VReg((bytecode::FnId, bytecode::VReg)),
         Object((bytecode::FnId, ObjectId)),
         IID((bytecode::FnId, bytecode::IID)),
-    }
-    impl Default for Highlighted {
-        fn default() -> Self {
-            Highlighted::None
-        }
     }
     impl Highlighted {
         fn match_vreg(&self, fnid: bytecode::FnId, vreg: bytecode::VReg) -> bool {
@@ -874,7 +861,7 @@ mod object_view {
                 Closure::Native(_) => Some("[Function Native]".into()),
                 Closure::JS(jsc) => Some(format!("[Function {:?}]", jsc.fnid()).into()),
             }
-        } else if let Some(_) = obj.array_elements() {
+        } else if obj.array_elements().is_some() {
             Some("[Array]".into())
         } else {
             None
@@ -1001,10 +988,8 @@ mod source_code_view {
         // if pixels per point changes, we need to re-make the galleys
         let ppi = fonts.pixels_per_point();
 
-        let needs_update = match &cache.main {
-            Some(main) if fnid == main.fnid && ppi == main.ppi => false,
-            _ => true,
-        };
+        let needs_update =
+            !matches!(&cache.main, Some(main) if fnid == main.fnid && ppi == main.ppi);
         if needs_update {
             let loader = probe.loader();
             cache.main = cache_main(loader, fnid, fonts);
@@ -1016,10 +1001,8 @@ mod source_code_view {
         }
 
         if let Some(cursor_ofs) = response.set_focus_cursor {
-            let needs_update = match &cache.focus {
-                Some(focus) if focus.cursor_ofs == cursor_ofs => false,
-                _ => true,
-            };
+            let needs_update =
+                !matches!(&cache.focus, Some(focus) if focus.cursor_ofs == cursor_ofs);
             if needs_update {
                 let main = cache.main.as_ref().unwrap();
                 cache.focus = cache_focus(probe, fnid, cursor_ofs, fonts, main);
@@ -1227,18 +1210,10 @@ mod interpreter_manager {
     /// In broad strokes: this state is saved when calling `StandaloneInterpreter::restart`, and
     /// restored as soon as a new interpreter is created with the next call to
     /// `StandaloneInterpreter::next`.
+    #[derive(Default)]
     struct DebuggingSave {
         instr_bkpts: Vec<GlobalIID>,
         source_bkpts: Vec<BreakRangeID>,
-    }
-
-    impl Default for DebuggingSave {
-        fn default() -> Self {
-            DebuggingSave {
-                instr_bkpts: Vec::new(),
-                source_bkpts: Vec::new(),
-            }
-        }
     }
 
     impl DebuggingSave {
