@@ -42,6 +42,8 @@ impl util::Dump for Function {
 pub struct Block {
     pub id: BlockID,
 
+    is_use_strict_declared: bool,
+
     // These are all Vec's, but they have somewhat different semantics. This is
     // reflected in Block's public API
     /// Set of declarations. No ordering.
@@ -154,7 +156,12 @@ impl util::Dump for Block {
         writeln!(f, "{:?} {{", self.id)?;
         f.indent();
 
+        if self.is_use_strict_declared {
+            writeln!(f, "use strict: yes")?;
+        }
+
         writeln!(f, "decls:")?;
+
         f.indent();
         for decl in &self.decls {
             writeln!(f, "{:?}", decl)?;
@@ -459,6 +466,7 @@ mod builder {
                 decls: Vec::new(),
                 stmts: Vec::new(),
                 exprs: Vec::new(),
+                is_use_strict_declared: false,
             });
         }
         fn pop_block(&mut self) -> Block {
@@ -481,6 +489,13 @@ mod builder {
             self.add_stmt(StmtOp::Block(Box::new(inner_block)));
 
             ret
+        }
+
+        pub(super) fn is_at_fn_body_start(&self) -> bool {
+            self.blocks.len() == 1 && self.blocks[0].stmts.is_empty()
+        }
+        pub(super) fn declare_use_strict(&mut self) {
+            self.blocks.first_mut().unwrap().is_use_strict_declared = true;
         }
 
         fn gen_tmp(&mut self) -> TmpID {
@@ -1087,6 +1102,17 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
 
             swc_ecma_ast::Stmt::Decl(decl) => compile_decl(fnb, decl),
             swc_ecma_ast::Stmt::Expr(expr_stmt) => {
+                if fnb.is_at_fn_body_start() {
+                    if let swc_ecma_ast::Expr::Lit(swc_ecma_ast::Lit::Str(s)) =
+                        expr_stmt.expr.as_ref()
+                    {
+                        if &s.value == "use strict" {
+                            fnb.declare_use_strict();
+                            return;
+                        }
+                    }
+                }
+
                 let value = compile_expr(fnb, &expr_stmt.expr);
                 fnb.add_stmt(StmtOp::Evaluate(value));
             }
@@ -1156,8 +1182,6 @@ fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
 }
 
 fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
-    let t = tracing::section("compile_expr");
-
     fnb.with_span(expr.span(), |fnb| {
         match expr {
             swc_ecma_ast::Expr::This(_) => fnb.add_expr(Expr::This),
@@ -1173,6 +1197,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                         let value = compile_expr(fnb, &expr_or_spread.expr);
                         fnb.add_stmt(StmtOp::ArrayPush(array_tmp.clone(), value));
                     } else {
+                        let t = tracing::section("compile_expr");
                         t.log("unsupported_array_expr", &format!("{:?}", array_expr.span));
                         // todo!("What does `None` mean here? {:?}", array_expr.span)
                     }
@@ -1667,7 +1692,7 @@ fn compile_function_from_parts(
         parameters.push(name.clone());
     }
 
-    let declares_use_strict = block_starts_with_use_strict(&body);
+    let declares_use_strict = body.is_use_strict_declared;
 
     let unbound_names = find_unbound_references(&body, &parameters);
     Function {
@@ -1677,23 +1702,6 @@ fn compile_function_from_parts(
         body,
         span,
     }
-}
-
-fn block_starts_with_use_strict(block: &Block) -> bool {
-    let expr = match block.stmts.first() {
-        Some(Stmt {
-            op: StmtOp::Evaluate(expr),
-            ..
-        }) => expr,
-        _ => return false,
-    };
-
-    let expr = &block.exprs[expr.0 as usize];
-    if let Expr::StringLiteral(atom) = expr {
-        return atom == "use strict";
-    }
-
-    false
 }
 
 fn find_unbound_references(root: &Block, param_names: &[JsWord]) -> Vec<JsWord> {
