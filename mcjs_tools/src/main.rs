@@ -236,6 +236,16 @@ impl eframe::App for AppData {
                 let fnid = vm_giid.0;
                 let func = probe.loader().get_function(fnid).unwrap();
 
+                ui.horizontal(|ui| {
+                    ui.label("mode: ");
+                    let text = if func.is_strict_mode() {
+                        "strict"
+                    } else {
+                        "sloppy"
+                    };
+                    ui.label(egui::RichText::new(text).strong());
+                });
+
                 let mut bkpt_to_set = None;
 
                 let instr_bkpts: Vec<_> = probe.instr_breakpoints().collect();
@@ -544,7 +554,11 @@ mod instr_view {
                     let value = if let Some(value) = read_result {
                         value
                     } else {
-                        ui.label(egui::RichText::new("TDZ").color(COLOR_INVALID).small_raised());
+                        ui.label(
+                            egui::RichText::new("TDZ")
+                                .color(COLOR_INVALID)
+                                .small_raised(),
+                        );
                         return;
                     };
 
