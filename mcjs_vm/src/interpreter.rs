@@ -915,7 +915,7 @@ impl<'a> Interpreter<'a> {
                     let literal = func.consts()[*name_cndx as usize].clone();
                     let key = {
                         let str_literal = match &literal {
-                            bytecode::Literal::String(s) => &s,
+                            bytecode::Literal::String(s) => s,
                             bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
                             _ => panic!("malformed bytecode: GetGlobal argument `name` not a string literal"),
                         };
