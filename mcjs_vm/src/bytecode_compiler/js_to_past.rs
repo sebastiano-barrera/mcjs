@@ -377,10 +377,10 @@ use builder::{Builder, FnBuilder};
 mod builder {
     use swc_atoms::JsWord;
 
-    use crate::{common::{MultiErrResult, MultiError}, util::pop_while};
+    use crate::common::{Error, MultiErrResult, MultiError};
+    use crate::util::pop_while;
 
-    use super::{Block, Decl, DeclName, Expr, ExprID, StmtID, StmtOp};
-    use crate::common::Error;
+    use super::*;
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     pub struct BlockID(u32);
@@ -497,11 +497,9 @@ mod builder {
             let block = self.blocks.pop().unwrap();
             block.assert_valid();
 
-            pop_while(&mut self.break_exits, |target| {
-                &target.block_id == &block.id
-            });
+            pop_while(&mut self.break_exits, |target| target.block_id == block.id);
             pop_while(&mut self.continue_exits, |target| {
-                &target.block_id == &block.id
+                target.block_id == block.id
             });
 
             block
