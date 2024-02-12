@@ -8,7 +8,7 @@ use std::fmt::Write;
 use swc_atoms::JsWord;
 use swc_common::Spanned;
 
-use crate::{impl_debug_via_dump, tracing, util};
+use crate::{common::MultiErrResult, error, impl_debug_via_dump, tracing, util};
 
 macro_rules! unsupported_node {
     ($value:expr) => {{
@@ -133,6 +133,7 @@ impl Block {
                     Expr::ImportModule { import_path: _ } => {}
                     Expr::StringCreate => {}
                     Expr::RegexLiteral { .. } => {}
+                    Expr::Error => {}
                 }
             }
         }
@@ -364,6 +365,7 @@ pub enum Expr {
         pattern: String,
         flags: String,
     },
+    Error,
 }
 
 const ZERO: Expr = Expr::NumberLiteral(0.0);
@@ -373,9 +375,12 @@ pub use builder::{BlockID, TmpID};
 use builder::{Builder, FnBuilder};
 
 mod builder {
-    use crate::util::pop_while;
+    use swc_atoms::JsWord;
+
+    use crate::{common::{MultiErrResult, MultiError}, util::pop_while};
 
     use super::{Block, Decl, DeclName, Expr, ExprID, StmtID, StmtOp};
+    use crate::common::Error;
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     pub struct BlockID(u32);
@@ -411,8 +416,22 @@ mod builder {
         /// The stack of 'current spans' that can be set via `FnBuilder::with_span`
         spans: Vec<swc_common::Span>,
 
-        break_exits: Vec<BlockID>,
-        continue_exits: Vec<BlockID>,
+        break_exits: Vec<Exit>,
+        continue_exits: Vec<Exit>,
+
+        errors: Vec<Error>,
+    }
+
+    #[derive(PartialEq, Eq)]
+    struct Exit {
+        block_id: BlockID,
+        label: Option<JsWord>,
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) enum ExitType {
+        Break,
+        Continue,
     }
 
     impl Builder {
@@ -433,16 +452,21 @@ mod builder {
                 break_exits: Vec::new(),
                 continue_exits: Vec::new(),
                 spans: Vec::new(),
+                errors: Vec::new(),
             };
             // The function's outermost block. Will be fetched via `pop_block` by `build`
             fnb.push_block();
             fnb
         }
 
-        pub(super) fn build(mut self) -> Block {
+        pub(super) fn build(mut self) -> MultiErrResult<Block> {
             let block = self.pop_block();
             assert!(self.blocks.is_empty());
-            block
+
+            match self.errors.len() {
+                0 => Ok(block),
+                _ => Err(MultiError(self.errors)),
+            }
         }
 
         pub(super) fn suspend(&mut self) -> &mut Builder {
@@ -473,8 +497,12 @@ mod builder {
             let block = self.blocks.pop().unwrap();
             block.assert_valid();
 
-            pop_while(&mut self.break_exits, |target| target == &block.id);
-            pop_while(&mut self.continue_exits, |target| target == &block.id);
+            pop_while(&mut self.break_exits, |target| {
+                &target.block_id == &block.id
+            });
+            pop_while(&mut self.continue_exits, |target| {
+                &target.block_id == &block.id
+            });
 
             block
         }
@@ -602,9 +630,9 @@ mod builder {
         /// This setting is independent from the one for StmtOp::Continue.
         ///
         /// Overrides the break target inherited from parent blocks.
-        pub(super) fn break_exits_this_block(&mut self) {
-            let blkid = self.cur_block_id();
-            self.break_exits.push(blkid);
+        pub(super) fn break_exits_this_block(&mut self, label: Option<JsWord>) {
+            let block_id = self.cur_block_id();
+            self.break_exits.push(Exit { block_id, label });
         }
 
         /// Exactly the same as `break_exits_this_block`, but applies to
@@ -612,19 +640,31 @@ mod builder {
         /// instead.
         ///
         /// This setting is independent from the one for StmtOp::Break.
-        pub(super) fn continue_exits_this_block(&mut self) {
-            let blkid = self.cur_block_id();
-            self.continue_exits.push(blkid);
+        pub(super) fn continue_exits_this_block(&mut self, label: Option<JsWord>) {
+            let block_id = self.cur_block_id();
+            self.continue_exits.push(Exit { block_id, label });
         }
 
-        pub(super) fn add_break_stmt(&mut self) {
-            let target = *self.break_exits.last().expect("no break target");
-            self.add_stmt(StmtOp::Break(target));
-        }
+        pub(super) fn find_exit(
+            &self,
+            exit_type: ExitType,
+            label: Option<&JsWord>,
+        ) -> Option<BlockID> {
+            let targets_stack = match exit_type {
+                ExitType::Break => &self.break_exits,
+                ExitType::Continue => &self.continue_exits,
+            };
 
-        pub(super) fn add_continue_stmt(&mut self) {
-            let target = *self.continue_exits.last().expect("no continue target");
-            self.add_stmt(StmtOp::Break(target));
+            if let Some(label) = label {
+                targets_stack
+                    .iter()
+                    .rev()
+                    .filter(|exit| exit.label.as_ref() == Some(label))
+                    .map(|exit| exit.block_id)
+                    .next()
+            } else {
+                targets_stack.last().map(|exit| exit.block_id)
+            }
         }
 
         pub(super) fn with_span<T>(
@@ -636,6 +676,13 @@ mod builder {
             let ret = action(self);
             self.spans.pop().unwrap();
             ret
+        }
+
+        pub(crate) fn signal_error(&mut self, error: Error) {
+            self.errors.push(error);
+        }
+        pub(crate) fn signal_multi_error(&mut self, multi_err: MultiError) {
+            self.errors.extend(multi_err.0);
         }
     }
 
@@ -654,13 +701,13 @@ mod builder {
     }
 }
 
-pub fn compile_script(script_ast: &swc_ecma_ast::Script) -> Function {
+pub fn compile_script(script_ast: &swc_ecma_ast::Script) -> MultiErrResult<Function> {
     let mut builder = Builder::new();
     let mut fnb = builder.new_function();
     for stmt in &script_ast.body {
         compile_stmt(&mut fnb, stmt);
     }
-    let block = fnb.build();
+    let block = fnb.build()?;
     let mut function = compile_function_from_parts(script_ast.span, &[], block);
 
     // Toplevel var (non-lexical) definitions in a script are allocated in
@@ -679,10 +726,10 @@ pub fn compile_script(script_ast: &swc_ecma_ast::Script) -> Function {
     }
     function.body.decls = kept_decls;
 
-    function
+    Ok(function)
 }
 
-pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> Function {
+pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> MultiErrResult<Function> {
     use swc_ecma_ast::ModuleItem;
 
     let mut builder = Builder::new();
@@ -812,16 +859,20 @@ pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> Function {
         }
     }
 
-    let block = fnb.build();
+    let block = fnb.build()?;
     let mut function = compile_function_from_parts(script_ast.span, &[], block);
 
     // modules are always strict, no matter what
     function.declares_use_strict = true;
 
-    function
+    Ok(function)
 }
 
 fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
+    compile_stmt_ex(fnb, stmt, None)
+}
+
+fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option<&JsWord>) {
     fnb.with_span(stmt.span(), |fnb| {
         match stmt {
             swc_ecma_ast::Stmt::Block(block_stmt) => {
@@ -847,16 +898,16 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             }
 
             swc_ecma_ast::Stmt::Break(break_stmt) => {
-                if break_stmt.label.is_some() {
-                    panic!("unsupported: labeled break statement");
+                let label = break_stmt.label.as_ref().map(|ident| &ident.sym);
+                if let Some(target) = find_exit(fnb, builder::ExitType::Break, label) {
+                    fnb.add_stmt(StmtOp::Break(target));
                 }
-                fnb.add_break_stmt();
             }
             swc_ecma_ast::Stmt::Continue(cont_stmt) => {
-                if cont_stmt.label.is_some() {
-                    panic!("unsupported: labeled continue statement");
+                let label = cont_stmt.label.as_ref().map(|ident| &ident.sym);
+                if let Some(target) = find_exit(fnb, builder::ExitType::Continue, label) {
+                    fnb.add_stmt(StmtOp::Break(target));
                 }
-                fnb.add_continue_stmt();
             }
 
             swc_ecma_ast::Stmt::If(if_stmt) => {
@@ -887,7 +938,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                 // if/else chain
                 //  - hoist *all* declarations (regardless of what
                 //  ECMAScript says)
-                todo!("switch")
+                todo!("switch");
             }
 
             swc_ecma_ast::Stmt::Throw(throw_stmt) => {
@@ -947,15 +998,18 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             }
             swc_ecma_ast::Stmt::While(while_stmt) => {
                 fnb.block(|fnb| {
-                    fnb.break_exits_this_block();
+                    fnb.break_exits_this_block(label.cloned());
                     let block_start = fnb.peek_stmt_id();
 
                     let test = compile_expr(fnb, &while_stmt.test);
                     fnb.add_stmt(StmtOp::IfNot { test });
-                    fnb.add_break_stmt();
+
+                    if let Some(target) = fnb.find_exit(builder::ExitType::Break, label) {
+                        fnb.add_stmt(StmtOp::Break(target));
+                    }
 
                     fnb.block(|fnb| {
-                        fnb.continue_exits_this_block();
+                        fnb.continue_exits_this_block(label.cloned());
                         compile_stmt(fnb, &while_stmt.body);
                     });
 
@@ -964,17 +1018,20 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             }
             swc_ecma_ast::Stmt::DoWhile(dowhile_stmt) => {
                 fnb.block(|fnb| {
-                    fnb.break_exits_this_block();
+                    fnb.break_exits_this_block(label.cloned());
 
                     let block_start = fnb.peek_stmt_id();
                     fnb.block(|fnb| {
-                        fnb.continue_exits_this_block();
+                        fnb.continue_exits_this_block(label.cloned());
                         compile_stmt(fnb, &dowhile_stmt.body);
                     });
 
                     let test = compile_expr(fnb, &dowhile_stmt.test);
                     fnb.add_stmt(StmtOp::IfNot { test });
-                    fnb.add_break_stmt();
+
+                    if let Some(target) = fnb.find_exit(builder::ExitType::Break, None) {
+                        fnb.add_stmt(StmtOp::Break(target));
+                    }
                     fnb.add_stmt(StmtOp::Jump(block_start));
                 });
             }
@@ -982,7 +1039,11 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                 fnb.block(|fnb| {
                     let outer_block_id = fnb.cur_block_id();
 
-                    fnb.break_exits_this_block();
+                    // If this statement is labeled, then this compile_stmt_ex has
+                    // been called by another compile_stmt_ex with stmt =
+                    // Stmt::Labeled(_).  The caller frame has already taken care of
+                    // defining the labeled break exit (in another wrapping block).
+                    fnb.break_exits_this_block(None);
 
                     match &for_stmt.init {
                         Some(swc_ecma_ast::VarDeclOrExpr::VarDecl(var_decl)) => {
@@ -1001,12 +1062,15 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                         if let Some(test_expr) = &for_stmt.test {
                             let test = compile_expr(fnb, test_expr);
                             fnb.add_stmt(StmtOp::IfNot { test });
-                            fnb.add_break_stmt();
+
+                            if let Some(target) = find_exit(fnb, builder::ExitType::Break, label) {
+                                fnb.add_stmt(StmtOp::Break(target));
+                            }
                         }
 
                         fnb.block(|fnb| {
-                            fnb.continue_exits_this_block();
-                            compile_stmt(fnb, &for_stmt.body);
+                            fnb.continue_exits_this_block(label.cloned());
+                            compile_stmt(fnb, &for_stmt.body)
                         });
 
                         if let Some(update) = &for_stmt.update {
@@ -1052,7 +1116,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
 
                 fnb.block(|fnb| {
                     let outer_block_id = fnb.cur_block_id();
-                    fnb.break_exits_this_block();
+                    fnb.break_exits_this_block(label.cloned());
 
                     let item_var = item_var_decl.name.clone();
                     fnb.add_decl(item_var_decl);
@@ -1074,7 +1138,10 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                     let test =
                         fnb.add_expr(Expr::Binary(swc_ecma_ast::BinaryOp::Lt, key_ndx, key_count));
                     fnb.add_stmt(StmtOp::IfNot { test });
-                    fnb.add_break_stmt();
+
+                    if let Some(target) = fnb.find_exit(builder::ExitType::Break, label) {
+                        fnb.add_stmt(StmtOp::Break(target));
+                    };
 
                     let element = fnb.add_expr(Expr::ArrayNth {
                         arr: keys,
@@ -1083,7 +1150,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                     fnb.add_stmt(StmtOp::Assign(item_var, element));
 
                     fnb.block(|fnb| {
-                        fnb.continue_exits_this_block();
+                        fnb.continue_exits_this_block(label.cloned());
                         compile_stmt(fnb, &forin_stmt.body);
                     });
 
@@ -1100,7 +1167,9 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
             }
             swc_ecma_ast::Stmt::ForOf(_) => todo!(),
 
-            swc_ecma_ast::Stmt::Decl(decl) => compile_decl(fnb, decl),
+            swc_ecma_ast::Stmt::Decl(decl) => {
+                compile_decl(fnb, decl);
+            }
             swc_ecma_ast::Stmt::Expr(expr_stmt) => {
                 if fnb.is_at_fn_body_start() {
                     if let swc_ecma_ast::Expr::Lit(swc_ecma_ast::Lit::Str(s)) =
@@ -1117,11 +1186,43 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
                 fnb.add_stmt(StmtOp::Evaluate(value));
             }
 
-            swc_ecma_ast::Stmt::Labeled(_) | swc_ecma_ast::Stmt::With(_) => {
+            swc_ecma_ast::Stmt::Labeled(labeled_stmt) => {
+                // we interpret the 'labeled statement' feature as a 'labelled
+                // block', actually. then we just, well, label the block. the
+                // existing machinery for break/continue is already fit for the
+                // purpose.
+
+                let label = labeled_stmt.label.sym.clone();
+                fnb.block(move |fnb| {
+                    fnb.break_exits_this_block(Some(label.clone()));
+                    compile_stmt_ex(fnb, &labeled_stmt.body, Some(&label));
+                });
+            }
+
+            swc_ecma_ast::Stmt::With(_) => {
                 unsupported_node!(stmt)
             }
-        }
+        };
     })
+}
+
+fn find_exit(
+    fnb: &mut FnBuilder,
+    exit_type: builder::ExitType,
+    label: Option<&JsWord>,
+) -> Option<BlockID> {
+    let exit = fnb.find_exit(exit_type, label);
+    if exit.is_none() {
+        let error = if let Some(label) = label {
+            error!("undefined block label `{}`", label.as_ref())
+        } else {
+            error!("break/continue statement outside of loop statement")
+        };
+
+        fnb.signal_error(error);
+    }
+
+    exit
 }
 
 fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
@@ -1133,13 +1234,7 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
                 is_lexical: false,
             });
 
-            let func = {
-                let builder = fnb.suspend();
-                let func = compile_function(builder, &fn_decl.function);
-                Box::new(func)
-            };
-
-            let closure = fnb.add_expr(Expr::CreateClosure { func });
+            let closure = compile_fn_as_expr(fnb, &fn_decl.function);
 
             // For function declarations, assignment to their value is always done at the beginning
             // of the block.  This allows the function to be called earlier in the block than the
@@ -1245,12 +1340,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                                 swc_ecma_ast::Prop::Method(method_prop) => {
                                     let name = method_prop.key.as_ident().expect("object literal: method property syntax, but name is not identifier?");
                                     let key = fnb.add_expr(Expr::StringLiteral(name.sym.clone()));
-                                    let func = {
-                                        let builder = fnb.suspend();
-                                        let func = compile_function(builder, &method_prop.function);
-                                        Box::new(func)
-                                    };
-                                    let value = fnb.add_expr(Expr::CreateClosure { func });
+                                    let value = compile_fn_as_expr(fnb, &method_prop.function);
                                     (key, value)
                                 }
 
@@ -1275,7 +1365,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
 
                 let params: Vec<_> = arrow_expr.params.iter().cloned().map(From::from).collect();
 
-                let body = {
+                let body_res = {
                     let builder = fnb.suspend();
                     let mut fnb = builder.new_function();
 
@@ -1295,6 +1385,15 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
 
                     fnb.build()
                 };
+
+                let body = match body_res {
+                    Ok(body) => body,
+                    Err(multi_err) => {
+                        fnb.signal_multi_error(multi_err);
+                        return fnb.add_expr(Expr::Error);
+                    },
+                };
+
                 let func = compile_function_from_parts(arrow_expr.span, &params, body);
 
                 let func_expr = fnb.add_expr(Expr::CreateClosure {
@@ -1489,12 +1588,24 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
 }
 
 fn compile_fn_expr(fnb: &mut FnBuilder, fn_expr: &swc_ecma_ast::FnExpr) -> ExprID {
-    let func = {
+    compile_fn_as_expr(fnb, &fn_expr.function)
+}
+
+fn compile_fn_as_expr(fnb: &mut FnBuilder<'_>, func_ast: &swc_ecma_ast::Function) -> ExprID {
+    let res = {
         let builder = fnb.suspend();
-        let func = compile_function(builder, &fn_expr.function);
-        Box::new(func)
+        compile_function(builder, func_ast)
     };
-    fnb.add_expr(Expr::CreateClosure { func })
+    let func = match res {
+        Ok(func) => func,
+        Err(multi_err) => {
+            fnb.signal_multi_error(multi_err);
+            return fnb.add_expr(Expr::Error);
+        }
+    };
+    fnb.add_expr(Expr::CreateClosure {
+        func: Box::new(func),
+    })
 }
 
 fn compile_member_assignment(
@@ -1654,7 +1765,10 @@ fn compile_args(fnb: &mut FnBuilder, args: &[swc_ecma_ast::ExprOrSpread]) -> Vec
         .collect()
 }
 
-fn compile_function(builder: &mut Builder, swc_func: &swc_ecma_ast::Function) -> Function {
+fn compile_function(
+    builder: &mut Builder,
+    swc_func: &swc_ecma_ast::Function,
+) -> MultiErrResult<Function> {
     if !swc_func.decorators.is_empty() {
         panic!("unsupported: function decorators");
     }
@@ -1676,8 +1790,9 @@ fn compile_function(builder: &mut Builder, swc_func: &swc_ecma_ast::Function) ->
     for stmt in stmts {
         compile_stmt(&mut fnb, stmt);
     }
-    let body = fnb.build();
-    compile_function_from_parts(swc_func.span, &swc_func.params, body)
+    let body = fnb.build()?;
+    let func = compile_function_from_parts(swc_func.span, &swc_func.params, body);
+    Ok(func)
 }
 
 fn compile_function_from_parts(
@@ -1820,7 +1935,7 @@ mod tests {
 
     fn quick_compile(src: String) -> super::Function {
         let swc_ast = crate::bytecode_compiler::quick_parse_script(src);
-        let function = super::compile_script(&swc_ast);
+        let function = super::compile_script(&swc_ast).unwrap();
         function
     }
 }

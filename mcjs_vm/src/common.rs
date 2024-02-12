@@ -139,16 +139,6 @@ impl Error {
 
         buf
     }
-
-    pub fn messages(&self) -> impl '_ + Iterator<Item = String> {
-        std::iter::once(&self.head)
-            .chain(self.chain.iter())
-            .map(|item| {
-                let mut buf = String::new();
-                item.message(&mut buf, self.source_map.as_deref(), 0);
-                buf
-            })
-    }
 }
 
 pub trait Context<Err> {
@@ -171,6 +161,40 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl<T> Context<Error> for Result<T> {
     fn with_context(self, other: Error) -> Self {
         self.map_err(|err| err.with_context(other))
+    }
+}
+
+pub type MultiErrResult<T> = std::result::Result<T, MultiError>;
+
+pub struct MultiError(pub Vec<Error>);
+
+impl MultiError {
+    pub fn message(&self) -> String {
+        use std::fmt::Write;
+        let mut buf = String::new();
+
+        writeln!(buf, "{} errors:\n", self.0.len()).unwrap();
+        for (ndx, err) in self.0.iter().enumerate() {
+            writeln!(buf, "error #{}:", ndx + 1).unwrap();
+            writeln!(buf, "{}", err.message_ex(1)).unwrap();
+        }
+
+        buf
+    }
+
+    pub fn into_single(self) -> Error {
+        assert!(self.0.len() >= 1);
+        if self.0.len() == 1 {
+            self.0.into_iter().next().unwrap()
+        } else {
+            error!("{}", self.message())
+        }
+    }
+}
+
+impl std::fmt::Debug for MultiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}", self.message())
     }
 }
 

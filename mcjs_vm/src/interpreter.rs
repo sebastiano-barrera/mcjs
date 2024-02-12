@@ -2378,6 +2378,18 @@ mod tests {
     }
 
     #[test]
+    fn test_temporal_dead_zone_none() {
+        let _ = quick_run(
+            r#"
+                "use strict"
+                let x = 12
+                sink(foo())
+                function foo() { return x }
+            "#,
+        );
+    }
+
+    #[test]
     #[should_panic]
     fn test_temporal_dead_zone() {
         let _ = quick_run(

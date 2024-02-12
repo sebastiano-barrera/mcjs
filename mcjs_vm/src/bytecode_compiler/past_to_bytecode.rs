@@ -628,6 +628,7 @@ fn compile_expr(
 
             obj
         }
+        Expr::Error => panic!("malformed PAST: Expr::Error left behind by previous phase"),
     }
 }
 
@@ -1091,7 +1092,7 @@ mod tests {
 
     fn quick_compile(src: String) -> CompiledModule {
         let swc_ast = crate::bytecode_compiler::quick_parse_script(src);
-        let past_function = super::js_to_past::compile_script(&swc_ast);
+        let past_function = super::js_to_past::compile_script(&swc_ast).unwrap();
 
         let mut module_builder = super::ModuleBuilder::new(0);
         let globals = past_function.unbound_names.iter().cloned().collect();
