@@ -10,13 +10,11 @@ fn LocalFnId(0)
   LoadConst(v10, const[0])
   ObjCreateEmpty(v11)
   ObjSet { obj: v9, key: v10, value: v11 }
-  GetGlobalThis(v12)
-  LoadConst(v14, const[1])
-  ObjGet { dest: v13, obj: v12, key: v14 }
+  GetGlobal { dest: v12, name: const[1] }
   LoadConst(v10, const[2])
-  ObjSet { obj: v9, key: v10, value: v13 }
+  ObjSet { obj: v9, key: v10, value: v12 }
   LoadUndefined(v8)
-  Call { return_value: v15, this: v8, callee: v9 }
+  Call { return_value: v13, this: v8, callee: v9 }
 fn LocalFnId(1)
   k0 String("prototype")
   k1 JsWord(Atom('Function' type=static))
@@ -27,11 +25,9 @@ fn LocalFnId(1)
   LoadConst(v10, const[0])
   ObjCreateEmpty(v11)
   ObjSet { obj: v8, key: v10, value: v11 }
-  GetGlobalThis(v12)
-  LoadConst(v14, const[1])
-  ObjGet { dest: v13, obj: v12, key: v14 }
+  GetGlobal { dest: v12, name: const[1] }
   LoadConst(v10, const[2])
-  ObjSet { obj: v8, key: v10, value: v13 }
+  ObjSet { obj: v8, key: v10, value: v12 }
   LoadConst(v9, const[3])
 fn LocalFnId(2)
   k0 Number(3.0)

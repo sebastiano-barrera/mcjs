@@ -148,6 +148,10 @@ pub enum Instr {
         src: VReg,
     },
     GetGlobalThis(VReg),
+    GetGlobal {
+        dest: VReg,
+        name: ConstIndex,
+    },
 
     BoolNot {
         dest: VReg,
@@ -313,6 +317,7 @@ impl Instr {
             Instr::LoadThis(dest) => { an.write_vreg(*dest); an.load_this(); },
             Instr::Copy { dst, src } => { an.write_vreg(*dst); an.read_vreg(*src); },
             Instr::GetGlobalThis (dest) => { an.write_vreg(*dest); },
+            Instr::GetGlobal { dest, name } => { an.write_vreg(*dest); an.load_const(*name); }
             Instr::BoolNot { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
             Instr::UnaryMinus { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
             Instr::OpAdd(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },

@@ -13,11 +13,9 @@ fn LocalFnId(0)
   LoadConst(v11, const[1])
   ObjCreateEmpty(v12)
   ObjSet { obj: v10, key: v11, value: v12 }
-  GetGlobalThis(v13)
-  LoadConst(v15, const[2])
-  ObjGet { dest: v14, obj: v13, key: v15 }
+  GetGlobal { dest: v13, name: const[2] }
   LoadConst(v11, const[3])
-  ObjSet { obj: v10, key: v11, value: v14 }
+  ObjSet { obj: v10, key: v11, value: v13 }
   ObjSet { obj: v8, key: v9, value: v10 }
 fn LocalFnId(1)
   k0 Number(3.0)
