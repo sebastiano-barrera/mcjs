@@ -794,8 +794,7 @@ impl<'a> Interpreter<'a> {
                         let upv_id = self
                             .data
                             .top_mut()
-                            .ensure_in_upvalue(*cap)
-                            .map_err(stack::Error::into_common_error)?;
+                            .ensure_in_upvalue(*cap);
                         upvalues.push(upv_id);
                         next_ndx += 1;
                     }
@@ -1131,7 +1130,7 @@ impl<'a> Interpreter<'a> {
         self.data
             .top()
             .get_result(vreg)
-            .map_err(stack::Error::into_common_error)
+            .ok_or_else(|| error!("variable read before initialization"))
     }
 
     fn get_operand_object(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectRef> {

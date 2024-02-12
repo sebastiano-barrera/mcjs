@@ -507,7 +507,7 @@ mod instr_view {
             let is_highlighted = {
                 let is_vreg_hl = self.highlighted.match_vreg(fnid, vreg);
                 let is_obj_id_hl = match read_result {
-                    Ok(InterpreterValue::Object(value_obj_id)) => {
+                    Some(InterpreterValue::Object(value_obj_id)) => {
                         self.highlighted.match_obj_id(fnid, value_obj_id)
                     }
                     _ => false,
@@ -541,7 +541,7 @@ mod instr_view {
                         ui.label(format!("upv{} »", upv_id));
                     }
 
-                    let value = if let Ok(value) = read_result {
+                    let value = if let Some(value) = read_result {
                         value
                     } else {
                         ui.label(egui::RichText::new("TDZ").color(COLOR_INVALID).small_raised());
@@ -571,7 +571,7 @@ mod instr_view {
                 });
 
             let obj_id = match read_result {
-                Ok(InterpreterValue::Object(obj_id)) => Some(obj_id),
+                Some(InterpreterValue::Object(obj_id)) => Some(obj_id),
                 _ => None,
             };
             if res.response.hovered() {
