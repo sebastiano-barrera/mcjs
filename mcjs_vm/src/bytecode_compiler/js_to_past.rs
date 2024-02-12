@@ -513,10 +513,22 @@ mod builder {
         }
 
         pub(super) fn add_stmt(&mut self, op: StmtOp) -> StmtID {
+            self.insert_stmt(None, op)
+        }
+
+        pub(super) fn add_stmt_at_block_start(&mut self, op: StmtOp) -> StmtID {
+            self.insert_stmt(Some(0), op)
+        }
+
+        fn insert_stmt(&mut self, index: Option<usize>, op: StmtOp) -> StmtID {
             let span = self.spans.last().copied().unwrap_or_default();
             let block = self.cur_block_mut();
             let stmt_id_raw = block.stmts.len().try_into().unwrap();
-            block.stmts.push(super::Stmt { span, op });
+            if let Some(index) = index {
+                block.stmts.insert(index, super::Stmt { span, op });
+            } else {
+                block.stmts.push(super::Stmt { span, op });
+            }
 
             StmtID(
                 stmt_id_raw,
@@ -1102,7 +1114,18 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
             };
 
             let closure = fnb.add_expr(Expr::CreateClosure { func });
-            fnb.add_stmt(StmtOp::Assign(name, closure));
+
+            // For function declarations, assignment to their value is always done at the beginning
+            // of the block.  This allows the function to be called earlier in the block than the
+            // declaration site in the source code.
+            //
+            // In non-strict mode, the name declaration is hoisted to the top of the enclosing
+            // function/script, but the assignment isn't! This can be considered a form of the
+            // implmentation-defined "strange behavior" described by MDN for block-scoped function
+            // declarations [1].
+            //
+            // [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function#description.
+            fnb.add_stmt_at_block_start(StmtOp::Assign(name, closure));
         }
         swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(fnb, var_decl),
         _ => {

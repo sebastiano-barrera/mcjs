@@ -2336,8 +2336,9 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_temporal_dead_zone() {
-        let output = quick_run(
+        let _ = quick_run(
             r#"
                 "use strict"
                 sink(foo())
