@@ -6,7 +6,7 @@ use swc_ecma_ast::EsVersion;
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
 use crate::bytecode::{self, LocalFnId};
-use crate::common::Result;
+use crate::common::{Result, MultiError};
 use crate::{error, tracing};
 
 pub use swc_common::SourceMap;
@@ -166,7 +166,8 @@ fn compile_module(
 ) -> Result<CompiledModule> {
     let t = tracing::section("compile_script");
 
-    let function = js_to_past::compile_module(ast_module);
+    let function = js_to_past::compile_module(ast_module)
+        .map_err(|multi_err| error!("{}", multi_err.message()))?;
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
 
@@ -179,7 +180,8 @@ fn compile_module(
 fn compile_script(script_ast: swc_ecma_ast::Script, flags: CompileFlags) -> Result<CompiledModule> {
     let t = tracing::section("compile_script");
 
-    let function = js_to_past::compile_script(&script_ast);
+    let function = js_to_past::compile_script(&script_ast)
+        .map_err(MultiError::into_single)?;
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
 
