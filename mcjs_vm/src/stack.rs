@@ -1,19 +1,6 @@
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX, IID};
 use crate::interpreter::{UpvalueId, Value};
 
-pub type Result<T> = std::result::Result<T, Error>;
-pub enum Error {
-    UninitializedRead,
-}
-
-impl Error {
-    pub fn into_common_error(self) -> crate::common::Error {
-        match self {
-            Error::UninitializedRead => crate::error!("variable read before initialization"),
-        }
-    }
-}
-
 /// The interpreter's stack.
 ///
 /// Mostly stores local variables.
@@ -23,27 +10,25 @@ pub struct InterpreterData {
     values: Vec<Slot>,
 }
 
-type Upvalues = slotmap::SlotMap<UpvalueId, Value>;
+// Throughout this module, `Option<Value>` is stored instead of `Value`.  The `None` case
+// represents an uninitialized storage location corresponding to a variable still in the temporal
+// dead zone.   See [1] for the source-level semantics in JavaScript.
+//
+// [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/let#temporal_dead_zone_tdz
+
+type Upvalues = slotmap::SlotMap<UpvalueId, Option<Value>>;
 
 #[derive(Clone, Copy)]
 enum Slot {
-    /// The initial state of all local variables.
-    ///
-    /// This state is observable from JavaScript code if the variable is declared via
-    /// `let`/`const`. Any read while the variable is still in this state is supposed to result in
-    /// an exception. At the user/source level this is referred to as the variable's "temporal dead
-    /// zone".
-    ///
-    /// Variables declared with `var`/`function` are immediately initialized (to `undefined` or to
-    /// a closure, respectively), so they have no temporal dead zone.
-    Uninitialized,
-    Inline(Value),
+    Inline(Option<Value>),
     Upvalue(UpvalueId),
 }
 
 #[cfg(feature = "debugger")]
 #[derive(Debug)]
 pub enum SlotDebug {
+    // slightly nicer to have uninitialized value show up explicitly as "Uninitialized" instead of
+    // "Inline(None)"
     Uninitialized,
     Inline(Value),
     Upvalue(UpvalueId),
@@ -52,8 +37,8 @@ pub enum SlotDebug {
 impl From<Slot> for SlotDebug {
     fn from(value: Slot) -> Self {
         match value {
-            Slot::Uninitialized => SlotDebug::Uninitialized,
-            Slot::Inline(x) => SlotDebug::Inline(x),
+            Slot::Inline(None) => SlotDebug::Uninitialized,
+            Slot::Inline(Some(x)) => SlotDebug::Inline(x),
             Slot::Upvalue(x) => SlotDebug::Upvalue(x),
         }
     }
@@ -109,7 +94,7 @@ impl InterpreterData {
         };
 
         for _ in 0..frame_hdr.regs_count {
-            self.values.push(Slot::Inline(Value::Undefined));
+            self.values.push(Slot::Inline(None));
         }
         self.headers.push(frame_hdr);
 
@@ -207,28 +192,28 @@ impl<'a> Frame<'a> {
         self.values[vreg.0 as usize].into()
     }
 
-    /// Read the given virtual register.
+    /// Return the value of the given virtual register.
     ///
-    /// Returns `None` if the register (varirable) is still uninitialized (in the temporal dead zone).
-    pub fn get_result(&self, vreg: bytecode::VReg) -> Result<Value> {
+    /// Returns `None` iff the value is still uninitialized (i.e. in the temporal dead zone).
+    pub fn get_result(&self, vreg: bytecode::VReg) -> Option<Value> {
         let slot = &self.values[vreg.0 as usize];
         match slot {
-            Slot::Inline(value) => Ok(*value),
-            Slot::Upvalue(upv_id) => Ok(*self
+            Slot::Inline(value) => *value,
+            Slot::Upvalue(upv_id) => *self
                 .upv_alloc
                 .get(*upv_id)
-                .expect("gc bug: value deleted but still referenced by stack")),
-            Slot::Uninitialized => Err(Error::UninitializedRead),
+                .expect("gc bug: value deleted but still referenced by stack"),
         }
     }
-    pub fn results(&self) -> impl '_ + ExactSizeIterator<Item = Result<Value>> {
+    /// Returns an iterator for the value of each virtual register.  See `get_result`.
+    pub fn results(&self) -> impl '_ + ExactSizeIterator<Item = Option<Value>> {
         (0..self.values.len()).map(|i| {
             let vreg = bytecode::VReg(i.try_into().unwrap());
             self.get_result(vreg)
         })
     }
 
-    pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Result<Value> {
+    pub fn get_arg(&self, argndx: bytecode::ArgIndex) -> Option<Value> {
         // TODO to support more than ARGS_MAX_COUNT arguments, the plan is to
         // have an external array of 'extra arguments', managed as part of the
         // FrameHeader
@@ -239,7 +224,7 @@ impl<'a> Frame<'a> {
         );
         self.get_result(bytecode::VReg(argndx.0))
     }
-    pub fn args(&self) -> impl '_ + ExactSizeIterator<Item = Result<Value>> {
+    pub fn args(&self) -> impl '_ + ExactSizeIterator<Item = Option<Value>> {
         (0..ARGS_COUNT_MAX).map(|i| self.get_arg(bytecode::ArgIndex(i)))
     }
 
@@ -255,7 +240,13 @@ impl<'a> Frame<'a> {
         self.header.captures.iter().copied()
     }
 
-    pub fn deref_upvalue(&self, upv_id: UpvalueId) -> Option<Value> {
+    /// Get the upvalue with the given ID.
+    ///
+    /// The return value has (unfortunately) two levels of `Option` with distinct meaning:
+    /// - the outer Option is None iff the given `upv_id` is invalid.
+    /// - the inner Option is None iff the upvalue exists but contains an uninitialized value (i.e.
+    ///   in the temporal dead zone).
+    pub fn deref_upvalue(&self, upv_id: UpvalueId) -> Option<Option<Value>> {
         self.upv_alloc.get(upv_id).copied()
     }
 
@@ -269,17 +260,14 @@ impl<'a> FrameMut<'a> {
         let slot = &mut self.values[vreg.0 as usize];
         match slot {
             Slot::Inline(slot_value) => {
-                *slot_value = value;
+                *slot_value = Some(value);
             }
             Slot::Upvalue(upv_id) => {
                 let heap_value = self
                     .upv_alloc
                     .get_mut(*upv_id)
                     .expect("gc bug: value deleted but still referenced by stack");
-                *heap_value = value;
-            }
-            Slot::Uninitialized => {
-                *slot = Slot::Inline(value);
+                *heap_value = Some(value);
             }
         };
     }
@@ -294,23 +282,22 @@ impl<'a> FrameMut<'a> {
         self.set_result(bytecode::VReg(argndx.0), value)
     }
 
-    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> Result<UpvalueId> {
+    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {
         let slot = &mut self.values[var.0 as usize];
         match slot {
             Slot::Inline(value) => {
                 let upv_id = self.upv_alloc.insert(*value);
                 *slot = Slot::Upvalue(upv_id);
-                Ok(upv_id)
+                upv_id
             }
-            Slot::Upvalue(upv_id) => Ok(*upv_id),
-            Slot::Uninitialized => Err(Error::UninitializedRead),
+            Slot::Upvalue(upv_id) => *upv_id,
         }
     }
 
     pub(crate) fn ensure_inline(&mut self, var: bytecode::VReg) {
         let slot = &mut self.values[var.0 as usize];
         match slot {
-            Slot::Uninitialized | Slot::Inline(_) => {}
+            Slot::Inline(_) => {}
             Slot::Upvalue(upv_id) => {
                 let value = *self.upv_alloc.get(*upv_id).unwrap();
                 *slot = Slot::Inline(value);
