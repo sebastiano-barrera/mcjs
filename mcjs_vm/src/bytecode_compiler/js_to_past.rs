@@ -1,10 +1,10 @@
+use std::fmt::Write;
 /// The Processed AST.
 ///
 /// An intermediate representation that results from an initial processing of
 /// swc_ecma_ast's AST, designed expressly to facilitate compilation to bytecode
 /// and compile-time checks.
-use std::collections::HashSet;
-use std::fmt::Write;
+use std::{collections::HashSet, rc::Rc};
 use swc_atoms::JsWord;
 use swc_common::Spanned;
 
@@ -43,6 +43,7 @@ pub struct Block {
     pub id: BlockID,
 
     is_use_strict_declared: bool,
+    is_function_decl_allowed: bool,
 
     // These are all Vec's, but they have somewhat different semantics. This is
     // reflected in Block's public API
@@ -375,6 +376,8 @@ pub use builder::{BlockID, TmpID};
 use builder::{Builder, FnBuilder};
 
 mod builder {
+    use std::rc::Rc;
+
     use swc_atoms::JsWord;
 
     use crate::common::{Error, MultiErrResult, MultiError};
@@ -401,6 +404,7 @@ mod builder {
 
     pub(super) struct Builder {
         next_id: u32,
+        source_map: Rc<swc_common::SourceMap>,
     }
 
     pub(super) struct FnBuilder<'a> {
@@ -435,8 +439,11 @@ mod builder {
     }
 
     impl Builder {
-        pub fn new() -> Self {
-            Builder { next_id: 0 }
+        pub fn new(source_map: Rc<swc_common::SourceMap>) -> Self {
+            Builder {
+                source_map,
+                next_id: 0,
+            }
         }
 
         pub fn new_function(&mut self) -> FnBuilder {
@@ -454,9 +461,14 @@ mod builder {
                 spans: Vec::new(),
                 errors: Vec::new(),
             };
-            // The function's outermost block. Will be fetched via `pop_block` by `build`
+            // The function's outermost block. Will be retrieved via `pop_block` by `build`
             fnb.push_block();
+            fnb.allow_fn_decl();
             fnb
+        }
+
+        pub(super) fn source_map(&self) -> &swc_common::SourceMap {
+            &self.builder.source_map
         }
 
         pub(super) fn build(mut self) -> MultiErrResult<Block> {
@@ -491,6 +503,7 @@ mod builder {
                 stmts: Vec::new(),
                 exprs: Vec::new(),
                 is_use_strict_declared: false,
+                is_function_decl_allowed: false,
             });
         }
         fn pop_block(&mut self) -> Block {
@@ -682,6 +695,13 @@ mod builder {
         pub(crate) fn signal_multi_error(&mut self, multi_err: MultiError) {
             self.errors.extend(multi_err.0);
         }
+
+        pub(crate) fn allow_fn_decl(&mut self) {
+            self.cur_block_mut().is_function_decl_allowed = true;
+        }
+        pub(crate) fn is_fn_decl_allowed(&self) -> bool {
+            self.blocks.last().unwrap().is_function_decl_allowed
+        }
     }
 
     fn hoist_declarations(outer: &mut Vec<Decl>, inner: &mut Vec<Decl>) {
@@ -699,8 +719,11 @@ mod builder {
     }
 }
 
-pub fn compile_script(script_ast: &swc_ecma_ast::Script) -> MultiErrResult<Function> {
-    let mut builder = Builder::new();
+pub fn compile_script(
+    script_ast: &swc_ecma_ast::Script,
+    source_map: Rc<swc_common::SourceMap>,
+) -> MultiErrResult<Function> {
+    let mut builder = Builder::new(source_map);
     let mut fnb = builder.new_function();
     for stmt in &script_ast.body {
         compile_stmt(&mut fnb, stmt);
@@ -727,10 +750,13 @@ pub fn compile_script(script_ast: &swc_ecma_ast::Script) -> MultiErrResult<Funct
     Ok(function)
 }
 
-pub fn compile_module(script_ast: &swc_ecma_ast::Module) -> MultiErrResult<Function> {
+pub fn compile_module(
+    script_ast: &swc_ecma_ast::Module,
+    source_map: Rc<swc_common::SourceMap>,
+) -> MultiErrResult<Function> {
     use swc_ecma_ast::ModuleItem;
 
-    let mut builder = Builder::new();
+    let mut builder = Builder::new(source_map);
     let mut fnb = builder.new_function();
 
     let lit_named = fnb.add_expr(Expr::StringLiteral("__named".into()));
@@ -874,11 +900,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
     fnb.with_span(stmt.span(), |fnb| {
         match stmt {
             swc_ecma_ast::Stmt::Block(block_stmt) => {
-                fnb.block(|fnb| {
-                    for stmt in &block_stmt.stmts {
-                        compile_stmt(fnb, stmt);
-                    }
-                });
+                compile_block(fnb, block_stmt);
             }
             swc_ecma_ast::Stmt::Empty(_) => {}
             swc_ecma_ast::Stmt::Debugger(_) => {
@@ -945,11 +967,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
             swc_ecma_ast::Stmt::Try(try_stmt) => {
                 let try_begin = fnb.add_stmt(StmtOp::Pending);
-                fnb.block(|fnb| {
-                    for stmt in &try_stmt.block.stmts {
-                        compile_stmt(fnb, stmt);
-                    }
-                });
+                compile_block(fnb, &try_stmt.block);
                 fnb.add_stmt(StmtOp::TryEnd);
                 let jmp_from_try = fnb.add_stmt(StmtOp::Pending);
 
@@ -966,9 +984,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                             fnb.add_stmt(StmtOp::Assign(name, cur_exc));
                         }
 
-                        for stmt in &handler.body.stmts {
-                            compile_stmt(fnb, stmt);
-                        }
+                        compile_block(fnb, &handler.body);
                     });
 
                     fnb.add_stmt(StmtOp::Pending)
@@ -976,11 +992,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
 
                 let finally_start = fnb.peek_stmt_id();
                 if let Some(finalizer_block) = &try_stmt.finalizer {
-                    fnb.block(|fnb| {
-                        for stmt in &finalizer_block.stmts {
-                            compile_stmt(fnb, stmt);
-                        }
-                    });
+                    compile_block(fnb, finalizer_block);
                 }
 
                 fnb.set_stmt(
@@ -1202,6 +1214,26 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
         };
     })
+}
+
+fn compile_block(fnb: &mut FnBuilder, block_stmt: &swc_ecma_ast::BlockStmt) {
+    // Stupid fucking hack to get around the fact that swc doesn't tell us if the block
+    // is actually delimited by curly braces (as opposed to being implicit and
+    // single-statement), and JavaScript somehow cares :(
+    let swc_common::SourceFileAndBytePos { sf, pos } =
+        fnb.source_map().lookup_byte_offset(block_stmt.span().lo);
+    let first_char = sf.src.as_bytes()[pos.0 as usize];
+    let is_brace_delimited = first_char == b'{';
+
+    fnb.block(|fnb| {
+        if is_brace_delimited {
+            fnb.allow_fn_decl();
+        }
+
+        for stmt in &block_stmt.stmts {
+            compile_stmt(fnb, stmt);
+        }
+    });
 }
 
 fn find_exit(
@@ -1590,6 +1622,11 @@ fn compile_fn_expr(fnb: &mut FnBuilder, fn_expr: &swc_ecma_ast::FnExpr) -> ExprI
 }
 
 fn compile_fn_as_expr(fnb: &mut FnBuilder<'_>, func_ast: &swc_ecma_ast::Function) -> ExprID {
+    if !fnb.is_fn_decl_allowed() {
+        fnb.signal_error(error!("function decl not allowed in this position"));
+        return fnb.add_expr(Expr::Error); 
+    }
+
     let res = {
         let builder = fnb.suspend();
         compile_function(builder, func_ast)
@@ -1703,7 +1740,6 @@ fn compile_call(
 }
 
 fn compile_eval_literal_arg(fnb: &mut FnBuilder, src: String) {
-    use std::rc::Rc;
     use swc_common::SourceMap;
     use swc_ecma_ast::EsVersion;
     use swc_ecma_parser::{lexer::Lexer, Parser, Syntax};
@@ -1925,6 +1961,18 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_function_in_non_allowed_position() {
+        const CODE: &'static str = r#""use strict"; do function g() {} while (false)"#;
+        quick_compile(CODE.to_string());
+    }
+    #[test]
+    fn test_function_in_allowed_position() {
+        const CODE: &'static str = r#""use strict"; do { function g() {} } while (false)"#;
+        quick_compile(CODE.to_string());
+    }
+
+    #[test]
     fn test_func_decl() {
         let src = "function myFunction() { return 3 }".to_string();
         let function = quick_compile(src);
@@ -1932,8 +1980,8 @@ mod tests {
     }
 
     fn quick_compile(src: String) -> super::Function {
-        let swc_ast = crate::bytecode_compiler::quick_parse_script(src);
-        let function = super::compile_script(&swc_ast).unwrap();
+        let (swc_ast, source_map) = crate::bytecode_compiler::quick_parse_script(src);
+        let function = super::compile_script(&swc_ast, source_map).unwrap();
         function
     }
 }

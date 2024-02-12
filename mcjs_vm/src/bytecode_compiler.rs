@@ -6,7 +6,7 @@ use swc_ecma_ast::EsVersion;
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
 use crate::bytecode::{self, LocalFnId};
-use crate::common::{Result, MultiError};
+use crate::common::{MultiError, Result};
 use crate::{error, tracing};
 
 pub use swc_common::SourceMap;
@@ -82,7 +82,7 @@ pub fn compile_file(
                 })
                 .with_context(error!("while parsing file: {}", path.display()))?;
 
-            compile_module(&module_ast, flags).with_context(
+            compile_module(&module_ast, flags, Lrc::clone(&source_map)).with_context(
                 error!("while compiling module: {}", path.display())
                     .with_source_map(Lrc::clone(&source_map)),
             )?
@@ -96,7 +96,7 @@ pub fn compile_file(
                 })
                 .with_context(error!("while parsing file: {}", path.display()))?;
 
-            compile_script(script_ast, flags).with_context(
+            compile_script(script_ast, flags, Lrc::clone(&source_map)).with_context(
                 error!("while compiling script: {}", path.display())
                     .with_source_map(Lrc::clone(&source_map)),
             )?
@@ -126,7 +126,7 @@ fn mk_error_handler(source_map: &Rc<SourceMap>) -> swc_common::errors::Handler {
 }
 
 #[cfg(test)]
-pub(crate) fn quick_parse_script(src: String) -> swc_ecma_ast::Script {
+pub(crate) fn quick_parse_script(src: String) -> (swc_ecma_ast::Script, Rc<SourceMap>) {
     let source_map = Rc::new(SourceMap::default());
     let err_handler = crate::bytecode_compiler::mk_error_handler(&source_map);
 
@@ -151,7 +151,7 @@ pub(crate) fn quick_parse_script(src: String) -> swc_ecma_ast::Script {
             panic!("parse error");
         }
     };
-    swc_ast
+    (swc_ast, source_map)
 }
 
 struct CompiledModule {
@@ -163,10 +163,11 @@ struct CompiledModule {
 fn compile_module(
     ast_module: &swc_ecma_ast::Module,
     flags: CompileFlags,
+    source_map: Rc<SourceMap>,
 ) -> Result<CompiledModule> {
     let t = tracing::section("compile_script");
 
-    let function = js_to_past::compile_module(ast_module)
+    let function = js_to_past::compile_module(ast_module, source_map)
         .map_err(|multi_err| error!("{}", multi_err.message()))?;
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
@@ -177,11 +178,15 @@ fn compile_module(
     Ok(module)
 }
 
-fn compile_script(script_ast: swc_ecma_ast::Script, flags: CompileFlags) -> Result<CompiledModule> {
+fn compile_script(
+    script_ast: swc_ecma_ast::Script,
+    flags: CompileFlags,
+    source_map: Rc<SourceMap>,
+) -> Result<CompiledModule> {
     let t = tracing::section("compile_script");
 
-    let function = js_to_past::compile_script(&script_ast)
-        .map_err(MultiError::into_single)?;
+    let function =
+        js_to_past::compile_script(&script_ast, source_map).map_err(MultiError::into_single)?;
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
 
