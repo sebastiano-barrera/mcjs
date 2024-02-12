@@ -485,7 +485,7 @@ mod instr_view {
     const COLOR_STRING: egui::Color32 = COLOR_ROSE;
     const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
     const COLOR_IID: egui::Color32 = COLOR_GREY;
-    const COLOR_INVALID: egui::Color32 = egui::Color32::RED;
+    const COLOR_INVALID: egui::Color32 = COLOR_GREY;
 
     struct ValueResponse {
         obj_id: Option<ObjectId>,
@@ -544,7 +544,7 @@ mod instr_view {
                     let value = if let Ok(value) = read_result {
                         value
                     } else {
-                        ui.label(egui::RichText::new("TDZ").color(COLOR_INVALID));
+                        ui.label(egui::RichText::new("TDZ").color(COLOR_INVALID).small_raised());
                         return;
                     };
 
