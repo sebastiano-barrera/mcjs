@@ -1,0 +1,32 @@
+---
+source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
+assertion_line: 1936
+expression: function.dump_to_string()
+---
+[18-80] func () unbound[g] block0 {
+  use strict: yes
+  decls:
+  exprs:
+  stmts:
+    block1 {
+      decls:
+      exprs:
+        e0: BoolLiteral(false)
+      stmts:
+        block2 {
+          decls:
+          exprs:
+            e0: CreateClosure:
+              [51-66] func () unbound[] block3 {
+                decls:
+                exprs:
+                stmts:
+              }
+          stmts:
+            [51-66] Assign(g, e0)
+        }
+        [48-80] IfNot { test: e0 }
+        [48-80] Break(block1)
+        [48-80] Jump(StmtID(0, block1))
+    }
+}
