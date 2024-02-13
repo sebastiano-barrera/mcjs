@@ -511,6 +511,18 @@ mod builder {
             let block = self.blocks.pop().unwrap();
             block.assert_valid();
 
+            // Quadratic, but we don't expect so many declarations, and this allows us to avoid
+            // memory allocs (due to HashSet for example).
+            for i in 0..block.decls.len() {
+                let name = &block.decls[i].name;
+                let is_lexical = block.decls[i].is_lexical;
+                for j in i + 1..block.decls.len() {
+                    if name == &block.decls[j].name && (is_lexical || block.decls[j].is_lexical) {
+                        self.signal_error(error!("identifier `{:?}` already declared", name));
+                    }
+                }
+            }
+
             pop_while(&mut self.break_exits, |target| target.block_id == block.id);
             pop_while(&mut self.continue_exits, |target| {
                 target.block_id == block.id
@@ -715,8 +727,6 @@ mod builder {
                 outer.push(decl);
             }
         }
-
-        // TODO Check redeclarations
     }
 }
 
@@ -1625,7 +1635,7 @@ fn compile_fn_expr(fnb: &mut FnBuilder, fn_expr: &swc_ecma_ast::FnExpr) -> ExprI
 fn compile_fn_as_expr(fnb: &mut FnBuilder<'_>, func_ast: &swc_ecma_ast::Function) -> ExprID {
     if !fnb.is_fn_decl_allowed() {
         fnb.signal_error(error!("function decl not allowed in this position"));
-        return fnb.add_expr(Expr::Error); 
+        return fnb.add_expr(Expr::Error);
     }
 
     let res = {
@@ -1978,6 +1988,29 @@ mod tests {
         let src = "function myFunction() { return 3 }".to_string();
         let function = quick_compile(src);
         insta::assert_snapshot!(function.dump_to_string());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_redecl_let() {
+        const CODE: &'static str = "let i = 1; let i = 3;";
+        quick_compile(CODE.to_string());
+    }
+    #[test]
+    fn test_redecl_let_negative() {
+        const CODE: &'static str = "let i = 1; let j = 3;";
+        quick_compile(CODE.to_string());
+    }
+    #[test]
+    #[should_panic]
+    fn test_redecl_const() {
+        const CODE: &'static str = "const i = 1; const i = 3;";
+        quick_compile(CODE.to_string());
+    }
+    #[test]
+    fn test_redecl_const_negative() {
+        const CODE: &'static str = "const i = 1; const j = 3;";
+        quick_compile(CODE.to_string());
     }
 
     fn quick_compile(src: String) -> super::Function {
