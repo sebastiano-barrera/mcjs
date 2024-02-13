@@ -2,8 +2,13 @@
 
 cd "$(dirname "$0")"
 
-version="$(git rev-parse HEAD)"
-[ -z "$(git status --porcelain)" ] || version="dirty"
+if [ -z "$1" ]
+then
+	version="$(git rev-parse HEAD)"
+	[ -z "$(git status --porcelain)" ] || version="dirty"
+else
+	version="$(git rev-parse "$1")"
+fi
 
 {
 	echo "# version: $version"
