@@ -511,6 +511,7 @@ mod builder {
             let block = self.blocks.pop().unwrap();
             block.assert_valid();
 
+            // Check redeclarations.
             // Quadratic, but we don't expect so many declarations, and this allows us to avoid
             // memory allocs (due to HashSet for example).
             for i in 0..block.decls.len() {
@@ -960,14 +961,13 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
 
             swc_ecma_ast::Stmt::Switch(switch_stmt) => {
-                let discriminant = compile_expr(fnb, &switch_stmt.discriminant);
-                let (_, discriminant) = create_tmp(fnb, discriminant);
-
                 // The tricky bit here is that declarations have to be shared across the whole of
                 // the switch stmt's body, so all cases need to be compiled into a single block.
                 // The cases are not really separate.
-
                 fnb.block(|fnb| {
+                    let discriminant = compile_expr(fnb, &switch_stmt.discriminant);
+                    let (_, discriminant) = create_tmp(fnb, discriminant);
+
                     fnb.break_exits_this_block(None);
 
                     // The switch stmt is compiled into two segments:
@@ -2087,6 +2087,18 @@ mod tests {
         const CODE: &'static str = "const i = 1; const j = 3;";
         quick_compile(CODE.to_string());
     }
+    #[test]
+    #[should_panic]
+    fn test_redecl_switch() {
+        const CODE: &'static str = "switch(0) { case 1: const i = 1; default: const i = 3; }";
+        quick_compile(CODE.to_string());
+    }
+    #[test]
+    fn test_redecl_switch_negative() {
+        const CODE: &'static str = "switch(0) { case 1: const i = 1; default: const j = 3; }";
+        quick_compile(CODE.to_string());
+    }
+
 
     fn quick_compile(src: String) -> super::Function {
         let (swc_ast, source_map) = crate::bytecode_compiler::quick_parse_script(src);
