@@ -2422,4 +2422,10 @@ mod tests {
 
         assert_eq!(&output.sink, &[Some(Literal::Bool(true))]);
     }
+
+    #[test]
+    fn test_eval_completion_value() {
+        let output = quick_run("sink(eval('11'))");
+        assert_eq!(&output.sink, &[Some(Literal::Number(11.0))]);
+    }
 }
