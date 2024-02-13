@@ -54,6 +54,13 @@ pub struct Block {
     stmts: Vec<Stmt>,
     /// Mapping of ExprID -> Expr. No ordering.
     exprs: Vec<Expr>,
+
+    /// Completion value of the block's last JavaScript statement (not to be confused with
+    /// Stmt's, which don't have a completion value).
+    ///
+    /// This is only meaningful when using eval (of which we only implement a very restricted
+    /// form).
+    completion_value: Option<ExprID>,
 }
 impl_debug_via_dump!(Block);
 
@@ -69,6 +76,10 @@ impl Block {
         {
             let check_stmt_id = |stmt_id: &StmtID| debug_assert_eq!(stmt_id.1, self.id);
             let check_expr_id = |expr_id: &ExprID| debug_assert_eq!(expr_id.1, self.id);
+
+            if let Some(eid) = &self.completion_value {
+                check_expr_id(eid);
+            }
 
             for stmt in &self.stmts {
                 match &stmt.op {
@@ -505,6 +516,7 @@ mod builder {
                 exprs: Vec::new(),
                 is_use_strict_declared: false,
                 is_function_decl_allowed: false,
+                completion_value: None,
             });
         }
         fn pop_block(&mut self) -> Block {
@@ -716,6 +728,14 @@ mod builder {
         pub(crate) fn is_fn_decl_allowed(&self) -> bool {
             self.blocks.last().unwrap().is_function_decl_allowed
         }
+
+        pub(crate) fn take_block_completion_value(&mut self) -> Option<ExprID> {
+            self.cur_block_mut().completion_value.take()
+        }
+
+        pub(crate) fn set_block_completion_value(&mut self, value: ExprID) {
+            self.cur_block_mut().completion_value = Some(value);
+        }
     }
 
     fn hoist_declarations(outer: &mut Vec<Decl>, inner: &mut Vec<Decl>) {
@@ -909,6 +929,7 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
 }
 
 fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option<&JsWord>) {
+    fnb.take_block_completion_value();
     fnb.with_span(stmt.span(), |fnb| {
         match stmt {
             swc_ecma_ast::Stmt::Block(block_stmt) => {
@@ -1280,6 +1301,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
 
                 let value = compile_expr(fnb, &expr_stmt.expr);
                 fnb.add_stmt(StmtOp::Evaluate(value));
+                fnb.set_block_completion_value(value);
             }
 
             swc_ecma_ast::Stmt::Labeled(labeled_stmt) => {
@@ -1298,7 +1320,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             swc_ecma_ast::Stmt::With(_) => {
                 unsupported_node!(stmt)
             }
-        };
+        }
     })
 }
 
@@ -1813,8 +1835,7 @@ fn compile_call(
         if &ident.sym == "eval" {
             if let Some(arg) = args.first() {
                 if let Some(swc_ecma_ast::Lit::Str(str_lit)) = arg.expr.as_lit() {
-                    compile_eval_literal_arg(fnb, str_lit.value.to_string());
-                    return fnb.add_expr(Expr::Undefined);
+                    return compile_eval_literal_arg(fnb, str_lit.value.to_string());
                 }
             }
         }
@@ -1825,7 +1846,7 @@ fn compile_call(
     fnb.add_expr(Expr::Call { callee, args })
 }
 
-fn compile_eval_literal_arg(fnb: &mut FnBuilder, src: String) {
+fn compile_eval_literal_arg(fnb: &mut FnBuilder, src: String) -> ExprID {
     use swc_common::SourceMap;
     use swc_ecma_ast::EsVersion;
     use swc_ecma_parser::{lexer::Lexer, Parser, Syntax};
@@ -1856,9 +1877,22 @@ fn compile_eval_literal_arg(fnb: &mut FnBuilder, src: String) {
         }
     };
 
+    // Save & restore completion value as it was before the call to `compile_eval_literal_arg`,
+    // just not to interfere with the context
+    let saved_comp_val = fnb.take_block_completion_value();
+
     for stmt in &swc_ast.body {
         compile_stmt(fnb, stmt);
     }
+    let comp_val = fnb
+        .take_block_completion_value()
+        .unwrap_or_else(|| fnb.add_expr(Expr::Undefined));
+
+    if let Some(eid) = saved_comp_val {
+        fnb.set_block_completion_value(eid);
+    }
+
+    comp_val
 }
 
 fn compile_new(
@@ -2098,7 +2132,6 @@ mod tests {
         const CODE: &'static str = "switch(0) { case 1: const i = 1; default: const j = 3; }";
         quick_compile(CODE.to_string());
     }
-
 
     fn quick_compile(src: String) -> super::Function {
         let (swc_ast, source_map) = crate::bytecode_compiler::quick_parse_script(src);
