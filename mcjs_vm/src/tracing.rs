@@ -82,14 +82,14 @@ mod internal {
     impl Default for SinkConfig {
         fn default() -> Self {
             SinkConfig {
-                sink_filename: PathBuf::from("/dev/stdout"),
+                sink_filename: PathBuf::from("/dev/null"),
             }
         }
     }
     impl SinkConfig {
         fn from_env() -> Self {
             let sink_filename: PathBuf = std::env::var("MCJS_TRACING_SINK")
-                .unwrap_or_else(|_| "/dev/stdout".to_string())
+                .unwrap_or_else(|_| "/dev/null".to_string())
                 .into();
             SinkConfig { sink_filename }
         }
