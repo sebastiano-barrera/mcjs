@@ -1,9 +1,10 @@
+//! The Processed AST.
+//!
+//! An intermediate representation that results from an initial processing of
+//! swc_ecma_ast's AST, designed expressly to facilitate compilation to bytecode
+//! and compile-time checks.
+
 use std::fmt::Write;
-/// The Processed AST.
-///
-/// An intermediate representation that results from an initial processing of
-/// swc_ecma_ast's AST, designed expressly to facilitate compilation to bytecode
-/// and compile-time checks.
 use std::{collections::HashSet, rc::Rc};
 use swc_atoms::JsWord;
 use swc_common::Spanned;
