@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::{collections::HashMap, path::PathBuf};
@@ -480,17 +481,60 @@ impl Loader {
         PackageId(pkg_id)
     }
 
-    pub fn get_source_map(&self, module_id: bytecode::ModuleId) -> Option<&swc_common::SourceMap> {
+    pub fn get_source_map(&self, module_id: bytecode::ModuleId) -> Option<&Rc<swc_common::SourceMap>> {
         let source_map_rc = if module_id == bytecode::SCRIPT_MODULE_ID {
             &self.script.source_map
         } else {
             &self.modules.get(&module_id)?.source_map
         };
-        Some(Rc::as_ref(source_map_rc))
+        Some(source_map_rc)
+    }
+
+    pub fn lookup_function(&self, fnid: bytecode::FnId) -> Option<FunctionLookup> {
+        let bytecode::FnId(mod_id, _) = fnid;
+
+        let func = self.get_function(fnid)?;
+        let source_map = Rc::clone(self.get_source_map(mod_id)?);
+        let span = *func.span();
+        let swc_common::SourceFileAndBytePos {
+            sf: source_file,
+            pos: local_lo,
+        } = source_map.lookup_byte_offset(span.lo);
+        let local_hi = local_lo + (span.hi - span.lo);
+
+        Some(FunctionLookup {
+            source_map,
+            source_file,
+            span,
+            local_range: local_lo..local_hi,
+        })
     }
 
     // TODO(performance) Does it make sense to mmap the input file?
     // TODO Indirect filesystem access? (Check if needed)
+}
+
+pub struct FunctionLookup {
+    pub source_map: Rc< swc_common::SourceMap>,
+    pub source_file: Rc<swc_common::SourceFile>,
+    pub span: swc_common::Span,
+    /// Byte pos range for the function's text, local to source_file.src
+    pub local_range: Range<swc_common::BytePos>,
+}
+impl FunctionLookup {
+    pub fn text(&self) -> &str {
+        let local_lo = self.local_range.start.0 as usize;
+        let local_hi = self.local_range.end.0 as usize;
+        &self.full_text()[local_lo..local_hi]
+    }
+    pub fn full_text(&self) -> &str {
+        &self.source_file.src
+    }
+    pub fn local_range_usize(&self) -> Range<usize> {
+        let start = self.local_range.start.0 as usize;
+        let end = self.local_range.end.0 as usize;
+        start..end
+    }
 }
 
 fn resolve_path_by_suffix<'a>(

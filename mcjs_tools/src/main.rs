@@ -883,8 +883,7 @@ mod source_code_view {
         fnid: bytecode::FnId,
         ppi: f32,
         galley: Arc<egui::Galley>,
-        src: Rc<String>,
-        source_start_ofs: u32,
+        func_lookup: mcjs_vm::FunctionLookup,
     }
     struct Focus {
         cursor_ofs: u32,
@@ -902,6 +901,28 @@ mod source_code_view {
             let focus = self.focus.as_ref()?;
             let ndx = focus.preview_breakrange_index?;
             Some(&focus.candidate_breakranges[ndx].br)
+        }
+    }
+
+    impl Main {
+        fn global_range_to_local(
+            &self,
+            lo: swc_common::BytePos,
+            hi: swc_common::BytePos,
+        ) -> Option<(u32, u32)> {
+            let swc_common::SourceFileAndBytePos { sf: sf_lo, pos: _ } =
+                self.func_lookup.source_map.lookup_byte_offset(lo);
+            let swc_common::SourceFileAndBytePos { sf: sf_hi, pos: _ } =
+                self.func_lookup.source_map.lookup_byte_offset(hi);
+
+            if !Rc::ptr_eq(&sf_lo, &sf_hi) || !Rc::ptr_eq(&sf_lo, &self.func_lookup.source_file) {
+                return None;
+            }
+
+            let start_ofs = sf_lo.start_pos.0;
+            let lo = lo.0 - start_ofs;
+            let hi = hi.0 - start_ofs;
+            Some((lo, hi))
         }
     }
 
@@ -934,10 +955,9 @@ mod source_code_view {
             };
             let res = ui.add(egui::Label::new(Arc::clone(galley)).sense(egui::Sense::click()));
 
-            if res.double_clicked() {
-                let pos = res.interact_pointer_pos().unwrap() - res.rect.min;
+            if let Some(pos) = res.interact_pointer_pos() {
                 let cursor_ofs: u32 = galley
-                    .cursor_from_pos(pos)
+                    .cursor_from_pos(pos - res.rect.min)
                     .ccursor
                     .index
                     .try_into()
@@ -1026,8 +1046,7 @@ mod source_code_view {
             .function_breakranges(fnid)
             .unwrap()
             .filter_map(|(brid, br)| {
-                let lo = br.lo.0 - main.source_start_ofs;
-                let hi = br.hi.0 - main.source_start_ofs;
+                let (lo, hi) = main.global_range_to_local(br.lo, br.hi)?;
                 if lo <= cursor_ofs && cursor_ofs < hi {
                     Some((brid, br, lo, hi))
                 } else {
@@ -1036,7 +1055,7 @@ mod source_code_view {
             })
             .map(|(brid, br, lo, hi)| {
                 let galley = make_highlight_galley(
-                    main.src.as_str(),
+                    main.func_lookup.full_text(),
                     lo as usize..hi as usize,
                     egui::Color32::GRAY,
                     egui::Color32::RED,
@@ -1061,34 +1080,15 @@ mod source_code_view {
         fnid: mcjs_vm::FnId,
         fonts: &egui::text::Fonts,
     ) -> Option<Main> {
-        // Can't update with no source map
-        let source_map = loader.get_source_map(fnid.0)?;
+        let func_lookup = loader.lookup_function(fnid)?;
         let abs_span = *loader.get_function(fnid).unwrap().span();
         if abs_span.is_dummy() {
             return None;
         }
 
-        let source_file = {
-            let mut break_ranges = loader.function_breakranges(fnid).unwrap().peekable();
-
-            // All break ranges must belong to the same file, so we just peek
-            // one and use it to get a ptr to that swc_common::SourceFile.
-            // Then we use source file's offset in the source map to make sure
-            // that the markers are expressed in file-local offsets.
-            //
-            // (There should *always* be at least a single break range in a
-            // function, belonging at least to an empty statement.  I *might*
-            // be wrong; we'll see.)
-            let (_, brange) = break_ranges.peek().expect("no break ranges!");
-            source_map.lookup_byte_offset(brange.lo).sf
-        };
-        let (ofs_start, ofs_end) = source_map.span_to_char_offset(&source_file, abs_span);
-        let ofs_start = ofs_start as usize;
-        let ofs_end = ofs_end as usize;
-
         let galley = make_highlight_galley(
-            &source_file.src,
-            ofs_start..ofs_end,
+            func_lookup.full_text(),
+            func_lookup.local_range_usize(),
             egui::Color32::GRAY,
             egui::Color32::WHITE,
             fonts,
@@ -1098,8 +1098,7 @@ mod source_code_view {
             fnid,
             ppi: fonts.pixels_per_point(),
             galley,
-            src: Rc::clone(&source_file.src),
-            source_start_ofs: source_file.start_pos.0,
+            func_lookup,
         })
     }
 
