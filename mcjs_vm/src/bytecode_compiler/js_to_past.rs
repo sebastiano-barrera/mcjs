@@ -959,17 +959,92 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                 fnb.set_stmt(after_cons, StmtOp::Jump(end));
             }
 
-            swc_ecma_ast::Stmt::Switch(_) => {
-                // In order to simulate the consequences of the body of the
-                // switch statement being a single flat scope (with
-                // declarations 'shared' between cases, and fallthrough
-                // between 'case:' labels), we:
-                //  - compile each case block as a separate block;
-                //  - merge each block into a single superblock with an
-                // if/else chain
-                //  - hoist *all* declarations (regardless of what
-                //  ECMAScript says)
-                todo!("switch");
+            swc_ecma_ast::Stmt::Switch(switch_stmt) => {
+                let discriminant = compile_expr(fnb, &switch_stmt.discriminant);
+                let (_, discriminant) = create_tmp(fnb, discriminant);
+
+                // The tricky bit here is that declarations have to be shared across the whole of
+                // the switch stmt's body, so all cases need to be compiled into a single block.
+                // The cases are not really separate.
+
+                fnb.block(|fnb| {
+                    fnb.break_exits_this_block(None);
+
+                    // The switch stmt is compiled into two segments:
+                    //
+                    // - compare the discriminant against each case value and if it matches,
+                    // StmtOp::Jump to the corresponding consequent statement. If none matches, go
+                    // to the default case.
+                    //      - in this phase, the check for the default case comes last
+                    //
+                    // - all statements in the switch body without the 'case:' labels. The Jump
+                    // stmts jump to somewhere in this block.
+                    //      - in this phase, the cases are compiled in the order they appear in the
+                    //      source code (including the default case).
+
+                    // TODO Remove this vector? It's always going to contain perfectly sequential
+                    // stmt IDs
+                    let mut non_default_cases = Vec::new();
+                    let mut has_default_case = false;
+
+                    for case in &switch_stmt.cases {
+                        let body = case.cons.as_slice();
+                        match &case.test {
+                            Some(test) => {
+                                // We know the test value so we can write the comparison stmt, ...
+                                let test_value = compile_expr(fnb, test);
+                                let test = fnb.add_expr(Expr::Binary(
+                                    // Negated, because it's an If*Not*.
+                                    //  we generate this code: if not !==, then jmp to X
+                                    //  to get these semantics: if ===, then jmp to X
+                                    swc_ecma_ast::BinaryOp::NotEqEq,
+                                    discriminant,
+                                    test_value,
+                                ));
+                                fnb.add_stmt(StmtOp::IfNot { test });
+
+                                // ... but we don't know the jump target yet, so we
+                                // reserve the stmt slot and resolve it later
+                                let jmpif_sid = fnb.add_stmt(StmtOp::Pending);
+                                non_default_cases.push(jmpif_sid);
+                            }
+                            None => {
+                                if has_default_case {
+                                    fnb.signal_error(error!("multiple `default` clauses"));
+                                }
+                                has_default_case = true;
+                            }
+                        }
+                    }
+
+                    let mut default_case = if has_default_case {
+                        // at this point in the code we've failed all the other case tests, so
+                        // we just emit a jump (to be resolved later)
+                        let stmt_id = fnb.add_stmt(StmtOp::Pending);
+                        Some(stmt_id)
+                    } else {
+                        None
+                    };
+
+                    let mut non_default_cases = non_default_cases.into_iter();
+                    for case in &switch_stmt.cases {
+                        let jmp_target = fnb.peek_stmt_id();
+
+                        let jmpif_sid = if case.test.is_some() {
+                            non_default_cases.next().unwrap()
+                        } else {
+                            default_case.take().unwrap()
+                        };
+                        fnb.set_stmt(jmpif_sid, StmtOp::Jump(jmp_target));
+
+                        for stmt in &case.cons {
+                            compile_stmt(fnb, stmt);
+                        }
+                    }
+
+                    assert!(non_default_cases.next().is_none());
+                    assert!(default_case.is_none());
+                });
             }
 
             swc_ecma_ast::Stmt::Throw(throw_stmt) => {
