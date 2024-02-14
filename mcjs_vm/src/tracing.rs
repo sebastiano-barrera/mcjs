@@ -5,7 +5,7 @@ pub fn section(header: &str) -> Section {
 }
 pub type Section = internal::Section;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "tracing")))]
 mod internal {
     use std::fmt::Debug;
 
@@ -20,7 +20,7 @@ mod internal {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "tracing"))]
 mod internal {
     use lazy_static::lazy_static;
 
@@ -39,7 +39,6 @@ mod internal {
 
     #[must_use]
     pub fn section(header: &str) -> Section {
-        #[cfg(test)]
         THREAD_LOGGER.with(|logger| {
             let mut logger = logger.borrow_mut();
             logger.start_section(header);
@@ -51,7 +50,6 @@ mod internal {
     pub struct Section;
     impl Section {
         pub fn log_value<T: Debug>(&self, tag: &str, value: &T) {
-            #[cfg(test)]
             THREAD_LOGGER.with(|logger| {
                 let mut logger = logger.borrow_mut();
                 logger.log_value(tag, value);
@@ -59,7 +57,6 @@ mod internal {
         }
 
         pub fn log(&self, tag: &str, value: &str) {
-            #[cfg(test)]
             THREAD_LOGGER.with(|logger| {
                 let mut logger = logger.borrow_mut();
                 logger.log(tag, value);
