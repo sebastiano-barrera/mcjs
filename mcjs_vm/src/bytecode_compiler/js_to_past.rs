@@ -230,16 +230,47 @@ impl util::Dump for Block {
 
 pub struct Decl {
     pub name: DeclName,
-    pub is_lexical: bool,
+    pub is_lexical: IsLexical,
+}
+pub enum IsLexical {
+    No,
+    Yes,
+    OnlyInStrictMode,
+}
+impl IsLexical {
+    /// Returns true iff the represented declaration is lexical, assuming that the declaration site
+    /// is in strict mode or not based on the `strict_mode` parameter.
+    pub fn assuming_strictness(&self, strict_mode: StrictMode) -> bool {
+        match (self, strict_mode) {
+            (IsLexical::No, _) => false,
+            (IsLexical::Yes, _) => true,
+            (IsLexical::OnlyInStrictMode, StrictMode::Strict) => true,
+            (IsLexical::OnlyInStrictMode, _) => false,
+        }
+    }
+}
+impl From<swc_ecma_ast::VarDeclKind> for IsLexical {
+    fn from(kind: swc_ecma_ast::VarDeclKind) -> IsLexical {
+        match kind {
+            swc_ecma_ast::VarDeclKind::Var => IsLexical::No,
+            swc_ecma_ast::VarDeclKind::Let => IsLexical::Yes,
+            swc_ecma_ast::VarDeclKind::Const => IsLexical::Yes,
+        }
+    }
+}
+impl std::fmt::Debug for IsLexical {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            IsLexical::No => "var",
+            IsLexical::Yes => "lex",
+            IsLexical::OnlyInStrictMode => "strict?lex:var",
+        };
+        write!(f, "{}", s)
+    }
 }
 impl std::fmt::Debug for Decl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Decl: {} {:?}",
-            if self.is_lexical { "let" } else { "var" },
-            self.name
-        )
+        write!(f, "Decl: {:?} {:?}", self.is_lexical, self.name)
     }
 }
 
@@ -553,9 +584,16 @@ mod builder {
             // memory allocs (due to HashSet for example).
             for i in 0..block.decls.len() {
                 let name = &block.decls[i].name;
-                let is_lexical = block.decls[i].is_lexical;
+                let is_lexical_i = block.decls[i]
+                    .is_lexical
+                    .assuming_strictness(self.strict_mode());
+
                 for j in i + 1..block.decls.len() {
-                    if name == &block.decls[j].name && (is_lexical || block.decls[j].is_lexical) {
+                    let is_lexical_j = block.decls[j]
+                        .is_lexical
+                        .assuming_strictness(self.strict_mode());
+
+                    if name == &block.decls[j].name && (is_lexical_i || is_lexical_j) {
                         self.signal_error(error!("identifier `{:?}` already declared", name));
                     }
                 }
@@ -574,7 +612,11 @@ mod builder {
             let ret = builder(self);
             let mut inner_block = self.pop_block();
 
-            hoist_declarations(&mut self.cur_block_mut().decls, &mut inner_block.decls);
+            hoist_declarations(
+                self.strict_mode(),
+                &mut self.cur_block_mut().decls,
+                &mut inner_block.decls,
+            );
 
             self.add_stmt(StmtOp::Block(Box::new(inner_block)));
 
@@ -605,7 +647,7 @@ mod builder {
             let name = DeclName::Tmp(self.gen_tmp());
             self.add_decl(Decl {
                 name: name.clone(),
-                is_lexical: true,
+                is_lexical: IsLexical::Yes,
             });
             name
         }
@@ -771,11 +813,13 @@ mod builder {
         }
     }
 
-    fn hoist_declarations(outer: &mut Vec<Decl>, inner: &mut Vec<Decl>) {
+    fn hoist_declarations(strict_mode: StrictMode, outer: &mut Vec<Decl>, inner: &mut Vec<Decl>) {
         let all_decls = std::mem::take(inner);
 
         for decl in all_decls {
-            if decl.is_lexical {
+            let is_lexical = decl.is_lexical.assuming_strictness(strict_mode);
+
+            if is_lexical {
                 inner.push(decl);
             } else {
                 outer.push(decl);
@@ -803,7 +847,7 @@ pub fn compile_script(
     let mut kept_decls = Vec::new();
     for decl in std::mem::take(&mut function.body.decls) {
         match decl.name {
-            DeclName::Js(name) if !decl.is_lexical => {
+            DeclName::Js(name) if !decl.is_lexical.assuming_strictness(strict_mode) => {
                 function.unbound_names.push(name);
             }
             _ => {
@@ -891,7 +935,7 @@ pub fn compile_module(
                         let decl_name = DeclName::Js(var_name);
                         fnb.add_decl(Decl {
                             name: decl_name.clone(),
-                            is_lexical: true,
+                            is_lexical: IsLexical::Yes,
                         });
                         fnb.add_stmt(StmtOp::Assign(Some(decl_name), imported_value));
                     }
@@ -899,7 +943,7 @@ pub fn compile_module(
                         let name = DeclName::Js(d.local.sym.clone());
                         fnb.add_decl(Decl {
                             name: name.clone(),
-                            is_lexical: true,
+                            is_lexical: IsLexical::Yes,
                         });
                         fnb.add_stmt(StmtOp::Assign(Some(name), default_export));
                     }
@@ -907,7 +951,7 @@ pub fn compile_module(
                         let name = DeclName::Js(d.local.sym.clone());
                         fnb.add_decl(Decl {
                             name: name.clone(),
-                            is_lexical: true,
+                            is_lexical: IsLexical::Yes,
                         });
                         fnb.add_stmt(StmtOp::Assign(Some(name), named_exports));
                     }
@@ -1121,7 +1165,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                             let name = compile_name_pat(handler_param);
                             fnb.add_decl(Decl {
                                 name: name.clone(),
-                                is_lexical: true,
+                                is_lexical: IsLexical::Yes,
                             });
                             let cur_exc = fnb.add_expr(Expr::CurrentException);
                             fnb.add_stmt(StmtOp::Assign(Some(name), cur_exc));
@@ -1254,16 +1298,12 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                         assert_eq!(var_decl.decls.len(), 1);
                         Decl {
                             name: compile_name_pat(&var_decl.decls[0].name),
-                            is_lexical: match var_decl.kind {
-                                swc_ecma_ast::VarDeclKind::Var => false,
-                                swc_ecma_ast::VarDeclKind::Let => true,
-                                swc_ecma_ast::VarDeclKind::Const => true,
-                            },
+                            is_lexical: IsLexical::from(var_decl.kind),
                         }
                     }
                     ForHead::Pat(pat) => Decl {
                         name: compile_name_pat(pat),
-                        is_lexical: true,
+                        is_lexical: IsLexical::Yes,
                     },
                 };
 
@@ -1404,7 +1444,7 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
             let name = DeclName::Js(fn_decl.ident.sym.clone());
             fnb.add_decl(Decl {
                 name: name.clone(),
-                is_lexical: false,
+                is_lexical: IsLexical::OnlyInStrictMode,
             });
 
             let closure = compile_fn_as_expr(fnb, &fn_decl.function);
@@ -1430,17 +1470,11 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
 }
 
 fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
-    let is_lexical = match var_decl.kind {
-        swc_ecma_ast::VarDeclKind::Var => false,
-        swc_ecma_ast::VarDeclKind::Let => true,
-        swc_ecma_ast::VarDeclKind::Const => true,
-    };
-
     for declarator in &var_decl.decls {
         let name = compile_name_pat(&declarator.name);
         fnb.add_decl(Decl {
             name: name.clone(),
-            is_lexical,
+            is_lexical: IsLexical::from(var_decl.kind),
         });
 
         if let Some(init) = &declarator.init {

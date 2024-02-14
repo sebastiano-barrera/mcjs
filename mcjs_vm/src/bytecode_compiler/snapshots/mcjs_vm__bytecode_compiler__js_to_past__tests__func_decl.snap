@@ -2,17 +2,19 @@
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function.dump_to_string()
 ---
-[1-35] func () unbound[myFunction] block0 {
+[1-35] func () unbound[myFunction] Sloppy block0 {
   decls:
+  fn asmts:
+    myFunction <- e0
   exprs:
     e0: CreateClosure:
-      [1-35] func () unbound[] block1 {
+      [1-35] func () unbound[] Sloppy block1 {
         decls:
+        fn asmts:
         exprs:
           e0: NumberLiteral(3.0)
         stmts:
           [25-33] Return(e0)
       }
   stmts:
-    [1-35] Assign(Some(myFunction), e0)
 }

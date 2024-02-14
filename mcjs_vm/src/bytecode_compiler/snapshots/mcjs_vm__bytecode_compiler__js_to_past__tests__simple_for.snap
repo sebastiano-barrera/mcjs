@@ -2,10 +2,11 @@
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function.dump_to_string()
 ---
-[18-104] func () unbound[] block0 {
+[18-104] func () unbound[] Sloppy block0 {
   decls:
-    Decl: let closures
-    Decl: let tmp1
+    Decl: lex closures
+    Decl: lex tmp1
+  fn asmts:
   exprs:
     e0: ArrayCreate
     e1: Read(tmp1)
@@ -14,24 +15,28 @@ expression: function.dump_to_string()
     [18-35] Assign(Some(closures), e1)
     block2 {
       decls:
-        Decl: let i
+        Decl: lex i
+      fn asmts:
       exprs:
         e0: NumberLiteral(0.0)
       stmts:
         [52-104] Assign(Some(i), e0)
         block3 {
           decls:
+          fn asmts:
           exprs:
             e0: Read(closures)
             e1: StringLiteral(Atom('push' type=inline))
             e2: ObjectGet { obj: e0, key: e1 }
             e3: CreateClosure:
-              [80-87] func () unbound[i] block4 {
+              [80-87] func () unbound[i] Sloppy block4 {
                 decls:
+                fn asmts:
                 exprs:
                 stmts:
                   block5 {
                     decls:
+                    fn asmts:
                     exprs:
                       e0: Read(i)
                     stmts:
@@ -56,10 +61,12 @@ expression: function.dump_to_string()
             [52-104] Break(block2)
             block6 {
               decls:
+              fn asmts:
               exprs:
               stmts:
                 block7 {
                   decls:
+                  fn asmts:
                   exprs:
                   stmts:
                 }

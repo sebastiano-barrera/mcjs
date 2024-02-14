@@ -2,18 +2,22 @@
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function.dump_to_string()
 ---
-[18-126] func () unbound[] block0 {
+[18-126] func () unbound[] Sloppy block0 {
   decls:
+  fn asmts:
   exprs:
     e0: CreateClosure:
-      [19-123] func () unbound[] block1 {
+      [19-123] func () unbound[] Sloppy block1 {
         decls:
-          Decl: var f
-          Decl: let x
+          Decl: strict?lex:var f
+          Decl: lex x
+        fn asmts:
+          f <- e0
         exprs:
           e0: CreateClosure:
-            [52-74] func () unbound[x] block2 {
+            [52-74] func () unbound[x] Sloppy block2 {
               decls:
+              fn asmts:
               exprs:
                 e0: Read(x)
                 e1: NumberLiteral(3.0)
@@ -23,7 +27,6 @@ expression: function.dump_to_string()
             }
           e1: NumberLiteral(2.0)
         stmts:
-          [52-74] Assign(Some(f), e0)
           [95-105] Assign(Some(x), e1)
       }
     e1: Call { callee: e0, args: [] }
