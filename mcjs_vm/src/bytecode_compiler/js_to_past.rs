@@ -22,7 +22,7 @@ pub struct Function {
     pub unbound_names: Vec<JsWord>,
     pub body: Block,
     pub span: swc_common::Span,
-    pub declares_use_strict: bool,
+    pub strict_mode: StrictMode,
 }
 impl_debug_via_dump!(Function);
 
@@ -35,15 +35,20 @@ impl util::Dump for Function {
         util::write_comma_sep(f, self.parameters.iter())?;
         write!(f, ") unbound[")?;
         util::write_comma_sep(f, self.unbound_names.iter())?;
-        write!(f, "] ")?;
+        write!(f, "] {:?} ", self.strict_mode)?;
         self.body.dump(f)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrictMode {
+    Strict,
+    Sloppy,
 }
 
 pub struct Block {
     pub id: BlockID,
 
-    is_use_strict_declared: bool,
     is_function_decl_allowed: bool,
 
     // These are all Vec's, but they have somewhat different semantics. This is
@@ -177,10 +182,6 @@ impl util::Dump for Block {
     fn dump<W: std::fmt::Write>(&self, f: &mut util::Formatter<W>) -> std::fmt::Result {
         writeln!(f, "{:?} {{", self.id)?;
         f.indent();
-
-        if self.is_use_strict_declared {
-            writeln!(f, "use strict: yes")?;
-        }
 
         writeln!(f, "decls:")?;
         f.indent();
@@ -456,6 +457,7 @@ mod builder {
         /// [*] Currently, this is only our hacky version of `eval` that only takes a
         /// string literal.
         completion_value_var: Option<DeclName>,
+        strict_mode: StrictMode,
     }
 
     #[derive(PartialEq, Eq)]
@@ -478,13 +480,15 @@ mod builder {
             }
         }
 
-        pub fn new_function(&mut self) -> FnBuilder {
-            FnBuilder::new(self)
+        /// Create a function with the given StrictMode. (It can change later, for example if the
+        /// function's first statement is "use strict").
+        pub fn new_function(&mut self, initial_strict_mode: StrictMode) -> FnBuilder {
+            FnBuilder::new(self, initial_strict_mode)
         }
     }
 
     impl<'a> FnBuilder<'a> {
-        fn new(builder: &'a mut Builder) -> Self {
+        fn new(builder: &'a mut Builder, initial_strict_mode: StrictMode) -> Self {
             let mut fnb = FnBuilder {
                 builder,
                 blocks: Vec::new(),
@@ -493,6 +497,7 @@ mod builder {
                 spans: Vec::new(),
                 errors: Vec::new(),
                 completion_value_var: None,
+                strict_mode: initial_strict_mode,
             };
             // The function's outermost block. Will be retrieved via `pop_block` by `build`
             fnb.push_block();
@@ -532,7 +537,6 @@ mod builder {
             // TODO Reuse allocations and get new Block out of a pool
             self.blocks.push(Block {
                 id: blkid,
-                is_use_strict_declared: false,
                 is_function_decl_allowed: false,
                 decls: Vec::new(),
                 fn_asmts: Vec::new(),
@@ -581,7 +585,10 @@ mod builder {
             self.blocks.len() == 1 && self.blocks[0].stmts.is_empty()
         }
         pub(super) fn declare_use_strict(&mut self) {
-            self.blocks.first_mut().unwrap().is_use_strict_declared = true;
+            self.strict_mode = StrictMode::Strict;
+        }
+        pub(crate) fn strict_mode(&self) -> StrictMode {
+            self.strict_mode
         }
 
         fn gen_tmp(&mut self) -> TmpID {
@@ -782,12 +789,13 @@ pub fn compile_script(
     source_map: Rc<swc_common::SourceMap>,
 ) -> MultiErrResult<Function> {
     let mut builder = Builder::new(source_map);
-    let mut fnb = builder.new_function();
+    let mut fnb = builder.new_function(StrictMode::Sloppy);
     for stmt in &script_ast.body {
         compile_stmt(&mut fnb, stmt);
     }
+    let strict_mode = fnb.strict_mode();
     let block = fnb.build()?;
-    let mut function = compile_function_from_parts(script_ast.span, &[], block);
+    let mut function = compile_function_from_parts(script_ast.span, &[], strict_mode, block);
 
     // Toplevel var (non-lexical) definitions in a script are allocated in
     // the `globalThis` object. This can be achieved simply by removing those
@@ -815,7 +823,8 @@ pub fn compile_module(
     use swc_ecma_ast::ModuleItem;
 
     let mut builder = Builder::new(source_map);
-    let mut fnb = builder.new_function();
+    // Modules are "use strict" by definition
+    let mut fnb = builder.new_function(StrictMode::Strict);
 
     let lit_named = fnb.add_expr(Expr::StringLiteral("__named".into()));
     let lit_default = fnb.add_expr(Expr::StringLiteral("__default".into()));
@@ -941,11 +950,9 @@ pub fn compile_module(
         }
     }
 
+    let strict_mode = fnb.strict_mode();
     let block = fnb.build()?;
-    let mut function = compile_function_from_parts(script_ast.span, &[], block);
-
-    // modules are always strict, no matter what
-    function.declares_use_strict = true;
+    let mut function = compile_function_from_parts(script_ast.span, &[], strict_mode, block);
 
     Ok(function)
 }
@@ -1532,9 +1539,10 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
 
                 let params: Vec<_> = arrow_expr.params.iter().cloned().map(From::from).collect();
 
-                let body_res = {
+                let (strict_mode, body_res) = {
+                    let outer_strict_mode = fnb.strict_mode();
                     let builder = fnb.suspend();
-                    let mut fnb = builder.new_function();
+                    let mut fnb = builder.new_function(outer_strict_mode);
 
                     match &*arrow_expr.body {
                         swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block_stmts) => fnb.block(|fnb| {
@@ -1550,7 +1558,9 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                         }
                     }
 
-                    fnb.build()
+                    let inner_strict_mode = fnb.strict_mode();
+                    let body = fnb.build();
+                    (inner_strict_mode, body)
                 };
 
                 let body = match body_res {
@@ -1561,7 +1571,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                     },
                 };
 
-                let func = compile_function_from_parts(arrow_expr.span, &params, body);
+                let func = compile_function_from_parts(arrow_expr.span, &params, strict_mode, body);
 
                 let func_expr = fnb.add_expr(Expr::CreateClosure {
                     func: Box::new(func),
@@ -1769,8 +1779,9 @@ fn compile_fn_as_expr(fnb: &mut FnBuilder<'_>, func_ast: &swc_ecma_ast::Function
     }
 
     let res = {
+        let strict_mode = fnb.strict_mode();
         let builder = fnb.suspend();
-        compile_function(builder, func_ast)
+        compile_function(builder, func_ast, strict_mode)
     };
     let func = match res {
         Ok(func) => func,
@@ -1960,6 +1971,7 @@ fn compile_args(fnb: &mut FnBuilder, args: &[swc_ecma_ast::ExprOrSpread]) -> Vec
 fn compile_function(
     builder: &mut Builder,
     swc_func: &swc_ecma_ast::Function,
+    initial_strict_mode: StrictMode,
 ) -> MultiErrResult<Function> {
     if !swc_func.decorators.is_empty() {
         panic!("unsupported: function decorators");
@@ -1978,18 +1990,20 @@ fn compile_function(
     }
 
     let stmts = &swc_func.body.as_ref().unwrap().stmts;
-    let mut fnb = builder.new_function();
+    let mut fnb = builder.new_function(initial_strict_mode);
     for stmt in stmts {
         compile_stmt(&mut fnb, stmt);
     }
+    let strict_mode = fnb.strict_mode();
     let body = fnb.build()?;
-    let func = compile_function_from_parts(swc_func.span, &swc_func.params, body);
+    let func = compile_function_from_parts(swc_func.span, &swc_func.params, strict_mode, body);
     Ok(func)
 }
 
 fn compile_function_from_parts(
     span: swc_common::Span,
     swc_params: &[swc_ecma_ast::Param],
+    strict_mode: StrictMode,
     body: Block,
 ) -> Function {
     let mut parameters = Vec::new();
@@ -1999,15 +2013,13 @@ fn compile_function_from_parts(
         parameters.push(name.clone());
     }
 
-    let declares_use_strict = body.is_use_strict_declared;
-
     let unbound_names = find_unbound_references(&body, &parameters);
     Function {
         parameters,
         unbound_names,
-        declares_use_strict,
         body,
         span,
+        strict_mode,
     }
 }
 

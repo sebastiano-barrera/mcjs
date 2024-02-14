@@ -47,7 +47,7 @@ pub fn compile_module(func: &js_to_past::Function, min_lfnid: u16) -> Result<Com
         // Similar to `compile_function`, but we have no parameters, no captures,
         // and we define 'globalThis' at the root scope
         let mut fnb = builder::FnBuilder::new(&globals, &mut module_builder);
-        fnb.set_strict_mode(func.declares_use_strict);
+        fnb.set_strict_mode(func.strict_mode);
 
         let stmts_count = func.body.stmts().count();
         fnb.block(func.body.id, stmts_count, |fnb| {
@@ -116,10 +116,9 @@ fn compile_function<'a>(
     module_builder: &'a mut ModuleBuilder,
     captures: Vec<DeclName>,
     func: &js_to_past::Function,
-    force_strict: bool,
 ) -> bytecode::LocalFnId {
     let mut fnb = builder::FnBuilder::new(globals, module_builder);
-    fnb.set_strict_mode(force_strict || func.declares_use_strict);
+    fnb.set_strict_mode(func.strict_mode);
 
     let stmts_count = func.body.stmts().count();
     fnb.block(func.body.id, stmts_count, |fnb| {
@@ -487,10 +486,9 @@ fn compile_expr(
                 }
             }
 
-            let force_strict = fnb.is_strict_mode();
             let lfnid = {
                 let (globals, module_builder) = fnb.suspend();
-                compile_function(globals, module_builder, cap_names, func, force_strict)
+                compile_function(globals, module_builder, cap_names, func)
             };
             let dest = get_dest(fnb);
             fnb.emit(Instr::ClosureNew {
@@ -724,7 +722,10 @@ mod builder {
     use super::{DeclName, StmtID};
     use crate::{
         bytecode,
-        bytecode_compiler::{js_to_past, CompiledModule},
+        bytecode_compiler::{
+            js_to_past::{self, StrictMode},
+            CompiledModule,
+        },
     };
 
     use bytecode::IID;
@@ -771,7 +772,7 @@ mod builder {
         block_boundaries: HashMap<BlockID, (IID, IID)>,
         deferred_actions: Vec<BoxedAction>,
 
-        is_strict_mode: bool,
+        strict_mode: StrictMode,
 
         globals: &'a HashSet<JsWord>,
         module_builder: &'a mut ModuleBuilder,
@@ -808,7 +809,7 @@ mod builder {
                 n_regs: bytecode::ARGS_COUNT_MAX,
                 blocks: Vec::new(),
                 block_boundaries: HashMap::new(),
-                is_strict_mode: false,
+                strict_mode: StrictMode::Sloppy,
                 globals,
                 module_builder,
                 deferred_actions: Vec::new(),
@@ -816,11 +817,12 @@ mod builder {
             }
         }
 
-        pub(super) fn set_strict_mode(&mut self, value: bool) {
-            self.is_strict_mode = value;
-        }
-        pub(super) fn is_strict_mode(&self) -> bool {
-            self.is_strict_mode
+        pub(super) fn set_strict_mode(&mut self, strict_mode: StrictMode) {
+            if self.strict_mode == StrictMode::Strict {
+                assert_eq!(strict_mode, StrictMode::Strict);
+            } else {
+                self.strict_mode = strict_mode;
+            }
         }
 
         fn push_block(&mut self, block_id: BlockID, stmts_count: usize) {
@@ -976,7 +978,7 @@ mod builder {
                 // TODO TODO This is all yet to be implemented:
                 ident_history: Vec::new(),
                 trace_anchors: HashMap::new(),
-                is_strict_mode: self.is_strict_mode,
+                is_strict_mode: self.strict_mode == StrictMode::Strict,
                 span,
             }
             .build();
@@ -1116,14 +1118,8 @@ mod tests {
 
         let mut module_builder = super::ModuleBuilder::new(0);
         let globals = past_function.unbound_names.iter().cloned().collect();
-        let force_strict = false;
-        let root_lfnid = super::compile_function(
-            &globals,
-            &mut module_builder,
-            Vec::new(),
-            &past_function,
-            force_strict,
-        );
+        let root_lfnid =
+            super::compile_function(&globals, &mut module_builder, Vec::new(), &past_function);
 
         module_builder.build(root_lfnid)
     }
