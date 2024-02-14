@@ -14,5 +14,5 @@ expression: function.dump_to_string()
           [25-33] Return(e0)
       }
   stmts:
-    [1-35] Assign(myFunction, e0)
+    [1-35] Assign(Some(myFunction), e0)
 }

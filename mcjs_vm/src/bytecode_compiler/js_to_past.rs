@@ -88,7 +88,6 @@ impl Block {
                     | StmtOp::Block(_)
                     | StmtOp::TryEnd
                     | StmtOp::Debugger => {}
-                    StmtOp::Evaluate(eid) => check_expr_id(eid),
                     StmtOp::IfNot { test } => check_expr_id(test),
                     StmtOp::Jump(target) => check_stmt_id(target),
                     StmtOp::Return(eid) => check_expr_id(eid),
@@ -118,7 +117,11 @@ impl Block {
                     | Expr::ArrayCreate
                     | Expr::ObjectCreate
                     | Expr::CreateClosure { func: _ }
-                    | Expr::CurrentException => {}
+                    | Expr::CurrentException
+                    | Expr::ImportModule { import_path: _ }
+                    | Expr::StringCreate
+                    | Expr::RegexLiteral { .. }
+                    | Expr::Error => {}
 
                     Expr::Unary(_, eid) => check_expr_id(eid),
                     Expr::Binary(_, l, r) => {
@@ -143,10 +146,6 @@ impl Block {
                         check_expr_id(callee);
                         args.iter().for_each(&check_expr_id);
                     }
-                    Expr::ImportModule { import_path: _ } => {}
-                    Expr::StringCreate => {}
-                    Expr::RegexLiteral { .. } => {}
-                    Expr::Error => {}
                 }
             }
         }
@@ -289,8 +288,6 @@ impl std::fmt::Debug for ExprID {
 pub enum StmtOp {
     Pending,
 
-    Evaluate(ExprID),
-
     Break(BlockID),
     Block(Box<Block>),
     /// Semantics: "Do the next statement if not <test>" or, equivalently,
@@ -303,7 +300,7 @@ pub enum StmtOp {
     Jump(StmtID),
     Return(ExprID),
 
-    Assign(DeclName, ExprID),
+    Assign(Option<DeclName>, ExprID),
     Unshare(DeclName),
     ArrayPush(DeclName, ExprID),
     ObjectSet {
@@ -436,6 +433,14 @@ mod builder {
         continue_exits: Vec<Exit>,
 
         errors: Vec<Error>,
+
+        /// For as long as we're compiling a section of code interested in a completion
+        /// value [*], this is the name of the variable that holds the completion value
+        /// (typically a tmp).
+        ///
+        /// [*] Currently, this is only our hacky version of `eval` that only takes a
+        /// string literal.
+        completion_value_var: Option<DeclName>,
     }
 
     #[derive(PartialEq, Eq)]
@@ -472,6 +477,7 @@ mod builder {
                 continue_exits: Vec::new(),
                 spans: Vec::new(),
                 errors: Vec::new(),
+                completion_value_var: None,
             };
             // The function's outermost block. Will be retrieved via `pop_block` by `build`
             fnb.push_block();
@@ -729,12 +735,19 @@ mod builder {
             self.blocks.last().unwrap().is_function_decl_allowed
         }
 
-        pub(crate) fn take_block_completion_value(&mut self) -> Option<ExprID> {
-            self.cur_block_mut().completion_value.take()
+        pub(crate) fn completion_value_var(&self) -> Option<&DeclName> {
+            self.completion_value_var.as_ref()
+        }
+        pub(crate) fn set_completion_value_var(&mut self, cv_name: DeclName) {
+            // It's possible to work with multiple nested ranges of code interested in completion
+            // values, but I have no intention of supporting eval 100%, so this is good enough
+            assert!(self.completion_value_var.is_none());
+            self.completion_value_var = Some(cv_name);
         }
 
-        pub(crate) fn set_block_completion_value(&mut self, value: ExprID) {
-            self.cur_block_mut().completion_value = Some(value);
+        pub(crate) fn clear_completion_value_var(&mut self) {
+            assert!(self.completion_value_var.is_some());
+            self.completion_value_var = None;
         }
     }
 
@@ -858,7 +871,7 @@ pub fn compile_module(
                             name: decl_name.clone(),
                             is_lexical: true,
                         });
-                        fnb.add_stmt(StmtOp::Assign(decl_name, imported_value));
+                        fnb.add_stmt(StmtOp::Assign(Some(decl_name), imported_value));
                     }
                     swc_ecma_ast::ImportSpecifier::Default(d) => {
                         let name = DeclName::Js(d.local.sym.clone());
@@ -866,7 +879,7 @@ pub fn compile_module(
                             name: name.clone(),
                             is_lexical: true,
                         });
-                        fnb.add_stmt(StmtOp::Assign(name, default_export));
+                        fnb.add_stmt(StmtOp::Assign(Some(name), default_export));
                     }
                     swc_ecma_ast::ImportSpecifier::Namespace(d) => {
                         let name = DeclName::Js(d.local.sym.clone());
@@ -874,7 +887,7 @@ pub fn compile_module(
                             name: name.clone(),
                             is_lexical: true,
                         });
-                        fnb.add_stmt(StmtOp::Assign(name, named_exports));
+                        fnb.add_stmt(StmtOp::Assign(Some(name), named_exports));
                     }
                 }
             }
@@ -929,7 +942,6 @@ fn compile_stmt(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt) {
 }
 
 fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option<&JsWord>) {
-    fnb.take_block_completion_value();
     fnb.with_span(stmt.span(), |fnb| {
         match stmt {
             swc_ecma_ast::Stmt::Block(block_stmt) => {
@@ -1088,7 +1100,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                                 is_lexical: true,
                             });
                             let cur_exc = fnb.add_expr(Expr::CurrentException);
-                            fnb.add_stmt(StmtOp::Assign(name, cur_exc));
+                            fnb.add_stmt(StmtOp::Assign(Some(name), cur_exc));
                         }
 
                         compile_block(fnb, &handler.body);
@@ -1168,7 +1180,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                         }
                         Some(swc_ecma_ast::VarDeclOrExpr::Expr(expr)) => {
                             let expr = compile_expr(fnb, expr);
-                            fnb.add_stmt(StmtOp::Evaluate(expr));
+                            fnb.add_stmt(StmtOp::Assign(None, expr));
                         }
                         None => {}
                     }
@@ -1192,7 +1204,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
 
                         if let Some(update) = &for_stmt.update {
                             let expr = compile_expr(fnb, update);
-                            fnb.add_stmt(StmtOp::Evaluate(expr));
+                            fnb.add_stmt(StmtOp::Assign(None, expr));
                         }
 
                         fnb.add_unshares_up_to(outer_block_id);
@@ -1264,7 +1276,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                         arr: keys,
                         index: key_ndx,
                     });
-                    fnb.add_stmt(StmtOp::Assign(item_var, element));
+                    fnb.add_stmt(StmtOp::Assign(Some(item_var), element));
 
                     fnb.block(|fnb| {
                         fnb.continue_exits_this_block(label.cloned());
@@ -1275,7 +1287,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                         let one = fnb.add_expr(ONE);
                         let new_val =
                             fnb.add_expr(Expr::Binary(swc_ecma_ast::BinaryOp::Add, key_ndx, one));
-                        fnb.add_stmt(StmtOp::Assign(key_ndx_tmp, new_val));
+                        fnb.add_stmt(StmtOp::Assign(Some(key_ndx_tmp), new_val));
                     }
 
                     fnb.add_unshares_up_to(outer_block_id);
@@ -1299,9 +1311,8 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                     }
                 }
 
-                let value = compile_expr(fnb, &expr_stmt.expr);
-                fnb.add_stmt(StmtOp::Evaluate(value));
-                fnb.set_block_completion_value(value);
+                let expr = compile_expr(fnb, &expr_stmt.expr);
+                fnb.add_stmt(StmtOp::Assign(fnb.completion_value_var().cloned(), expr));
             }
 
             swc_ecma_ast::Stmt::Labeled(labeled_stmt) => {
@@ -1384,7 +1395,7 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
             // declarations [1].
             //
             // [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function#description.
-            fnb.add_stmt_at_block_start(StmtOp::Assign(name, closure));
+            fnb.add_stmt_at_block_start(StmtOp::Assign(Some(name), closure));
         }
         swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(fnb, var_decl),
         _ => {
@@ -1409,7 +1420,7 @@ fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
 
         if let Some(init) = &declarator.init {
             let value = compile_expr(fnb, init);
-            fnb.add_stmt(StmtOp::Assign(name, value));
+            fnb.add_stmt(StmtOp::Assign(Some(name), value));
         }
     }
 }
@@ -1568,7 +1579,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 };
                 let one = fnb.add_expr(ONE);
                 let new_value = fnb.add_expr(Expr::Binary(op, value, one));
-                fnb.add_stmt(StmtOp::Assign(loc, new_value));
+                fnb.add_stmt(StmtOp::Assign(Some(loc), new_value));
 
                 new_value
             }
@@ -1582,7 +1593,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                     let loc = DeclName::Js(ident.sym.clone());
                     let init_value = fnb.add_expr(Expr::Read(loc.clone()));
                     let value = compile_assignment(fnb, assign_expr, init_value);
-                    fnb.add_stmt(StmtOp::Assign(loc, value));
+                    fnb.add_stmt(StmtOp::Assign(Some(loc), value));
                     value
                 } else if let Some(target_expr) = assign_expr.left.as_expr() {
                     match target_expr {
@@ -1616,12 +1627,12 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 let if_not_jmp = fnb.add_stmt(StmtOp::Pending);
 
                 let value_cons = compile_expr(fnb, &cond_expr.cons);
-                fnb.add_stmt(StmtOp::Assign(tmp.clone(), value_cons));
+                fnb.add_stmt(StmtOp::Assign(Some(tmp.clone()), value_cons));
                 let after_cons_jmp = fnb.add_stmt(StmtOp::Pending);
 
                 let else_target = fnb.peek_stmt_id();
                 let value_alt = compile_expr(fnb, &cond_expr.alt);
-                fnb.add_stmt(StmtOp::Assign(tmp.clone(), value_alt));
+                fnb.add_stmt(StmtOp::Assign(Some(tmp.clone()), value_alt));
 
                 let end = fnb.peek_stmt_id();
 
@@ -1644,14 +1655,18 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 compile_new(fnb, &new_expr.callee, args)
             }
             swc_ecma_ast::Expr::Seq(seq_expr) => {
-                let mut last_value = fnb.add_expr(Expr::Undefined);
+                if let Some((last, non_last)) = seq_expr.exprs.split_last() {
+                    for expr in non_last {
+                         let expr_id = compile_expr(fnb, expr);
+                        fnb.add_stmt(StmtOp::Assign(None, expr_id));
+                    }
 
-                for expr in &seq_expr.exprs {
-                    last_value = compile_expr(fnb, expr);
-                    fnb.add_stmt(StmtOp::Evaluate(last_value));
+                        let last_value = compile_expr(fnb, last);
+                        fnb.add_stmt(StmtOp::Assign(fnb.completion_value_var().cloned(), last_value));
+                    last_value
+                } else {
+                 fnb.add_expr(Expr::Undefined)
                 }
-
-                last_value
             }
             swc_ecma_ast::Expr::Ident(ident) => {
                 match ident.sym.as_ref() {
@@ -1785,7 +1800,7 @@ fn compile_assignment(
 
 fn create_tmp(fnb: &mut FnBuilder, value: ExprID) -> (DeclName, ExprID) {
     let tmp = fnb.decl_tmp();
-    fnb.add_stmt(StmtOp::Assign(tmp.clone(), value));
+    fnb.add_stmt(StmtOp::Assign(Some(tmp.clone()), value));
     let expr = fnb.add_expr(Expr::Read(tmp.clone()));
     (tmp, expr)
 }
@@ -1877,22 +1892,27 @@ fn compile_eval_literal_arg(fnb: &mut FnBuilder, src: String) -> ExprID {
         }
     };
 
-    // Save & restore completion value as it was before the call to `compile_eval_literal_arg`,
-    // just not to interfere with the context
-    let saved_comp_val = fnb.take_block_completion_value();
+    let (_, read_cv) = compile_stmt_get_completion(fnb, |fnb| {
+        for stmt in &swc_ast.body {
+            compile_stmt(fnb, stmt);
+        }
+    });
 
-    for stmt in &swc_ast.body {
-        compile_stmt(fnb, stmt);
-    }
-    let comp_val = fnb
-        .take_block_completion_value()
-        .unwrap_or_else(|| fnb.add_expr(Expr::Undefined));
+    read_cv
+}
 
-    if let Some(eid) = saved_comp_val {
-        fnb.set_block_completion_value(eid);
-    }
+fn compile_stmt_get_completion(
+    fnb: &mut FnBuilder,
+    action: impl FnOnce(&mut FnBuilder),
+) -> (DeclName, ExprID) {
+    let init = fnb.add_expr(Expr::Undefined);
+    let (cv_name, read_cv) = create_tmp(fnb, init);
 
-    comp_val
+    fnb.set_completion_value_var(cv_name.clone());
+    action(fnb);
+    fnb.clear_completion_value_var();
+
+    (cv_name, read_cv)
 }
 
 fn compile_new(
@@ -1995,7 +2015,7 @@ fn find_unbound_references(root: &Block, param_names: &[JsWord]) -> Vec<JsWord> 
 
         for stmt in &block.stmts {
             match &stmt.op {
-                StmtOp::Assign(DeclName::Js(name), _) => {
+                StmtOp::Assign(Some(DeclName::Js(name)), _) => {
                     referenced.insert(name.clone());
                 }
                 StmtOp::Block(block) => {

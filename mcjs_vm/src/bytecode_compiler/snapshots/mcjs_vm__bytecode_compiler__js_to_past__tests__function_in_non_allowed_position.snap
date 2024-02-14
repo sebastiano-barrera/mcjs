@@ -1,6 +1,5 @@
 ---
 source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
-assertion_line: 1936
 expression: function.dump_to_string()
 ---
 [18-80] func () unbound[g] block0 {
