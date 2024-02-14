@@ -10,23 +10,22 @@ expression: function.dump_to_string()
     e0: ArrayCreate
     e1: Read(tmp1)
   stmts:
-    [33-35] Assign(tmp1, e0)
-    [18-35] Assign(closures, e1)
+    [33-35] Assign(Some(tmp1), e0)
+    [18-35] Assign(Some(closures), e1)
     block2 {
       decls:
         Decl: let i
       exprs:
         e0: NumberLiteral(0.0)
       stmts:
-        [52-104] Assign(i, e0)
+        [52-104] Assign(Some(i), e0)
         block3 {
           decls:
           exprs:
-            e0: Undefined
-            e1: Read(closures)
-            e2: StringLiteral(Atom('push' type=inline))
-            e3: ObjectGet { obj: e1, key: e2 }
-            e4: CreateClosure:
+            e0: Read(closures)
+            e1: StringLiteral(Atom('push' type=inline))
+            e2: ObjectGet { obj: e0, key: e1 }
+            e3: CreateClosure:
               [80-87] func () unbound[i] block4 {
                 decls:
                 exprs:
@@ -39,21 +38,21 @@ expression: function.dump_to_string()
                       [0-0] Return(e0)
                   }
               }
-            e5: StringLiteral(Atom('bind' type=inline))
-            e6: ObjectGet { obj: e4, key: e5 }
-            e7: This
-            e8: Call { callee: e6, args: [e7] }
-            e9: Call { callee: e3, args: [e8] }
-            e10: Read(i)
-            e11: NumberLiteral(5.0)
-            e12: Binary("<", e10, e11)
-            e13: Read(i)
-            e14: NumberLiteral(1.0)
-            e15: Binary("+", e13, e14)
+            e4: StringLiteral(Atom('bind' type=inline))
+            e5: ObjectGet { obj: e3, key: e4 }
+            e6: This
+            e7: Call { callee: e5, args: [e6] }
+            e8: Call { callee: e2, args: [e7] }
+            e9: Read(i)
+            e10: NumberLiteral(5.0)
+            e11: Binary("<", e9, e10)
+            e12: Read(i)
+            e13: NumberLiteral(1.0)
+            e14: Binary("+", e12, e13)
           stmts:
-            [66-95] Evaluate(e9)
-            [66-95] Evaluate(e12)
-            [52-104] IfNot { test: e12 }
+            [66-95] Assign(None, e8)
+            [66-95] Assign(None, e11)
+            [52-104] IfNot { test: e11 }
             [52-104] Break(block2)
             block6 {
               decls:
@@ -65,8 +64,8 @@ expression: function.dump_to_string()
                   stmts:
                 }
             }
-            [97-100] Assign(i, e15)
-            [52-104] Evaluate(e15)
+            [97-100] Assign(Some(i), e14)
+            [52-104] Assign(None, e14)
             [52-104] Unshare(i)
             [52-104] Jump(StmtID(0, block3))
         }

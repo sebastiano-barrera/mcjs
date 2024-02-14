@@ -18,15 +18,15 @@ expression: function.dump_to_string()
                 e0: Read(x)
                 e1: NumberLiteral(3.0)
               stmts:
-                [67-72] Assign(x, e1)
-                [67-72] Evaluate(e1)
+                [67-72] Assign(Some(x), e1)
+                [67-72] Assign(None, e1)
             }
           e1: NumberLiteral(2.0)
         stmts:
-          [52-74] Assign(f, e0)
-          [95-105] Assign(x, e1)
+          [52-74] Assign(Some(f), e0)
+          [95-105] Assign(Some(x), e1)
       }
     e1: Call { callee: e0, args: [] }
   stmts:
-    [18-126] Evaluate(e1)
+    [18-126] Assign(None, e1)
 }

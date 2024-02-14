@@ -26,18 +26,18 @@ expression: function.dump_to_string()
                       e5: Read(someLocalVar)
                       e6: Call { callee: e3, args: [e4, e5] }
                     stmts:
-                      [112-134] Assign(someLocalVar, e0)
-                      [155-195] Evaluate(e6)
+                      [112-134] Assign(Some(someLocalVar), e0)
+                      [155-195] Assign(None, e6)
                   }
                 e1: Call { callee: e0, args: [] }
               stmts:
-                [78-216] Evaluate(e1)
+                [78-216] Assign(None, e1)
             }
           e1: Call { callee: e0, args: [] }
         stmts:
-          [48-237] Evaluate(e1)
+          [48-237] Assign(None, e1)
       }
     e1: Call { callee: e0, args: [] }
   stmts:
-    [18-258] Evaluate(e1)
+    [18-258] Assign(None, e1)
 }

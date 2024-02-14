@@ -481,7 +481,10 @@ impl Loader {
         PackageId(pkg_id)
     }
 
-    pub fn get_source_map(&self, module_id: bytecode::ModuleId) -> Option<&Rc<swc_common::SourceMap>> {
+    pub fn get_source_map(
+        &self,
+        module_id: bytecode::ModuleId,
+    ) -> Option<&Rc<swc_common::SourceMap>> {
         let source_map_rc = if module_id == bytecode::SCRIPT_MODULE_ID {
             &self.script.source_map
         } else {
@@ -515,7 +518,7 @@ impl Loader {
 }
 
 pub struct FunctionLookup {
-    pub source_map: Rc< swc_common::SourceMap>,
+    pub source_map: Rc<swc_common::SourceMap>,
     pub source_file: Rc<swc_common::SourceFile>,
     pub span: swc_common::Span,
     /// Byte pos range for the function's text, local to source_file.src

@@ -201,26 +201,31 @@ fn compile_one_stmt<'a>(
             fnb.set_instr(jmpif, Instr::JmpIf { cond, dest });
         }
         StmtOp::Assign(dest, value_eid) => {
-            match fnb.resolve_name(dest) {
-                Loc::Reg(reg) => {
-                    compile_expr(fnb, Some(reg), block, *value_eid);
-                }
-                Loc::Global(name) => {
-                    let global_this = fnb.gen_reg();
-                    fnb.emit(Instr::GetGlobalThis(global_this));
+            if let Some(dest) = dest {
+                match fnb.resolve_name(dest) {
+                    Loc::Reg(reg) => {
+                        compile_expr(fnb, Some(reg), block, *value_eid);
+                    }
+                    Loc::Global(name) => {
+                        let global_this = fnb.gen_reg();
+                        fnb.emit(Instr::GetGlobalThis(global_this));
 
-                    let key = fnb.gen_reg();
-                    compile_load_const(fnb, key, Literal::JsWord(name));
+                        let key = fnb.gen_reg();
+                        compile_load_const(fnb, key, Literal::JsWord(name));
 
-                    let value = compile_expr(fnb, None, block, *value_eid);
+                        let value = compile_expr(fnb, None, block, *value_eid);
 
-                    fnb.emit(Instr::ObjSet {
-                        obj: global_this,
-                        key,
-                        value,
-                    });
-                }
-            };
+                        fnb.emit(Instr::ObjSet {
+                            obj: global_this,
+                            key,
+                            value,
+                        });
+                    }
+                };
+            } else {
+                // the dest register is then forgotten
+                let _ = compile_expr(fnb, None, block, *value_eid);
+            }
         }
         StmtOp::ArrayPush(arr, value_eid) => {
             let arr = compile_read(fnb, arr);
@@ -248,10 +253,6 @@ fn compile_one_stmt<'a>(
         }
         StmtOp::Debugger => {
             fnb.emit(Instr::Breakpoint);
-        }
-        StmtOp::Evaluate(eid) => {
-            // the dest register is then forgotten
-            let _ = compile_expr(fnb, None, block, *eid);
         }
         StmtOp::Block(child_block) => {
             compile_block(fnb, child_block);
