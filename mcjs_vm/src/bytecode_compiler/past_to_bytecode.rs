@@ -202,26 +202,7 @@ fn compile_one_stmt<'a>(
         }
         StmtOp::Assign(dest, value_eid) => {
             if let Some(dest) = dest {
-                match fnb.resolve_name(dest) {
-                    Loc::Reg(reg) => {
-                        compile_expr(fnb, Some(reg), block, *value_eid);
-                    }
-                    Loc::Global(name) => {
-                        let global_this = fnb.gen_reg();
-                        fnb.emit(Instr::GetGlobalThis(global_this));
-
-                        let key = fnb.gen_reg();
-                        compile_load_const(fnb, key, Literal::JsWord(name));
-
-                        let value = compile_expr(fnb, None, block, *value_eid);
-
-                        fnb.emit(Instr::ObjSet {
-                            obj: global_this,
-                            key,
-                            value,
-                        });
-                    }
-                };
+                compile_assignment(fnb, dest, block, *value_eid);
             } else {
                 // the dest register is then forgotten
                 let _ = compile_expr(fnb, None, block, *value_eid);
@@ -291,6 +272,34 @@ fn compile_one_stmt<'a>(
     }
 
     true
+}
+
+fn compile_assignment(
+    fnb: &mut FnBuilder,
+    var_name: &DeclName,
+    block: &Block,
+    value_eid: js_to_past::ExprID,
+) {
+    match fnb.resolve_name(var_name) {
+        Loc::Reg(reg) => {
+            compile_expr(fnb, Some(reg), block, value_eid);
+        }
+        Loc::Global(name) => {
+            let global_this = fnb.gen_reg();
+            fnb.emit(Instr::GetGlobalThis(global_this));
+
+            let key = fnb.gen_reg();
+            compile_load_const(fnb, key, Literal::JsWord(name));
+
+            let value = compile_expr(fnb, None, block, value_eid);
+
+            fnb.emit(Instr::ObjSet {
+                obj: global_this,
+                key,
+                value,
+            });
+        }
+    };
 }
 
 fn compile_read(fnb: &mut FnBuilder<'_>, name: &DeclName) -> bytecode::VReg {
@@ -697,6 +706,10 @@ fn compile_block_internal(fnb: &mut FnBuilder, block: &Block) {
             // block (assuming hoisting has been done already)
             fnb.emit(Instr::LoadUndefined(reg));
         }
+    }
+
+    for fn_asmt in block.fn_asmts() {
+        compile_assignment(fnb, &fn_asmt.var_name, block, fn_asmt.expr);
     }
 
     let mut iter = block.stmts();
