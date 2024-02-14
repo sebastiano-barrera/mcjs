@@ -50,12 +50,28 @@ pub struct Block {
     // reflected in Block's public API
     /// Set of declarations. No ordering.
     decls: Vec<Decl>,
+
+    /// Ordered sequence of function assignments. Not really indexable. Sematics: they happen after
+    /// any initialization for `decls`, and before all `stmts`.
+    ///
+    /// These assignments are distinct from StmtOp::Assign because we want to 'carve out' a
+    /// dedicated space at the beginning of each block where function assignments can be added
+    /// without shifting every statement forward (therefore invalidating already emitted StmtID's).
+    fn_asmts: Vec<FnAsmt>,
+
     /// Ordered sequence of statements.  Indexable via StmtID.
     stmts: Vec<Stmt>,
+
     /// Mapping of ExprID -> Expr. No ordering.
     exprs: Vec<Expr>,
 }
 impl_debug_via_dump!(Block);
+
+/// A function assignment. See `Block::fn_asmts`.
+pub struct FnAsmt {
+    pub var_name: DeclName,
+    pub expr: ExprID,
+}
 
 impl Block {
     fn assert_valid(&self) {
@@ -140,6 +156,10 @@ impl Block {
         }
     }
 
+    pub fn fn_asmts(&self) -> impl ExactSizeIterator<Item = &FnAsmt> {
+        self.fn_asmts.iter()
+    }
+
     pub fn stmts(&self) -> impl ExactSizeIterator<Item = &Stmt> {
         self.stmts.iter()
     }
@@ -163,10 +183,16 @@ impl util::Dump for Block {
         }
 
         writeln!(f, "decls:")?;
-
         f.indent();
         for decl in &self.decls {
             writeln!(f, "{:?}", decl)?;
+        }
+        f.dedent();
+
+        writeln!(f, "fn asmts:")?;
+        f.indent();
+        for fa in &self.fn_asmts {
+            writeln!(f, "{:?} <- e{}", fa.var_name, fa.expr.0)?;
         }
         f.dedent();
 
@@ -506,11 +532,12 @@ mod builder {
             // TODO Reuse allocations and get new Block out of a pool
             self.blocks.push(Block {
                 id: blkid,
-                decls: Vec::new(),
-                stmts: Vec::new(),
-                exprs: Vec::new(),
                 is_use_strict_declared: false,
                 is_function_decl_allowed: false,
+                decls: Vec::new(),
+                fn_asmts: Vec::new(),
+                stmts: Vec::new(),
+                exprs: Vec::new(),
             });
         }
         fn pop_block(&mut self) -> Block {
@@ -587,22 +614,10 @@ mod builder {
         }
 
         pub(super) fn add_stmt(&mut self, op: StmtOp) -> StmtID {
-            self.insert_stmt(None, op)
-        }
-
-        pub(super) fn add_stmt_at_block_start(&mut self, op: StmtOp) -> StmtID {
-            self.insert_stmt(Some(0), op)
-        }
-
-        fn insert_stmt(&mut self, index: Option<usize>, op: StmtOp) -> StmtID {
             let span = self.spans.last().copied().unwrap_or_default();
             let block = self.cur_block_mut();
             let stmt_id_raw = block.stmts.len().try_into().unwrap();
-            if let Some(index) = index {
-                block.stmts.insert(index, super::Stmt { span, op });
-            } else {
-                block.stmts.push(super::Stmt { span, op });
-            }
+            block.stmts.push(super::Stmt { span, op });
 
             StmtID(
                 stmt_id_raw,
@@ -740,6 +755,12 @@ mod builder {
         }
         pub(crate) fn disable_completion_value_var(&mut self) {
             self.completion_value_var = None;
+        }
+
+        pub(crate) fn assign_fn(&mut self, var_name: DeclName, expr: ExprID) {
+            self.cur_block_mut()
+                .fn_asmts
+                .push(FnAsmt { var_name, expr })
         }
     }
 
@@ -1385,13 +1406,14 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
             // of the block.  This allows the function to be called earlier in the block than the
             // declaration site in the source code.
             //
-            // In non-strict mode, the name declaration is hoisted to the top of the enclosing
-            // function/script, but the assignment isn't! This can be considered a form of the
+            // In strict mode, the declaration is also hoisted at the beginning of the block. In
+            // non-strict mode, instead, it's hoisted to the top of the enclosing function/script,
+            // but the assignment still isn't! This can be considered a form of the
             // implmentation-defined "strange behavior" described by MDN for block-scoped function
             // declarations [1].
             //
             // [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function#description.
-            fnb.add_stmt_at_block_start(StmtOp::Assign(Some(name), closure));
+            fnb.assign_fn(name, closure);
         }
         swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(fnb, var_decl),
         _ => {
