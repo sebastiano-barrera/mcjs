@@ -54,13 +54,6 @@ pub struct Block {
     stmts: Vec<Stmt>,
     /// Mapping of ExprID -> Expr. No ordering.
     exprs: Vec<Expr>,
-
-    /// Completion value of the block's last JavaScript statement (not to be confused with
-    /// Stmt's, which don't have a completion value).
-    ///
-    /// This is only meaningful when using eval (of which we only implement a very restricted
-    /// form).
-    completion_value: Option<ExprID>,
 }
 impl_debug_via_dump!(Block);
 
@@ -76,10 +69,6 @@ impl Block {
         {
             let check_stmt_id = |stmt_id: &StmtID| debug_assert_eq!(stmt_id.1, self.id);
             let check_expr_id = |expr_id: &ExprID| debug_assert_eq!(expr_id.1, self.id);
-
-            if let Some(eid) = &self.completion_value {
-                check_expr_id(eid);
-            }
 
             for stmt in &self.stmts {
                 match &stmt.op {
@@ -266,7 +255,7 @@ impl std::fmt::Debug for Stmt {
 // to check for a common type of bug where the StmtID/ExprID is used in the
 // wrong block
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StmtID(u16, #[cfg(debug_assertions)] BlockID);
 
 impl StmtID {
@@ -522,7 +511,6 @@ mod builder {
                 exprs: Vec::new(),
                 is_use_strict_declared: false,
                 is_function_decl_allowed: false,
-                completion_value: None,
             });
         }
         fn pop_block(&mut self) -> Block {
@@ -738,15 +726,19 @@ mod builder {
         pub(crate) fn completion_value_var(&self) -> Option<&DeclName> {
             self.completion_value_var.as_ref()
         }
-        pub(crate) fn set_completion_value_var(&mut self, cv_name: DeclName) {
+        pub(crate) fn enable_completion_value_var(&mut self, cv_name: DeclName) {
             // It's possible to work with multiple nested ranges of code interested in completion
             // values, but I have no intention of supporting eval 100%, so this is good enough
             assert!(self.completion_value_var.is_none());
             self.completion_value_var = Some(cv_name);
         }
-
-        pub(crate) fn clear_completion_value_var(&mut self) {
-            assert!(self.completion_value_var.is_some());
+        pub(crate) fn clear_completion_value(&mut self) {
+            if let Some(cv_var) = self.completion_value_var.clone() {
+                let undefined = self.add_expr(Expr::Undefined);
+                self.add_stmt(StmtOp::Assign(Some(cv_var), undefined));
+            }
+        }
+        pub(crate) fn disable_completion_value_var(&mut self) {
             self.completion_value_var = None;
         }
     }
@@ -997,7 +989,11 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                 // The tricky bit here is that declarations have to be shared across the whole of
                 // the switch stmt's body, so all cases need to be compiled into a single block.
                 // The cases are not really separate.
+                fnb.clear_completion_value();
                 fnb.block(|fnb| {
+                    // This block is necessarily brace-delimited
+                    fnb.allow_fn_decl();
+
                     let discriminant = compile_expr(fnb, &switch_stmt.discriminant);
                     let (_, discriminant) = create_tmp(fnb, discriminant);
 
@@ -1021,7 +1017,6 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                     let mut has_default_case = false;
 
                     for case in &switch_stmt.cases {
-                        let body = case.cons.as_slice();
                         match &case.test {
                             Some(test) => {
                                 // We know the test value so we can write the comparison stmt, ...
@@ -1068,6 +1063,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                         } else {
                             default_case.take().unwrap()
                         };
+                        assert_ne!(jmpif_sid, jmp_target);
                         fnb.set_stmt(jmpif_sid, StmtOp::Jump(jmp_target));
 
                         for stmt in &case.cons {
@@ -1661,11 +1657,11 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                         fnb.add_stmt(StmtOp::Assign(None, expr_id));
                     }
 
-                        let last_value = compile_expr(fnb, last);
-                        fnb.add_stmt(StmtOp::Assign(fnb.completion_value_var().cloned(), last_value));
+                    let last_value = compile_expr(fnb, last);
+                    fnb.add_stmt(StmtOp::Assign(fnb.completion_value_var().cloned(), last_value));
                     last_value
                 } else {
-                 fnb.add_expr(Expr::Undefined)
+                    fnb.add_expr(Expr::Undefined)
                 }
             }
             swc_ecma_ast::Expr::Ident(ident) => {
@@ -1908,9 +1904,9 @@ fn compile_stmt_get_completion(
     let init = fnb.add_expr(Expr::Undefined);
     let (cv_name, read_cv) = create_tmp(fnb, init);
 
-    fnb.set_completion_value_var(cv_name.clone());
+    fnb.enable_completion_value_var(cv_name.clone());
     action(fnb);
-    fnb.clear_completion_value_var();
+    fnb.disable_completion_value_var();
 
     (cv_name, read_cv)
 }
