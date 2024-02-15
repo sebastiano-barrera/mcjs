@@ -111,15 +111,18 @@ impl Heap {
     pub fn number_proto(&self) -> ObjectId {
         self.number_proto
     }
-    pub fn string_proto(&self) -> ObjectId {
-        self.string_proto
-    }
     pub fn func_proto(&self) -> ObjectId {
         self.func_proto
     }
     pub fn array_proto(&self) -> ObjectId {
         self.array_proto
     }
+    // These are going to be used at some point. No use in delaying their writing
+    #[allow(dead_code)]
+    pub fn string_proto(&self) -> ObjectId {
+        self.string_proto
+    }
+    #[allow(dead_code)]
     pub fn bool_proto(&self) -> ObjectId {
         self.bool_proto
     }

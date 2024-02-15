@@ -4,14 +4,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::{
-    bytecode::{self, FnId, GlobalIID, Instr, VReg, IID},
+    bytecode::{self, FnId, Instr, VReg, IID},
     common::{Context, Result},
     error,
     heap::{self, IndexOrKey, Object},
-    loader::{self, BreakRangeID},
-    // jit::{self, InterpreterStep},
-    stack,
+    loader, stack,
     util::pop_while,
+};
+
+#[cfg(feature = "debugger")]
+use crate::{
+    bytecode::GlobalIID,
+    BreakRangeID,
 };
 
 pub use crate::common::Error;
@@ -103,7 +107,10 @@ impl std::fmt::Debug for Closure {
 
 slotmap::new_key_type! { pub struct UpvalueId; }
 
-#[cfg_attr(not(enable_jit), allow(dead_code))]
+#[cfg(not(enable_jit))]
+pub type Options = ();
+
+#[cfg(enable_jit)]
 #[derive(Clone, Default)]
 pub struct Options {
     #[cfg(enable_jit)]
@@ -178,15 +185,18 @@ pub struct Interpreter<'a> {
     exc_handler_stack: Vec<ExcHandler>,
 
     sink: Vec<Value>,
+    #[cfg(enable_jit)]
     opts: Options,
 
     /// Instruction breakpoints
+    #[cfg(feature = "debugger")]
     instr_bkpts: HashMap<GlobalIID, InstrBreakpoint>,
 
     /// Source breakpoints, indexed by their ID.
     ///
     /// Each source breakpoint corresponds to exactly to one instruction breakpoint, which is
     /// added/deleted together with it.
+    #[cfg(feature = "debugger")]
     source_bkpts: HashMap<BreakRangeID, SourceBreakpoint>,
 
     /// This special flag can be used to cause the interpreter to suspend
@@ -194,6 +204,7 @@ pub struct Interpreter<'a> {
     /// automatically follows call/return.
     ///
     /// See the type, `Fuel`.
+    #[cfg(feature = "debugger")]
     fuel: Fuel,
 }
 
@@ -215,8 +226,10 @@ pub enum Fuel {
 
 // There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
 // enough (but some addtional parameters might have to be includede here later)
+#[cfg(feature = "debugger")]
 pub struct SourceBreakpoint;
 
+#[cfg(feature = "debugger")]
 struct InstrBreakpoint {
     src_bkpt: Option<BreakRangeID>,
 }
@@ -279,7 +292,7 @@ pub struct InterpreterError<'a> {
     interpreter: Interpreter<'a>,
 }
 impl<'a> InterpreterError<'a> {
-    #[cfg(any(test, feature = "debugger"))]
+    #[cfg(feature = "debugger")]
     pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
         debugger::Probe::attach(&mut self.interpreter)
     }
@@ -309,7 +322,7 @@ impl<'a> Interpreter<'a> {
     }
 
     pub fn with_options(
-        opts: Options,
+        _opts: Options,
         realm: &'a mut Realm,
         loader: &'a mut loader::Loader,
         fnid: bytecode::FnId,
@@ -325,9 +338,13 @@ impl<'a> Interpreter<'a> {
             current_exc: None,
             exc_handler_stack: Vec::new(),
             sink: Vec::new(),
-            opts,
+            #[cfg(enable_jit)]
+            opts: _opts,
+            #[cfg(feature = "debugger")]
             instr_bkpts: HashMap::new(),
+            #[cfg(feature = "debugger")]
             source_bkpts: HashMap::new(),
+            #[cfg(feature = "debugger")]
             fuel: Fuel::Unlimited,
             #[cfg(enable_jit)]
             jitting: None,
@@ -996,27 +1013,30 @@ impl<'a> Interpreter<'a> {
                 });
             }
 
-            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
-            let giid = bytecode::GlobalIID(fnid, self.iid);
-            let out_of_fuel = match &mut self.fuel {
-                Fuel::Limited(count) => {
-                    assert!(*count > 0);
-                    *count -= 1;
-                    if *count == 0 {
-                        self.fuel = Fuel::Unlimited;
-                        true
-                    } else {
-                        false
-                    }
-                }
-                Fuel::Unlimited => false,
-            };
-
             // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
             self.iid.0 = next_ndx;
 
-            if out_of_fuel || self.instr_bkpts.contains_key(&giid) {
-                return Ok(ExitInternal::Suspended);
+            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+            #[cfg(feature = "debugger")]
+            {
+                let giid = bytecode::GlobalIID(fnid, self.iid);
+                let out_of_fuel = match &mut self.fuel {
+                    Fuel::Limited(count) => {
+                        assert!(*count > 0);
+                        *count -= 1;
+                        if *count == 0 {
+                            self.fuel = Fuel::Unlimited;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Fuel::Unlimited => false,
+                };
+
+                if out_of_fuel || self.instr_bkpts.contains_key(&giid) {
+                    return Ok(ExitInternal::Suspended);
+                }
             }
         }
 
@@ -1360,7 +1380,7 @@ impl From<std::cmp::Ordering> for ValueOrdering {
     }
 }
 
-#[cfg(any(test, feature = "debugger"))]
+#[cfg(feature = "debugger")]
 pub mod debugger {
     use std::cell::Ref;
 

@@ -996,7 +996,7 @@ pub fn compile_module(
 
     let strict_mode = fnb.strict_mode();
     let block = fnb.build()?;
-    let mut function = compile_function_from_parts(script_ast.span, &[], strict_mode, block);
+    let function = compile_function_from_parts(script_ast.span, &[], strict_mode, block);
 
     Ok(function)
 }
