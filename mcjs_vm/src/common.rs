@@ -114,11 +114,6 @@ impl Error {
         }
     }
 
-    pub(crate) fn with_span(mut self, span: Span) -> Self {
-        self.head.span = Some(span);
-        self
-    }
-
     pub(crate) fn with_source_map(mut self, source_map: Rc<SourceMap>) -> Self {
         self.source_map = Some(source_map);
         self

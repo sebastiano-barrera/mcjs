@@ -201,6 +201,7 @@ mod internal {
 
     enum Sink {
         File(File),
+        #[cfg(test)]
         Memory(String),
     }
     impl Sink {
@@ -218,6 +219,7 @@ mod internal {
                     // crashing right after returning from this call, so let's flush immediately.
                     f.flush().unwrap();
                 }
+                #[cfg(test)]
                 Sink::Memory(buf) => {
                     // no flushing necessary
                     buf.push_str(data);
