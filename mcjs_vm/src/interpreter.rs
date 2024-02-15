@@ -265,10 +265,6 @@ impl<'a> InterpreterError<'a> {
     pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
         debugger::Probe::attach(&mut self.interpreter)
     }
-
-    pub fn restart(self) -> Interpreter<'a> {
-        self.interpreter.restart()
-    }
 }
 impl<'a> std::fmt::Debug for InterpreterError<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -314,18 +310,6 @@ impl<'a> Interpreter<'a> {
             #[cfg(feature = "debugger")]
             dbg: debugger::InterpreterState::new(),
         }
-    }
-
-    pub fn restart(mut self) -> Self {
-        self.data = {
-            let bottom_frame = self.data.frames().last().unwrap();
-            let root_fnid = bottom_frame.header().fn_id;
-            init_stack(self.loader, self.realm, root_fnid)
-        };
-        self.iid = bytecode::IID(0);
-        self.sink.clear();
-
-        self
     }
 
     #[cfg(enable_jit)]
@@ -1465,7 +1449,11 @@ pub mod debugger {
         pub fn source_breakpoints(
             &self,
         ) -> impl ExactSizeIterator<Item = (BreakRangeID, &SourceBreakpoint)> {
-            self.interpreter.dbg.source_bkpts.iter().map(|(k, v)| (*k, v))
+            self.interpreter
+                .dbg
+                .source_bkpts
+                .iter()
+                .map(|(k, v)| (*k, v))
         }
 
         pub fn set_instr_breakpoint(
