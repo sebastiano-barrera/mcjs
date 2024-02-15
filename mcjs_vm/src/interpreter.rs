@@ -12,12 +12,6 @@ use crate::{
     util::pop_while,
 };
 
-#[cfg(feature = "debugger")]
-use crate::{
-    bytecode::GlobalIID,
-    BreakRangeID,
-};
-
 pub use crate::common::Error;
 
 mod builtins;
@@ -190,22 +184,7 @@ pub struct Interpreter<'a> {
 
     /// Instruction breakpoints
     #[cfg(feature = "debugger")]
-    instr_bkpts: HashMap<GlobalIID, InstrBreakpoint>,
-
-    /// Source breakpoints, indexed by their ID.
-    ///
-    /// Each source breakpoint corresponds to exactly to one instruction breakpoint, which is
-    /// added/deleted together with it.
-    #[cfg(feature = "debugger")]
-    source_bkpts: HashMap<BreakRangeID, SourceBreakpoint>,
-
-    /// This special flag can be used to cause the interpreter to suspend
-    /// after N instructions. It's conceptually similar to a breakpoint that
-    /// automatically follows call/return.
-    ///
-    /// See the type, `Fuel`.
-    #[cfg(feature = "debugger")]
-    fuel: Fuel,
+    dbg: debugger::InterpreterState,
 }
 
 struct ExcHandler {
@@ -222,16 +201,6 @@ struct ExcHandler {
 pub enum Fuel {
     Limited(usize),
     Unlimited,
-}
-
-// There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
-// enough (but some addtional parameters might have to be includede here later)
-#[cfg(feature = "debugger")]
-pub struct SourceBreakpoint;
-
-#[cfg(feature = "debugger")]
-struct InstrBreakpoint {
-    src_bkpt: Option<BreakRangeID>,
 }
 
 // TODO Probably going to be changed or even replaced once I resume working on the JIT.
@@ -340,14 +309,10 @@ impl<'a> Interpreter<'a> {
             sink: Vec::new(),
             #[cfg(enable_jit)]
             opts: _opts,
-            #[cfg(feature = "debugger")]
-            instr_bkpts: HashMap::new(),
-            #[cfg(feature = "debugger")]
-            source_bkpts: HashMap::new(),
-            #[cfg(feature = "debugger")]
-            fuel: Fuel::Unlimited,
             #[cfg(enable_jit)]
             jitting: None,
+            #[cfg(feature = "debugger")]
+            dbg: debugger::InterpreterState::new(),
         }
     }
 
@@ -1020,21 +985,8 @@ impl<'a> Interpreter<'a> {
             #[cfg(feature = "debugger")]
             {
                 let giid = bytecode::GlobalIID(fnid, self.iid);
-                let out_of_fuel = match &mut self.fuel {
-                    Fuel::Limited(count) => {
-                        assert!(*count > 0);
-                        *count -= 1;
-                        if *count == 0 {
-                            self.fuel = Fuel::Unlimited;
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    Fuel::Unlimited => false,
-                };
-
-                if out_of_fuel || self.instr_bkpts.contains_key(&giid) {
+                let out_of_fuel = self.dbg.consume_1_fuel();
+                if out_of_fuel || self.dbg.is_breakpoint_at(&giid) {
                     return Ok(ExitInternal::Suspended);
                 }
             }
@@ -1383,12 +1335,14 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 #[cfg(feature = "debugger")]
 pub mod debugger {
     use std::cell::Ref;
+    use std::collections::HashMap;
 
-    use crate::heap;
     use crate::{bytecode, InterpreterValue};
+    use crate::{heap, GlobalIID};
 
-    use super::{Fuel, InstrBreakpoint, Interpreter, SourceBreakpoint};
+    use super::{Fuel, Interpreter};
 
+    pub use crate::loader::BreakRangeID;
     pub use heap::{IndexOrKey, Object, ObjectId};
 
     /// The only real entry point to all the debugging features present in the
@@ -1407,8 +1361,6 @@ pub mod debugger {
     pub struct Probe<'a, 'b> {
         interpreter: &'a mut Interpreter<'b>,
     }
-
-    pub use crate::loader::BreakRangeID;
 
     #[derive(Debug)]
     pub enum BreakpointError {
@@ -1443,7 +1395,7 @@ pub mod debugger {
         }
 
         pub fn set_fuel(&mut self, fuel: Fuel) {
-            self.interpreter.fuel = fuel;
+            self.interpreter.dbg.fuel = fuel;
         }
 
         /// Set a breakpoint at the specified instruction.
@@ -1455,7 +1407,7 @@ pub mod debugger {
             &mut self,
             brange_id: BreakRangeID,
         ) -> std::result::Result<(), BreakpointError> {
-            if self.interpreter.source_bkpts.contains_key(&brange_id) {
+            if self.interpreter.dbg.source_bkpts.contains_key(&brange_id) {
                 return Err(BreakpointError::AlreadyThere);
             }
 
@@ -1467,6 +1419,7 @@ pub mod debugger {
 
             let prev = self
                 .interpreter
+                .dbg
                 .source_bkpts
                 .insert(brange_id, SourceBreakpoint);
             assert!(prev.is_none());
@@ -1498,7 +1451,7 @@ pub mod debugger {
             &mut self,
             brange_id: BreakRangeID,
         ) -> std::result::Result<bool, BreakpointError> {
-            if !self.interpreter.source_bkpts.contains_key(&brange_id) {
+            if !self.interpreter.dbg.source_bkpts.contains_key(&brange_id) {
                 return Ok(false);
             }
 
@@ -1512,7 +1465,7 @@ pub mod debugger {
         pub fn source_breakpoints(
             &self,
         ) -> impl ExactSizeIterator<Item = (BreakRangeID, &SourceBreakpoint)> {
-            self.interpreter.source_bkpts.iter().map(|(k, v)| (*k, v))
+            self.interpreter.dbg.source_bkpts.iter().map(|(k, v)| (*k, v))
         }
 
         pub fn set_instr_breakpoint(
@@ -1528,7 +1481,7 @@ pub mod debugger {
             giid: bytecode::GlobalIID,
             bkpt: InstrBreakpoint,
         ) -> std::result::Result<(), BreakpointError> {
-            let new_insert = self.interpreter.instr_bkpts.insert(giid, bkpt);
+            let new_insert = self.interpreter.dbg.instr_bkpts.insert(giid, bkpt);
             match new_insert {
                 None => Ok(()),
                 Some(_) => Err(BreakpointError::AlreadyThere),
@@ -1536,10 +1489,10 @@ pub mod debugger {
         }
 
         pub fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
-            let ibkpt = self.interpreter.instr_bkpts.remove(&giid);
+            let ibkpt = self.interpreter.dbg.instr_bkpts.remove(&giid);
             if let Some(ibkpt) = &ibkpt {
                 if let Some(brid) = &ibkpt.src_bkpt {
-                    self.interpreter.source_bkpts.remove(brid).unwrap();
+                    self.interpreter.dbg.source_bkpts.remove(brid).unwrap();
                 }
             }
 
@@ -1547,7 +1500,7 @@ pub mod debugger {
         }
 
         pub fn instr_breakpoints(&self) -> impl '_ + ExactSizeIterator<Item = bytecode::GlobalIID> {
-            self.interpreter.instr_bkpts.keys().copied()
+            self.interpreter.dbg.instr_bkpts.keys().copied()
         }
 
         pub fn loader(&self) -> &crate::loader::Loader {
@@ -1596,6 +1549,64 @@ pub mod debugger {
                 .heap
                 .get(obj_id)
                 .map(|hocell| hocell.borrow())
+        }
+    }
+
+    /// Extra stuff that is debugging-specific and added to the intepreter.
+    pub struct InterpreterState {
+        /// Instruction breakpoints
+        instr_bkpts: HashMap<GlobalIID, InstrBreakpoint>,
+
+        /// Source breakpoints, indexed by their ID.
+        ///
+        /// Each source breakpoint corresponds to exactly to one instruction breakpoint, which is
+        /// added/deleted together with it.
+        source_bkpts: HashMap<BreakRangeID, SourceBreakpoint>,
+
+        /// This special flag can be used to cause the interpreter to suspend
+        /// after N instructions. It's conceptually similar to a breakpoint that
+        /// automatically follows call/return.
+        ///
+        /// See the type, `Fuel`.
+        fuel: Fuel,
+    }
+
+    // There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
+    // enough (but some addtional parameters might have to be includede here later)
+    pub struct SourceBreakpoint;
+
+    pub struct InstrBreakpoint {
+        src_bkpt: Option<BreakRangeID>,
+    }
+
+    impl InterpreterState {
+        pub fn new() -> Self {
+            InterpreterState {
+                instr_bkpts: HashMap::new(),
+                source_bkpts: HashMap::new(),
+                fuel: Fuel::Unlimited,
+            }
+        }
+
+        /// Consume 1 unit of fuel.  Returns true iff the tank is empty.
+        pub fn consume_1_fuel(&mut self) -> bool {
+            match &mut self.fuel {
+                Fuel::Limited(count) => {
+                    assert!(*count > 0);
+                    *count -= 1;
+                    if *count == 0 {
+                        self.fuel = Fuel::Unlimited;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Fuel::Unlimited => false,
+            }
+        }
+
+        pub fn is_breakpoint_at(&self, giid: &bytecode::GlobalIID) -> bool {
+            self.instr_bkpts.contains_key(giid)
         }
     }
 }
