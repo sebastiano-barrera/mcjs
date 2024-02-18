@@ -203,13 +203,9 @@ impl eframe::App for AppData {
             ui.heading("STACK");
             ui.vertical(|ui| {
                 for (ndx, frame) in probe.frames().enumerate() {
-                    let iid = if ndx == 0 {
-                        probe.giid().1
-                    } else {
-                        frame.header().return_target.unwrap().0
-                    };
+                    let iid = frame.header().iid;
 
-                    let text = format!("{:?}:{:?}", frame.header().fn_id, iid);
+                    let text = format!("{:?}:{:?}", frame.header().fnid, iid);
                     let bg = if ndx == self.frame_ndx {
                         ctx.style().visuals.selection.bg_fill
                     } else {
