@@ -1,4 +1,4 @@
-use crate::bytecode::{self, VReg, ARGS_COUNT_MAX, IID};
+use crate::bytecode::{self, VReg, ARGS_COUNT_MAX};
 use crate::interpreter::{UpvalueId, Value};
 
 /// The interpreter's stack.
@@ -8,6 +8,10 @@ pub struct InterpreterData {
     upv_alloc: Upvalues,
     headers: Vec<FrameHeader>,
     values: Vec<Slot>,
+
+    // TODO Make tests work without this hack
+    #[cfg(test)]
+    sink: Vec<Value>,
 }
 
 // Throughout this module, `Option<Value>` is stored instead of `Value`.  The `None` case
@@ -48,11 +52,15 @@ impl From<Slot> for SlotDebug {
 pub struct FrameHeader {
     regs_offset: u32,
     regs_count: u32,
-    pub fn_id: bytecode::FnId,
+    pub fnid: bytecode::FnId,
+    pub iid: bytecode::IID,
     pub this: Value,
-    pub return_target: Option<(IID, VReg)>,
+    pub return_target: Option<VReg>,
     // TODO Avoid this heap alloc?
     pub captures: Box<[UpvalueId]>,
+    /// Exception handlers, ordered by scope, *local to this stack frame*
+    /// Cheap (not allocated) until we enter a 'try' block (PushExcHandler)
+    pub exc_handlers: Vec<bytecode::IID>,
 }
 
 #[derive(Clone)]
@@ -72,6 +80,9 @@ impl InterpreterData {
             upv_alloc: slotmap::SlotMap::with_key(),
             headers: Vec::with_capacity(Self::INIT_CAPACITY),
             values: Vec::with_capacity(Self::INIT_CAPACITY),
+
+            #[cfg(test)]
+            sink: Vec::new(),
         }
     }
 
@@ -87,10 +98,12 @@ impl InterpreterData {
         let frame_hdr = FrameHeader {
             regs_offset: self.values.len().try_into().unwrap(),
             regs_count: call_meta.n_regs + ARGS_COUNT_MAX as u32,
-            fn_id: call_meta.fnid,
+            fnid: call_meta.fnid,
+            iid: bytecode::IID(0),
             this: call_meta.this,
             return_target: None,
             captures: call_meta.captures.to_owned().into_boxed_slice(),
+            exc_handlers: Vec::new(),
         };
 
         for _ in 0..frame_hdr.regs_count {
@@ -168,6 +181,16 @@ impl InterpreterData {
     ) {
         let upv_id = self.top().get_capture(capture_ndx);
         self.top_mut().values[vreg.0 as usize] = Slot::Upvalue(upv_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_to_sink(&mut self, value: Value) {
+        self.sink.push(value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sink(&self) -> &[Value] {
+        &self.sink
     }
 }
 
@@ -250,7 +273,7 @@ impl<'a> Frame<'a> {
         self.upv_alloc.get(upv_id).copied()
     }
 
-    pub fn return_target(&self) -> Option<(IID, VReg)> {
+    pub fn return_target_reg(&self) -> Option<VReg> {
         self.header.return_target
     }
 }
@@ -305,11 +328,21 @@ impl<'a> FrameMut<'a> {
         }
     }
 
-    pub(crate) fn set_return_target(&mut self, iid: IID, reg: VReg) {
-        self.header.return_target = Some((iid, reg));
+    pub(crate) fn set_return_target(&mut self, reg: VReg) {
+        self.header.return_target = Some(reg);
+    }
+    pub(crate) fn take_return_target(&mut self) -> Option<VReg> {
+        self.header.return_target.take()
     }
 
-    pub(crate) fn take_return_target(&mut self) -> (IID, VReg) {
-        self.header.return_target.take().unwrap()
+    pub(crate) fn set_resume_iid(&mut self, iid: crate::IID) {
+        self.header.iid = iid;
+    }
+
+    pub(crate) fn pop_exc_handler(&mut self) -> Option<bytecode::IID> {
+        self.header.exc_handlers.pop()
+    }
+    pub(crate) fn push_exc_handler(&mut self, iid: bytecode::IID) {
+        self.header.exc_handlers.push(iid)
     }
 }

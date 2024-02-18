@@ -5,16 +5,35 @@ use std::path::PathBuf;
 
 use crate::{
     bytecode::{self, FnId, Instr, VReg, IID},
-    common::{Context, Result},
+    common::{self, Result},
     error,
     heap::{self, IndexOrKey, Object},
     loader, stack,
-    util::pop_while,
 };
 
-pub use crate::common::Error;
-
 mod builtins;
+
+// Public versions of the private `Result` and `Error` above
+pub type InterpreterResult<'a, T> = std::result::Result<T, InterpreterError<'a>>;
+pub struct InterpreterError<'a> {
+    pub error: crate::common::Error,
+
+    // This struct owns the failed interpreter, but we explicitly disallow doing
+    // anything else with it other than examining it (read-only, via &)
+    #[cfg_attr(not(feature = "debugger"), allow(dead_code))]
+    interpreter: Interpreter<'a>,
+}
+impl<'a> InterpreterError<'a> {
+    #[cfg(feature = "debugger")]
+    pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
+        debugger::Probe::attach(&mut self.interpreter)
+    }
+}
+impl<'a> std::fmt::Debug for InterpreterError<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InterpreterError: {:?}", self.error)
+    }
+}
 
 /// A value that can be input, output, or processed by the program at runtime.
 ///
@@ -42,11 +61,9 @@ macro_rules! gen_value_expect {
             pub(crate) fn $fn_name(&self) -> Result<$inner_ty> {
                 match self {
                     Value::$variant(inner) => Ok(*inner),
-                    other => Err(error!(
-                        "expected a {}, got {:?}",
-                        stringify!($variant),
-                        other
-                    )),
+                    other => {
+                        Err(error!("expected a {}, got {:?}", stringify!($variant), other).into())
+                    }
                 }
             }
         }
@@ -62,7 +79,7 @@ pub enum Closure {
     JS(JSClosure),
 }
 
-type NativeFunction = fn(&mut Interpreter, &Value, &[Value]) -> Result<Value>;
+type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> Result<Value>;
 
 #[derive(Clone, PartialEq)]
 pub struct JSClosure {
@@ -158,8 +175,6 @@ pub struct Interpreter<'a> {
     /// manipulate) this Realm object until the Interpreter finishes executing.
     realm: &'a mut Realm,
 
-    iid: bytecode::IID,
-
     /// The interpreter's stack.
     ///
     /// The data stored here does not survive after the Interpreter returns.  (Well, some
@@ -175,27 +190,12 @@ pub struct Interpreter<'a> {
     // know
     loader: &'a mut loader::Loader,
 
-    current_exc: Option<Value>,
-    exc_handler_stack: Vec<ExcHandler>,
-
-    sink: Vec<Value>,
     #[cfg(enable_jit)]
     opts: Options,
 
     /// Instruction breakpoints
     #[cfg(feature = "debugger")]
     dbg: debugger::InterpreterState,
-}
-
-struct ExcHandler {
-    /// Size/length/height of the stack at the time when the exception handler
-    /// was installed. This is used to pop the correct amount of stack frames as
-    /// we unwind it during handling.
-    stack_height: usize,
-
-    /// IID to jump to.  The instruction is assumed to be in the same function where the exception
-    /// handler was installed (tracked via stack_height).
-    target_iid: IID,
 }
 
 pub enum Fuel {
@@ -221,8 +221,6 @@ impl<'a> InterpreterStep<'a> {
     }
 }
 
-pub type InterpreterResult<'a> = std::result::Result<Exit<'a>, InterpreterError<'a>>;
-
 pub struct FinishedData {
     pub sink: Vec<Option<bytecode::Literal>>,
 }
@@ -239,36 +237,6 @@ impl<'a> Exit<'a> {
                 panic!("interpreter was interrupted, while it was expected to finish")
             }
         }
-    }
-}
-
-/// Similar to `Exit`, but only exists for internal use.
-///
-/// Mostly exists to avoid boolean blindness.
-enum ExitInternal {
-    Finished,
-    Suspended,
-}
-
-// TODO Remove this InterpreterError?
-// It used to be justified by the addition of a CoreDump, but the CoreDump has been
-// removed since.
-pub struct InterpreterError<'a> {
-    pub error: Error,
-
-    // This struct owns the failed interpreter, but we explicitly disallow doing
-    // anything else with it other than examining it (read-only, via &)
-    interpreter: Interpreter<'a>,
-}
-impl<'a> InterpreterError<'a> {
-    #[cfg(feature = "debugger")]
-    pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
-        debugger::Probe::attach(&mut self.interpreter)
-    }
-}
-impl<'a> std::fmt::Debug for InterpreterError<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "InterpreterError: {:?}", self.error,)
     }
 }
 
@@ -297,12 +265,9 @@ impl<'a> Interpreter<'a> {
         let data = init_stack(loader, realm, fnid);
         Interpreter {
             realm,
-            iid: bytecode::IID(0),
             data,
             loader,
-            current_exc: None,
-            exc_handler_stack: Vec::new(),
-            sink: Vec::new(),
+
             #[cfg(enable_jit)]
             opts: _opts,
             #[cfg(enable_jit)]
@@ -339,873 +304,48 @@ impl<'a> Interpreter<'a> {
     ///   - If the interpreter is interrupted (e.g. by a breakpoint), then it is returned
     ///     again via the Output::Suspended variant; then it can be run again or dropped
     ///     (destroyed).
-    pub fn run(mut self) -> InterpreterResult<'a> {
-        match self.run_internal() {
-            Ok(ExitInternal::Finished) => Ok(Exit::Finished(self.dump_output())),
-            Ok(ExitInternal::Suspended) => Ok(Exit::Suspended(self)),
-            Err(common_err) => Err(InterpreterError {
-                interpreter: self,
-                error: common_err,
-            }),
-        }
-    }
+    pub fn run(mut self) -> InterpreterResult<'a, Exit<'a>> {
+        assert_eq!(self.data.len(), 1);
 
-    /// Just `run`, but it takes self by &mut and returns a simple
-    /// `mcjs_vm::common::Error`.
-    ///
-    /// This implementation does not consume the Interpreter like `run` does,
-    /// but this allows the implementation code to be a little simpler.
-    ///
-    /// Returns:
-    ///  - `Ok(true)` if the interpreter finished successfully.
-    ///  - `Ok(false)` if the interpreter is supposed to suspend.
-    ///  - `Err(err)` if the interpreter failed.
-    ///
-    /// In all cases, it's `run` that perfects the process of returning the
-    /// control to the caller, ensuring the correct type of access to the
-    /// interpreter.
-    fn run_internal(&mut self) -> Result<ExitInternal> {
-        while !self.data.is_empty() {
-            // TODO Avoid calling get_function at each instructions
-            let fnid = self.data.top().header().fn_id;
-
-            // TODO make it so that func is "gotten" and unwrapped only when strictly necessary
-            let func = self.loader.get_function(fnid).unwrap();
-            let n_instrs = func.instrs().len();
-
-            assert!(
-                self.iid.0 as usize <= n_instrs,
-                "can't proceed to instruction at index {} (func has {})",
-                self.iid.0,
-                n_instrs
-            );
-            if self.iid.0 as usize == n_instrs {
-                self.exit_function(None)?;
-                continue;
-            }
-
-            let instr = func.instrs()[self.iid.0 as usize];
-            let mut next_ndx = self.iid.0 + 1;
-
-            #[cfg(enable_jit)]
-            if let Some(tanch) = func.get_trace_anchor(self.iid) {
-                match self.flags.jit_mode {
-                    JitMode::Compile => {
-                        if self.jitting.is_none() {
-                            let builder =
-                                jit::TraceBuilder::start(n_instrs, jit::CloseMode::FunctionExit);
-                            self.jitting = Some(Jitting {
-                                builder,
-                                fnid,
-                                iid: self.iid,
-                                trace_id: tanch.trace_id.clone(),
-                            });
-                        }
-                    }
-                    JitMode::UseTraces => {
-                        let (trace, thunk) =
-                            self.vm.get_trace(&tanch.trace_id).unwrap_or_else(|| {
-                                panic!("no such trace with ID `{}`", tanch.trace_id)
-                            });
-
-                        let mut snap: Vec<_> = trace
-                            .snapshot_map()
-                            .iter()
-                            .map(|snapitem| {
-                                if snapitem.write_on_entry {
-                                    self.get_operand(snapitem.operand)
-                                } else {
-                                    Value::Undefined
-                                }
-                            })
-                            .collect();
-
-                        // TODO(small feat) Update the interpreter's state from the trace
-                        thunk.run(&mut snap);
-                    }
-                }
-            }
-
-            match &instr {
-                Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
-                    let literal = func.consts()[*const_ndx as usize].clone();
-                    let value = literal_to_value(literal, &mut self.realm.heap);
-                    self.data.top_mut().set_result(*dest, value);
-                }
-
-                Instr::OpAdd(dest, a, b) => match self.get_operand(*a)? {
-                    Value::Number(_) => self.with_numbers(*dest, *a, *b, |x, y| x + y)?,
-                    Value::Object(_) => {
-                        let value = self.str_append(a, b)?;
-                        self.data.top_mut().set_result(*dest, value);
-                    }
-                    other => return Err(error!("unsupported operator '+' for: {:?}", other)),
-                },
-                Instr::ArithSub(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x - y)?,
-                Instr::ArithMul(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x * y)?,
-                Instr::ArithDiv(dest, a, b) => self.with_numbers(*dest, *a, *b, |x, y| x / y)?,
-
-                Instr::PushToSink(operand) => {
-                    let value = self.get_operand(*operand)?;
-                    self.sink.push(value);
-                }
-
-                Instr::CmpGE(dest, a, b) => self.compare(*dest, *a, *b, |ord| {
-                    ord == ValueOrdering::Greater || ord == ValueOrdering::Equal
-                })?,
-                Instr::CmpGT(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Greater)?
-                }
-                Instr::CmpLT(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Less)?
-                }
-                Instr::CmpLE(dest, a, b) => self.compare(*dest, *a, *b, |ord| {
-                    ord == ValueOrdering::Less || ord == ValueOrdering::Equal
-                })?,
-                Instr::CmpEQ(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |ord| ord == ValueOrdering::Equal)?
-                }
-                Instr::CmpNE(dest, a, b) => {
-                    self.compare(*dest, *a, *b, |ord| ord != ValueOrdering::Equal)?
-                }
-
-                Instr::JmpIf { cond, dest } => {
-                    let cond_value = self.get_operand(*cond)?;
-                    match cond_value {
-                        Value::Bool(true) => {
-                            next_ndx = dest.0;
-                        }
-                        Value::Bool(false) => {} // Just go to the next instruction
-                        other => {
-                            return Err(error!(" invalid if condition (not boolean): {:?}", other))
-                        }
-                    }
-                }
-
-                Instr::Copy { dst, src } => {
-                    let value = self.get_operand(*src)?;
-                    self.data.top_mut().set_result(*dst, value);
-                }
-                Instr::LoadCapture(dest, cap_ndx) => {
-                    self.data.capture_to_var(*cap_ndx, *dest);
-                }
-
-                Instr::Nop => {}
-                Instr::BoolNot { dest, arg } => {
-                    let value = self.get_operand(*arg)?;
-                    let value = Value::Bool(!self.to_boolean(value));
-                    self.data.top_mut().set_result(*dest, value);
-                }
-                Instr::Jmp(IID(dest_ndx)) => {
-                    next_ndx = *dest_ndx;
-                }
-                Instr::Return(value) => {
-                    self.exit_function(Some(*value))?;
-                    continue;
-                }
-                Instr::Call {
-                    callee,
-                    this,
-                    return_value,
-                } => {
-                    let oid = self.get_operand(*callee)?.expect_obj()?;
-                    let ho_ref = self
-                        .realm
-                        .heap
-                        .get(oid)
-                        .ok_or_else(|| error!("invalid function (object is not callable)"))?
-                        .borrow();
-                    let closure: &Closure = ho_ref
-                        .as_closure()
-                        .ok_or_else(|| error!("can't call non-closure"))?;
-
-                    // NOTE The arguments have to be "read" before adding the stack frame;
-                    // they will no longer be accessible
-                    // afterwards
-                    //
-                    // TODO make the above fact false, and avoid this allocation
-                    //
-                    // NOTE Note that we collect into Result<Vec<_>>, and *then* try (?). This is
-                    // to ensure that, if get_operand fails, we return early. otherwise we
-                    // would risk that arg_vals.len() != the number of CallArg instructions
-                    let res: Result<Vec<_>> = func
-                        .instrs()
-                        .iter()
-                        .skip(self.iid.0 as usize + 1)
-                        .map_while(|instr| match instr {
-                            Instr::CallArg(arg_reg) => Some(*arg_reg),
-                            _ => None,
-                        })
-                        .map(|vreg| self.get_operand(vreg))
-                        .collect();
-                    let mut arg_vals = res?;
-                    let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
-                    let return_to_iid = IID(self.iid.0 + n_args_u16 + 1);
-
-                    match closure {
-                        Closure::JS(closure) => {
-                            // This code was moved.  Put it back where it belongs, when you
-                            // re-enable the JIT.
-                            #[cfg(enable_jit)]
-                            if let Some(jitting) = &mut self.jitting {
-                                jitting.builder.set_args(args);
-                                jitting.builder.enter_function(
-                                    self.iid,
-                                    *callee,
-                                    n_instrs as usize,
-                                );
-                            }
-
-                            let callee_func = self.loader.get_function(closure.fnid).unwrap();
-                            let n_params = bytecode::ARGS_COUNT_MAX as usize;
-                            arg_vals.truncate(n_params);
-                            arg_vals.resize(n_params, Value::Undefined);
-                            assert_eq!(arg_vals.len(), n_params);
-
-                            let this = closure
-                                .forced_this
-                                .map(Ok)
-                                .unwrap_or_else(|| self.get_operand(*this))?;
-                            // "this" substitution: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
-                            // If I understand this correctly, we don't need to box anything right
-                            // now.  We just pass the value, and the callee will box it when
-                            // needed.
-                            let this = match (callee_func.is_strict_mode(), this) {
-                                (false, Value::Null | Value::Undefined) => {
-                                    Value::Object(self.realm.global_obj)
-                                }
-                                (_, other) => other,
-                            };
-
-                            let call_meta = stack::CallMeta {
-                                fnid: closure.fnid,
-                                // TODO Actually, we just need to allocate enough space for
-                                // *variables*, not for instructions.  However, this is OK for now,
-                                // as n_instrs is always >= n_variables.
-                                n_regs: callee_func.n_regs() as u32,
-                                captures: &closure.upvalues,
-                                this,
-                            };
-
-                            self.data
-                                .top_mut()
-                                .set_return_target(return_to_iid, *return_value);
-
-                            self.data.push(call_meta);
-                            for (i, arg) in arg_vals.into_iter().enumerate() {
-                                self.data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
-                            }
-                            self.iid = IID(0u16);
-
-                            // Important: we don't execute the tail part of the instruction's
-                            // execution. This makes it easier
-                            // to keep a consistent value in `func` and other
-                            // variables, and avoid subtle bugs
-                            continue;
-                        }
-                        Closure::Native(nf) => {
-                            let nf = *nf;
-                            drop(ho_ref);
-
-                            let this = self.get_operand(*this)?;
-                            let ret_val = nf(self, &this, &arg_vals)?;
-                            self.data.top_mut().set_result(*return_value, ret_val);
-                            next_ndx = return_to_iid.0;
-                        }
-                    }
-                }
-                Instr::CallArg(_) => {
-                    unreachable!("interpreter bug: CallArg goes through another path!")
-                }
-
-                Instr::LoadArg(dest, arg_ndx) => {
-                    // TODO extra copy?
-                    // TODO usize is a bit too wide
-                    let value = self
-                        .data
-                        .top()
-                        .get_arg(*arg_ndx)
-                        .unwrap_or(Value::Undefined);
-                    self.data.top_mut().set_result(*dest, value);
-                }
-
-                Instr::ObjCreateEmpty(dest) => {
-                    let oid = self.realm.heap.new_ordinary_object(HashMap::new());
-                    self.data.top_mut().set_result(*dest, Value::Object(oid));
-                }
-                Instr::ObjSet { obj, key, value } => {
-                    let mut obj = self.get_operand_object_mut(*obj)?;
-                    let key = self.get_operand(*key)?;
-                    let key = Self::value_to_index_or_key(&self.realm.heap, &key)
-                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = self.get_operand(*value)?;
-
-                    obj.set_own_element_or_property(key.to_ref(), value);
-                }
-                Instr::ObjGet { dest, obj, key } => {
-                    let obj = self.get_operand_object(*obj)?;
-                    let key = self.get_operand(*key)?;
-                    let key = Self::value_to_index_or_key(&self.realm.heap, &key);
-
-                    let value = match key {
-                        Some(ik @ heap::IndexOrKeyOwned::Index(_)) => {
-                            obj.get_own_element_or_property(ik.to_ref())
-                        }
-                        Some(heap::IndexOrKeyOwned::Key(key)) => {
-                            self.realm.heap.get_property_chained(&obj, &key)
-                        }
-                        None => None,
-                    }
-                    .unwrap_or(Value::Undefined);
-
-                    self.data.top_mut().set_result(*dest, value);
-                }
-                Instr::ObjGetKeys { dest, obj } => {
-                    // TODO Something more efficient?
-                    let obj = self.get_operand_object(*obj)?;
-                    let keys = obj
-                        .own_properties()
-                        .into_iter()
-                        .map(|name| Value::Object(self.realm.heap.new_string(name)))
-                        .collect();
-
-                    let keys_oid = self.realm.heap.new_array(keys);
-                    self.data
-                        .top_mut()
-                        .set_result(*dest, Value::Object(keys_oid));
-                }
-                Instr::ObjDelete { dest, obj, key } => {
-                    // TODO Adjust return value: true for all cases except when the property is an
-                    // own non-configurable property, in which case false is returned in non-strict
-                    // mode. (Source: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/delete)
-                    {
-                        let mut obj = self.get_operand_object_mut(*obj)?;
-                        let key = self.get_operand(*key)?;
-                        let key = Self::value_to_index_or_key(&self.realm.heap, &key)
-                            .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                        obj.delete_own_element_or_property(key.to_ref());
-                    }
-
-                    self.data.top_mut().set_result(*dest, Value::Bool(true));
-                }
-
-                Instr::ArrayPush { arr, value } => {
-                    let value = self.get_operand(*value)?;
-                    let mut arr = self
-                        .get_operand_object_mut(*arr)?
-                        .into_heap_cell()
-                        .ok_or_else(|| error!("not an array!"))?
-                        .borrow_mut();
-
-                    let was_array = arr.array_push(value);
-                    assert!(was_array);
-                }
-                Instr::ArrayNth { dest, arr, index } => {
-                    let value = {
-                        let arr = self
-                            .get_operand_object(*arr)?
-                            .into_heap_cell()
-                            .ok_or_else(|| error!("not an array!"))?
-                            .borrow();
-                        let elements = arr.array_elements().unwrap();
-
-                        let num = self.get_operand(*index)?.expect_num()?;
-                        let num_trunc = num.trunc();
-                        if num_trunc == num {
-                            let ndx = num_trunc as usize;
-                            elements.get(ndx).copied().unwrap_or(Value::Undefined)
-                        } else {
-                            Value::Undefined
-                        }
-                    };
-                    self.data.top_mut().set_result(*dest, value);
-                }
-                Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
-                Instr::ArrayLen { dest, arr } => {
-                    let len = self
-                        .get_operand_object(*arr)?
-                        .into_heap_cell()
-                        .ok_or_else(|| error!("not an array!"))?
-                        .borrow()
-                        .array_elements()
-                        .unwrap()
-                        .len();
-                    self.data
-                        .top_mut()
-                        .set_result(*dest, Value::Number(len as f64));
-                }
-
-                Instr::TypeOf { dest, arg: value } => {
-                    let value = self.get_operand(*value)?;
-                    let result = self.js_typeof(&value);
-                    self.data.top_mut().set_result(*dest, result);
-                }
-
-                Instr::BoolOpAnd(dest, a, b) => {
-                    let a = self.get_operand(*a)?;
-                    let b = self.get_operand(*b)?;
-                    let a_bool = self.to_boolean(a);
-                    let res = if a_bool { b } else { Value::Bool(false) };
-                    self.data.top_mut().set_result(*dest, res);
-                }
-                Instr::BoolOpOr(dest, a, b) => {
-                    let a = self.get_operand(*a)?;
-                    let b = self.get_operand(*b)?;
-                    let a_bool = self.to_boolean(a);
-                    let res = if a_bool { a } else { b };
-                    self.data.top_mut().set_result(*dest, res);
-                }
-
-                Instr::ClosureNew {
-                    dest,
-                    fnid,
-                    forced_this,
-                } => {
-                    let mut upvalues = Vec::new();
-                    while let Some(Instr::ClosureAddCapture(cap)) =
-                        func.instrs().get(next_ndx as usize)
-                    {
-                        let upv_id = self.data.top_mut().ensure_in_upvalue(*cap);
-                        upvalues.push(upv_id);
-                        next_ndx += 1;
-                    }
-
-                    let forced_this = forced_this.map(|reg| self.get_operand(reg)).transpose()?;
-                    let module_id = self.data.top().header().fn_id.0;
-                    let fnid = bytecode::FnId(module_id, *fnid);
-                    let closure = Closure::JS(JSClosure {
-                        fnid,
-                        upvalues,
-                        forced_this,
-                    });
-
-                    let oid = self.realm.heap.new_function(closure);
-                    self.data.top_mut().set_result(*dest, Value::Object(oid));
-                }
-                // This is always handled in the code for ClosureNew
-                Instr::ClosureAddCapture(_) => {
-                    unreachable!(
-                        "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
-                    )
-                }
-                Instr::Unshare(reg) => {
-                    self.data.top_mut().ensure_inline(*reg);
-                }
-
-                Instr::UnaryMinus { dest, arg } => {
-                    let arg_val: f64 = self.get_operand(*arg)?.expect_num()?;
-                    self.data
-                        .top_mut()
-                        .set_result(*dest, Value::Number(-arg_val));
-                }
-
-                Instr::ImportModule(dest, module_path) => {
-                    let bytecode::FnId(import_site, _) = self.data.top().header().fn_id;
-                    let module_path = self.get_operand_string(*module_path)?.to_string();
-
-                    let root_fnid = self
-                        .loader
-                        .load_import(&module_path, Some(import_site))
-                        .with_context(error!("while trying to import '{}'", module_path))?;
-
-                    if let Some(module_oid) = self.realm.module_objs.get(&root_fnid.0) {
-                        self.data
-                            .top_mut()
-                            .set_result(*dest, Value::Object(*module_oid));
-                    } else {
-                        // TODO Refactor with other implementations of Call?
-                        let root_fn = self.loader.get_function(root_fnid).unwrap();
-
-                        let call_meta = stack::CallMeta {
-                            fnid: root_fnid,
-                            n_regs: root_fn.n_regs() as u32,
-                            captures: &[],
-                            this: Value::Undefined,
-                        };
-                        self.data
-                            .top_mut()
-                            .set_return_target(IID(self.iid.0 + 1), *dest);
-
-                        self.data.push(call_meta);
-                        self.iid = IID(0u16);
-                        continue;
-                    }
-                }
-
-                Instr::LoadNull(dest) => {
-                    self.data.top_mut().set_result(*dest, Value::Null);
-                }
-                Instr::LoadUndefined(dest) => {
-                    self.data.top_mut().set_result(*dest, Value::Undefined);
-                }
-                Instr::LoadThis(dest) => {
-                    let value = self.data.top().header().this;
-                    self.data.top_mut().set_result(*dest, value);
-                }
-                Instr::ArithInc(dest, src) => {
-                    let val = self
-                        .get_operand(*src)?
-                        .expect_num()
-                        .map_err(|_| error!("bytecode bug: ArithInc on non-number"))?;
-                    self.data
-                        .top_mut()
-                        .set_result(*dest, Value::Number(val + 1.0));
-                }
-                Instr::ArithDec(dest, src) => {
-                    let val = self
-                        .get_operand(*src)?
-                        .expect_num()
-                        .map_err(|_| error!("bytecode bug: ArithDec on non-number"))?;
-                    self.data
-                        .top_mut()
-                        .set_result(*dest, Value::Number(val - 1.0));
-                }
-                Instr::IsInstanceOf(dest, obj, sup) => {
-                    let result = self.is_instance_of(*obj, *sup)?;
-                    self.data.top_mut().set_result(*dest, Value::Bool(result));
-                }
-                Instr::NewIterator { dest: _, obj: _ } => todo!(),
-                Instr::IteratorGetCurrent { dest: _, iter: _ } => todo!(),
-                Instr::IteratorAdvance { iter: _ } => todo!(),
-                Instr::JmpIfIteratorFinished { iter: _, dest: _ } => todo!(),
-
-                Instr::StrCreateEmpty(dest) => {
-                    let oid = self.realm.heap.new_string(String::new());
-                    self.data.top_mut().set_result(*dest, Value::Object(oid));
-                }
-                Instr::StrAppend(buf_reg, tail) => {
-                    let value = self.str_append(buf_reg, tail)?;
-                    self.data.top_mut().set_result(*buf_reg, value);
-                }
-
-                Instr::GetGlobalThis(dest) => {
-                    let value = Value::Object(self.realm.global_obj);
-                    self.data.top_mut().set_result(*dest, value);
-                }
-                Instr::GetGlobal {
-                    dest,
-                    name: bytecode::ConstIndex(name_cndx),
-                } => {
-                    let literal = func.consts()[*name_cndx as usize].clone();
-                    let key = {
-                        let str_literal = match &literal {
-                            bytecode::Literal::String(s) => s,
-                            bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
-                            _ => panic!("malformed bytecode: GetGlobal argument `name` not a string literal"),
-                        };
-                        heap::IndexOrKey::Key(str_literal)
-                    };
-
-                    let global_this = self.realm.heap.get(self.realm.global_obj).unwrap().borrow();
-                    let lookup_result = global_this.get_own_element_or_property(key);
-
-                    match lookup_result {
-                        None | Some(Value::Undefined) => {
-                            let exc_proto = global_this
-                                .get_own_element_or_property(IndexOrKey::Key("ReferenceError"))
-                                .expect("missing required builtin: ReferenceError")
-                                .expect_obj()
-                                .expect("bug: ReferenceError is not an object?!");
-                            // sadly, the borrowck needs some hand-holding here
-                            drop(global_this);
-                            let exc_oid = self.realm.heap.new_ordinary_object(HashMap::new());
-                            {
-                                let mut exc = self.realm.heap.get(exc_oid).unwrap().borrow_mut();
-                                exc.set_proto(Some(exc_proto));
-                            }
-                            self.handle_exception(Value::Object(exc_oid))?;
-                            continue;
-                        }
-                        Some(value) => {
-                            self.data.top_mut().set_result(*dest, value);
-                        }
-                    }
-                }
-
-                Instr::Breakpoint => {
-                    // We must update self.iid now, or the Interpreter will be back here on resume,
-                    // in an infinite loop
-                    self.iid.0 = next_ndx;
-                    return Ok(ExitInternal::Suspended);
-                }
-
-                Instr::GetCurrentException(dest) => {
-                    let current_exc = self.current_exc.expect("no current exception!");
-                    self.data.top_mut().set_result(*dest, current_exc);
-                }
-                Instr::Throw(exc_value) => {
-                    let exception = self.get_operand(*exc_value)?;
-                    self.handle_exception(exception)?;
-                    continue;
-                }
-                Instr::PopExcHandler => {
-                    let handler = self
-                        .exc_handler_stack
-                        .pop()
-                        .ok_or_else(|| error!("compiler bug: no exception handler to pop!"))?;
-                    assert_eq!(handler.stack_height, self.data.len());
-                }
-                Instr::PushExcHandler(target_iid) => self.exc_handler_stack.push(ExcHandler {
-                    stack_height: self.data.len(),
-                    target_iid: *target_iid,
-                }),
-            }
-
-            #[cfg(enable_jit)]
-            if let Some(jitting) = &mut self.jitting {
-                jitting.builder.interpreter_step(&InterpreterStep {
-                    fnid,
-                    func,
-                    iid: self.iid,
-                    next_iid: IID(next_ndx),
-                    get_operand: &|iid| self.data.get_result(iid).clone(),
-                });
-            }
-
-            // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
-            self.iid.0 = next_ndx;
-
-            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+        let res = run_frame(
+            &mut self.data,
+            &mut self.realm,
+            &mut self.loader,
+            0,
             #[cfg(feature = "debugger")]
-            {
-                let giid = bytecode::GlobalIID(fnid, self.iid);
-                let out_of_fuel = self.dbg.consume_1_fuel();
-                if out_of_fuel || self.dbg.is_breakpoint_at(&giid) {
-                    return Ok(ExitInternal::Suspended);
-                }
+            &mut self.dbg,
+        );
+
+        // We currently translate IntrpResult into Result<Exit<'a>> just to
+        // avoid boiling the ocean, but long-term Result<Exit> should be
+        // deleted.
+
+        match res {
+            Ok(_) => {
+                // return value discarded
+
+                #[cfg(test)]
+                let sink: Vec<_> = self
+                    .data
+                    .sink()
+                    .iter()
+                    .map(|value| try_value_to_literal(*value, &self.realm.heap))
+                    .collect();
+
+                #[cfg(not(test))]
+                let sink = Vec::new();
+
+                Ok(Exit::Finished(FinishedData { sink }))
             }
-        }
-
-        Ok(ExitInternal::Finished)
-    }
-
-    fn handle_exception(&mut self, exception: Value) -> Result<()> {
-        self.current_exc = Some(exception);
-        let handler = self
-            .exc_handler_stack
-            .pop()
-            .ok_or_else(|| error!("unhandled exception: {:?}", exception))?;
-        assert!(handler.stack_height <= self.data.len());
-        while handler.stack_height < self.data.len() {
-            // like return, but ignore the return value
-            self.data.pop();
-            let (tgt_iid, _) = self.data.top_mut().take_return_target();
-            self.iid = tgt_iid;
-        }
-        assert_eq!(handler.stack_height, self.data.len());
-        self.iid = handler.target_iid;
-        Ok(())
-    }
-
-    fn str_append(&mut self, a: &VReg, b: &VReg) -> Result<Value> {
-        // TODO Make this at least *decently* efficient!
-        let b = self.get_operand(*b)?;
-
-        let mut buf = self.get_operand_string(*a)?.to_owned();
-        let tail = value_to_string(b, &self.realm.heap);
-        buf.push_str(&tail);
-        let value = literal_to_value(bytecode::Literal::String(buf), &mut self.realm.heap);
-        Ok(value)
-    }
-
-    fn is_instance_of(&mut self, obj: VReg, sup: VReg) -> Result<bool> {
-        let sup_oid = match self.get_operand(sup)? {
-            Value::Object(oid) => oid,
-            _ => return Ok(false),
-        };
-
-        let obj = match self.get_operand_object(obj) {
-            Ok(obj) => obj,
-            Err(_) => return Ok(false),
-        };
-        Ok(self.realm.heap.is_instance_of(&obj, sup_oid))
-    }
-
-    fn get_operand_string(&self, vreg: bytecode::VReg) -> Result<Ref<str>> {
-        let ho = self
-            .get_operand_object(vreg)?
-            .into_heap_cell()
-            .ok_or_else(|| error!("not a heap object"))?
-            .borrow();
-        Ok(Ref::filter_map(ho, |ho| ho.as_str()).unwrap())
-    }
-
-    fn dump_output(self) -> FinishedData {
-        let sink = try_values_to_literals(&self.sink, &self.realm.heap);
-        FinishedData { sink }
-    }
-
-    fn exit_function(&mut self, callee_retval_reg: Option<VReg>) -> Result<()> {
-        let return_value = callee_retval_reg
-            .map(|vreg| self.get_operand(vreg))
-            .unwrap_or(Ok(Value::Undefined))?;
-
-        let height = self.data.len();
-        pop_while(&mut self.exc_handler_stack, |handler| {
-            handler.stack_height == height
-        });
-
-        self.data.pop();
-        if !self.data.is_empty() {
-            let (tgt_iid, tgt_vreg) = self.data.top_mut().take_return_target();
-            self.data.top_mut().set_result(tgt_vreg, return_value);
-
-            #[cfg(enable_jit)]
-            if let Some(jitting) = &mut self.jitting {
-                jitting.builder.exit_function(callee_retval_reg);
-            }
-
-            self.iid = tgt_iid;
-        } else {
-            // The stack is now empty, so execution can't continue
-            // This instance of Interpreter must be decommissioned
-        }
-
-        Ok(())
-    }
-
-    fn with_numbers<F>(&mut self, dest: VReg, a: VReg, b: VReg, op: F) -> Result<()>
-    where
-        F: FnOnce(f64, f64) -> f64,
-    {
-        let a = self.get_operand(a)?.expect_num();
-        let b = self.get_operand(b)?.expect_num();
-        let value = match (a, b) {
-            (Ok(a), Ok(b)) => Value::Number(op(a, b)),
-            (_, _) => {
-                // TODO: Try to convert values to numbers. For example:
-                //   { valueOf() { return 42; } } => 42
-                //   "10" => 10
-                Value::Number(f64::NAN)
-            }
-        };
-
-        self.data.top_mut().set_result(dest, value);
-        Ok(())
-    }
-
-    fn compare(
-        &mut self,
-        dest: VReg,
-        a: VReg,
-        b: VReg,
-        test: impl Fn(ValueOrdering) -> bool,
-    ) -> Result<()> {
-        let a = self.get_operand(a)?;
-        let b = self.get_operand(b)?;
-
-        let ordering = match (&a, &b) {
-            (Value::Bool(a), Value::Bool(b)) => a.cmp(b).into(),
-            (Value::Number(a), Value::Number(b)) => a
-                .partial_cmp(b)
-                .map(|x| x.into())
-                .unwrap_or(ValueOrdering::Incomparable),
-            (Value::Null, Value::Null) => ValueOrdering::Equal,
-            (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
-            #[rustfmt::skip]
-            (Value::Object(a_oid), Value::Object(b_oid)) => {
-                let a_obj = self.realm.heap.get(*a_oid).map(|x| x.borrow());
-                let b_obj = self.realm.heap.get(*b_oid).map(|x| x.borrow());
-
-                let a_str = a_obj.as_ref().and_then(|ho| ho.as_str());
-                let b_str = b_obj.as_ref().and_then(|ho| ho.as_str());
-
-                if let (Some(a_str), Some(b_str)) = (a_str, b_str) {
-                    a_str.cmp(b_str).into()
-                } else if a_oid == b_oid {
-                    ValueOrdering::Equal
-                } else {
-                    ValueOrdering::Incomparable
-                }
-            }
-            _ => ValueOrdering::Incomparable,
-        };
-
-        self.data
-            .top_mut()
-            .set_result(dest, Value::Bool(test(ordering)));
-        Ok(())
-    }
-
-    // TODO(cleanup) inline this function? It now adds nothing
-    fn get_operand(&self, vreg: bytecode::VReg) -> Result<Value> {
-        self.data
-            .top()
-            .get_result(vreg)
-            .ok_or_else(|| error!("variable read before initialization"))
-    }
-
-    fn get_operand_object(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectRef> {
-        let value = self.get_operand(vreg)?;
-        as_object_ref(value, &self.realm.heap)
-            .ok_or_else(|| error!("could not use as object: {:?}", vreg))
-    }
-
-    fn get_operand_object_mut(&self, vreg: bytecode::VReg) -> Result<heap::ValueObjectRef> {
-        // TODO Remove this function, inline into all callers
-        self.get_operand_object(vreg)
-    }
-
-    fn js_typeof(&mut self, value: &Value) -> Value {
-        let ty_s = match value {
-            Value::Number(_) => "number",
-            Value::Bool(_) => "boolean",
-            Value::Object(oid) => match self.realm.heap.get(*oid).unwrap().borrow().type_of() {
-                heap::Typeof::Object => "object",
-                heap::Typeof::Function => "function",
-                heap::Typeof::String => "string",
-                heap::Typeof::Number => "number",
-                heap::Typeof::Boolean => "boolean",
-            },
-            // TODO(cleanup) This is actually an error in our type system.  null is really a value
-            // of the 'object' type
-            Value::Null => "object",
-            Value::Undefined => "undefined",
-            Value::SelfFunction => "function",
-            Value::Internal(_) => panic!("internal value has no typeof!"),
-        };
-
-        literal_to_value(
-            bytecode::Literal::String(ty_s.to_string()),
-            &mut self.realm.heap,
-        )
-    }
-
-    fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::IndexOrKeyOwned> {
-        match value {
-            Value::Number(n) if *n >= 0.0 => {
-                let n_trunc = n.trunc();
-                if *n == n_trunc {
-                    let ndx = n_trunc as usize;
-                    Some(heap::IndexOrKeyOwned::Index(ndx))
-                } else {
-                    None
-                }
-            }
-            Value::Object(oid) => {
-                let obj = heap.get(*oid)?;
-                let string = obj.borrow().as_str()?.to_owned();
-                Some(heap::IndexOrKeyOwned::Key(string))
-            }
-            _ => None,
-        }
-    }
-
-    /// Converts the given value to a boolean (e.g. for use by `if`,
-    /// or operators `&&` and `||`)
-    ///
-    /// See: https://262.ecma-international.org/14.0/#sec-toboolean
-    fn to_boolean(&self, value: Value) -> bool {
-        match value {
-            Value::Null => false,
-            Value::Bool(bool_val) => bool_val,
-            Value::Number(num) => num != 0.0,
-            Value::Object(oid) => self.realm.heap.get(oid).unwrap().borrow().to_boolean(),
-            Value::Undefined => false,
-            Value::SelfFunction => true,
-            Value::Internal(_) => {
-                panic!("bytecode compiler bug: internal value should be unreachable")
-            }
+            Err(RunError::Exception(exc)) => Err(InterpreterError {
+                error: error!("unhandled exception: {:?}", exc),
+                interpreter: self,
+            }),
+            Err(RunError::Internal(common_err)) => Err(InterpreterError {
+                error: common_err,
+                interpreter: self,
+            }),
+            Err(RunError::Suspended) => Ok(Exit::Suspended(self)),
         }
     }
 }
@@ -1230,12 +370,862 @@ fn init_stack(
     data
 }
 
+/// Run bytecode.  This is the core of the interpreter.
+///
+/// Before/after each call, `data` must hold/holds the interpreter's state in
+/// enough detail that this function can resume execution even across separate
+/// calls.
+/// 
+/// This function assumes that the stack frame has already been set up
+/// beforehand, but will pop it before returning successfully. When returning
+/// due to failure/suspend, the stack frame stays there, to allow for resuming.
+///
+/// In order to restore execution correctly, callers of this function external
+/// to the function itself should always pass `0` as the `stack_level`
+/// parameter. Any different value is a bug (akin to undefined behavior, that
+/// is, not necessarily detected at run-time).
+///
+/// For external callers, this function returns when:
+///  - the interpreter has finished its work (gone through the program without
+///    errors)
+///  - an unhandled exception has been thrown
+///  - the debugger has suspended execution (e.g. a breakpoint has been
+///    reached).
+///
+/// If a bug is detected (e.g. assertion failed), the function panics. The
+/// interpreter's data is not unwind-safe in general, so execution can only
+/// restart by initializing a new interpreter instance.
+///
+/// ## Implementation details
+///
+/// This function calls itself recursively, so that each JS stack frame maps 1:1
+/// with a native `run_internal` stack frame.
+///
+/// For a call coming from within `run_internal` itself (recursively), it
+/// returns when:
+///  - the function has returned successfully (no exception)
+///  - an as-of-yet-unhandled exception has been thrown (may be handled by one
+///    of the parent frames or bubble up to the user unhandled)
+///  - the debugger has suspended execution (e.g. a breakpoint has been
+///    reached).
+///
+/// Upon starting, `run_internal` calls itself again with a 1-higher
+/// `stack_level` so as to restore the mapping between JS and native stacks.
+/// Then it resumes JS execution.
+fn run_frame<'a>(
+    data: &'a mut stack::InterpreterData,
+    realm: &'a mut Realm,
+    loader: &'a mut loader::Loader,
+    // TODO Define a StackLevel newtype
+    stack_level: usize,
+
+    #[cfg(feature = "debugger")] dbg: &'a mut debugger::InterpreterState,
+) -> RunResult<Value> {
+    assert!(data.len() >= 1);
+    assert!(stack_level <= data.len() - 1);
+
+    let mut cur_exc = None;
+
+    if stack_level < data.len() - 1 {
+        // We're not the top of the stack, which means we're suspended waiting for a called function.
+        // Keep running code until it's our turn.
+        let res = run_frame(
+            data,
+            realm,
+            loader,
+            stack_level + 1,
+            #[cfg(feature = "debugger")]
+            dbg,
+        );
+
+        // unblocked, let's proceed
+        match res {
+            Ok(ret_val) => {
+                if let Some(rv_reg) = data.top_mut().take_return_target() {
+                    data.top_mut().set_result(rv_reg, ret_val);
+                }
+            }
+            Err(RunError::Exception(exc)) => {
+                cur_exc = Some(exc);
+            }
+            Err(_) => return res,
+        }
+    }
+
+    assert_eq!(stack_level, data.len() - 1);
+
+    let return_value = loop {
+        let res = run_regular(
+            data,
+            realm,
+            loader,
+            stack_level,
+            cur_exc.unwrap_or(Value::Undefined),
+            #[cfg(feature = "debugger")]
+            dbg,
+        );
+
+        match res {
+            Ok(ret_val) => {
+                break ret_val;
+            }
+            Err(RunError::Exception(exc)) => {
+                if let Some(handler_iid) = data.top_mut().pop_exc_handler() {
+                    cur_exc = Some(exc);
+                    data.top_mut().set_resume_iid(handler_iid);
+                    // loop back; next call to run_regular will handle the
+                    // exception
+                } else {
+                    // no handler, let the caller do something about it
+                    return res;
+                }
+            }
+
+            Err(RunError::Internal(_) | RunError::Suspended) => return res,
+        }
+    };
+
+    data.pop();
+    Ok(return_value)
+}
+
+type RunResult<T> = std::result::Result<T, RunError>;
+enum RunError {
+    Exception(Value),
+    Suspended,
+    Internal(common::Error),
+}
+impl From<common::Error> for RunError {
+    fn from(err: common::Error) -> Self {
+        RunError::Internal(err)
+    }
+}
+
+fn run_regular<'a>(
+    data: &'a mut stack::InterpreterData,
+    realm: &'a mut Realm,
+    loader: &'a mut loader::Loader,
+    // TODO Define a StackLevel newtype
+    stack_level: usize,
+    cur_exc: Value,
+
+    #[cfg(feature = "debugger")] dbg: &'a mut debugger::InterpreterState,
+) -> RunResult<Value> {
+    let fnid = data.top().header().fnid;
+    let mut iid = data.top().header().iid;
+
+    'reborrow: loop {
+        let func = loader.get_function(fnid).unwrap();
+
+        loop {
+            // Each (native) call to `run_regular` corresponds to part of a call to a JavaScript
+            // function. As such, it stays within the same JavaScript stack frame.
+            assert_eq!(data.len() - 1, stack_level);
+            assert_eq!(data.top().header().fnid, fnid);
+
+            if iid.0 as usize == func.instrs().len() {
+                // Bytecode "finished" => Implicitly return undefined
+                return Ok(Value::Undefined);
+            }
+
+            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+            #[cfg(feature = "debugger")]
+            {
+                let giid = bytecode::GlobalIID(fnid, iid);
+                let out_of_fuel = dbg.consume_1_fuel();
+                if out_of_fuel || dbg.is_breakpoint_at(&giid) {
+                    // Important: "commit" the IID to the stack so that debugging tools can see the correct IID!
+                    data.top_mut().set_resume_iid(iid);
+                    return Err(RunError::Suspended);
+                }
+            }
+
+            let instr = func.instrs()[iid.0 as usize];
+            let mut next_ndx = iid.0 + 1;
+
+            match &instr {
+                Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
+                    let literal = func.consts()[*const_ndx as usize].clone();
+                    let value = literal_to_value(literal, &mut realm.heap);
+                    data.top_mut().set_result(*dest, value);
+                }
+
+                Instr::OpAdd(dest, a, b) => match get_operand(data, *a)? {
+                    Value::Number(_) => with_numbers(data, *dest, *a, *b, |x, y| x + y)?,
+                    Value::Object(_) => {
+                        let value = str_append(data, realm, *a, *b)?;
+                        data.top_mut().set_result(*dest, value);
+                    }
+                    other => return Err(error!("unsupported operator '+' for: {:?}", other).into()),
+                },
+                Instr::ArithSub(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x - y)?,
+                Instr::ArithMul(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x * y)?,
+                Instr::ArithDiv(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x / y)?,
+
+                Instr::PushToSink(operand) => {
+                    #[allow(unused_variables)]
+                    let value = get_operand(data, *operand)?;
+                    #[cfg(test)]
+                    data.push_to_sink(value);
+                    #[cfg(not(test))]
+                    panic!("PushToSink instruction not implemented outside of unit tests");
+                }
+
+                Instr::CmpGE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                    ord == ValueOrdering::Greater || ord == ValueOrdering::Equal
+                })?,
+                Instr::CmpGT(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                    ord == ValueOrdering::Greater
+                })?,
+                Instr::CmpLT(dest, a, b) => {
+                    compare(data, realm, *dest, *a, *b, |ord| ord == ValueOrdering::Less)?
+                }
+                Instr::CmpLE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                    ord == ValueOrdering::Less || ord == ValueOrdering::Equal
+                })?,
+                Instr::CmpEQ(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                    ord == ValueOrdering::Equal
+                })?,
+                Instr::CmpNE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                    ord != ValueOrdering::Equal
+                })?,
+
+                Instr::JmpIf { cond, dest } => {
+                    let cond_value = get_operand(data, *cond)?;
+                    match cond_value {
+                        Value::Bool(true) => {
+                            next_ndx = dest.0;
+                        }
+                        Value::Bool(false) => {} // Just go to the next instruction
+                        other => {
+                            return Err(
+                                error!(" invalid if condition (not boolean): {:?}", other).into()
+                            )
+                        }
+                    }
+                }
+
+                Instr::Copy { dst, src } => {
+                    let value = get_operand(data, *src)?;
+                    data.top_mut().set_result(*dst, value);
+                }
+                Instr::LoadCapture(dest, cap_ndx) => {
+                    data.capture_to_var(*cap_ndx, *dest);
+                }
+
+                Instr::Nop => {}
+                Instr::BoolNot { dest, arg } => {
+                    let value = get_operand(data, *arg)?;
+                    let value = Value::Bool(!to_boolean(value, realm));
+                    data.top_mut().set_result(*dest, value);
+                }
+                Instr::Jmp(IID(dest_ndx)) => {
+                    next_ndx = *dest_ndx;
+                }
+                Instr::Return(value) => {
+                    let return_value = get_operand(data, *value)?;
+                    return Ok(return_value);
+                }
+                Instr::Call {
+                    callee,
+                    this,
+                    return_value: return_value_reg,
+                } => {
+                    let oid = get_operand(data, *callee)?.expect_obj()?;
+                    let ho_ref = realm
+                        .heap
+                        .get(oid)
+                        .ok_or_else(|| error!("invalid function (object is not callable)"))?
+                        .borrow();
+                    let closure: &Closure = ho_ref
+                        .as_closure()
+                        .ok_or_else(|| error!("can't call non-closure"))?;
+
+                    // NOTE The arguments have to be "read" before adding the stack frame;
+                    // they will no longer be accessible
+                    // afterwards
+                    //
+                    // TODO make the above fact false, and avoid this allocation
+                    //
+                    // NOTE Note that we collect into Result<Vec<_>>, and *then* try (?). This is
+                    // to ensure that, if get_operand fails, we return early. otherwise we
+                    // would risk that arg_vals.len() != the number of CallArg instructions
+                    let res: RunResult<Vec<_>> = func
+                        .instrs()
+                        .iter()
+                        .skip(iid.0 as usize + 1)
+                        .map_while(|instr| match instr {
+                            Instr::CallArg(arg_reg) => Some(*arg_reg),
+                            _ => None,
+                        })
+                        .map(|vreg| get_operand(data, vreg))
+                        .collect();
+                    let mut arg_vals = res?;
+                    let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
+                    let return_to_iid = IID(iid.0 + n_args_u16 + 1);
+
+                    match closure {
+                        Closure::JS(closure) => {
+                            let callee_func = loader.get_function(closure.fnid).unwrap();
+                            let n_params = bytecode::ARGS_COUNT_MAX as usize;
+                            arg_vals.truncate(n_params);
+                            arg_vals.resize(n_params, Value::Undefined);
+                            assert_eq!(arg_vals.len(), n_params);
+
+                            let this = closure
+                                .forced_this
+                                .map(Ok)
+                                .unwrap_or_else(|| get_operand(data, *this))?;
+                            // "this" substitution: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
+                            // If I understand this correctly, we don't need to box anything right
+                            // now.  We just pass the value, and the callee will box it when
+                            // needed.
+                            let this = match (callee_func.is_strict_mode(), this) {
+                                (false, Value::Null | Value::Undefined) => {
+                                    Value::Object(realm.global_obj)
+                                }
+                                (_, other) => other,
+                            };
+
+                            let call_meta = stack::CallMeta {
+                                fnid: closure.fnid,
+                                n_regs: callee_func.n_regs() as u32,
+                                captures: &closure.upvalues,
+                                this,
+                            };
+
+                            // Only used if we re-enter run_internal via suspend+resume
+                            data.top_mut().set_return_target(*return_value_reg);
+
+                            data.push(call_meta);
+                            for (i, arg) in arg_vals.into_iter().enumerate() {
+                                data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
+                            }
+
+                            // Important: run ho_ref destructor early ('unref' the
+                            // RefCell via ReadGuard::drop), so that we can
+                            // re-borrow for run_frame
+                            drop(ho_ref);
+
+                            let ret_val = run_frame(
+                                data,
+                                realm,
+                                loader,
+                                stack_level + 1,
+                                #[cfg(feature = "debugger")]
+                                dbg,
+                            )?;
+
+                            if let Some(rv_reg) = data.top_mut().take_return_target() {
+                                data.top_mut().set_result(rv_reg, ret_val);
+                            }
+
+                            iid = return_to_iid;
+                            continue 'reborrow;
+                        }
+                        Closure::Native(nf) => {
+                            let nf = *nf;
+                            drop(ho_ref);
+
+                            let this = get_operand(data, *this)?;
+                            let ret_val = nf(realm, &this, &arg_vals)?;
+                            data.top_mut().set_result(*return_value_reg, ret_val);
+                            next_ndx = return_to_iid.0;
+                        }
+                    }
+                }
+                Instr::CallArg(_) => {
+                    unreachable!("interpreter bug: CallArg goes through another path!")
+                }
+
+                Instr::LoadArg(dest, arg_ndx) => {
+                    // TODO extra copy?
+                    // TODO usize is a bit too wide
+                    let value = data.top().get_arg(*arg_ndx).unwrap_or(Value::Undefined);
+                    data.top_mut().set_result(*dest, value);
+                }
+
+                Instr::ObjCreateEmpty(dest) => {
+                    let oid = realm.heap.new_ordinary_object(HashMap::new());
+                    data.top_mut().set_result(*dest, Value::Object(oid));
+                }
+                Instr::ObjSet { obj, key, value } => {
+                    let mut obj = get_operand_object(data, realm, *obj)?;
+                    let key = get_operand(data, *key)?;
+                    let key = value_to_index_or_key(&realm.heap, &key)
+                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+                    let value = get_operand(data, *value)?;
+
+                    obj.set_own_element_or_property(key.to_ref(), value);
+                }
+                Instr::ObjGet { dest, obj, key } => {
+                    let obj = get_operand_object(data, realm, *obj)?;
+                    let key = get_operand(data, *key)?;
+                    let key = value_to_index_or_key(&realm.heap, &key);
+
+                    let value = match key {
+                        Some(ik @ heap::IndexOrKeyOwned::Index(_)) => {
+                            obj.get_own_element_or_property(ik.to_ref())
+                        }
+                        Some(heap::IndexOrKeyOwned::Key(key)) => {
+                            realm.heap.get_property_chained(&obj, &key)
+                        }
+                        None => None,
+                    }
+                    .unwrap_or(Value::Undefined);
+
+                    data.top_mut().set_result(*dest, value);
+                }
+                Instr::ObjGetKeys { dest, obj } => {
+                    // TODO Something more efficient?
+                    let obj = get_operand_object(data, realm, *obj)?;
+                    let keys = obj
+                        .own_properties()
+                        .into_iter()
+                        .map(|name| Value::Object(realm.heap.new_string(name)))
+                        .collect();
+
+                    let keys_oid = realm.heap.new_array(keys);
+                    data.top_mut().set_result(*dest, Value::Object(keys_oid));
+                }
+                Instr::ObjDelete { dest, obj, key } => {
+                    // TODO Adjust return value: true for all cases except when the property is an
+                    // own non-configurable property, in which case false is returned in non-strict
+                    // mode. (Source: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/delete)
+                    {
+                        let mut obj = get_operand_object(data, realm, *obj)?;
+                        let key = get_operand(data, *key)?;
+                        let key = value_to_index_or_key(&realm.heap, &key)
+                            .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+                        obj.delete_own_element_or_property(key.to_ref());
+                    }
+
+                    data.top_mut().set_result(*dest, Value::Bool(true));
+                }
+
+                Instr::ArrayPush { arr, value } => {
+                    let value = get_operand(data, *value)?;
+                    let mut arr = get_operand_object(data, realm, *arr)?
+                        .into_heap_cell()
+                        .ok_or_else(|| error!("not an array!"))?
+                        .borrow_mut();
+
+                    let was_array = arr.array_push(value);
+                    assert!(was_array);
+                }
+                Instr::ArrayNth { dest, arr, index } => {
+                    let value = {
+                        let arr = get_operand_object(data, realm, *arr)?
+                            .into_heap_cell()
+                            .ok_or_else(|| error!("not an array!"))?
+                            .borrow();
+                        let elements = arr.array_elements().unwrap();
+
+                        let num = get_operand(data, *index)?.expect_num()?;
+                        let num_trunc = num.trunc();
+                        if num_trunc == num {
+                            let ndx = num_trunc as usize;
+                            elements.get(ndx).copied().unwrap_or(Value::Undefined)
+                        } else {
+                            Value::Undefined
+                        }
+                    };
+                    data.top_mut().set_result(*dest, value);
+                }
+                Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
+                Instr::ArrayLen { dest, arr } => {
+                    let len = get_operand_object(data, realm, *arr)?
+                        .into_heap_cell()
+                        .ok_or_else(|| error!("not an array!"))?
+                        .borrow()
+                        .array_elements()
+                        .unwrap()
+                        .len();
+                    data.top_mut().set_result(*dest, Value::Number(len as f64));
+                }
+
+                Instr::TypeOf { dest, arg: value } => {
+                    let value = get_operand(data, *value)?;
+                    let result = js_typeof(&value, realm);
+                    data.top_mut().set_result(*dest, result);
+                }
+
+                Instr::BoolOpAnd(dest, a, b) => {
+                    let a = get_operand(data, *a)?;
+                    let b = get_operand(data, *b)?;
+                    let a_bool = to_boolean(a, realm);
+                    let res = if a_bool { b } else { Value::Bool(false) };
+                    data.top_mut().set_result(*dest, res);
+                }
+                Instr::BoolOpOr(dest, a, b) => {
+                    let a = get_operand(data, *a)?;
+                    let b = get_operand(data, *b)?;
+                    let a_bool = to_boolean(a, realm);
+                    let res = if a_bool { a } else { b };
+                    data.top_mut().set_result(*dest, res);
+                }
+
+                Instr::ClosureNew {
+                    dest,
+                    fnid,
+                    forced_this,
+                } => {
+                    let mut upvalues = Vec::new();
+                    while let Some(Instr::ClosureAddCapture(cap)) =
+                        func.instrs().get(next_ndx as usize)
+                    {
+                        let upv_id = data.top_mut().ensure_in_upvalue(*cap);
+                        upvalues.push(upv_id);
+                        next_ndx += 1;
+                    }
+
+                    let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
+                    let module_id = data.top().header().fnid.0;
+                    let fnid = bytecode::FnId(module_id, *fnid);
+                    let closure = Closure::JS(JSClosure {
+                        fnid,
+                        upvalues,
+                        forced_this,
+                    });
+
+                    let oid = realm.heap.new_function(closure);
+                    data.top_mut().set_result(*dest, Value::Object(oid));
+                }
+                // This is always handled in the code for ClosureNew
+                Instr::ClosureAddCapture(_) => {
+                    unreachable!(
+                        "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
+                    )
+                }
+                Instr::Unshare(reg) => {
+                    data.top_mut().ensure_inline(*reg);
+                }
+
+                Instr::UnaryMinus { dest, arg } => {
+                    let arg_val: f64 = get_operand(data, *arg)?.expect_num()?;
+                    data.top_mut().set_result(*dest, Value::Number(-arg_val));
+                }
+
+                Instr::ImportModule(dest, module_path) => {
+                    use common::Context;
+
+                    let bytecode::FnId(import_site, _) = fnid;
+                    let module_path = get_operand_string(data, realm, *module_path)?.to_string();
+
+                    let root_fnid = loader
+                        .load_import(&module_path, Some(import_site))
+                        .with_context(error!("while trying to import '{}'", module_path))?;
+
+                    if let Some(module_oid) = realm.module_objs.get(&root_fnid.0) {
+                        data.top_mut().set_result(*dest, Value::Object(*module_oid));
+                    } else {
+                        let root_fn = loader.get_function(root_fnid).unwrap();
+
+                        data.push(stack::CallMeta {
+                            fnid: root_fnid,
+                            n_regs: root_fn.n_regs() as u32,
+                            captures: &[],
+                            this: Value::Undefined,
+                        });
+
+                        // We don't care about return value: don't set a return
+                        // value target reg, discard it here
+                        run_frame(
+                            data,
+                            realm,
+                            loader,
+                            stack_level + 1,
+                            #[cfg(feature = "debugger")]
+                            dbg,
+                        )?;
+                    }
+
+                    // This satisfies the borrow checker (`loader.load_import`
+                    // mut-borrows the whole Loader, so the compiler can't prove
+                    // that the same FnId won't correspond to a different
+                    // function or even stay valid across the call)
+                    iid = bytecode::IID(iid.0 + 1);
+                    continue 'reborrow;
+                }
+
+                Instr::LoadNull(dest) => {
+                    data.top_mut().set_result(*dest, Value::Null);
+                }
+                Instr::LoadUndefined(dest) => {
+                    data.top_mut().set_result(*dest, Value::Undefined);
+                }
+                Instr::LoadThis(dest) => {
+                    let value = data.top().header().this;
+                    data.top_mut().set_result(*dest, value);
+                }
+                Instr::ArithInc(dest, src) => {
+                    let val = get_operand(data, *src)?
+                        .expect_num()
+                        .map_err(|_| error!("bytecode bug: ArithInc on non-number"))?;
+                    data.top_mut().set_result(*dest, Value::Number(val + 1.0));
+                }
+                Instr::ArithDec(dest, src) => {
+                    let val = get_operand(data, *src)?
+                        .expect_num()
+                        .map_err(|_| error!("bytecode bug: ArithDec on non-number"))?;
+                    data.top_mut().set_result(*dest, Value::Number(val - 1.0));
+                }
+                Instr::IsInstanceOf(dest, obj, sup) => {
+                    let result = is_instance_of(data, realm, *obj, *sup)?;
+                    data.top_mut().set_result(*dest, Value::Bool(result));
+                }
+                Instr::NewIterator { dest: _, obj: _ } => todo!(),
+                Instr::IteratorGetCurrent { dest: _, iter: _ } => todo!(),
+                Instr::IteratorAdvance { iter: _ } => todo!(),
+                Instr::JmpIfIteratorFinished { iter: _, dest: _ } => todo!(),
+
+                Instr::StrCreateEmpty(dest) => {
+                    let oid = realm.heap.new_string(String::new());
+                    data.top_mut().set_result(*dest, Value::Object(oid));
+                }
+                Instr::StrAppend(buf_reg, tail) => {
+                    let value = str_append(data, realm, *buf_reg, *tail)?;
+                    data.top_mut().set_result(*buf_reg, value);
+                }
+
+                Instr::GetGlobalThis(dest) => {
+                    let value = Value::Object(realm.global_obj);
+                    data.top_mut().set_result(*dest, value);
+                }
+                Instr::GetGlobal {
+                    dest,
+                    name: bytecode::ConstIndex(name_cndx),
+                } => {
+                    let literal = func.consts()[*name_cndx as usize].clone();
+                    let key = {
+                        let str_literal = match &literal {
+                            bytecode::Literal::String(s) => s,
+                            bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
+                            _ => panic!(
+                            "malformed bytecode: GetGlobal argument `name` not a string literal"
+                        ),
+                        };
+                        heap::IndexOrKey::Key(str_literal)
+                    };
+
+                    let global_this = realm.heap.get(realm.global_obj).unwrap().borrow();
+                    let lookup_result = global_this.get_own_element_or_property(key);
+
+                    match lookup_result {
+                        None | Some(Value::Undefined) => {
+                            let exc_proto = global_this
+                                .get_own_element_or_property(IndexOrKey::Key("ReferenceError"))
+                                .expect("missing required builtin: ReferenceError")
+                                .expect_obj()
+                                .expect("bug: ReferenceError is not an object?!");
+                            // sadly, the borrowck needs some hand-holding here
+                            drop(global_this);
+                            let exc_oid = realm.heap.new_ordinary_object(HashMap::new());
+                            {
+                                let mut exc = realm.heap.get(exc_oid).unwrap().borrow_mut();
+                                exc.set_proto(Some(exc_proto));
+                            }
+
+                            // Duplicate with the Instr::Throw implementation. Not sure how to improve.
+                            let exc = Value::Object(exc_oid);
+                            return Err(RunError::Exception(exc));
+                        }
+                        Some(value) => {
+                            data.top_mut().set_result(*dest, value);
+                        }
+                    }
+                }
+
+                Instr::Breakpoint => {
+                    // We must set the 'return-to' IID now, or the Interpreter will be back here on resume,
+                    // in an infinite loop.
+                    data.top_mut().set_resume_iid(bytecode::IID(next_ndx));
+                    return Err(RunError::Suspended);
+                }
+
+                Instr::GetCurrentException(dest) => {
+                    data.top_mut().set_result(*dest, cur_exc);
+                }
+                Instr::Throw(exc) => {
+                    let exc = get_operand(data, *exc)?;
+                    return Err(RunError::Exception(exc));
+                }
+                Instr::PopExcHandler => {
+                    data.top_mut()
+                        .pop_exc_handler()
+                        .ok_or_else(|| error!("compiler bug: no exception handler to pop!"))?;
+                }
+                Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
+            }
+
+            // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
+            iid.0 = next_ndx;
+        }
+    }
+}
+
+// TODO(cleanup) inline this function? It now adds nothing
+fn get_operand(data: &stack::InterpreterData, vreg: bytecode::VReg) -> RunResult<Value> {
+    data.top()
+        .get_result(vreg)
+        .ok_or_else(|| error!("variable read before initialization").into())
+}
+
+fn get_operand_object<'r>(
+    data: &stack::InterpreterData,
+    realm: &'r Realm,
+    vreg: bytecode::VReg,
+) -> RunResult<heap::ValueObjectRef<'r>> {
+    let value = get_operand(data, vreg)?;
+    as_object_ref(value, &realm.heap)
+        .ok_or_else(|| error!("could not use as object: {:?}", vreg).into())
+}
+
+fn get_operand_string<'r>(
+    data: &stack::InterpreterData,
+    realm: &'r Realm,
+    vreg: bytecode::VReg,
+) -> RunResult<Ref<'r, str>> {
+    let ho = get_operand_object(data, realm, vreg)?
+        .into_heap_cell()
+        .ok_or_else(|| error!("not a heap object"))?
+        .borrow();
+    Ok(Ref::filter_map(ho, |ho| ho.as_str()).unwrap())
+}
+
+fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
+    let ty_s = match value {
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Object(oid) => match realm.heap.get(*oid).unwrap().borrow().type_of() {
+            heap::Typeof::Object => "object",
+            heap::Typeof::Function => "function",
+            heap::Typeof::String => "string",
+            heap::Typeof::Number => "number",
+            heap::Typeof::Boolean => "boolean",
+        },
+        // TODO(cleanup) This is actually an error in our type system.  null is really a value
+        // of the 'object' type
+        Value::Null => "object",
+        Value::Undefined => "undefined",
+        Value::SelfFunction => "function",
+        Value::Internal(_) => panic!("internal value has no typeof!"),
+    };
+
+    literal_to_value(bytecode::Literal::String(ty_s.to_string()), &mut realm.heap)
+}
+
 fn as_object_ref(value: Value, heap: &heap::Heap) -> Option<heap::ValueObjectRef> {
     match value {
         Value::Object(oid) => heap.get(oid).map(heap::ValueObjectRef::Heap),
         Value::Number(num) => Some(heap::ValueObjectRef::Number(num, heap)),
         Value::Bool(bool) => Some(heap::ValueObjectRef::Bool(bool, heap)),
         _ => None,
+    }
+}
+
+fn is_instance_of(
+    data: &stack::InterpreterData,
+    realm: &mut Realm,
+    obj: VReg,
+    sup: VReg,
+) -> RunResult<bool> {
+    let sup_oid = match get_operand(data, sup)? {
+        Value::Object(oid) => oid,
+        _ => return Ok(false),
+    };
+
+    let obj = match get_operand_object(data, realm, obj) {
+        Ok(obj) => obj,
+        Err(_) => return Ok(false),
+    };
+
+    Ok(realm.heap.is_instance_of(&obj, sup_oid))
+}
+
+fn with_numbers<F>(
+    data: &mut stack::InterpreterData,
+    dest: VReg,
+    a: VReg,
+    b: VReg,
+    op: F,
+) -> RunResult<()>
+where
+    F: FnOnce(f64, f64) -> f64,
+{
+    let a = get_operand(data, a)?.expect_num();
+    let b = get_operand(data, b)?.expect_num();
+    let value = match (a, b) {
+        (Ok(a), Ok(b)) => Value::Number(op(a, b)),
+        (_, _) => {
+            // TODO: Try to convert values to numbers. For example:
+            //   { valueOf() { return 42; } } => 42
+            //   "10" => 10
+            Value::Number(f64::NAN)
+        }
+    };
+
+    data.top_mut().set_result(dest, value);
+    Ok(())
+}
+
+fn compare(
+    data: &mut stack::InterpreterData,
+    realm: &mut Realm,
+    dest: VReg,
+    a: VReg,
+    b: VReg,
+    test: impl Fn(ValueOrdering) -> bool,
+) -> RunResult<()> {
+    let a = get_operand(data, a)?;
+    let b = get_operand(data, b)?;
+
+    let ordering = match (&a, &b) {
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b).into(),
+        (Value::Number(a), Value::Number(b)) => a
+            .partial_cmp(b)
+            .map(|x| x.into())
+            .unwrap_or(ValueOrdering::Incomparable),
+        (Value::Null, Value::Null) => ValueOrdering::Equal,
+        (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
+        #[rustfmt::skip]
+        (Value::Object(a_oid), Value::Object(b_oid)) => {
+            let a_obj = realm.heap.get(*a_oid).map(|x| x.borrow());
+            let b_obj = realm.heap.get(*b_oid).map(|x| x.borrow());
+
+            let a_str = a_obj.as_ref().and_then(|ho| ho.as_str());
+            let b_str = b_obj.as_ref().and_then(|ho| ho.as_str());
+
+            if let (Some(a_str), Some(b_str)) = (a_str, b_str) {
+                a_str.cmp(b_str).into()
+            } else if a_oid == b_oid {
+                ValueOrdering::Equal
+            } else {
+                ValueOrdering::Incomparable
+            }
+        }
+        _ => ValueOrdering::Incomparable,
+    };
+
+    data.top_mut().set_result(dest, Value::Bool(test(ordering)));
+    Ok(())
+}
+
+/// Converts the given value to a boolean (e.g. for use by `if`,
+/// or operators `&&` and `||`)
+///
+/// See: https://262.ecma-international.org/14.0/#sec-toboolean
+fn to_boolean(value: Value, realm: &Realm) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(bool_val) => bool_val,
+        Value::Number(num) => num != 0.0,
+        Value::Object(oid) => realm.heap.get(oid).unwrap().borrow().to_boolean(),
+        Value::Undefined => false,
+        Value::SelfFunction => true,
+        Value::Internal(_) => {
+            panic!("bytecode compiler bug: internal value should be unreachable")
+        }
     }
 }
 
@@ -1252,10 +1242,20 @@ fn value_to_string(value: Value, heap: &heap::Heap) -> String {
     }
 }
 
-fn try_values_to_literals(vec: &[Value], heap: &heap::Heap) -> Vec<Option<bytecode::Literal>> {
-    vec.iter()
-        .map(|value| try_value_to_literal(*value, heap))
-        .collect()
+fn str_append(
+    data: &stack::InterpreterData,
+    realm: &mut Realm,
+    a: VReg,
+    b: VReg,
+) -> RunResult<Value> {
+    // TODO Make this at least *decently* efficient!
+    let b = get_operand(data, b)?;
+
+    let mut buf = get_operand_string(data, realm, a)?.to_owned();
+    let tail = value_to_string(b, &realm.heap);
+    buf.push_str(&tail);
+    let value = literal_to_value(bytecode::Literal::String(buf), &mut realm.heap);
+    Ok(value)
 }
 
 /// Create a Value based on the given Literal.
@@ -1281,6 +1281,7 @@ fn literal_to_value(lit: bytecode::Literal, heap: &mut heap::Heap) -> Value {
     }
 }
 
+#[cfg(test)]
 fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Literal> {
     match value {
         Value::Number(num) => Some(bytecode::Literal::Number(num)),
@@ -1295,6 +1296,26 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
         Value::Undefined => Some(bytecode::Literal::Undefined),
         Value::SelfFunction => None,
         Value::Internal(_) => None,
+    }
+}
+
+fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::IndexOrKeyOwned> {
+    match value {
+        Value::Number(n) if *n >= 0.0 => {
+            let n_trunc = n.trunc();
+            if *n == n_trunc {
+                let ndx = n_trunc as usize;
+                Some(heap::IndexOrKeyOwned::Index(ndx))
+            } else {
+                None
+            }
+        }
+        Value::Object(oid) => {
+            let obj = heap.get(*oid)?;
+            let string = obj.borrow().as_str()?.to_owned();
+            Some(heap::IndexOrKeyOwned::Key(string))
+        }
+        _ => None,
     }
 }
 
@@ -1371,7 +1392,7 @@ pub mod debugger {
         pub fn giid(&self) -> bytecode::GlobalIID {
             let frame = self.interpreter.data.top();
 
-            bytecode::GlobalIID(frame.header().fn_id, self.interpreter.iid)
+            bytecode::GlobalIID(frame.header().fnid, self.interpreter.iid)
         }
 
         pub fn sink(&self) -> &[InterpreterValue] {
@@ -1511,23 +1532,8 @@ pub mod debugger {
                 .interpreter
                 .data
                 .nth_frame(self.interpreter.data.len() - frame_ndx - 1);
-            let fnid = frame.header().fn_id;
-
-            let iid = if frame_ndx == 0 {
-                // Top frame
-                self.interpreter.iid
-            } else {
-                frame
-                    .return_target()
-                    .expect("non-top stack frame has no return target!")
-                    .0
-            };
-
-            // For the top frame: `iid` is the instruction to *resume* to.
-            // For other frames: `iid` is the instruction to *return* to.
-            // In either case: we actually want the instruction we suspended/called at,
-            // which is the previous one.
-
+            let fnid = frame.header().fnid;
+            let iid = frame.header().iid;
             bytecode::GlobalIID(fnid, iid)
         }
 
