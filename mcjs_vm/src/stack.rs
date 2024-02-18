@@ -10,7 +10,7 @@ pub struct InterpreterData {
     values: Vec<Slot>,
 
     // TODO Make tests work without this hack
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debugger"))]
     sink: Vec<Value>,
 }
 
@@ -81,7 +81,7 @@ impl InterpreterData {
             headers: Vec::with_capacity(Self::INIT_CAPACITY),
             values: Vec::with_capacity(Self::INIT_CAPACITY),
 
-            #[cfg(test)]
+            #[cfg(any(test, feature = "debugger"))]
             sink: Vec::new(),
         }
     }
@@ -188,9 +188,15 @@ impl InterpreterData {
         self.sink.push(value)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "debugger"))]
     pub(crate) fn sink(&self) -> &[Value] {
         &self.sink
+    }
+
+    pub(crate) fn truncate(&mut self, new_len: usize) {
+        assert!(new_len <= self.headers.len());
+        self.headers.truncate(new_len);
+        self.check_invariants();
     }
 }
 

@@ -305,7 +305,7 @@ impl<'a> Interpreter<'a> {
     ///     again via the Output::Suspended variant; then it can be run again or dropped
     ///     (destroyed).
     pub fn run(mut self) -> InterpreterResult<'a, Exit<'a>> {
-        assert_eq!(self.data.len(), 1);
+        assert!(self.data.len() >= 1);
 
         let res = run_frame(
             &mut self.data,
@@ -375,7 +375,7 @@ fn init_stack(
 /// Before/after each call, `data` must hold/holds the interpreter's state in
 /// enough detail that this function can resume execution even across separate
 /// calls.
-/// 
+///
 /// This function assumes that the stack frame has already been set up
 /// beforehand, but will pop it before returning successfully. When returning
 /// due to failure/suspend, the stack frame stays there, to allow for resuming.
@@ -424,72 +424,112 @@ fn run_frame<'a>(
     assert!(data.len() >= 1);
     assert!(stack_level <= data.len() - 1);
 
+    let t = crate::tracing::section("run_frame");
+
     let mut cur_exc = None;
 
-    if stack_level < data.len() - 1 {
-        // We're not the top of the stack, which means we're suspended waiting for a called function.
-        // Keep running code until it's our turn.
-        let res = run_frame(
-            data,
-            realm,
-            loader,
-            stack_level + 1,
-            #[cfg(feature = "debugger")]
-            dbg,
-        );
+    t.log("stack_level", &format!("{}/{}", stack_level, data.len()));
 
-        // unblocked, let's proceed
-        match res {
-            Ok(ret_val) => {
-                if let Some(rv_reg) = data.top_mut().take_return_target() {
-                    data.top_mut().set_result(rv_reg, ret_val);
+    loop {
+        let err = if stack_level < data.len() - 1 {
+            t.log("loop", "climbing stack");
+
+            // We're not the top of the stack, which means we're suspended waiting for a called function.
+            // Keep running code until it's our turn.
+            let res = run_frame(
+                data,
+                realm,
+                loader,
+                stack_level + 1,
+                #[cfg(feature = "debugger")]
+                dbg,
+            );
+
+            match res {
+                Ok(ret_val) => {
+                    t.log("returned", "after climbing the stack");
+                    if let Some(rv_reg) = data.top_mut().take_return_target() {
+                        data.top_mut().set_result(rv_reg, ret_val);
+                    }
+                    continue;
                 }
+                Err(err) => err,
             }
-            Err(RunError::Exception(exc)) => {
-                cur_exc = Some(exc);
+        } else {
+            let loop_header = format!(
+                "regular execution {:?}{:?}",
+                data.top().header().fnid,
+                data.top().header().iid,
+            );
+            t.log("loop", &loop_header);
+
+            let res = run_regular(
+                data,
+                realm,
+                loader,
+                stack_level,
+                cur_exc.unwrap_or(Value::Undefined),
+                #[cfg(feature = "debugger")]
+                dbg,
+            );
+
+            match res {
+                Ok(ret_val) => {
+                    t.log("returned", "regularly");
+                    data.pop();
+                    return Ok(ret_val);
+                }
+                Err(err) => err,
             }
-            Err(_) => return res,
-        }
-    }
+        };
 
-    assert_eq!(stack_level, data.len() - 1);
+        match err {
+            RunError::Exception(exc) => {
+                t.log("returned", &format!("exception thrown: {:?}", exc));
 
-    let return_value = loop {
-        let res = run_regular(
-            data,
-            realm,
-            loader,
-            stack_level,
-            cur_exc.unwrap_or(Value::Undefined),
-            #[cfg(feature = "debugger")]
-            dbg,
-        );
-
-        match res {
-            Ok(ret_val) => {
-                break ret_val;
-            }
-            Err(RunError::Exception(exc)) => {
                 if let Some(handler_iid) = data.top_mut().pop_exc_handler() {
+                    t.log(
+                        "exception handling",
+                        &format!("internally @ {:?}", handler_iid),
+                    );
+
+                    // Cut the stack short to here, because we left it up in the 'else' clause
+                    data.truncate(stack_level + 1);
+
                     cur_exc = Some(exc);
                     data.top_mut().set_resume_iid(handler_iid);
                     // loop back; next call to run_regular will handle the
                     // exception
                 } else {
                     // no handler, let the caller do something about it
-                    return res;
+                    t.log("exception handling", "unwinding");
+
+                    data.pop();
+                    // Keep the frame around until we figure out who is going to
+                    // handle it. This way, if the exception bubbles up
+                    // unhandled all the way to the top, the debugger can still
+                    // examine the stack
+                    return Err(err);
                 }
             }
 
-            Err(RunError::Internal(_) | RunError::Suspended) => return res,
-        }
-    };
+            RunError::Internal(_) => {
+                t.log("returned", "due to internal error");
+                // data.pop();
+                return Err(err);
+            }
 
-    data.pop();
-    Ok(return_value)
+            // Keep the stack around in this case
+            RunError::Suspended => {
+                t.log("returned", "suspending");
+                return Err(err);
+            }
+        }
+    }
 }
 
 type RunResult<T> = std::result::Result<T, RunError>;
+#[derive(Debug)]
 enum RunError {
     Exception(Value),
     Suspended,
@@ -511,10 +551,12 @@ fn run_regular<'a>(
 
     #[cfg(feature = "debugger")] dbg: &'a mut debugger::InterpreterState,
 ) -> RunResult<Value> {
-    let fnid = data.top().header().fnid;
-    let mut iid = data.top().header().iid;
-
     'reborrow: loop {
+        // Reload the func and instr IID and locate the function. Keep it around
+        // until we need to suspend and resume our burrow (e.g. across a call to
+        // run_frame)
+        let fnid = data.top().header().fnid;
+        let mut iid = data.top().header().iid;
         let func = loader.get_function(fnid).unwrap();
 
         loop {
@@ -527,19 +569,6 @@ fn run_regular<'a>(
                 // Bytecode "finished" => Implicitly return undefined
                 return Ok(Value::Undefined);
             }
-
-            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
-            #[cfg(feature = "debugger")]
-            {
-                let giid = bytecode::GlobalIID(fnid, iid);
-                let out_of_fuel = dbg.consume_1_fuel();
-                if out_of_fuel || dbg.is_breakpoint_at(&giid) {
-                    // Important: "commit" the IID to the stack so that debugging tools can see the correct IID!
-                    data.top_mut().set_resume_iid(iid);
-                    return Err(RunError::Suspended);
-                }
-            }
-
             let instr = func.instrs()[iid.0 as usize];
             let mut next_ndx = iid.0 + 1;
 
@@ -687,17 +716,21 @@ fn run_regular<'a>(
                                 (_, other) => other,
                             };
 
-                            let call_meta = stack::CallMeta {
+                            // Only used if we re-enter run_internal via suspend+resume
+                            data.top_mut().set_return_target(*return_value_reg);
+
+                            // Commit the IID that we want to return to before
+                            // calling run_frame to properly resume, either
+                            // "from the top" (run_frame returns) or "from the
+                            // bottom" (stack rebuilt by run_frame)
+                            data.top_mut().set_resume_iid(return_to_iid);
+
+                            data.push(stack::CallMeta {
                                 fnid: closure.fnid,
                                 n_regs: callee_func.n_regs() as u32,
                                 captures: &closure.upvalues,
                                 this,
-                            };
-
-                            // Only used if we re-enter run_internal via suspend+resume
-                            data.top_mut().set_return_target(*return_value_reg);
-
-                            data.push(call_meta);
+                            });
                             for (i, arg) in arg_vals.into_iter().enumerate() {
                                 data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
                             }
@@ -706,7 +739,6 @@ fn run_regular<'a>(
                             // RefCell via ReadGuard::drop), so that we can
                             // re-borrow for run_frame
                             drop(ho_ref);
-
                             let ret_val = run_frame(
                                 data,
                                 realm,
@@ -716,11 +748,11 @@ fn run_regular<'a>(
                                 dbg,
                             )?;
 
+                            assert_eq!(stack_level, data.len() - 1);
                             if let Some(rv_reg) = data.top_mut().take_return_target() {
                                 data.top_mut().set_result(rv_reg, ret_val);
                             }
 
-                            iid = return_to_iid;
                             continue 'reborrow;
                         }
                         Closure::Native(nf) => {
@@ -916,6 +948,9 @@ fn run_regular<'a>(
                         .load_import(&module_path, Some(import_site))
                         .with_context(error!("while trying to import '{}'", module_path))?;
 
+                    // Commit before reborrowing
+                    data.top_mut().set_resume_iid(bytecode::IID(iid.0 + 1));
+
                     if let Some(module_oid) = realm.module_objs.get(&root_fnid.0) {
                         data.top_mut().set_result(*dest, Value::Object(*module_oid));
                     } else {
@@ -944,7 +979,6 @@ fn run_regular<'a>(
                     // mut-borrows the whole Loader, so the compiler can't prove
                     // that the same FnId won't correspond to a different
                     // function or even stay valid across the call)
-                    iid = bytecode::IID(iid.0 + 1);
                     continue 'reborrow;
                 }
 
@@ -1060,6 +1094,22 @@ fn run_regular<'a>(
 
             // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
             iid.0 = next_ndx;
+
+            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+            #[cfg(feature = "debugger")]
+            {
+                let giid = bytecode::GlobalIID(fnid, iid);
+                let out_of_fuel = dbg.consume_1_fuel();
+                if out_of_fuel || dbg.is_breakpoint_at(&giid) {
+                    // Important: Commit a pre-increased IID before suspending,
+                    // so that:
+                    //  1. debugging tools can see the correct IID
+                    //  2. cycling suspend/resume (which is what "NEXT" is in
+                    //     the debugger) won't be an infinite loop.
+                    data.top_mut().set_resume_iid(iid);
+                    return Err(RunError::Suspended);
+                }
+            }
         }
     }
 }
@@ -1392,11 +1442,11 @@ pub mod debugger {
         pub fn giid(&self) -> bytecode::GlobalIID {
             let frame = self.interpreter.data.top();
 
-            bytecode::GlobalIID(frame.header().fnid, self.interpreter.iid)
+            bytecode::GlobalIID(frame.header().fnid, frame.header().iid)
         }
 
         pub fn sink(&self) -> &[InterpreterValue] {
-            self.interpreter.sink.as_slice()
+            self.interpreter.data.sink()
         }
 
         pub fn set_fuel(&mut self, fuel: Fuel) {
@@ -2220,6 +2270,23 @@ mod tests {
         );
 
         assert_eq!(&output.sink, &[Some(Literal::Bool(true))]);
+    }
+
+    #[test]
+    fn test_unwinding_on_exception() {
+        let output = quick_run(
+            r#"
+                try {
+                    (function() {
+                        throw 42;
+                    })()
+                } catch (e) {
+                    sink(e);
+                }
+            "#,
+        );
+
+        assert_eq!(&output.sink, &[Some(Literal::Number(42.0))]);
     }
 
     #[test]
