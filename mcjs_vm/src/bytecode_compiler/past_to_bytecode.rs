@@ -377,9 +377,12 @@ fn compile_expr(
                 swc_ecma_ast::UnaryOp::TypeOf => {
                     fnb.emit(Instr::TypeOf { dest, arg: dest });
                 }
-                swc_ecma_ast::UnaryOp::Tilde
-                | swc_ecma_ast::UnaryOp::Void
-                | swc_ecma_ast::UnaryOp::Delete => panic!("unsupported unary op: {:?}", op),
+                swc_ecma_ast::UnaryOp::Void => {
+                    fnb.emit(Instr::LoadUndefined(dest));
+                }
+                swc_ecma_ast::UnaryOp::Tilde | swc_ecma_ast::UnaryOp::Delete => {
+                    panic!("unsupported unary op: {:?}", op)
+                }
             }
             dest
         }
