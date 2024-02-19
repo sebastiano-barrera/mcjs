@@ -173,10 +173,6 @@ impl eframe::App for AppData {
             });
 
             let probe = self.si.probe_mut().unwrap();
-            let status_text = format!("suspended at {:?}", probe.giid());
-
-            ui.separator();
-            ui.label(status_text);
 
             ui.separator();
             ui.label("Double click on a <source code range> to set a breakpoint");
@@ -225,8 +221,19 @@ impl eframe::App for AppData {
             .show(ctx, |ui| {
                 let probe = self.si.probe_mut().unwrap();
 
-                let frame = probe.frames().nth(self.frame_ndx).unwrap();
+                if self.frame_ndx >= probe.frames().len() {
+                    // invalid frame ndx
+                    if self.frame_ndx == 0 {
+                        ui.label("Stack frame empty.  This normally happens when an exception goes completely unhandled.");
+                    } else {
+                        ui.label(&format!("No stack frame at index {}", self.frame_ndx));
+                    }
+
+                    return;
+                }
+
                 let vm_giid = probe.frame_giid(self.frame_ndx);
+
                 let fnid = vm_giid.0;
                 let func = probe.loader().get_function(fnid).unwrap();
 
@@ -271,6 +278,7 @@ impl eframe::App for AppData {
                                     ui.label(" >> ");
                                 }
 
+                                let frame = probe.frames().nth(self.frame_ndx).unwrap();
                                 let res = instr_view::InstrView {
                                     instr,
                                     frame: &frame,
@@ -998,6 +1006,13 @@ mod source_code_view {
         response: &Response,
         fonts: &egui::epaint::Fonts,
     ) {
+        if probe.frames().len() == 0 {
+            // stack empty, just reset the whole thing
+            cache.main = None;
+            cache.focus = None;
+            return;
+        }
+
         let giid = probe.giid();
         let fnid = giid.0;
 
