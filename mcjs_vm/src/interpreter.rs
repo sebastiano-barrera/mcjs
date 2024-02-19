@@ -2290,6 +2290,15 @@ mod tests {
     }
 
     #[test]
+    fn test_void_operator() {
+        let output = quick_run("sink(123); sink(void 123);");
+        assert_eq!(
+            &output.sink,
+            &[Some(Literal::Number(123.0)), Some(Literal::Undefined)]
+        );
+    }
+
+    #[test]
     fn test_eval_completion_value() {
         let output = quick_run("sink(eval('11'))");
         assert_eq!(&output.sink, &[Some(Literal::Number(11.0))]);
