@@ -505,10 +505,6 @@ fn run_frame<'a>(
                     t.log("exception handling", "unwinding");
 
                     data.pop();
-                    // Keep the frame around until we figure out who is going to
-                    // handle it. This way, if the exception bubbles up
-                    // unhandled all the way to the top, the debugger can still
-                    // examine the stack
                     return Err(err);
                 }
             }
@@ -1062,7 +1058,13 @@ fn run_regular<'a>(
 
                             // Duplicate with the Instr::Throw implementation. Not sure how to improve.
                             let exc = Value::Object(exc_oid);
-                            return Err(RunError::Exception(exc));
+                            throw_exc(
+                                data,
+                                exc,
+                                iid,
+                                #[cfg(feature = "debugger")]
+                                dbg,
+                            )?;
                         }
                         Some(value) => {
                             data.top_mut().set_result(*dest, value);
@@ -1082,7 +1084,14 @@ fn run_regular<'a>(
                 }
                 Instr::Throw(exc) => {
                     let exc = get_operand(data, *exc)?;
-                    return Err(RunError::Exception(exc));
+
+                    throw_exc(
+                        data,
+                        exc,
+                        iid,
+                        #[cfg(feature = "debugger")]
+                        dbg,
+                    )?;
                 }
                 Instr::PopExcHandler => {
                     data.top_mut()
@@ -1112,6 +1121,24 @@ fn run_regular<'a>(
             }
         }
     }
+}
+
+fn throw_exc(
+    data: &mut stack::InterpreterData,
+    exc: Value,
+    iid: bytecode::IID,
+    #[cfg(feature = "debugger")] dbg: &mut debugger::InterpreterState,
+) -> RunResult<()> {
+    #[cfg(feature = "debugger")]
+    if dbg.should_break_on_throw()
+        || (dbg.should_break_on_unhandled_throw() && !data.any_exception_handler())
+    {
+        // Save the IID so that execution can resume correctly afterwards
+        data.top_mut().set_resume_iid(iid);
+        return Err(RunError::Suspended);
+    }
+
+    Err(RunError::Exception(exc))
 }
 
 // TODO(cleanup) inline this function? It now adds nothing
@@ -1594,6 +1621,20 @@ pub mod debugger {
                 .get(obj_id)
                 .map(|hocell| hocell.borrow())
         }
+
+        pub fn break_on_throw(&mut self) -> bool {
+            self.interpreter.dbg.break_on_throw
+        }
+        pub fn set_break_on_throw(&mut self, value: bool) {
+            self.interpreter.dbg.break_on_throw = value;
+        }
+
+        pub fn break_on_unhandled_throw(&mut self) -> bool {
+            self.interpreter.dbg.break_on_unhandled_throw
+        }
+        pub fn set_break_on_unhandled_throw(&mut self, value: bool) {
+            self.interpreter.dbg.break_on_unhandled_throw = value;
+        }
     }
 
     /// Extra stuff that is debugging-specific and added to the intepreter.
@@ -1613,6 +1654,15 @@ pub mod debugger {
         ///
         /// See the type, `Fuel`.
         fuel: Fuel,
+
+        /// If true, the interpreter will suspend right after an unhandled
+        /// exception is thrown, but before the stack is unwound in the attempt
+        /// to handle it.   This is useful to look at the interpreter's state
+        /// before it gets completely undone after the handling attempt.
+        break_on_unhandled_throw: bool,
+
+        /// If true, the interpreter will suspend upon reaching any `Instr::Throw`.
+        break_on_throw: bool,
     }
 
     // There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
@@ -1629,6 +1679,8 @@ pub mod debugger {
                 instr_bkpts: HashMap::new(),
                 source_bkpts: HashMap::new(),
                 fuel: Fuel::Unlimited,
+                break_on_unhandled_throw: false,
+                break_on_throw: false,
             }
         }
 
@@ -1651,6 +1703,14 @@ pub mod debugger {
 
         pub fn is_breakpoint_at(&self, giid: &bytecode::GlobalIID) -> bool {
             self.instr_bkpts.contains_key(giid)
+        }
+
+        pub(crate) fn should_break_on_unhandled_throw(&self) -> bool {
+            self.break_on_unhandled_throw
+        }
+
+        pub(crate) fn should_break_on_throw(&self) -> bool {
+            self.break_on_throw
         }
     }
 }

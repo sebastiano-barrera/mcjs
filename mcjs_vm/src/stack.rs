@@ -198,6 +198,11 @@ impl InterpreterData {
         self.headers.truncate(new_len);
         self.check_invariants();
     }
+
+    #[cfg(feature = "debugger")]
+    pub(crate) fn any_exception_handler(&self) -> bool {
+        self.headers.iter().any(|hdr| !hdr.exc_handlers.is_empty())
+    }
 }
 
 pub struct Frame<'a> {

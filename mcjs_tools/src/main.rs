@@ -172,10 +172,26 @@ impl eframe::App for AppData {
                 ui.label(text);
             });
 
-            let probe = self.si.probe_mut().unwrap();
+            let mut probe = self.si.probe_mut().unwrap();
 
             ui.separator();
             ui.label("Double click on a <source code range> to set a breakpoint");
+
+            {
+                let mut value = probe.break_on_throw();
+                let res = ui.checkbox(&mut value, "Break on throw");
+                if res.changed() {
+                    probe.set_break_on_throw(value);
+                }
+            }
+
+            {
+                let mut value = probe.break_on_unhandled_throw();
+                let res = ui.checkbox(&mut value, "Break on unhandled throw");
+                if res.changed() {
+                    probe.set_break_on_unhandled_throw(value);
+                }
+            }
 
             ui.heading("SOURCE BREAKPOINTS");
             let loader = probe.loader();
