@@ -227,13 +227,16 @@ pub struct FinishedData {
 
 pub enum Exit<'a> {
     Finished(FinishedData),
-    Suspended(Interpreter<'a>),
+    Suspended {
+        interpreter: Interpreter<'a>,
+        cause: SuspendCause,
+    },
 }
 impl<'a> Exit<'a> {
     pub fn expect_finished(self) -> FinishedData {
         match self {
             Exit::Finished(fd) => fd,
-            Exit::Suspended(_) => {
+            Exit::Suspended { .. } => {
                 panic!("interpreter was interrupted, while it was expected to finish")
             }
         }
@@ -345,7 +348,10 @@ impl<'a> Interpreter<'a> {
                 error: common_err,
                 interpreter: self,
             }),
-            Err(RunError::Suspended) => Ok(Exit::Suspended(self)),
+            Err(RunError::Suspended(cause)) => Ok(Exit::Suspended {
+                interpreter: self,
+                cause,
+            }),
         }
     }
 }
@@ -516,8 +522,8 @@ fn run_frame<'a>(
             }
 
             // Keep the stack around in this case
-            RunError::Suspended => {
-                t.log("returned", "suspending");
+            RunError::Suspended(ref cause) => {
+                t.log("returned", &format!("suspending due to {:?}", cause));
                 return Err(err);
             }
         }
@@ -528,13 +534,19 @@ type RunResult<T> = std::result::Result<T, RunError>;
 #[derive(Debug)]
 enum RunError {
     Exception(Value),
-    Suspended,
+    Suspended(SuspendCause),
     Internal(common::Error),
 }
 impl From<common::Error> for RunError {
     fn from(err: common::Error) -> Self {
         RunError::Internal(err)
     }
+}
+
+#[derive(Debug)]
+pub enum SuspendCause {
+    Breakpoint,
+    Exception(Value),
 }
 
 fn run_regular<'a>(
@@ -1076,7 +1088,7 @@ fn run_regular<'a>(
                     // We must set the 'return-to' IID now, or the Interpreter will be back here on resume,
                     // in an infinite loop.
                     data.top_mut().set_resume_iid(bytecode::IID(next_ndx));
-                    return Err(RunError::Suspended);
+                    return Err(RunError::Suspended(SuspendCause::Breakpoint));
                 }
 
                 Instr::GetCurrentException(dest) => {
@@ -1116,7 +1128,7 @@ fn run_regular<'a>(
                     //  2. cycling suspend/resume (which is what "NEXT" is in
                     //     the debugger) won't be an infinite loop.
                     data.top_mut().set_resume_iid(iid);
-                    return Err(RunError::Suspended);
+                    return Err(RunError::Suspended(SuspendCause::Breakpoint));
                 }
             }
         }
@@ -1135,7 +1147,7 @@ fn throw_exc(
     {
         // Save the IID so that execution can resume correctly afterwards
         data.top_mut().set_resume_iid(iid);
-        return Err(RunError::Suspended);
+        return Err(RunError::Suspended(SuspendCause::Exception(exc)));
     }
 
     Err(RunError::Exception(exc))
@@ -1426,6 +1438,7 @@ pub mod debugger {
 
     pub use crate::loader::BreakRangeID;
     pub use heap::{IndexOrKey, Object, ObjectId};
+    pub use super::SuspendCause;
 
     /// The only real entry point to all the debugging features present in the
     /// Interpreter.

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -163,11 +164,14 @@ impl eframe::App for AppData {
 
             ui.horizontal(|ui| {
                 ui.label("State:");
-                let text = match self.si.state_mut() {
-                    State::Ready => "Ready",
-                    State::Finished => "Finished",
-                    State::Suspended(_) => "Suspended",
-                    State::Failed(_) => "Failed",
+                let text: Cow<str> = match self.si.state_mut() {
+                    State::Ready => "Ready".into(),
+                    State::Finished => "Finished".into(),
+                    State::Suspended {
+                        interpreter: _,
+                        cause,
+                    } => format!("Suspended due to {:?}", cause).into(),
+                    State::Failed(_) => "Failed".into(),
                 };
                 ui.label(text);
             });
@@ -1179,8 +1183,8 @@ mod interpreter_manager {
     use std::path::PathBuf;
     use std::pin::Pin;
 
-    use mcjs_vm::interpreter::debugger::{BreakpointError, Probe};
     use mcjs_vm::{
+        interpreter::debugger::{BreakpointError, Probe, SuspendCause},
         interpreter::{Exit, InterpreterError},
         BreakRangeID, FnId, GlobalIID, Interpreter, Loader, Realm,
     };
@@ -1213,7 +1217,10 @@ mod interpreter_manager {
 
         /// Finished successfully. Won't proceed to any other state.
         Finished,
-        Suspended(Interpreter<'a>),
+        Suspended {
+            interpreter: Interpreter<'a>,
+            cause: SuspendCause,
+        },
         Failed(Error<'a>),
     }
 
@@ -1372,7 +1379,9 @@ mod interpreter_manager {
 
         fn interpreter_mut(&mut self) -> Option<&mut Interpreter<'static>> {
             match &mut self.state {
-                State::Suspended(intrp) => Some(intrp),
+                State::Suspended {
+                    interpreter: intrp, ..
+                } => Some(intrp),
                 _ => None,
             }
         }
@@ -1405,13 +1414,19 @@ mod interpreter_manager {
                     if !all_ok {
                         eprintln!("warning: not all breakpoints could be restored after restart");
                     }
-                    State::Suspended(intrp)
+                    State::Suspended {
+                        interpreter: intrp,
+                        // just a little white lie
+                        cause: SuspendCause::Breakpoint,
+                    }
                 }
                 cur @ State::Failed(_) | cur @ State::Finished => {
                     // nothing  to do
                     cur
                 }
-                State::Suspended(intrp) => match intrp.run() {
+                State::Suspended {
+                    interpreter: intrp, ..
+                } => match intrp.run() {
                     Ok(exit) => match exit {
                         Exit::Finished(_) => {
                             self_.n_scripts_done += 1;
@@ -1424,7 +1439,9 @@ mod interpreter_manager {
                                 Ordering::Greater => panic!("assertion failed"),
                             }
                         }
-                        Exit::Suspended(new_intrp) => State::Suspended(new_intrp),
+                        Exit::Suspended { interpreter, cause } => {
+                            State::Suspended { interpreter, cause }
+                        }
                     },
                     Err(err) => State::Failed(Error::Interpreter(err)),
                 },
@@ -1435,7 +1452,7 @@ mod interpreter_manager {
             // Safe because the Probe allows mutating the Interpreter
             // or accessing the Loader and/or Realm read-only (as &T)
             match self.state_mut() {
-                State::Suspended(intrp) => Some(Probe::attach(intrp)),
+                State::Suspended { interpreter, .. } => Some(Probe::attach(interpreter)),
                 State::Failed(Error::Interpreter(intrp_err)) => Some(intrp_err.probe()),
                 _ => None,
             }
@@ -1443,7 +1460,7 @@ mod interpreter_manager {
 
         pub fn error_message(self: &mut Pin<Box<Self>>) -> Option<String> {
             match self.state_mut() {
-                State::Suspended(_) => None,
+                State::Suspended { .. } => None,
                 State::Failed(Error::Interpreter(intrp_err)) => {
                     Some(format!("{:?}", intrp_err.error))
                 }
