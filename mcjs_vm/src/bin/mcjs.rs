@@ -82,7 +82,7 @@ fn run_to_completion(mut intrp: Interpreter<'_>) {
     loop {
         match intrp.run().expect("runtime error") {
             Exit::Finished(_) => break,
-            Exit::Suspended(next_intrp) => {
+            Exit::Suspended { interpreter: next_intrp, .. } => {
                 intrp = next_intrp;
             }
         }

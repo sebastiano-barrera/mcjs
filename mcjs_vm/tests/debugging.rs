@@ -31,7 +31,7 @@ foo();
 
     let mut interpreter = match exit {
         Exit::Finished(_) => panic!("finished instead of interrupting"),
-        Exit::Suspended(intrp) => intrp,
+        Exit::Suspended { interpreter: intrp, .. } => intrp,
     };
 
     {
@@ -89,7 +89,7 @@ fn test_pos_breakpoint() {
 
         interpreter = match interpreter.run().expect("interpreter failed") {
             Exit::Finished(_) => panic!("interpreter finished instead of breaking"),
-            Exit::Suspended(intrp) => intrp,
+            Exit::Suspended { interpreter: intrp, .. } => intrp,
         };
 
         let probe = Probe::attach(&mut interpreter);
