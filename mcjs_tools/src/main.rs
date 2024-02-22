@@ -672,6 +672,7 @@ mod instr_view {
         operands: [OperandDescriptor; Self::MAX_OPERANDS],
     }
     #[derive(Clone, Copy)]
+    #[allow(clippy::upper_case_acronyms)]
     enum OperandDescriptor {
         None,
         Description(&'static str),
@@ -836,37 +837,37 @@ mod object_view {
                     }
                 });
 
-                self.show_attributes(ui, probe, self.obj_id);
+                show_object_attributes(ui, probe, self.obj_id);
             });
         }
+    }
 
-        fn show_attributes(&mut self, ui: &mut egui::Ui, probe: &Probe, obj_id: ObjectId) {
-            use mcjs_vm::interpreter::debugger::{IndexOrKey, Object};
-            use mcjs_vm::interpreter::Value as InterpreterValue;
+    fn show_object_attributes(ui: &mut egui::Ui, probe: &Probe, obj_id: ObjectId) {
+        use mcjs_vm::interpreter::debugger::{IndexOrKey, Object};
+        use mcjs_vm::interpreter::Value as InterpreterValue;
 
-            let obj = probe.get_object(obj_id).unwrap();
-            // TODO Inefficient!
-            let props = obj.own_properties();
+        let obj = probe.get_object(obj_id).unwrap();
+        // TODO Inefficient!
+        let props = obj.own_properties();
 
-            for prop in props {
-                let value = obj
-                    .get_own_element_or_property(IndexOrKey::Key(&prop))
-                    .unwrap();
+        for prop in props {
+            let value = obj
+                .get_own_element_or_property(IndexOrKey::Key(&prop))
+                .unwrap();
 
-                match value {
-                    InterpreterValue::Object(obj_id) => {
-                        let header = format!(
-                            "{} = {}",
-                            prop,
-                            short_text_for_object(probe, obj_id).unwrap_or("<object>".into())
-                        );
-                        ui.collapsing(header, |ui| {
-                            self.show_attributes(ui, probe, obj_id);
-                        });
-                    }
-                    _ => {
-                        ui.label(format!("{} = {:?}", prop, value));
-                    }
+            match value {
+                InterpreterValue::Object(obj_id) => {
+                    let header = format!(
+                        "{} = {}",
+                        prop,
+                        short_text_for_object(probe, obj_id).unwrap_or("<object>".into())
+                    );
+                    ui.collapsing(header, |ui| {
+                        show_object_attributes(ui, probe, obj_id);
+                    });
+                }
+                _ => {
+                    ui.label(format!("{} = {:?}", prop, value));
                 }
             }
         }
@@ -1326,7 +1327,7 @@ mod interpreter_manager {
                 init.instr_bkpts.push(bytecode::GlobalIID(fnid, iid));
             }
 
-            let state = if scripts.len() == 0 {
+            let state = if scripts.is_empty() {
                 State::Finished
             } else {
                 State::Ready {
@@ -1439,7 +1440,7 @@ mod interpreter_manager {
             &self.cause
         }
 
-        pub fn probe_mut<'a>(&'a mut self) -> Probe<'a, 'static> {
+        pub fn probe_mut(&mut self) -> Probe<'_, 'static> {
             self.si.probe()
         }
     }
@@ -1511,7 +1512,7 @@ mod interpreter_manager {
                 }
             }
 
-            pub(super) fn probe<'a>(&'a mut self) -> Probe<'a, 'static> {
+            pub(super) fn probe(&mut self) -> Probe<'_, 'static> {
                 Probe::attach(&mut self.interpreter)
             }
 
