@@ -52,7 +52,6 @@ fn parse_args() -> Result<interpreter_manager::Params> {
 struct AppData {
     params: interpreter_manager::Params,
     mgr: interpreter_manager::Manager,
-    recent_state_change: bool,
     source_code_view: source_code_view::Cache,
     frame_ndx: usize,
     highlight: instr_view::Highlighted,
@@ -65,7 +64,6 @@ impl AppData {
         let mut app = AppData {
             params,
             mgr,
-            recent_state_change: false,
             source_code_view: Default::default(),
             frame_ndx: 0,
             highlight: Default::default(),
@@ -93,9 +91,6 @@ impl AppData {
 impl eframe::App for AppData {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use interpreter_manager::State;
-
-        let recent_state_change = self.recent_state_change;
-        self.recent_state_change = false;
 
         enum Action {
             Next,
@@ -296,7 +291,7 @@ impl eframe::App for AppData {
                                 clicked_obj_id = clicked_obj_id.or(res.clicked_obj_id);
                             });
 
-                            if recent_state_change && is_current {
+                            if is_current {
                                 res.response.scroll_to_me(None);
                             }
                         }
@@ -332,19 +327,16 @@ impl eframe::App for AppData {
                 let mut probe = suspended_state.probe_mut();
                 probe.set_fuel(Fuel::Limited(1));
                 self.resume();
-                self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
             Action::Continue => {
                 self.resume();
-                self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
             Action::Restart => {
                 self.mgr = interpreter_manager::Manager::new(&self.params)
                     .expect("could not create interpreter");
                 self.resume();
-                self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
             Action::SetStackFrame { index } => {
@@ -1240,6 +1232,8 @@ mod interpreter_manager {
     struct InterpreterInit {
         instr_bkpts: Vec<GlobalIID>,
         source_bkpts: Vec<BreakRangeID>,
+        break_on_throw: bool,
+        break_on_unhandled_throw: bool,
     }
 
     impl InterpreterInit {
@@ -1258,6 +1252,9 @@ mod interpreter_manager {
                 let res = probe.set_source_breakpoint(*brange_id);
                 check_breakpoint_result(res);
             }
+
+            probe.set_break_on_throw(self.break_on_throw);
+            probe.set_break_on_unhandled_throw(self.break_on_unhandled_throw);
         }
     }
 
