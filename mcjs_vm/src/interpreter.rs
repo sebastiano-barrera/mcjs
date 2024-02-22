@@ -253,6 +253,7 @@ struct Jitting {
 
 impl<'a> Interpreter<'a> {
     pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
+        #[allow(clippy::let_unit_value)]
         let opts = Default::default();
         Self::with_options(opts, realm, loader, fnid)
     }
@@ -308,12 +309,12 @@ impl<'a> Interpreter<'a> {
     ///     again via the Output::Suspended variant; then it can be run again or dropped
     ///     (destroyed).
     pub fn run(mut self) -> InterpreterResult<'a, Exit<'a>> {
-        assert!(self.data.len() >= 1);
+        assert!(!self.data.is_empty());
 
         let res = run_frame(
             &mut self.data,
-            &mut self.realm,
-            &mut self.loader,
+            self.realm,
+            self.loader,
             0,
             #[cfg(feature = "debugger")]
             &mut self.dbg,
@@ -427,9 +428,12 @@ fn run_frame<'a>(
 
     #[cfg(feature = "debugger")] dbg: &'a mut debugger::InterpreterState,
 ) -> RunResult<Value> {
-    assert!(data.len() >= 1);
-    assert!(stack_level <= data.len() - 1);
-
+    #[allow(clippy::len_zero)]
+    {
+        assert!(data.len() > 0);
+        assert!(stack_level < data.len());
+    }
+    
     let t = crate::tracing::section("run_frame");
 
     let mut cur_exc = None;
@@ -1436,9 +1440,9 @@ pub mod debugger {
 
     use super::{Fuel, Interpreter};
 
+    pub use super::SuspendCause;
     pub use crate::loader::BreakRangeID;
     pub use heap::{IndexOrKey, Object, ObjectId};
-    pub use super::SuspendCause;
 
     /// The only real entry point to all the debugging features present in the
     /// Interpreter.
@@ -1687,6 +1691,7 @@ pub mod debugger {
     }
 
     impl InterpreterState {
+        #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             InterpreterState {
                 instr_bkpts: HashMap::new(),

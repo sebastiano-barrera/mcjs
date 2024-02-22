@@ -150,7 +150,7 @@ mod internal {
                     write!(self.buf, "    ").unwrap();
                 }
 
-                write!(self.buf, "{}\n", line).unwrap();
+                writeln!(self.buf, "{}", line).unwrap();
             }
 
             // flush global sink file. inefficient, but tracing is often employed to debug VM
@@ -213,7 +213,7 @@ mod internal {
         fn write(&mut self, data: &str) {
             match self {
                 Sink::File(f) => {
-                    f.write(data.as_bytes()).unwrap();
+                    f.write_all(data.as_bytes()).unwrap();
 
                     // inefficient, but tracing is often employed when the program is crashing. we might be
                     // crashing right after returning from this call, so let's flush immediately.
