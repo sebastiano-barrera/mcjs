@@ -846,8 +846,16 @@ pub fn compile_script(
     // declarations.
     let mut kept_decls = Vec::new();
     for decl in std::mem::take(&mut function.body.decls) {
+        // At the toplevel *of a script*, functions declarations are treated as
+        // non-lexical, so that they can be allocated into globalThis like
+        // variables.
+        let is_lexical = match decl.is_lexical {
+            IsLexical::No | IsLexical::OnlyInStrictMode => false,
+            IsLexical::Yes => true,
+        };
+
         match decl.name {
-            DeclName::Js(name) if !decl.is_lexical.assuming_strictness(strict_mode) => {
+            DeclName::Js(name) if !is_lexical => {
                 function.unbound_names.push(name);
             }
             _ => {

@@ -2266,6 +2266,45 @@ mod tests {
     }
 
     #[test]
+    fn test_script_global_fn_nonstrict() {
+        let output = quick_run(
+            r#"
+            function x() { return 55 }
+            sink(globalThis.x())
+            sink(x())
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Number(55.0)),
+                Some(Literal::Number(55.0)),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_script_global_fn_strict() {
+        let output = quick_run(
+            r#"
+            "use strict";
+            function x() { return 55 }
+            sink(globalThis.x())
+            sink(x())
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Number(55.0)),
+                Some(Literal::Number(55.0)),
+            ],
+        );
+    }
+
+    #[test]
     fn test_constructor_prototype() {
         quick_run(
             r#"
