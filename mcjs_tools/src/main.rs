@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::pin::Pin;
 
 use anyhow::Result;
 use mcjs_vm::interpreter::debugger::ObjectId;
 use mcjs_vm::interpreter::Fuel;
 use mcjs_vm::{bytecode, BreakRangeID, GlobalIID};
+
+use crate::interpreter_manager::SuspendedState;
 
 fn main() {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
@@ -14,11 +15,7 @@ fn main() {
     let params = parse_args().expect("cli error");
     eprintln!("params = {:?}", params);
 
-    let mut si = interpreter_manager::StandaloneInterpreter::new(params)
-        .expect("could not create interpreter");
-    si.resume();
-
-    let app = AppData::new(si);
+    let app = AppData::new(params);
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = native_options
@@ -56,7 +53,8 @@ fn parse_args() -> Result<interpreter_manager::Params> {
 }
 
 struct AppData {
-    si: Pin<Box<interpreter_manager::StandaloneInterpreter>>,
+    params: interpreter_manager::Params,
+    mgr: interpreter_manager::Manager,
     recent_state_change: bool,
     source_code_view: source_code_view::Cache,
     frame_ndx: usize,
@@ -65,9 +63,14 @@ struct AppData {
 }
 
 impl AppData {
-    fn new(si: Pin<Box<interpreter_manager::StandaloneInterpreter>>) -> Self {
+    fn new(params: interpreter_manager::Params) -> Self {
+        let mgr =
+            interpreter_manager::Manager::start(&params).expect("could not create interpreter");
+        // si.resume();
+
         AppData {
-            si,
+            params,
+            mgr,
             recent_state_change: false,
             source_code_view: Default::default(),
             frame_ndx: 0,
@@ -98,24 +101,24 @@ impl eframe::App for AppData {
             SetStackFrame { index: usize },
             SetSourceBreakpoint { brange_id: BreakRangeID },
             SetInstrBreakpoint { giid: GlobalIID },
+            OpenObjectWindow(ObjectId),
         }
 
         let mut action = Action::None;
 
-        match self.si.state_mut() {
-            State::Ready => {
+        let suspended_state = match self.mgr.state_mut() {
+            State::Ready { script_ndx, .. } => {
                 let should_start = egui::CentralPanel::default()
                     .show(ctx, |ui| {
-                        ui.label(format!(
-                            "Ready to proceed with file #{}",
-                            self.si.n_filenames_done()
-                        ));
+                        ui.label(format!("Ready to proceed with file #{}", script_ndx));
                         ui.button("Start").clicked()
                     })
                     .inner;
+
                 if should_start {
-                    self.si.resume();
+                    self.mgr.resume();
                 }
+
                 return;
             }
             State::Finished => {
@@ -124,11 +127,17 @@ impl eframe::App for AppData {
                 });
                 return;
             }
-            _ => {}
+            State::Suspended(suspended_state) => suspended_state,
+            State::Failed(err) => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.label(format!("interpreter failed: {:?}", err));
+                });
+                return;
+            }
         };
 
         {
-            let probe = self.si.probe_mut().unwrap();
+            let probe = suspended_state.probe_mut();
             let mut window_to_close = None;
 
             for (obj_id, obj_win) in self.object_windows.iter_mut() {
@@ -145,10 +154,10 @@ impl eframe::App for AppData {
         }
 
         egui::SidePanel::left("sidebar").show(ctx, |ui| {
-            if let Some(err_message) = self.si.error_message() {
-                ui.heading("interpreter failed");
-                ui.label(&err_message);
-            }
+            // if let Some(err_message) = self.mgr.error_message() {
+            //     ui.heading("interpreter failed");
+            //     ui.label(&err_message);
+            // }
 
             if ui.button("NEXT").clicked() {
                 action = Action::Next;
@@ -164,19 +173,11 @@ impl eframe::App for AppData {
 
             ui.horizontal(|ui| {
                 ui.label("State:");
-                let text: Cow<str> = match self.si.state_mut() {
-                    State::Ready => "Ready".into(),
-                    State::Finished => "Finished".into(),
-                    State::Suspended {
-                        interpreter: _,
-                        cause,
-                    } => format!("Suspended due to {:?}", cause).into(),
-                    State::Failed(_) => "Failed".into(),
-                };
+                let text = format!("Suspended due to {:?}", suspended_state.cause());
                 ui.label(text);
             });
 
-            let mut probe = self.si.probe_mut().unwrap();
+            let mut probe = suspended_state.probe_mut();
 
             ui.separator();
             ui.label("Double click on a <source code range> to set a breakpoint");
@@ -239,7 +240,7 @@ impl eframe::App for AppData {
         egui::SidePanel::left("bytecode")
             .min_width(400.0)
             .show(ctx, |ui| {
-                let probe = self.si.probe_mut().unwrap();
+                let probe = suspended_state.probe_mut();
 
                 if self.frame_ndx >= probe.frames().len() {
                     // invalid frame ndx
@@ -325,14 +326,16 @@ impl eframe::App for AppData {
                 );
 
                 if let Some(obj_id) = clicked_obj_id {
-                    self.open_object_window(obj_id);
+                    action = Action::OpenObjectWindow(obj_id);
                 }
                 if let Some(giid) = bkpt_to_set {
                     action = Action::SetInstrBreakpoint { giid };
                 }
             });
 
-        if let Some(probe) = self.si.probe_mut() {
+        {
+            let probe = suspended_state.probe_mut();
+
             let res = egui::CentralPanel::default()
                 .show(ctx, |ui| source_code_view::show(ui, &self.source_code_view))
                 .inner;
@@ -348,20 +351,20 @@ impl eframe::App for AppData {
         match action {
             Action::None => {}
             Action::Next => {
-                let mut probe = self.si.probe_mut().unwrap();
+                let mut probe = suspended_state.probe_mut();
                 probe.set_fuel(Fuel::Limited(1));
-                self.si.resume();
+                self.mgr.resume();
                 self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
             Action::Continue => {
-                self.si.resume();
+                self.mgr.resume();
                 self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
             Action::Restart => {
-                self.si.restart();
-                self.si.resume();
+                self.mgr = interpreter_manager::Manager::start(&self.params)
+                    .expect("could not create interpreter");
                 self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
@@ -369,10 +372,13 @@ impl eframe::App for AppData {
                 self.frame_ndx = index;
             }
             Action::SetSourceBreakpoint { brange_id } => {
-                self.si.set_source_breakpoint(brange_id);
+                self.mgr.set_source_breakpoint(brange_id);
             }
             Action::SetInstrBreakpoint { giid } => {
-                self.si.set_instr_breakpoint(giid);
+                self.mgr.set_instr_breakpoint(giid);
+            }
+            Action::OpenObjectWindow(obj_id) => {
+                self.open_object_window(obj_id);
             }
         }
     }
@@ -1179,17 +1185,21 @@ mod source_code_view {
 
 mod interpreter_manager {
     use std::cmp::Ordering;
-    use std::marker::PhantomPinned;
     use std::path::PathBuf;
     use std::pin::Pin;
 
     use mcjs_vm::{
-        interpreter::debugger::{BreakpointError, Probe, SuspendCause},
-        interpreter::{Exit, InterpreterError},
+        bytecode,
+        interpreter::{
+            debugger::{BreakpointError, Probe, SuspendCause},
+            InterpreterError,
+        },
         BreakRangeID, FnId, GlobalIID, Interpreter, Loader, Realm,
     };
 
     use anyhow::{anyhow, Result};
+
+    use standalone_interpreter::StandaloneInterpreter;
 
     #[derive(Debug)]
     pub struct Params {
@@ -1199,29 +1209,76 @@ mod interpreter_manager {
 
     #[derive(Debug)]
     pub enum Error<'a> {
+        Load(anyhow::Error),
         Interpreter(InterpreterError<'a>),
     }
 
-    pub struct StandaloneInterpreter {
-        realm: Realm,
-        loader: Loader,
+    //--- TODO This is not really just a StandaloneInterpreter. Split the
+    // StandaloneInterpreter part into its own thing, preferably into its own
+    // module, so that all the unsafe stuff is encapsulated there. Then rename
+    // this into something more apt, and with better state management.
+    pub struct Manager {
+        // Params are stored to allow restart
         scripts: Vec<Script>,
-        n_scripts_done: usize,
-        state: State<'static>,
-        saved_state: DebuggingSave,
-        _pin: PhantomPinned,
+        init: InterpreterInit,
+        state: State,
     }
-    pub enum State<'a> {
-        /// Ready to process the next file in the sequence
-        Ready,
+
+    pub enum State {
+        /// Ready to start the next file in `self.scripts`.
+        Ready {
+            script_ndx: usize,
+            loader: Pin<Box<Loader>>,
+            realm: Pin<Box<Realm>>,
+        },
 
         /// Finished successfully. Won't proceed to any other state.
         Finished,
-        Suspended {
-            interpreter: Interpreter<'a>,
-            cause: SuspendCause,
-        },
-        Failed(Error<'a>),
+
+        Suspended(SuspendedState),
+
+        /// Interpreter has failed with an error.  Ephemeral data structures
+        /// have been torn down, and resuming execution is not possible.
+        Failed(Error<'static>),
+    }
+    /// Interpreter suspended.  The reason for suspending (e.g. a
+    /// breakpoint) is specified by `cause`.
+    pub struct SuspendedState {
+        n_scripts_done: usize,
+        si: StandaloneInterpreter,
+        cause: SuspendCause,
+    }
+
+    /// Parts of the interpreter's state that are set every time a new
+    /// Interpreter is created. (Keep in mind that `Interpreter` is the object
+    /// that tracks the execution along a single script or module loading. It
+    /// gets deleted every time the script or module is finished
+    /// running/loading.)
+    ///
+    /// These include instruction and source breakpoints.
+    #[derive(Default)]
+    struct InterpreterInit {
+        instr_bkpts: Vec<GlobalIID>,
+        source_bkpts: Vec<BreakRangeID>,
+    }
+
+    impl InterpreterInit {
+        /// Restores the state stored in this object into the given Interpreter.
+        ///
+        /// This operation should never fail. (It panics otherwise.)
+        fn restore(&self, intrp: &mut Interpreter) {
+            let mut probe = Probe::attach(intrp);
+
+            for giid in &self.instr_bkpts {
+                let res = probe.set_instr_breakpoint(*giid);
+                check_breakpoint_result(res);
+            }
+
+            for brange_id in &self.source_bkpts {
+                let res = probe.set_source_breakpoint(*brange_id);
+                check_breakpoint_result(res);
+            }
+        }
     }
 
     /// Represents one of the scripts that the interpreter will run.
@@ -1235,60 +1292,6 @@ mod interpreter_manager {
         filename: PathBuf,
         main_fnid: FnId,
     }
-
-    /// Parts of the interpreter's state that are saved and restored across a restart cycle.
-    ///
-    /// These include instruction and source breakpoints.
-    ///
-    /// In broad strokes: this state is saved when calling `StandaloneInterpreter::restart`, and
-    /// restored as soon as a new interpreter is created with the next call to
-    /// `StandaloneInterpreter::next`.
-    #[derive(Default)]
-    struct DebuggingSave {
-        instr_bkpts: Vec<GlobalIID>,
-        source_bkpts: Vec<BreakRangeID>,
-    }
-
-    impl DebuggingSave {
-        /// Restores the state stored in this object into the given Interpreter.
-        ///
-        /// Returns true iff every breakpoint was restored successfully. Check it on
-        /// return!
-        #[must_use]
-        fn restore(&self, intrp: &mut Interpreter) -> bool {
-            let mut all_ok = true;
-            let mut probe = Probe::attach(intrp);
-
-            eprintln!(
-                "restoring: {} instr bkpts, {} source bkpts",
-                self.instr_bkpts.len(),
-                self.source_bkpts.len()
-            );
-
-            for giid in &self.instr_bkpts {
-                let res = probe.set_instr_breakpoint(*giid);
-                match res {
-                    Ok(_) | Err(BreakpointError::AlreadyThere) => {}
-                    Err(_) => {
-                        all_ok = false;
-                    }
-                }
-            }
-
-            for brange_id in &self.source_bkpts {
-                let res = probe.set_source_breakpoint(*brange_id);
-                match res {
-                    Ok(_) | Err(BreakpointError::AlreadyThere) => {}
-                    Err(_) => {
-                        all_ok = false;
-                    }
-                }
-            }
-
-            all_ok
-        }
-    }
-
     impl Script {
         fn read_script(loader: &mut Loader, filename: PathBuf) -> Result<Script> {
             let filename_str = filename.to_string_lossy().into_owned();
@@ -1306,165 +1309,245 @@ mod interpreter_manager {
         }
     }
 
-    impl StandaloneInterpreter {
-        pub fn new(params: Params) -> Result<Pin<Box<StandaloneInterpreter>>> {
-            let mut loader = Loader::new(params.main_directory);
-            let realm = Realm::new(&mut loader);
+    fn check_breakpoint_result<T>(res: Result<T, BreakpointError>) {
+        match res {
+            Ok(_) | Err(BreakpointError::AlreadyThere) => {}
+            Err(err) => panic!("unexpected error while setting breakpoint: {:?}", err),
+        }
+    }
+
+    impl Manager {
+        pub fn start(params: &Params) -> Result<Manager> {
+            let mut loader = Box::pin(Loader::new(params.main_directory.clone()));
+            let realm = Box::pin(Realm::new(&mut loader));
 
             let scripts = params
                 .filenames
-                .into_iter()
-                .map(|filename| Script::read_script(&mut loader, filename))
+                .iter()
+                .map(|filename| Script::read_script(&mut loader, filename.clone()))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let si = StandaloneInterpreter {
-                realm,
-                loader,
-                scripts,
-                n_scripts_done: 0,
-                state: State::Ready,
-                saved_state: DebuggingSave::default(),
-                _pin: PhantomPinned,
+            let mut init = InterpreterInit::default();
+            // Place an instruction breakpoint at the beginning of each script
+            for script in &scripts {
+                let fnid = script.main_fnid;
+                let iid = bytecode::IID(0);
+                init.instr_bkpts.push(bytecode::GlobalIID(fnid, iid));
+            }
+
+            let state = if scripts.len() == 0 {
+                State::Finished
+            } else {
+                State::Ready {
+                    loader,
+                    realm,
+                    script_ndx: 0,
+                }
             };
 
-            Ok(Box::pin(si))
+            Ok(Manager {
+                scripts,
+                init,
+                state,
+            })
         }
 
-        pub fn n_filenames_done(&self) -> usize {
-            self.n_scripts_done
+        pub fn state(&self) -> &State {
+            &self.state
         }
 
-        pub fn state_mut<'a>(self: &'a mut Pin<Box<Self>>) -> &'a mut State<'static> {
-            // Safe because I only return `interpreter`, which is the
-            // part of the struct that doesn't have to stay pinned
-            let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
-            &mut self_.state
+        pub fn state_mut(&mut self) -> &mut State {
+            &mut self.state
         }
 
-        pub fn set_instr_breakpoint(self: &mut Pin<Box<Self>>, giid: GlobalIID) {
-            let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
+        pub fn set_instr_breakpoint(&mut self, giid: GlobalIID) {
+            self.init.instr_bkpts.push(giid);
 
-            self_.saved_state.instr_bkpts.push(giid);
-
-            if let Some(intrp) = self_.interpreter_mut() {
-                let mut probe = Probe::attach(intrp);
-                Self::check_breakpoint_result(probe.set_instr_breakpoint(giid))
+            if let State::Suspended(SuspendedState {
+                si: ref mut interpreter,
+                ..
+            }) = &mut self.state
+            {
+                let mut probe = interpreter.probe();
+                let res = probe.set_instr_breakpoint(giid);
+                check_breakpoint_result(res);
             }
         }
 
-        pub fn set_source_breakpoint(self: &mut Pin<Box<Self>>, brange_id: BreakRangeID) {
-            let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
+        pub fn set_source_breakpoint(&mut self, brange_id: BreakRangeID) {
+            self.init.source_bkpts.push(brange_id);
 
-            self_.saved_state.source_bkpts.push(brange_id);
-
-            if let Some(intrp) = self_.interpreter_mut() {
-                let mut probe = Probe::attach(intrp);
-                Self::check_breakpoint_result(probe.set_source_breakpoint(brange_id));
+            if let State::Suspended(SuspendedState {
+                si: ref mut interpreter,
+                ..
+            }) = &mut self.state
+            {
+                let mut probe = interpreter.probe();
+                let res = probe.set_source_breakpoint(brange_id);
+                check_breakpoint_result(res);
             }
         }
 
-        fn check_breakpoint_result<T>(res: Result<T, BreakpointError>) {
-            match res {
-                Ok(_) | Err(BreakpointError::AlreadyThere) => {}
-                Err(err) => panic!("unexpected error while setting breakpoint: {:?}", err),
-            }
-        }
-
-        pub fn restart(self: &mut Pin<Box<Self>>) {
-            let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
-
-            self_.n_scripts_done = 0;
-            self_.state = State::Ready;
-        }
-
-        fn interpreter_mut(&mut self) -> Option<&mut Interpreter<'static>> {
-            match &mut self.state {
-                State::Suspended {
-                    interpreter: intrp, ..
-                } => Some(intrp),
-                _ => None,
-            }
-        }
-
-        pub fn resume(self: &mut Pin<Box<Self>>) {
-            // Safe because nowhere in this function we move neither
-            // `realm` or `loader` (`state`, and therefore the
-            // contained `Interpreter` should be fine to move
-            // temporarily, as long as we restore it correctly after
-            // return)
-            let self_ = unsafe { Pin::get_unchecked_mut(Pin::as_mut(self)) };
-
-            let state = std::mem::replace(&mut self_.state, State::Finished);
-
-            self_.state = match state {
-                State::Ready => {
-                    let script = &self_.scripts[self_.n_scripts_done];
-                    println!();
+        pub fn resume(&mut self) {
+            let state = std::mem::replace(&mut self.state, State::Finished);
+            self.state = match state {
+                State::Ready {
+                    script_ndx,
+                    loader,
+                    realm,
+                } => {
+                    let script = &self.scripts[script_ndx];
                     println!(
-                        "(starting loop for file: {})",
-                        script.filename.to_string_lossy().into_owned()
+                        "(starting interpreter for file: {})",
+                        script.filename.display()
                     );
 
-                    let intrp =
-                        Interpreter::new(&mut self_.realm, &mut self_.loader, script.main_fnid);
-                    // Cast the lifetime: real "trust me" moment
-                    let mut intrp: Interpreter<'static> = unsafe { std::mem::transmute(intrp) };
-
-                    let all_ok = self_.saved_state.restore(&mut intrp);
-                    if !all_ok {
-                        eprintln!("warning: not all breakpoints could be restored after restart");
-                    }
-                    State::Suspended {
-                        interpreter: intrp,
-                        // just a little white lie
+                    let mut si = StandaloneInterpreter::new(realm, loader, script.main_fnid);
+                    self.init.restore(si.interpreter_mut());
+                    State::Suspended(SuspendedState {
+                        n_scripts_done: script_ndx,
+                        si,
                         cause: SuspendCause::Breakpoint,
+                    })
+                }
+                State::Failed(_) | State::Finished => {
+                    // nothing to do -- resume does not change state at all
+                    return;
+                }
+                State::Suspended(SuspendedState {
+                    si,
+                    n_scripts_done,
+                    cause: _,
+                }) => {
+                    use standalone_interpreter::Exit;
+
+                    match si.run() {
+                        Ok(exit) => match exit {
+                            Exit::Finished { realm, loader } => {
+                                let n_scripts_done = n_scripts_done + 1;
+                                match n_scripts_done.cmp(&self.scripts.len()) {
+                                    Ordering::Less => {
+                                        self.state = State::Ready {
+                                            script_ndx: n_scripts_done + 1,
+                                            loader,
+                                            realm,
+                                        };
+                                        return self.resume();
+                                    }
+                                    Ordering::Equal => State::Finished,
+                                    Ordering::Greater => panic!("assertion failed"),
+                                }
+                            }
+                            Exit::Suspended { si, cause } => State::Suspended(SuspendedState {
+                                n_scripts_done,
+                                si,
+                                cause,
+                            }),
+                        },
+                        Err(err) => State::Failed(Error::Interpreter(err)),
                     }
                 }
-                cur @ State::Failed(_) | cur @ State::Finished => {
-                    // nothing  to do
-                    cur
-                }
-                State::Suspended {
-                    interpreter: intrp, ..
-                } => match intrp.run() {
-                    Ok(exit) => match exit {
-                        Exit::Finished(_) => {
-                            self_.n_scripts_done += 1;
-                            match self_.n_scripts_done.cmp(&self_.scripts.len()) {
-                                Ordering::Less => {
-                                    self_.state = State::Ready;
-                                    return self.resume();
-                                }
-                                Ordering::Equal => State::Finished,
-                                Ordering::Greater => panic!("assertion failed"),
-                            }
-                        }
-                        Exit::Suspended { interpreter, cause } => {
-                            State::Suspended { interpreter, cause }
-                        }
-                    },
-                    Err(err) => State::Failed(Error::Interpreter(err)),
-                },
             };
         }
 
-        pub fn probe_mut<'a>(self: &'a mut Pin<Box<Self>>) -> Option<Probe<'a, 'static>> {
-            // Safe because the Probe allows mutating the Interpreter
-            // or accessing the Loader and/or Realm read-only (as &T)
-            match self.state_mut() {
-                State::Suspended { interpreter, .. } => Some(Probe::attach(interpreter)),
-                State::Failed(Error::Interpreter(intrp_err)) => Some(intrp_err.probe()),
-                _ => None,
-            }
-        }
-
-        pub fn error_message(self: &mut Pin<Box<Self>>) -> Option<String> {
-            match self.state_mut() {
-                State::Suspended { .. } => None,
+        pub fn error_message(&mut self) -> Option<String> {
+            match &self.state {
+                State::Suspended(SuspendedState { .. }) => None,
                 State::Failed(Error::Interpreter(intrp_err)) => {
                     Some(format!("{:?}", intrp_err.error))
                 }
                 _ => None,
+            }
+        }
+    }
+
+    impl SuspendedState {
+        pub fn cause(&self) -> &SuspendCause {
+            &self.cause
+        }
+
+        pub fn probe_mut<'a>(&'a mut self) -> Probe<'a, 'static> {
+            self.si.probe()
+        }
+    }
+
+    mod standalone_interpreter {
+        use std::pin::Pin;
+
+        use mcjs_vm::{
+            bytecode,
+            interpreter::{self, debugger::Probe, InterpreterError, SuspendCause},
+            Interpreter, Loader, Realm,
+        };
+
+        pub struct StandaloneInterpreter {
+            // Keep these 2 still, on the heap:
+            realm: Pin<Box<Realm>>,
+            loader: Pin<Box<Loader>>,
+            // This can be moved in/out
+            interpreter: Interpreter<'static>,
+            // It's still possible to move the struct itself
+        }
+
+        pub enum Exit {
+            Finished {
+                realm: Pin<Box<Realm>>,
+                loader: Pin<Box<Loader>>,
+            },
+            Suspended {
+                si: StandaloneInterpreter,
+                cause: SuspendCause,
+            },
+        }
+
+        impl StandaloneInterpreter {
+            pub(super) fn new(
+                mut realm: Pin<Box<Realm>>,
+                mut loader: Pin<Box<Loader>>,
+                fnid: bytecode::FnId,
+            ) -> Self {
+                let interpreter: Interpreter<'static> = {
+                    let realm = Pin::get_mut(Pin::as_mut(&mut realm));
+                    let loader = Pin::get_mut(Pin::as_mut(&mut loader));
+                    let src = Interpreter::new(realm, loader, fnid);
+                    unsafe { std::mem::transmute(src) }
+                };
+
+                StandaloneInterpreter {
+                    realm,
+                    loader,
+                    interpreter,
+                }
+            }
+
+            pub(super) fn run(self) -> std::result::Result<Exit, InterpreterError<'static>> {
+                let exit = self.interpreter.run()?;
+                match exit {
+                    interpreter::Exit::Finished(_) => Ok(Exit::Finished {
+                        realm: self.realm,
+                        loader: self.loader,
+                    }),
+                    interpreter::Exit::Suspended { interpreter, cause } => {
+                        let si = StandaloneInterpreter {
+                            realm: self.realm,
+                            loader: self.loader,
+                            interpreter,
+                        };
+                        Ok(Exit::Suspended { si, cause })
+                    }
+                }
+            }
+
+            pub(super) fn probe<'a>(&'a mut self) -> Probe<'a, 'static> {
+                Probe::attach(&mut self.interpreter)
+            }
+
+            pub(super) fn interpreter_mut(&mut self) -> &mut Interpreter<'static> {
+                &mut self.interpreter
+            }
+
+            pub(super) fn release(self) -> Pin<Box<Loader>> {
+                self.loader
             }
         }
     }
