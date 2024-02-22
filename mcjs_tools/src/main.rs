@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -6,8 +5,6 @@ use anyhow::Result;
 use mcjs_vm::interpreter::debugger::ObjectId;
 use mcjs_vm::interpreter::Fuel;
 use mcjs_vm::{bytecode, BreakRangeID, GlobalIID};
-
-use crate::interpreter_manager::SuspendedState;
 
 fn main() {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
@@ -64,8 +61,7 @@ struct AppData {
 
 impl AppData {
     fn new(params: interpreter_manager::Params) -> Self {
-        let mgr =
-            interpreter_manager::Manager::start(&params).expect("could not create interpreter");
+        let mgr = interpreter_manager::Manager::new(&params).expect("could not create interpreter");
         // si.resume();
 
         AppData {
@@ -154,11 +150,6 @@ impl eframe::App for AppData {
         }
 
         egui::SidePanel::left("sidebar").show(ctx, |ui| {
-            // if let Some(err_message) = self.mgr.error_message() {
-            //     ui.heading("interpreter failed");
-            //     ui.label(&err_message);
-            // }
-
             if ui.button("NEXT").clicked() {
                 action = Action::Next;
             }
@@ -363,7 +354,7 @@ impl eframe::App for AppData {
                 self.frame_ndx = 0;
             }
             Action::Restart => {
-                self.mgr = interpreter_manager::Manager::start(&self.params)
+                self.mgr = interpreter_manager::Manager::new(&self.params)
                     .expect("could not create interpreter");
                 self.recent_state_change = true;
                 self.frame_ndx = 0;
@@ -1209,16 +1200,10 @@ mod interpreter_manager {
 
     #[derive(Debug)]
     pub enum Error<'a> {
-        Load(anyhow::Error),
         Interpreter(InterpreterError<'a>),
     }
 
-    //--- TODO This is not really just a StandaloneInterpreter. Split the
-    // StandaloneInterpreter part into its own thing, preferably into its own
-    // module, so that all the unsafe stuff is encapsulated there. Then rename
-    // this into something more apt, and with better state management.
     pub struct Manager {
-        // Params are stored to allow restart
         scripts: Vec<Script>,
         init: InterpreterInit,
         state: State,
@@ -1227,6 +1212,7 @@ mod interpreter_manager {
     pub enum State {
         /// Ready to start the next file in `self.scripts`.
         Ready {
+            // TODO script_ndx really needed?
             script_ndx: usize,
             loader: Pin<Box<Loader>>,
             realm: Pin<Box<Realm>>,
@@ -1237,25 +1223,30 @@ mod interpreter_manager {
 
         Suspended(SuspendedState),
 
-        /// Interpreter has failed with an error.  Ephemeral data structures
-        /// have been torn down, and resuming execution is not possible.
+        /// Interpreter has failed with an error.  All ephemeral data
+        /// structures, including the Interpreter itself, have been torn down.
+        /// Resuming execution or analyzing the interpreter's state is no longer
+        /// possible.
         Failed(Error<'static>),
     }
     /// Interpreter suspended.  The reason for suspending (e.g. a
     /// breakpoint) is specified by `cause`.
     pub struct SuspendedState {
+        /// The number of scripts (from Manager::scripts) that have been completed.
         n_scripts_done: usize,
         si: StandaloneInterpreter,
         cause: SuspendCause,
     }
 
-    /// Parts of the interpreter's state that are set every time a new
-    /// Interpreter is created. (Keep in mind that `Interpreter` is the object
-    /// that tracks the execution along a single script or module loading. It
-    /// gets deleted every time the script or module is finished
-    /// running/loading.)
+    /// This stores the parts of an Interpreter's state that are set every time
+    /// a new Interpreter is created.
     ///
-    /// These include instruction and source breakpoints.
+    /// (Keep in mind that `Interpreter` is the object that tracks the execution
+    /// along a single script or module loading. It gets deleted every time the
+    /// script or module is finished running/loading.)
+    ///
+    /// These include instruction and source breakpoints (so that they survive
+    /// across the execution of different scripts).
     #[derive(Default)]
     struct InterpreterInit {
         instr_bkpts: Vec<GlobalIID>,
@@ -1317,7 +1308,7 @@ mod interpreter_manager {
     }
 
     impl Manager {
-        pub fn start(params: &Params) -> Result<Manager> {
+        pub fn new(params: &Params) -> Result<Manager> {
             let mut loader = Box::pin(Loader::new(params.main_directory.clone()));
             let realm = Box::pin(Realm::new(&mut loader));
 
@@ -1350,10 +1341,6 @@ mod interpreter_manager {
                 init,
                 state,
             })
-        }
-
-        pub fn state(&self) -> &State {
-            &self.state
         }
 
         pub fn state_mut(&mut self) -> &mut State {
@@ -1422,42 +1409,28 @@ mod interpreter_manager {
                     use standalone_interpreter::Exit;
 
                     match si.run() {
-                        Ok(exit) => match exit {
-                            Exit::Finished { realm, loader } => {
-                                let n_scripts_done = n_scripts_done + 1;
-                                match n_scripts_done.cmp(&self.scripts.len()) {
-                                    Ordering::Less => {
-                                        self.state = State::Ready {
-                                            script_ndx: n_scripts_done + 1,
-                                            loader,
-                                            realm,
-                                        };
-                                        return self.resume();
-                                    }
-                                    Ordering::Equal => State::Finished,
-                                    Ordering::Greater => panic!("assertion failed"),
-                                }
+                        Ok(Exit::Finished { realm, loader }) => {
+                            let script_ndx = n_scripts_done + 1;
+                            let script_count = self.scripts.len();
+                            match script_ndx.cmp(&script_count) {
+                                Ordering::Less => State::Ready {
+                                    script_ndx,
+                                    loader,
+                                    realm,
+                                },
+                                Ordering::Equal => State::Finished,
+                                Ordering::Greater => panic!("assertion failed"),
                             }
-                            Exit::Suspended { si, cause } => State::Suspended(SuspendedState {
-                                n_scripts_done,
-                                si,
-                                cause,
-                            }),
-                        },
+                        }
+                        Ok(Exit::Suspended { si, cause }) => State::Suspended(SuspendedState {
+                            n_scripts_done,
+                            si,
+                            cause,
+                        }),
                         Err(err) => State::Failed(Error::Interpreter(err)),
                     }
                 }
             };
-        }
-
-        pub fn error_message(&mut self) -> Option<String> {
-            match &self.state {
-                State::Suspended(SuspendedState { .. }) => None,
-                State::Failed(Error::Interpreter(intrp_err)) => {
-                    Some(format!("{:?}", intrp_err.error))
-                }
-                _ => None,
-            }
         }
     }
 
@@ -1544,10 +1517,6 @@ mod interpreter_manager {
 
             pub(super) fn interpreter_mut(&mut self) -> &mut Interpreter<'static> {
                 &mut self.interpreter
-            }
-
-            pub(super) fn release(self) -> Pin<Box<Loader>> {
-                self.loader
             }
         }
     }
