@@ -165,6 +165,7 @@ class Database
       select tc.path
       , r.version
       , r.error_message is null as success
+      , r.error_message
       , r.is_strict
       , tc.dirname
       , tc.basename
@@ -174,9 +175,9 @@ class Database
     '
 
     @db.execute '
-      drop index runs__version if exists;        CREATE INDEX runs__version on runs (version);
-      drop index testcases__dirname if exists;   CREATE INDEX testcases__dirname on testcases (dirname);
-      drop index testcases__path_hash if exists; CREATE INDEX testcases__path_hash on testcases (path_hash);
+      drop index if exists runs__version;        CREATE INDEX runs__version on runs (version);
+      drop index if exists testcases__dirname;   CREATE INDEX testcases__dirname on testcases (dirname);
+      drop index if exists testcases__path_hash; CREATE INDEX testcases__path_hash on testcases (path_hash);
     '
   end
     
