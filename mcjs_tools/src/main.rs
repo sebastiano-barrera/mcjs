@@ -62,9 +62,7 @@ struct AppData {
 impl AppData {
     fn new(params: interpreter_manager::Params) -> Self {
         let mgr = interpreter_manager::Manager::new(&params).expect("could not create interpreter");
-        // si.resume();
-
-        AppData {
+        let mut app = AppData {
             params,
             mgr,
             recent_state_change: false,
@@ -72,13 +70,23 @@ impl AppData {
             frame_ndx: 0,
             highlight: Default::default(),
             object_windows: HashMap::new(),
-        }
+        };
+        app.resume();
+        app
     }
 
     fn open_object_window(&mut self, obj_id: ObjectId) {
         self.object_windows
             .entry(obj_id)
             .or_insert_with(|| object_view::ObjectWindow::new(obj_id));
+    }
+
+    fn resume(&mut self) {
+        // Resume the manager until it's no longer in state "Ready" (which is not an interesting state to show to the user)
+        self.mgr.resume();
+        while let interpreter_manager::State::Ready { .. } = self.mgr.state_mut() {
+            self.mgr.resume();
+        }
     }
 }
 
@@ -103,19 +111,8 @@ impl eframe::App for AppData {
         let mut action = Action::None;
 
         let suspended_state = match self.mgr.state_mut() {
-            State::Ready { script_ndx, .. } => {
-                let should_start = egui::CentralPanel::default()
-                    .show(ctx, |ui| {
-                        ui.label(format!("Ready to proceed with file #{}", script_ndx));
-                        ui.button("Start").clicked()
-                    })
-                    .inner;
-
-                if should_start {
-                    self.mgr.resume();
-                }
-
-                return;
+            State::Ready { .. } => {
+                panic!("assertion failed: State::Ready should not be visible to the user")
             }
             State::Finished => {
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -344,18 +341,19 @@ impl eframe::App for AppData {
             Action::Next => {
                 let mut probe = suspended_state.probe_mut();
                 probe.set_fuel(Fuel::Limited(1));
-                self.mgr.resume();
+                self.resume();
                 self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
             Action::Continue => {
-                self.mgr.resume();
+                self.resume();
                 self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
             Action::Restart => {
                 self.mgr = interpreter_manager::Manager::new(&self.params)
                     .expect("could not create interpreter");
+                self.resume();
                 self.recent_state_change = true;
                 self.frame_ndx = 0;
             }
