@@ -230,17 +230,7 @@ impl eframe::App for AppData {
             .show(ctx, |ui| {
                 let probe = suspended_state.probe_mut();
 
-                if self.frame_ndx >= probe.frames().len() {
-                    // invalid frame ndx
-                    if self.frame_ndx == 0 {
-                        ui.label("Stack frame empty.  This normally happens when an exception goes completely unhandled.");
-                    } else {
-                        ui.label(&format!("No stack frame at index {}", self.frame_ndx));
-                    }
-
-                    return;
-                }
-
+                assert!(self.frame_ndx < probe.frames().len());
                 let vm_giid = probe.frame_giid(self.frame_ndx);
 
                 let fnid = vm_giid.0;
