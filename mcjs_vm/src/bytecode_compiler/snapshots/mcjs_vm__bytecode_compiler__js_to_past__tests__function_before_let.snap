@@ -9,8 +9,8 @@ expression: function.dump_to_string()
     e0: CreateClosure:
       [19-123] func () unbound[] Sloppy block1 {
         decls:
-          Decl: strict?lex:var f
-          Decl: lex x
+          Decl: f = Undefined [hoisted]
+          Decl: x = TDZ [conflicting]
         fn asmts:
           f <- e0
         exprs:

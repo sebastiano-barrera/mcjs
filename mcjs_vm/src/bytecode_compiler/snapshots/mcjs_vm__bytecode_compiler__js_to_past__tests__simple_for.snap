@@ -4,8 +4,8 @@ expression: function.dump_to_string()
 ---
 [18-104] func () unbound[] Sloppy block0 {
   decls:
-    Decl: lex closures
-    Decl: lex tmp1
+    Decl: closures = TDZ [conflicting]
+    Decl: tmp1 = TDZ [conflicting]
   fn asmts:
   exprs:
     e0: ArrayCreate
@@ -15,7 +15,7 @@ expression: function.dump_to_string()
     [18-35] Assign(Some(closures), e1)
     block2 {
       decls:
-        Decl: lex i
+        Decl: i = TDZ [conflicting]
       fn asmts:
       exprs:
         e0: NumberLiteral(0.0)

@@ -230,47 +230,56 @@ impl util::Dump for Block {
 
 pub struct Decl {
     pub name: DeclName,
-    pub is_lexical: IsLexical,
+    pub init: DeclInit,
+    /// When true, the declaration is going to be 'hoisted' to the parent block,
+    /// all the way up until the closest enclosing function/module/script. (i.e.
+    /// hoisting does not cross function boundaries).
+    ///
+    /// Redeclaration rules are checked at every 'step' of the way.
+    pub is_hoisted: bool,
+    /// When true, any other declaration of the same name will result in a
+    /// compile error.
+    pub is_conflicting: bool,
 }
-pub enum IsLexical {
-    No,
-    Yes,
-    OnlyInStrictMode,
+/// Whether to initialize this variable and to what value.
+#[derive(Debug)]
+pub enum DeclInit {
+    /// Do not initialize the variable implicitly.  The time until the first
+    /// explicit assignment is called Temporal Dead Zone (TDZ) and during it,
+    /// any access to the variable will result in a runtime error.
+    TDZ,
+    /// Implicitly initialize the variable to undefined, before any of the
+    /// block's statements.
+    Undefined,
 }
-impl IsLexical {
-    /// Returns true iff the represented declaration is lexical, assuming that the declaration site
-    /// is in strict mode or not based on the `strict_mode` parameter.
-    pub fn assuming_strictness(&self, strict_mode: StrictMode) -> bool {
-        match (self, strict_mode) {
-            (IsLexical::No, _) => false,
-            (IsLexical::Yes, _) => true,
-            (IsLexical::OnlyInStrictMode, StrictMode::Strict) => true,
-            (IsLexical::OnlyInStrictMode, _) => false,
-        }
-    }
-}
-impl From<swc_ecma_ast::VarDeclKind> for IsLexical {
-    fn from(kind: swc_ecma_ast::VarDeclKind) -> IsLexical {
+impl Decl {
+    fn from_js_var_decl(name: DeclName, kind: swc_ecma_ast::VarDeclKind) -> Self {
         match kind {
-            swc_ecma_ast::VarDeclKind::Var => IsLexical::No,
-            swc_ecma_ast::VarDeclKind::Let => IsLexical::Yes,
-            swc_ecma_ast::VarDeclKind::Const => IsLexical::Yes,
+            swc_ecma_ast::VarDeclKind::Var => Decl {
+                name,
+                init: DeclInit::Undefined,
+                is_hoisted: true,
+                is_conflicting: false,
+            },
+            swc_ecma_ast::VarDeclKind::Let | swc_ecma_ast::VarDeclKind::Const => Decl {
+                name,
+                init: DeclInit::TDZ,
+                is_hoisted: false,
+                is_conflicting: true,
+            },
         }
-    }
-}
-impl std::fmt::Debug for IsLexical {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            IsLexical::No => "var",
-            IsLexical::Yes => "lex",
-            IsLexical::OnlyInStrictMode => "strict?lex:var",
-        };
-        write!(f, "{}", s)
     }
 }
 impl std::fmt::Debug for Decl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Decl: {:?} {:?}", self.is_lexical, self.name)
+        write!(f, "Decl: {:?} = {:?}", self.name, self.init)?;
+        if self.is_hoisted {
+            write!(f, " [hoisted]")?;
+        }
+        if self.is_conflicting {
+            write!(f, " [conflicting]")?;
+        }
+        Ok(())
     }
 }
 
@@ -584,16 +593,12 @@ mod builder {
             // memory allocs (due to HashSet for example).
             for i in 0..block.decls.len() {
                 let name = &block.decls[i].name;
-                let is_lexical_i = block.decls[i]
-                    .is_lexical
-                    .assuming_strictness(self.strict_mode());
+                let is_conflicting_i = block.decls[i].is_conflicting;
 
                 for j in i + 1..block.decls.len() {
-                    let is_lexical_j = block.decls[j]
-                        .is_lexical
-                        .assuming_strictness(self.strict_mode());
+                    let is_conflicting_j = block.decls[j].is_conflicting;
 
-                    if name == &block.decls[j].name && (is_lexical_i || is_lexical_j) {
+                    if name == &block.decls[j].name && (is_conflicting_i || is_conflicting_j) {
                         self.signal_error(error!("identifier `{:?}` already declared", name));
                     }
                 }
@@ -612,15 +617,14 @@ mod builder {
             let ret = builder(self);
             let mut inner_block = self.pop_block();
 
-            hoist_declarations(
-                self.strict_mode(),
-                &mut self.cur_block_mut().decls,
-                &mut inner_block.decls,
-            );
+            hoist_declarations(&mut self.cur_block_mut().decls, &mut inner_block.decls);
 
             self.add_stmt(StmtOp::Block(Box::new(inner_block)));
 
             ret
+        }
+        pub(super) fn blocks_depth(&self) -> usize {
+            self.blocks.len()
         }
 
         pub(super) fn is_at_fn_body_start(&self) -> bool {
@@ -647,7 +651,9 @@ mod builder {
             let name = DeclName::Tmp(self.gen_tmp());
             self.add_decl(Decl {
                 name: name.clone(),
-                is_lexical: IsLexical::Yes,
+                init: DeclInit::TDZ,
+                is_hoisted: false,
+                is_conflicting: true,
             });
             name
         }
@@ -813,16 +819,14 @@ mod builder {
         }
     }
 
-    fn hoist_declarations(strict_mode: StrictMode, outer: &mut Vec<Decl>, inner: &mut Vec<Decl>) {
+    fn hoist_declarations(outer: &mut Vec<Decl>, inner: &mut Vec<Decl>) {
         let all_decls = std::mem::take(inner);
 
         for decl in all_decls {
-            let is_lexical = decl.is_lexical.assuming_strictness(strict_mode);
-
-            if is_lexical {
-                inner.push(decl);
-            } else {
+            if decl.is_hoisted {
                 outer.push(decl);
+            } else {
+                inner.push(decl);
             }
         }
     }
@@ -841,21 +845,16 @@ pub fn compile_script(
     let block = fnb.build()?;
     let mut function = compile_function_from_parts(script_ast.span, &[], strict_mode, block);
 
-    // Toplevel var (non-lexical) definitions in a script are allocated in
-    // the `globalThis` object. This can be achieved simply by removing those
-    // declarations.
+    // In scripts, declarations that are non-conflicting (var, function) and are
+    // found at the toplevel (either because they were brought there via
+    // hoisting or were already there in the source code) are allocated in the
+    // `globalThis` object. In our IR, this can be achieved simply by removing
+    // those declarations and transferring them to the "unbound names" list of
+    // the script's root function.
     let mut kept_decls = Vec::new();
     for decl in std::mem::take(&mut function.body.decls) {
-        // At the toplevel *of a script*, functions declarations are treated as
-        // non-lexical, so that they can be allocated into globalThis like
-        // variables.
-        let is_lexical = match decl.is_lexical {
-            IsLexical::No | IsLexical::OnlyInStrictMode => false,
-            IsLexical::Yes => true,
-        };
-
         match decl.name {
-            DeclName::Js(name) if !is_lexical => {
+            DeclName::Js(name) if !decl.is_conflicting => {
                 function.unbound_names.push(name);
             }
             _ => {
@@ -943,7 +942,9 @@ pub fn compile_module(
                         let decl_name = DeclName::Js(var_name);
                         fnb.add_decl(Decl {
                             name: decl_name.clone(),
-                            is_lexical: IsLexical::Yes,
+                            init: DeclInit::TDZ,
+                            is_hoisted: false,
+                            is_conflicting: true,
                         });
                         fnb.add_stmt(StmtOp::Assign(Some(decl_name), imported_value));
                     }
@@ -951,7 +952,9 @@ pub fn compile_module(
                         let name = DeclName::Js(d.local.sym.clone());
                         fnb.add_decl(Decl {
                             name: name.clone(),
-                            is_lexical: IsLexical::Yes,
+                            init: DeclInit::TDZ,
+                            is_hoisted: false,
+                            is_conflicting: true,
                         });
                         fnb.add_stmt(StmtOp::Assign(Some(name), default_export));
                     }
@@ -959,7 +962,9 @@ pub fn compile_module(
                         let name = DeclName::Js(d.local.sym.clone());
                         fnb.add_decl(Decl {
                             name: name.clone(),
-                            is_lexical: IsLexical::Yes,
+                            init: DeclInit::TDZ,
+                            is_hoisted: false,
+                            is_conflicting: true,
                         });
                         fnb.add_stmt(StmtOp::Assign(Some(name), named_exports));
                     }
@@ -1173,7 +1178,9 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                             let name = compile_name_pat(handler_param);
                             fnb.add_decl(Decl {
                                 name: name.clone(),
-                                is_lexical: IsLexical::Yes,
+                                init: DeclInit::TDZ,
+                                is_hoisted: false,
+                                is_conflicting: true,
                             });
                             let cur_exc = fnb.add_expr(Expr::CurrentException);
                             fnb.add_stmt(StmtOp::Assign(Some(name), cur_exc));
@@ -1304,15 +1311,13 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                     ForHead::UsingDecl(_) => unsupported_node!(&forin_stmt.left),
                     ForHead::VarDecl(var_decl) => {
                         assert_eq!(var_decl.decls.len(), 1);
-                        Decl {
-                            name: compile_name_pat(&var_decl.decls[0].name),
-                            is_lexical: IsLexical::from(var_decl.kind),
-                        }
+                        let name = compile_name_pat(&var_decl.decls[0].name);
+                        Decl::from_js_var_decl(name, var_decl.kind)
                     }
-                    ForHead::Pat(pat) => Decl {
-                        name: compile_name_pat(pat),
-                        is_lexical: IsLexical::Yes,
-                    },
+                    ForHead::Pat(pat) => {
+                        let name = compile_name_pat(pat);
+                        Decl::from_js_var_decl(name, swc_ecma_ast::VarDeclKind::Let)
+                    }
                 };
 
                 fnb.block(|fnb| {
@@ -1450,12 +1455,6 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
     match decl {
         swc_ecma_ast::Decl::Fn(fn_decl) => {
             let name = DeclName::Js(fn_decl.ident.sym.clone());
-            fnb.add_decl(Decl {
-                name: name.clone(),
-                is_lexical: IsLexical::OnlyInStrictMode,
-            });
-
-            let closure = compile_fn_as_expr(fnb, &fn_decl.function);
 
             // For function declarations, assignment to their value is always done at the beginning
             // of the block.  This allows the function to be called earlier in the block than the
@@ -1468,6 +1467,19 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
             // declarations [1].
             //
             // [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function#description.
+            fnb.add_decl(Decl {
+                name: name.clone(),
+                init: DeclInit::Undefined,
+                is_hoisted: match fnb.strict_mode() {
+                    StrictMode::Strict => false,
+                    StrictMode::Sloppy => true,
+                },
+                // At the toplevel scope of a script or a function, function declarations can conflict (like `var`)
+                // In a block, they can NOT conflict (like let/const).
+                is_conflicting: (fnb.blocks_depth() > 1),
+            });
+
+            let closure = compile_fn_as_expr(fnb, &fn_decl.function);
             fnb.assign_fn(name, closure);
         }
         swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(fnb, var_decl),
@@ -1480,10 +1492,7 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
 fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
     for declarator in &var_decl.decls {
         let name = compile_name_pat(&declarator.name);
-        fnb.add_decl(Decl {
-            name: name.clone(),
-            is_lexical: IsLexical::from(var_decl.kind),
-        });
+        fnb.add_decl(Decl::from_js_var_decl(name.clone(), var_decl.kind));
 
         if let Some(init) = &declarator.init {
             let value = compile_expr(fnb, init);

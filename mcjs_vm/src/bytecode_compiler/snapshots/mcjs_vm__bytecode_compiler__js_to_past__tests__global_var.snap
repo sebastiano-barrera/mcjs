@@ -19,7 +19,7 @@ expression: function.dump_to_string()
                 e0: CreateClosure:
                   [79-213] func () unbound[console, someGlobalVar] Sloppy block3 {
                     decls:
-                      Decl: lex someLocalVar
+                      Decl: someLocalVar = TDZ [conflicting]
                     fn asmts:
                     exprs:
                       e0: NumberLiteral(23.0)

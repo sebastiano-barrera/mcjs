@@ -702,10 +702,12 @@ fn compile_block_internal(fnb: &mut FnBuilder, block: &Block) {
         let reg = fnb.gen_reg();
         fnb.define_name(decl.name.clone(), reg);
 
-        if !decl.is_lexical.assuming_strictness(fnb.strict_mode()) {
-            // `var` declarations are implicitly initialized as `undefined` at the beginning of the
-            // block (assuming hoisting has been done already)
-            fnb.emit(Instr::LoadUndefined(reg));
+        match decl.init {
+            // Do nothing. TDZ is already the default for all VM registers.
+            js_to_past::DeclInit::TDZ => {}
+            js_to_past::DeclInit::Undefined => {
+                fnb.emit(Instr::LoadUndefined(reg));
+            }
         }
     }
 
@@ -826,9 +828,6 @@ mod builder {
             } else {
                 self.strict_mode = strict_mode;
             }
-        }
-        pub(super) fn strict_mode(&mut self) -> StrictMode {
-            self.strict_mode
         }
 
         fn push_block(&mut self, block_id: BlockID, stmts_count: usize) {
