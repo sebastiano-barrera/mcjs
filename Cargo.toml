@@ -1,8 +1,7 @@
 [workspace]
 members = [
 	"mcjs_vm",
-	"mcjs_tools",
-	"mcjs_test262"
+	"mcjs_test262",
 ]
 resolver = "2"
 

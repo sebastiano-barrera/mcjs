@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
 };
 
-use mcjs_vm::{Interpreter, Loader, Realm};
+use mcjs_vm::{FnId, Interpreter, Loader, Realm};
 
 fn main() {
     let config = parse_args();
@@ -39,8 +39,7 @@ fn main() {
         println!();
         println!("running...");
 
-        let intrp = Interpreter::new(&mut realm, &mut loader, main_fnid);
-        run_to_completion(intrp);
+        run_to_completion(&mut realm, &mut loader, main_fnid);
     }
 
     if config.start_shell {
@@ -65,8 +64,7 @@ fn main() {
 
             match res {
                 Ok(fnid) => {
-                    let intrp = Interpreter::new(&mut realm, &mut loader, fnid);
-                    run_to_completion(intrp);
+                    run_to_completion(&mut realm, &mut loader, fnid);
                 }
                 Err(err) => {
                     println!(" (!!) compile error: {}", err.message());
@@ -76,20 +74,9 @@ fn main() {
     }
 }
 
-fn run_to_completion(mut intrp: Interpreter<'_>) {
-    use mcjs_vm::interpreter::Exit;
-
-    loop {
-        match intrp.run().expect("runtime error") {
-            Exit::Finished(_) => break,
-            Exit::Suspended {
-                interpreter: next_intrp,
-                ..
-            } => {
-                intrp = next_intrp;
-            }
-        }
-    }
+fn run_to_completion(realm: &mut Realm, loader: &mut Loader, fnid: FnId) {
+    let intrp = Interpreter::new(realm, loader, fnid);
+    intrp.run().expect("runtime error").expect_finished();
 }
 
 struct Config {

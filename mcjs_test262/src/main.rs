@@ -1,6 +1,6 @@
 use std::{io::Write, path::PathBuf};
 
-use mcjs_vm::interpreter::{debugger::Probe, Fuel};
+use mcjs_vm::interpreter::debugger::{DebuggingState, Fuel};
 use serde::Serialize;
 
 fn main() {
@@ -59,9 +59,9 @@ fn run_test(params: &CliOptions) -> Result<(), TestError> {
                 .map_err(TestError::Load)?;
 
             let mut interpreter = mcjs_vm::Interpreter::new(&mut realm, &mut loader, chunk_fnid);
-            let mut probe = Probe::attach(&mut interpreter);
-            probe.set_fuel(Fuel::Limited(200_000));
-
+            let mut dbg = DebuggingState::new();
+            dbg.set_fuel(Fuel::Limited(200_000));
+            interpreter.set_debugging_state(&mut dbg);
             interpreter
                 .run()
                 .map_err(|intrp_err| TestError::Run(intrp_err.error))?;

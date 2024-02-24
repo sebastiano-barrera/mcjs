@@ -3,8 +3,7 @@
 use std::path::PathBuf;
 
 use mcjs_vm::bytecode;
-use mcjs_vm::interpreter::debugger::Probe;
-use mcjs_vm::interpreter::{Exit, Interpreter, Realm, Value};
+use mcjs_vm::interpreter::{debugger, Exit, Interpreter, Realm, Value};
 
 #[test]
 fn test_inline_breakpoint() {
@@ -29,25 +28,22 @@ foo();
         .run()
         .expect("interpreter failed");
 
-    let mut interpreter = match exit {
+    let intrp_state = match exit {
         Exit::Finished(_) => panic!("finished instead of interrupting"),
-        Exit::Suspended {
-            interpreter: intrp, ..
-        } => intrp,
+        Exit::Suspended { intrp_state, .. } => intrp_state,
     };
 
     {
-        let probe = Probe::attach(&mut interpreter);
-        let bytecode::GlobalIID(fnid, _) = probe.giid();
+        let bytecode::GlobalIID(fnid, _) = debugger::giid(&intrp_state);
         let bytecode::FnId(mod_id, _) = fnid;
         assert_eq!(mod_id, bytecode::SCRIPT_MODULE_ID);
-
-        assert_eq!(probe.sink(), &[Value::Number(1.0)]);
-
-        drop(probe);
+        assert_eq!(&intrp_state.sink, &[Value::Number(1.0)]);
     }
 
-    let finish_data = interpreter.run().unwrap().expect_finished();
+    let finish_data = Interpreter::resume(&mut realm, &mut loader, intrp_state)
+        .run()
+        .unwrap()
+        .expect_finished();
     assert_eq!(
         &finish_data.sink,
         &[
@@ -83,30 +79,28 @@ fn test_pos_breakpoint() {
         .map(|(brid, _)| brid)
         .collect();
 
+    let mut dbg = debugger::DebuggingState::new();
+
     for brid in break_range_ids {
+        dbg.set_source_breakpoint(brid, &loader).unwrap();
+
         let mut interpreter = Interpreter::new(&mut realm, &mut loader, main_fnid);
+        interpreter.set_debugging_state(&mut dbg);
 
-        let mut probe = Probe::attach(&mut interpreter);
-        probe.set_source_breakpoint(brid).unwrap();
-
-        interpreter = match interpreter.run().expect("interpreter failed") {
+        let intrp_state = match interpreter.run().expect("interpreter failed") {
             Exit::Finished(_) => panic!("interpreter finished instead of breaking"),
-            Exit::Suspended {
-                interpreter: intrp, ..
-            } => intrp,
+            Exit::Suspended { intrp_state, .. } => intrp_state,
         };
 
-        let probe = Probe::attach(&mut interpreter);
-
-        let giid = probe.giid();
-        eprintln!("we are at: {:?}; sink = {:?}", giid, probe.sink());
+        let giid = debugger::giid(&intrp_state);
+        eprintln!("we are at: {:?}; sink = {:?}", giid, intrp_state.sink);
         if giid.0 .1 == bytecode::LocalFnId(2) {
-            assert_eq!(probe.sink(), &[Value::Number(1.0)]);
+            assert_eq!(&intrp_state.sink, &[Value::Number(1.0)]);
         } else {
-            assert_eq!(probe.sink(), &[]);
+            assert_eq!(&intrp_state.sink, &[]);
         }
 
-        let finish_data = interpreter
+        let finish_data = Interpreter::resume(&mut realm, &mut loader, intrp_state)
             .run()
             .expect("interpreter failed")
             .expect_finished();

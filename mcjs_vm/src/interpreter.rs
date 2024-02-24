@@ -14,22 +14,23 @@ use crate::{
 mod builtins;
 
 // Public versions of the private `Result` and `Error` above
-pub type InterpreterResult<'a, T> = std::result::Result<T, InterpreterError<'a>>;
-pub struct InterpreterError<'a> {
+pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
+pub struct InterpreterError {
     pub error: crate::common::Error,
 
-    // This struct owns the failed interpreter, but we explicitly disallow doing
-    // anything else with it other than examining it (read-only, via &)
-    #[cfg_attr(not(feature = "debugger"), allow(dead_code))]
-    interpreter: Interpreter<'a>,
-}
-impl<'a> InterpreterError<'a> {
+    // When debugging support is compiled in, the state of the failed
+    // interpreter is transferred into this struct, where it can be examined via
+    // InterpreterError::interpreter_data()
     #[cfg(feature = "debugger")]
-    pub fn probe<'s>(&'s mut self) -> debugger::Probe<'s, 'a> {
-        debugger::Probe::attach(&mut self.interpreter)
+    intrp_state: stack::InterpreterData,
+}
+impl InterpreterError {
+    #[cfg(feature = "debugger")]
+    pub fn interpreter_state(&self) -> &stack::InterpreterData {
+        &self.intrp_state
     }
 }
-impl<'a> std::fmt::Debug for InterpreterError<'a> {
+impl std::fmt::Debug for InterpreterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "InterpreterError: {:?}", self.error)
     }
@@ -166,17 +167,19 @@ pub struct Interpreter<'a> {
 }
 
 pub struct FinishedData {
+    #[cfg(any(test, feature = "debugger"))]
     pub sink: Vec<Option<bytecode::Literal>>,
 }
 
-pub enum Exit<'a> {
+pub enum Exit {
     Finished(FinishedData),
     Suspended {
-        interpreter: Interpreter<'a>,
+        #[cfg(feature = "debugger")]
+        intrp_state: stack::InterpreterData,
         cause: SuspendCause,
     },
 }
-impl<'a> Exit<'a> {
+impl Exit {
     pub fn expect_finished(self) -> FinishedData {
         match self {
             Exit::Finished(fd) => fd,
@@ -190,8 +193,23 @@ impl<'a> Exit<'a> {
 impl<'a> Interpreter<'a> {
     pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
-        // parameters
+        // parameters, then put it into an Interpreter
         let data = init_stack(loader, realm, fnid);
+        Interpreter {
+            realm,
+            data,
+            loader,
+            #[cfg(feature = "debugger")]
+            dbg: None,
+        }
+    }
+
+    #[cfg(feature = "debugger")]
+    pub fn resume(
+        realm: &'a mut Realm,
+        loader: &'a mut loader::Loader,
+        data: stack::InterpreterData,
+    ) -> Self {
         Interpreter {
             realm,
             data,
@@ -218,7 +236,7 @@ impl<'a> Interpreter<'a> {
     ///   - If the interpreter is interrupted (e.g. by a breakpoint), then it is returned
     ///     again via the Output::Suspended variant; then it can be run again or dropped
     ///     (destroyed).
-    pub fn run(mut self) -> InterpreterResult<'a, Exit<'a>> {
+    pub fn run(mut self) -> InterpreterResult<Exit> {
         assert!(!self.data.is_empty());
 
         let res = run_frame(
@@ -238,7 +256,7 @@ impl<'a> Interpreter<'a> {
             Ok(_) => {
                 // return value discarded
 
-                #[cfg(test)]
+                #[cfg(any(test, feature = "debugger"))]
                 let sink: Vec<_> = self
                     .data
                     .sink()
@@ -246,28 +264,31 @@ impl<'a> Interpreter<'a> {
                     .map(|value| try_value_to_literal(*value, &self.realm.heap))
                     .collect();
 
-                #[cfg(not(test))]
-                let sink = Vec::new();
-
-                Ok(Exit::Finished(FinishedData { sink }))
+                Ok(Exit::Finished(FinishedData {
+                    #[cfg(any(test, feature = "debugger"))]
+                    sink,
+                }))
             }
             Err(RunError::Exception(exc)) => Err(InterpreterError {
                 error: error!("unhandled exception: {:?}", exc),
-                interpreter: self,
+                #[cfg(feature = "debugger")]
+                intrp_state: self.data,
             }),
             Err(RunError::Internal(common_err)) => Err(InterpreterError {
                 error: common_err,
-                interpreter: self,
+                #[cfg(feature = "debugger")]
+                intrp_state: self.data,
             }),
             Err(RunError::Suspended(cause)) => Ok(Exit::Suspended {
-                interpreter: self,
                 cause,
+                #[cfg(feature = "debugger")]
+                intrp_state: self.data,
             }),
         }
     }
 }
 
-fn init_stack(
+pub fn init_stack(
     loader: &mut loader::Loader,
     realm: &mut Realm,
     fnid: FnId,
@@ -1290,7 +1311,7 @@ fn literal_to_value(lit: bytecode::Literal, heap: &mut heap::Heap) -> Value {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "debugger"))]
 fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Literal> {
     match value {
         Value::Number(num) => Some(bytecode::Literal::Number(num)),
@@ -1348,34 +1369,14 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 
 #[cfg(feature = "debugger")]
 pub mod debugger {
-    use std::cell::Ref;
     use std::collections::HashMap;
 
-    use crate::{bytecode, InterpreterValue};
+    use crate::{bytecode, loader, stack};
     use crate::{heap, GlobalIID};
-
-    use super::Interpreter;
 
     pub use super::SuspendCause;
     pub use crate::loader::BreakRangeID;
     pub use heap::{IndexOrKey, Object, ObjectId};
-
-    /// The only real entry point to all the debugging features present in the
-    /// Interpreter.
-    ///
-    /// Create it it by calling Probe::attach with a reference to the Interpreter. The
-    /// Interpreter will stay suspended as long as the Probe exists. (Since the
-    /// interpreter only runs within a call to Interpreter::run, this implies that the
-    /// Interpreter is suspended at that time. And since the Probe acquires an
-    /// exclusive &mut reference to the Interpreter, you won't be able
-    /// to call Interpreter::run until dropping the probe).
-    ///
-    /// In general, a Probe can be used to:
-    ///  - query the interpreter's state (examine the call stack, local variables, etc.)
-    ///  - place breakpoints
-    pub struct Probe<'a, 'b> {
-        interpreter: &'a mut Interpreter<'b>,
-    }
 
     #[derive(Debug)]
     pub enum BreakpointError {
@@ -1384,7 +1385,6 @@ pub mod debugger {
         AlreadyThere,
         InvalidLocation,
     }
-
     impl BreakpointError {
         pub fn message(&self) -> &'static str {
             match self {
@@ -1394,230 +1394,34 @@ pub mod debugger {
         }
     }
 
-    impl<'a, 'b> Probe<'a, 'b> {
-        pub fn attach(interpreter: &'a mut Interpreter<'b>) -> Self {
-            Probe { interpreter }
-        }
+    pub fn giid(data: &stack::InterpreterData) -> bytecode::GlobalIID {
+        let frame = data.top();
+        bytecode::GlobalIID(frame.header().fnid, frame.header().iid)
+    }
 
-        pub fn giid(&self) -> bytecode::GlobalIID {
-            let frame = self.interpreter.data.top();
+    fn giid_of_break_range(
+        loader: &loader::Loader,
+        brange_id: BreakRangeID,
+    ) -> std::result::Result<bytecode::GlobalIID, BreakpointError> {
+        let break_range: &bytecode::BreakRange = loader
+            .get_break_range(brange_id)
+            .ok_or(BreakpointError::InvalidLocation)?;
+        Ok(bytecode::GlobalIID(
+            bytecode::FnId(brange_id.module_id(), break_range.local_fnid),
+            break_range.iid_start,
+        ))
+    }
 
-            bytecode::GlobalIID(frame.header().fnid, frame.header().iid)
-        }
-
-        pub fn sink(&self) -> &[InterpreterValue] {
-            self.interpreter.data.sink()
-        }
-
-        pub fn set_fuel(&mut self, fuel: Fuel) {
-            self.interpreter.dbg.as_mut().unwrap().fuel = fuel;
-        }
-
-        /// Set a breakpoint at the specified instruction.
-        ///
-        /// After this operation, the interpreter will suspend itself (Interpreter::run
-        /// will return Exit::Suspended), and it will be possible to examine its
-        /// state (by attaching a new Probe on it).
-        pub fn set_source_breakpoint(
-            &mut self,
-            brange_id: BreakRangeID,
-        ) -> std::result::Result<(), BreakpointError> {
-            if self
-                .interpreter
-                .dbg
-                .as_mut()
-                .unwrap()
-                .source_bkpts
-                .contains_key(&brange_id)
-            {
-                return Err(BreakpointError::AlreadyThere);
-            }
-
-            let giid = self.giid_of_break_range(brange_id)?;
-            let bkpt = InstrBreakpoint {
-                src_bkpt: Some(brange_id),
-            };
-            self.add_instr_bkpt(giid, bkpt)?;
-
-            let prev = self
-                .interpreter
-                .dbg
-                .as_mut()
-                .unwrap()
-                .source_bkpts
-                .insert(brange_id, SourceBreakpoint);
-            assert!(prev.is_none());
-
-            Ok(())
-        }
-
-        fn giid_of_break_range(
-            &mut self,
-            brange_id: BreakRangeID,
-        ) -> std::result::Result<bytecode::GlobalIID, BreakpointError> {
-            let break_range: &bytecode::BreakRange = self
-                .interpreter
-                .loader
-                .get_break_range(brange_id)
-                .ok_or(BreakpointError::InvalidLocation)?;
-            Ok(bytecode::GlobalIID(
-                bytecode::FnId(brange_id.module_id(), break_range.local_fnid),
-                break_range.iid_start,
-            ))
-        }
-
-        ///
-        /// Delete the breakpoint with the given ID.
-        ///
-        /// Returns true only if there was actually a breakpoint with the given ID; false
-        /// if the ID did not correspond to any breakpoint.
-        pub fn clear_source_breakpoint(
-            &mut self,
-            brange_id: BreakRangeID,
-        ) -> std::result::Result<bool, BreakpointError> {
-            if !self
-                .interpreter
-                .dbg
-                .as_mut()
-                .unwrap()
-                .source_bkpts
-                .contains_key(&brange_id)
-            {
-                return Ok(false);
-            }
-
-            let giid = self.giid_of_break_range(brange_id)?;
-            let was_there = self.clear_instr_breakpoint(giid);
-            assert!(was_there);
-
-            Ok(true)
-        }
-
-        pub fn source_breakpoints(
-            &self,
-        ) -> impl ExactSizeIterator<Item = (BreakRangeID, &SourceBreakpoint)> {
-            self.interpreter
-                .dbg
-                .as_ref()
-                .unwrap()
-                .source_bkpts
-                .iter()
-                .map(|(k, v)| (*k, v))
-        }
-
-        pub fn set_instr_breakpoint(
-            &mut self,
-            giid: bytecode::GlobalIID,
-        ) -> std::result::Result<(), BreakpointError> {
-            let bkpt = InstrBreakpoint { src_bkpt: None };
-            self.add_instr_bkpt(giid, bkpt)
-        }
-
-        fn add_instr_bkpt(
-            &mut self,
-            giid: bytecode::GlobalIID,
-            bkpt: InstrBreakpoint,
-        ) -> std::result::Result<(), BreakpointError> {
-            let new_insert = self
-                .interpreter
-                .dbg
-                .as_mut()
-                .unwrap()
-                .instr_bkpts
-                .insert(giid, bkpt);
-            match new_insert {
-                None => Ok(()),
-                Some(_) => Err(BreakpointError::AlreadyThere),
-            }
-        }
-
-        pub fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
-            let ibkpt = self
-                .interpreter
-                .dbg
-                .as_mut()
-                .unwrap()
-                .instr_bkpts
-                .remove(&giid);
-            if let Some(ibkpt) = &ibkpt {
-                if let Some(brid) = &ibkpt.src_bkpt {
-                    self.interpreter
-                        .dbg
-                        .as_mut()
-                        .unwrap()
-                        .source_bkpts
-                        .remove(brid)
-                        .unwrap();
-                }
-            }
-
-            ibkpt.is_some()
-        }
-
-        pub fn instr_breakpoints(&self) -> impl '_ + ExactSizeIterator<Item = bytecode::GlobalIID> {
-            self.interpreter
-                .dbg
-                .as_ref()
-                .unwrap()
-                .instr_bkpts
-                .keys()
-                .copied()
-        }
-
-        pub fn loader(&self) -> &crate::loader::Loader {
-            self.interpreter.loader
-        }
-
-        /// Returns the sequence of stack frames in the form of an iterator, ordered top
-        /// to bottom.
-        pub fn frames(&self) -> impl ExactSizeIterator<Item = crate::stack::Frame> {
-            self.interpreter.data.frames()
-        }
-
-        /// Get the instruction pointer for the n-th frame (0 = top)
-        ///
-        /// Panics if `frame_ndx` is invalid.
-        pub fn frame_giid(&self, frame_ndx: usize) -> bytecode::GlobalIID {
-            // `frame_ndx` is top-first (0 = top)
-            // the stack API is bottom first (0 = bottom), so convert first
-            let frame = self
-                .interpreter
-                .data
-                .nth_frame(self.interpreter.data.len() - frame_ndx - 1);
-            let fnid = frame.header().fnid;
-            let iid = frame.header().iid;
-            bytecode::GlobalIID(fnid, iid)
-        }
-
-        pub fn get_object(&self, obj_id: heap::ObjectId) -> Option<Ref<heap::HeapObject>> {
-            self.interpreter
-                .realm
-                .heap
-                .get(obj_id)
-                .map(|hocell| hocell.borrow())
-        }
-
-        pub fn break_on_throw(&mut self) -> bool {
-            self.interpreter.dbg.as_mut().unwrap().break_on_throw
-        }
-        pub fn set_break_on_throw(&mut self, value: bool) {
-            self.interpreter.dbg.as_mut().unwrap().break_on_throw = value;
-        }
-
-        pub fn break_on_unhandled_throw(&mut self) -> bool {
-            self.interpreter
-                .dbg
-                .as_mut()
-                .unwrap()
-                .break_on_unhandled_throw
-        }
-        pub fn set_break_on_unhandled_throw(&mut self, value: bool) {
-            self.interpreter
-                .dbg
-                .as_mut()
-                .unwrap()
-                .break_on_unhandled_throw = value;
-        }
+    /// Get the instruction pointer for the n-th frame (0 = top)
+    ///
+    /// Panics if `frame_ndx` is invalid.
+    pub fn frame_giid(data: &stack::InterpreterData, frame_ndx: usize) -> bytecode::GlobalIID {
+        // `frame_ndx` is top-first (0 = top)
+        // the stack API is bottom first (0 = bottom), so convert first
+        let frame = data.nth_frame(data.len() - frame_ndx - 1);
+        let fnid = frame.header().fnid;
+        let iid = frame.header().iid;
+        bytecode::GlobalIID(fnid, iid)
     }
 
     /// Additional debugging-specific state added to the interpreter.
@@ -1673,6 +1477,10 @@ pub mod debugger {
             }
         }
 
+        pub fn set_fuel(&mut self, fuel: Fuel) {
+            self.fuel = fuel;
+        }
+
         /// Consume 1 unit of fuel.  Returns true iff the tank is empty.
         pub fn consume_1_fuel(&mut self) -> bool {
             match &mut self.fuel {
@@ -1690,16 +1498,118 @@ pub mod debugger {
             }
         }
 
+        //
+        // Source breakpoints
+        //
+
+        /// Set a breakpoint at the specified instruction.
+        ///
+        /// After this operation, the interpreter will suspend itself (Interpreter::run
+        /// will return Exit::Suspended), and it will be possible to examine its
+        /// state (by attaching a new Probe on it).
+        pub fn set_source_breakpoint(
+            &mut self,
+            brange_id: BreakRangeID,
+            loader: &loader::Loader,
+        ) -> std::result::Result<(), BreakpointError> {
+            if self.source_bkpts.contains_key(&brange_id) {
+                return Err(BreakpointError::AlreadyThere);
+            }
+
+            let giid = giid_of_break_range(loader, brange_id)?;
+            let bkpt = InstrBreakpoint {
+                src_bkpt: Some(brange_id),
+            };
+            self.add_instr_bkpt(giid, bkpt)?;
+
+            let prev = self.source_bkpts.insert(brange_id, SourceBreakpoint);
+            assert!(prev.is_none());
+
+            Ok(())
+        }
+
+        /// Delete the breakpoint with the given ID.
+        ///
+        /// Returns true only if there was actually a breakpoint with the given ID; false
+        /// if the ID did not correspond to any breakpoint.
+        pub fn clear_source_breakpoint(
+            &mut self,
+            brange_id: BreakRangeID,
+            loader: &loader::Loader,
+        ) -> std::result::Result<bool, BreakpointError> {
+            if !self.source_bkpts.contains_key(&brange_id) {
+                return Ok(false);
+            }
+
+            let giid = giid_of_break_range(loader, brange_id)?;
+            let was_there = self.clear_instr_breakpoint(giid);
+            assert!(was_there);
+
+            Ok(true)
+        }
+
+        pub fn source_breakpoints(
+            &self,
+        ) -> impl ExactSizeIterator<Item = (BreakRangeID, &SourceBreakpoint)> {
+            self.source_bkpts.iter().map(|(k, v)| (*k, v))
+        }
+
+        //
+        // Instruction breakpoints
+        //
+
+        pub fn set_instr_breakpoint(
+            &mut self,
+            giid: bytecode::GlobalIID,
+        ) -> std::result::Result<(), BreakpointError> {
+            let bkpt = InstrBreakpoint { src_bkpt: None };
+            self.add_instr_bkpt(giid, bkpt)
+        }
+
+        fn add_instr_bkpt(
+            &mut self,
+            giid: bytecode::GlobalIID,
+            bkpt: InstrBreakpoint,
+        ) -> std::result::Result<(), BreakpointError> {
+            let new_insert = self.instr_bkpts.insert(giid, bkpt);
+            match new_insert {
+                None => Ok(()),
+                Some(_) => Err(BreakpointError::AlreadyThere),
+            }
+        }
+
+        pub fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
+            let ibkpt = self.instr_bkpts.remove(&giid);
+
+            if let Some(ibkpt) = &ibkpt {
+                if let Some(brid) = &ibkpt.src_bkpt {
+                    self.source_bkpts.remove(brid).unwrap();
+                }
+            }
+
+            ibkpt.is_some()
+        }
+
+        pub fn instr_breakpoints(&self) -> impl '_ + ExactSizeIterator<Item = bytecode::GlobalIID> {
+            self.instr_bkpts.keys().copied()
+        }
+
         pub fn is_breakpoint_at(&self, giid: &bytecode::GlobalIID) -> bool {
             self.instr_bkpts.contains_key(giid)
         }
 
-        pub(crate) fn should_break_on_unhandled_throw(&self) -> bool {
-            self.break_on_unhandled_throw
+        pub fn set_break_on_throw(&mut self, value: bool) {
+            self.break_on_throw = value;
+        }
+        pub fn should_break_on_throw(&self) -> bool {
+            self.break_on_throw
         }
 
-        pub(crate) fn should_break_on_throw(&self) -> bool {
-            self.break_on_throw
+        pub fn set_break_on_unhandled_throw(&mut self, value: bool) {
+            self.break_on_unhandled_throw = value;
+        }
+        pub fn should_break_on_unhandled_throw(&self) -> bool {
+            self.break_on_unhandled_throw
         }
     }
 }

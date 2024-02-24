@@ -11,7 +11,7 @@ pub struct InterpreterData {
 
     // TODO Make tests work without this hack
     #[cfg(any(test, feature = "debugger"))]
-    sink: Vec<Value>,
+    pub sink: Vec<Value>,
 }
 
 // Throughout this module, `Option<Value>` is stored instead of `Value`.  The `None` case
