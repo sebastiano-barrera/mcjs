@@ -1,5 +1,5 @@
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX};
-use crate::interpreter::{UpvalueId, Value};
+use crate::interpreter::Value;
 
 /// The interpreter's stack.
 ///
@@ -19,6 +19,8 @@ pub struct InterpreterData {
 // dead zone.   See [1] for the source-level semantics in JavaScript.
 //
 // [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/let#temporal_dead_zone_tdz
+
+slotmap::new_key_type! { pub struct UpvalueId; }
 
 type Upvalues = slotmap::SlotMap<UpvalueId, Option<Value>>;
 

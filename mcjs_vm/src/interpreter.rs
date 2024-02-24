@@ -1,14 +1,14 @@
 use std::cell::Ref;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::{
     bytecode::{self, FnId, Instr, VReg, IID},
     common::{self, Result},
     error,
     heap::{self, IndexOrKey, Object},
-    loader, stack,
+    loader,
+    stack::{self, UpvalueId},
 };
 
 mod builtins;
@@ -116,38 +116,12 @@ impl std::fmt::Debug for Closure {
     }
 }
 
-slotmap::new_key_type! { pub struct UpvalueId; }
-
-#[cfg(not(enable_jit))]
-pub type Options = ();
-
-#[cfg(enable_jit)]
-#[derive(Clone, Default)]
-pub struct Options {
-    #[cfg(enable_jit)]
-    pub jit_mode: JitMode,
-}
-#[cfg(enable_jit)]
-#[derive(Clone, Copy, Debug)]
-pub enum JitMode {
-    Compile,
-    UseTraces,
-}
-
-pub struct NotADirectoryError(PathBuf);
-impl std::fmt::Debug for NotADirectoryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "provided path is not a directory: {}", self.0.display())
-    }
-}
-
 pub struct Realm {
     heap: heap::Heap,
     module_objs: HashMap<bytecode::ModuleId, heap::ObjectId>,
     global_obj: heap::ObjectId,
 }
 
-#[allow(clippy::new_without_default)]
 impl Realm {
     pub fn new(loader: &mut loader::Loader) -> Realm {
         let mut heap = heap::Heap::new();
@@ -182,43 +156,14 @@ pub struct Interpreter<'a> {
     /// collect them.)
     data: stack::InterpreterData,
 
-    #[cfg(enable_jit)]
-    jitting: Option<Jitting>,
-
     // The loader ref must never change for the whole lifecycle of the interpreter.  What would
     // happen if the same module path suddenly corresponded to a different module? Better not to
     // know
     loader: &'a mut loader::Loader,
 
-    #[cfg(enable_jit)]
-    opts: Options,
-
     /// Instruction breakpoints
     #[cfg(feature = "debugger")]
     dbg: debugger::InterpreterState,
-}
-
-pub enum Fuel {
-    Limited(usize),
-    Unlimited,
-}
-
-// TODO Probably going to be changed or even replaced once I resume working on the JIT.
-// TODO(performance) monomorphize get_operand?
-#[cfg(enable_jit)]
-pub struct InterpreterStep<'a> {
-    pub fnid: bytecode::FnId,
-    pub func: &'a bytecode::Function,
-    pub iid: bytecode::IID,
-    pub next_iid: bytecode::IID,
-    pub get_operand: &'a dyn Fn(bytecode::VReg) -> Value,
-}
-
-#[cfg(enable_jit)]
-impl<'a> InterpreterStep<'a> {
-    fn cur_instr(&self) -> &bytecode::Instr {
-        &self.func.instrs()[self.iid.0 as usize]
-    }
 }
 
 pub struct FinishedData {
@@ -243,27 +188,8 @@ impl<'a> Exit<'a> {
     }
 }
 
-#[cfg(enable_jit)]
-struct Jitting {
-    fnid: FnId,
-    iid: IID,
-    trace_id: String,
-    builder: jit::TraceBuilder,
-}
-
 impl<'a> Interpreter<'a> {
     pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
-        #[allow(clippy::let_unit_value)]
-        let opts = Default::default();
-        Self::with_options(opts, realm, loader, fnid)
-    }
-
-    pub fn with_options(
-        _opts: Options,
-        realm: &'a mut Realm,
-        loader: &'a mut loader::Loader,
-        fnid: bytecode::FnId,
-    ) -> Self {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters
         let data = init_stack(loader, realm, fnid);
@@ -271,30 +197,15 @@ impl<'a> Interpreter<'a> {
             realm,
             data,
             loader,
-
-            #[cfg(enable_jit)]
-            opts: _opts,
-            #[cfg(enable_jit)]
-            jitting: None,
             #[cfg(feature = "debugger")]
             dbg: debugger::InterpreterState::new(),
         }
     }
 
-    #[cfg(enable_jit)]
-    pub fn take_trace(&mut self) -> Option<jit::Trace> {
-        todo!("(cleanup) delete this method")
-    }
-
-    #[cfg(enable_jit)]
-    pub fn get_trace(&self, trace_id: &str) -> Option<&(jit::Trace, jit::NativeThunk)> {
-        self.traces.get(trace_id)
-    }
-
-    #[cfg(enable_jit)]
-    pub fn trace_ids(&self) -> impl ExactSizeIterator<Item = &String> {
-        self.traces.keys()
-    }
+    // From this section, it seems that `Interpreter` can only be created
+    // (`Interpreter::new`) and used+destroyed (`Interpreter::run`). So why not
+    // just have a function without an intermediate struct? Because gives the
+    // user an opportunity to hook the `debugger::Probe` API.
 
     /// Run the interpreter until it either finishes, or it gets interrupted.
     ///
@@ -433,7 +344,7 @@ fn run_frame<'a>(
         assert!(data.len() > 0);
         assert!(stack_level < data.len());
     }
-    
+
     let t = crate::tracing::section("run_frame");
 
     let mut cur_exc = None;
@@ -535,6 +446,7 @@ fn run_frame<'a>(
 }
 
 type RunResult<T> = std::result::Result<T, RunError>;
+/// The error type only used internally by `run_frame` and `run_internal`.
 #[derive(Debug)]
 enum RunError {
     Exception(Value),
@@ -560,7 +472,6 @@ fn run_regular<'a>(
     // TODO Define a StackLevel newtype
     stack_level: usize,
     cur_exc: Value,
-
     #[cfg(feature = "debugger")] dbg: &'a mut debugger::InterpreterState,
 ) -> RunResult<Value> {
     'reborrow: loop {
@@ -1075,9 +986,7 @@ fn run_regular<'a>(
                             // Duplicate with the Instr::Throw implementation. Not sure how to improve.
                             let exc = Value::Object(exc_oid);
                             throw_exc(
-                                data,
                                 exc,
-                                iid,
                                 #[cfg(feature = "debugger")]
                                 dbg,
                             )?;
@@ -1102,9 +1011,7 @@ fn run_regular<'a>(
                     let exc = get_operand(data, *exc)?;
 
                     throw_exc(
-                        data,
                         exc,
-                        iid,
                         #[cfg(feature = "debugger")]
                         dbg,
                     )?;
@@ -1140,9 +1047,7 @@ fn run_regular<'a>(
 }
 
 fn throw_exc(
-    data: &mut stack::InterpreterData,
     exc: Value,
-    iid: bytecode::IID,
     #[cfg(feature = "debugger")] dbg: &mut debugger::InterpreterState,
 ) -> RunResult<()> {
     #[cfg(feature = "debugger")]
@@ -1438,7 +1343,7 @@ pub mod debugger {
     use crate::{bytecode, InterpreterValue};
     use crate::{heap, GlobalIID};
 
-    use super::{Fuel, Interpreter};
+    use super::Interpreter;
 
     pub use super::SuspendCause;
     pub use crate::loader::BreakRangeID;
@@ -1680,6 +1585,11 @@ pub mod debugger {
 
         /// If true, the interpreter will suspend upon reaching any `Instr::Throw`.
         break_on_throw: bool,
+    }
+
+    pub enum Fuel {
+        Limited(usize),
+        Unlimited,
     }
 
     // There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
@@ -2277,10 +2187,7 @@ mod tests {
 
         assert_eq!(
             &output.sink,
-            &[
-                Some(Literal::Number(55.0)),
-                Some(Literal::Number(55.0)),
-            ],
+            &[Some(Literal::Number(55.0)), Some(Literal::Number(55.0)),],
         );
     }
 
@@ -2297,10 +2204,7 @@ mod tests {
 
         assert_eq!(
             &output.sink,
-            &[
-                Some(Literal::Number(55.0)),
-                Some(Literal::Number(55.0)),
-            ],
+            &[Some(Literal::Number(55.0)), Some(Literal::Number(55.0)),],
         );
     }
 

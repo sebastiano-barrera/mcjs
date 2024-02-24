@@ -243,6 +243,7 @@ pub struct Decl {
 }
 /// Whether to initialize this variable and to what value.
 #[derive(Debug)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum DeclInit {
     /// Do not initialize the variable implicitly.  The time until the first
     /// explicit assignment is called Temporal Dead Zone (TDZ) and during it,
