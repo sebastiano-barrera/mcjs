@@ -102,7 +102,7 @@ RUNS = TableSchema.new 'runs', {
   :path_hash => Field.new(type: 'blob'),
   :is_strict => Field.new(type: 'boolean'),
   :error_category => Field.new(type: 'varchar'),
-  :error_message => Field.new(type: 'varchar'),
+  :error_message_hash => Field.new(type: 'varchar'),
   :version => Field.new(type: 'varchar'),
 }
 
@@ -158,20 +158,29 @@ class Database
     @runs.insert record
   end
 
+  def insert_string string
+    unless string.nil?
+      hash = Digest::SHA1.hexdigest(string)
+      @db.execute 'insert or ignore into strings (string, hash) values (?, ?)', [string, hash]
+    end
+  end
+
   def recreate_extras
     @db.execute 'drop view if exists general'
     @db.execute '
       create view general as 
       select tc.path
       , r.version
-      , r.error_message is null as success
-      , r.error_message
+      , r.error_message_hash is null as success
+      , s.string as error_message
       , r.is_strict
       , tc.dirname
       , tc.basename
       , tc.uses_eval 
       , tc.expected_error
-      from runs r left join testcases tc on (r.path_hash = tc.path_hash)
+      from runs r
+        left join testcases tc on (r.path_hash = tc.path_hash)
+        left join strings s on (r.error_message_hash = s.hash)
     '
 
     @db.execute '
@@ -255,6 +264,8 @@ class Database
     STDERR.puts "initing schema"
     @runs.recreate
     @testcases.recreate
+    @db.execute 'drop table if exists strings'
+    @db.execute 'create table strings (string varchar, hash varchar, unique (string, hash))'
     self.recreate_extras
   end
 end
@@ -360,7 +371,7 @@ class SourceInst
           :path_hash => Digest::SHA1.digest(run["file_path"]),
           :is_strict => run["is_strict"] ? 1 : 0,
           :error_category => run.deep_get("error", "category"),
-          :error_message => run.deep_get("error", "message"),
+          :error_message_hash => @db.insert_string(run.deep_get("error", "message")),
           :version => self.mcjs_version,
         }
         @db.insert_run record
