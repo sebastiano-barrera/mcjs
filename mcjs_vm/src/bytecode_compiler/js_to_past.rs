@@ -1454,6 +1454,10 @@ fn find_exit(
 fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
     match decl {
         swc_ecma_ast::Decl::Fn(fn_decl) => {
+            if !fnb.is_fn_decl_allowed() {
+                fnb.signal_error(error!("function decl not allowed in this position"));
+            }
+
             let name = DeclName::Js(fn_decl.ident.sym.clone());
 
             // For function declarations, assignment to their value is always done at the beginning
@@ -1824,11 +1828,6 @@ fn compile_fn_expr(fnb: &mut FnBuilder, fn_expr: &swc_ecma_ast::FnExpr) -> ExprI
 }
 
 fn compile_fn_as_expr(fnb: &mut FnBuilder<'_>, func_ast: &swc_ecma_ast::Function) -> ExprID {
-    if !fnb.is_fn_decl_allowed() {
-        fnb.signal_error(error!("function decl not allowed in this position"));
-        return fnb.add_expr(Expr::Error);
-    }
-
     let res = {
         let strict_mode = fnb.strict_mode();
         let builder = fnb.suspend();
