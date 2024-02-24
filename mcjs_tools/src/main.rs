@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use mcjs_vm::interpreter::debugger::ObjectId;
 use mcjs_vm::interpreter::Fuel;
-use mcjs_vm::{bytecode, BreakRangeID, GlobalIID};
+use mcjs_vm::{bytecode, BreakRangeID, GlobalIID, InterpreterValue};
 
 fn main() {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
@@ -155,9 +155,35 @@ impl eframe::App for AppData {
             let _ = ui.button("DELETE");
 
             ui.horizontal(|ui| {
+                use mcjs_vm::interpreter::SuspendCause;
+
                 ui.label("State:");
-                let text = format!("Suspended due to {:?}", suspended_state.cause());
-                ui.label(text);
+                match *suspended_state.cause() {
+                    SuspendCause::Breakpoint => {
+                        ui.label("Suspended on a breakpoint");
+                    }
+                    SuspendCause::Exception(exc_value) => {
+                        ui.label("Suspended due to exception: ");
+                        match exc_value {
+                            InterpreterValue::Object(obj_id) => {
+                                let probe = suspended_state.probe_mut();
+
+                                if ui.button(format!("{:?}", obj_id)).clicked() {
+                                    action = Action::OpenObjectWindow(obj_id);
+                                }
+
+                                if let Some(text) =
+                                    object_view::short_text_for_object(&probe, obj_id)
+                                {
+                                    ui.label(text);
+                                }
+                            }
+                            _ => {
+                                ui.label(instr_view::richtext_for_value(exc_value));
+                            }
+                        }
+                    }
+                }
             });
 
             let mut probe = suspended_state.probe_mut();
@@ -605,7 +631,7 @@ mod instr_view {
         egui::RichText::new(format!("v{}", vreg.0)).color(text_color)
     }
 
-    fn richtext_for_value(value: InterpreterValue) -> egui::RichText {
+    pub fn richtext_for_value(value: InterpreterValue) -> egui::RichText {
         match value {
             InterpreterValue::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_NUMBER),
             InterpreterValue::Bool(true) => egui::RichText::new("true").color(COLOR_SINGLETON),
