@@ -5,6 +5,79 @@ require 'digest/sha1'
 require 'git'
 require 'sqlite3'
 
+require 'rspec'
+
+class InsertStmtException < StandardError
+end
+
+class InsertStmt
+  def initialize(db, table_name, column_names)
+    @column_names = Set.new column_names
+
+    columns = column_names.join ', '
+    values_placeholders = column_names.map {|k| ":#{k}" }.join ", "
+    @stmt = db.prepare "insert into #{table_name} (#{columns}) values (#{values_placeholders})"
+  end
+
+  def insert record
+    if record.keys.to_set != @column_names
+      raise InsertStmtException.new
+    end
+    
+    begin
+      @stmt.execute record
+    rescue SQLite3::Exception
+      raise InsertStmtException.new
+    end
+  end
+end
+
+RSpec.describe InsertStmt do
+  before do
+    @db = SQLite3::Database.new ":memory:"
+    @db.execute 'create table strings (string varchar, hash varchar)'
+  end
+
+  it 'initializes with Symbol column names' do
+    InsertStmt.new @db, 'strings', [:string, :hash]
+  end
+  it 'initializes with String column names' do
+    InsertStmt.new @db, 'strings', ['string', 'hash']
+  end
+
+  it 'can insert a simple correct record' do
+    stmt = InsertStmt.new @db, 'strings', [:string, :hash]
+    stmt.insert({
+      :string => "asdlol123",
+      :hash => 'deadbeef',
+    })
+
+    res = @db.execute 'select string, hash from strings'
+    expect(res).to eq([['asdlol123', 'deadbeef']])
+  end
+
+  it 'raises exception on extra attributes' do
+    stmt = InsertStmt.new @db, 'strings', [:string, :hash]
+    expect {
+      stmt.insert({
+        :string => "asdlol123",
+        :hash => 'deadbeef',
+        :something_else => 123,
+      })
+    }.to raise_error(InsertStmtException)
+  end
+
+  it 'raises exception on missing attributes' do
+    stmt = InsertStmt.new @db, 'strings', [:string, :hash]
+    expect {
+      stmt.insert({
+        :string => "asdlol123",
+      })
+    }.to raise_error(InsertStmtException)
+  end
+end
+
+
 #
 # Utils
 #
@@ -23,146 +96,74 @@ class Hash
 end
 
 #
-# Database utils
-#
-
-Field = Struct.new(:type)
-
-class TableSchema
-  def initialize(name, fields)
-    @name = name
-    @fields = fields
-  end
-
-  attr_reader :name
-
-  def fields()
-    @fields.keys
-  end
-
-  def field_type field
-    @fields[field].type
-  end
-
-  def field_name field
-    raise Exception.new "no such field: #{field}" unless @fields.include? field
-    field.to_s
-  end
-end
-
-class Table
-  def initialize(db, schema)
-    @db = db
-    @schema = schema
-    @insert_stmt = nil
-  end
-
-  def delete_all
-    @db.execute "delete from #{@schema.name}"
-  end
-
-  def recreate
-    @db.execute "drop table if exists #{@schema.name}"
-
-    field_descs = @schema.fields.map do |field|
-      type = @schema.field_type field
-      "#{field} #{type}"
-    end
-    @db.execute "create table #{@schema.name} (#{field_descs.join ', '})"
-  end
-
-  def insert record
-    values = @schema.fields.map {|field| record[field.to_sym]}
-
-    extra_attrs = Set.new(record.keys) - Set.new(@schema.fields) 
-    raise Exception.new, "extra attributes: #{extra_attrs.join ', '}" unless extra_attrs.empty?
-
-    @insert_stmt ||= @db.prepare "
-      insert into #{@schema.name} (#{@schema.fields.join ', '})
-      values (#{values.map{|_| '?'}.join ', '})
-    "
-    @insert_stmt.execute values
-  end
-end
-
-#
 # Main exports
 #
-
-TESTCASES = TableSchema.new 'testcases', {
-  :path => Field.new(type: 'varchar'),
-  :path_hash => Field.new(type: 'varchar'),
-  :dirname => Field.new(type: 'varchar'),
-  :basename => Field.new(type: 'varchar'),
-  :uses_eval => Field.new(type: 'boolean'),
-  :expected_error => Field.new(type: 'varchar'),
-}
-
-RUNS = TableSchema.new 'runs', {
-  :path_hash => Field.new(type: 'blob'),
-  :is_strict => Field.new(type: 'boolean'),
-  :error_category => Field.new(type: 'varchar'),
-  :error_message_hash => Field.new(type: 'varchar'),
-  :version => Field.new(type: 'varchar'),
-}
 
 DiffItem = Struct.new(:path, :is_strict, :prev_success, :cur_success)
 
 class Database
   def initialize filename
-    filename = Pathname.new filename
-    new_file = ! filename.exist?
-    FileUtils.mkdir_p(filename.dirname) 
+    if filename == ':memory:'
+      new_file = false
+    else
+      filename = Pathname.new filename
+      new_file = ! filename.exist?
+      FileUtils.mkdir_p(filename.dirname) 
+    end
 
     @db = SQLite3::Database.new filename
-    @testcases = Table.new @db, TESTCASES
-    @runs = Table.new @db, RUNS
 
     if new_file
       @db.transaction { self.recreate }
     end
-
-    @stmt__delete_runs_for_version = nil
-    @stmt__outcome_diffs = nil
   end
 
   def transaction &block
     @db.transaction &block
   end
 
-  def execute *args
-    @db.execute *args
-  end
-
   def delete_all_testcases
-    @testcases.delete_all
+    @db.execute 'delete from testcases'
   end
 
   def insert_testcase record
-    @testcases.insert record
+    @stmt__testcase_insert ||= InsertStmt.new @db, 'testcases', [
+      :path,
+      :path_hash,
+      :dirname,
+      :basename,
+      :uses_eval,
+      :expected_error,
+    ]
+    @stmt__testcase_insert.insert record
   end
 
   def delete_all_runs
-    @runs.delete_all
+    @db.execute 'delete from runs'
   end
 
   def delete_runs_for_version version
-    @stmt__delete_runs_for_version ||= @db.prepare "
-      delete from #{RUNS.name}
-      where #{RUNS.field_name :version} = ?
-    "
+    @stmt__delete_runs_for_version ||= @db.prepare "delete from runs where version = ?"
     @stmt__delete_runs_for_version.execute(version.to_s)
   end
 
   def insert_run record
-    @runs.insert record
+    @stmt__runs_insert ||= InsertStmt.new @db, 'runs', [
+      :path_hash,
+      :is_strict,
+      :error_category,
+      :error_message_hash,
+      :version,
+    ]
+    @stmt__runs_insert.insert record
   end
 
   def insert_string string
-    unless string.nil?
-      hash = Digest::SHA1.hexdigest(string)
-      @db.execute 'insert or ignore into strings (string, hash) values (?, ?)', [string, hash]
-    end
+    return nil if string.nil?
+    hash = Digest::SHA1.hexdigest(string)
+    # ignore if the string/hash pair is already in
+    @db.execute 'insert or ignore into strings (string, hash) values (?, ?)', [string, hash]
+    hash
   end
 
   def recreate_extras
@@ -212,7 +213,6 @@ class Database
           end
         end
 
-        puts path
         record = {
           :path => path.to_s,
           :path_hash => Digest::SHA1.digest(path.to_s),
@@ -268,6 +268,16 @@ class Database
     @db.execute 'create table strings (string varchar, hash varchar, unique (string, hash))'
     self.recreate_extras
   end
+end
+
+
+RSpec.describe Database do
+  it 'can initialize with :memory: as filename' do
+    db = Database.new ':memory:'
+    expect(Pathname.new(':memory:').exist?).to be true
+  end
+
+  it 
 end
 
 
@@ -357,11 +367,14 @@ class SourceInst
   end
 
   # Imports runs.json into database
-  def import_outcome
+  def read_runs_json
     filename = self.runs_json_path
-
     STDERR.puts "loading #{filename}..."
     runs = File.new(filename).each_line.map{|line| JSON::load line}
+  end
+
+  def import_outcome
+    runs = self.read_runs_json
 
     STDERR.puts "inserting into db..."
     @db.transaction do
