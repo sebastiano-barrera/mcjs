@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use mcjs_vm::interpreter::debugger::ObjectId;
-use mcjs_vm::interpreter::Fuel;
+use mcjs_vm::interpreter::debugger::{Fuel, ObjectId};
 use mcjs_vm::{bytecode, BreakRangeID, GlobalIID, InterpreterValue};
 
 fn main() {

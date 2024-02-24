@@ -161,9 +161,8 @@ pub struct Interpreter<'a> {
     // know
     loader: &'a mut loader::Loader,
 
-    /// Instruction breakpoints
     #[cfg(feature = "debugger")]
-    dbg: debugger::InterpreterState,
+    dbg: Option<&'a mut debugger::DebuggingState>,
 }
 
 pub struct FinishedData {
@@ -198,14 +197,14 @@ impl<'a> Interpreter<'a> {
             data,
             loader,
             #[cfg(feature = "debugger")]
-            dbg: debugger::InterpreterState::new(),
+            dbg: None,
         }
     }
 
-    // From this section, it seems that `Interpreter` can only be created
-    // (`Interpreter::new`) and used+destroyed (`Interpreter::run`). So why not
-    // just have a function without an intermediate struct? Because gives the
-    // user an opportunity to hook the `debugger::Probe` API.
+    #[cfg(feature = "debugger")]
+    pub fn set_debugging_state(&mut self, dbg: &'a mut debugger::DebuggingState) {
+        self.dbg = Some(dbg);
+    }
 
     /// Run the interpreter until it either finishes, or it gets interrupted.
     ///
@@ -331,13 +330,13 @@ fn init_stack(
 /// `stack_level` so as to restore the mapping between JS and native stacks.
 /// Then it resumes JS execution.
 fn run_frame<'a>(
-    data: &'a mut stack::InterpreterData,
-    realm: &'a mut Realm,
-    loader: &'a mut loader::Loader,
+    data: &mut stack::InterpreterData,
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
     // TODO Define a StackLevel newtype
     stack_level: usize,
 
-    #[cfg(feature = "debugger")] dbg: &'a mut debugger::InterpreterState,
+    #[cfg(feature = "debugger")] dbg: &mut Option<&'a mut debugger::DebuggingState>,
 ) -> RunResult<Value> {
     #[allow(clippy::len_zero)]
     {
@@ -465,14 +464,14 @@ pub enum SuspendCause {
     Exception(Value),
 }
 
-fn run_regular<'a>(
-    data: &'a mut stack::InterpreterData,
-    realm: &'a mut Realm,
-    loader: &'a mut loader::Loader,
+fn run_regular(
+    data: &mut stack::InterpreterData,
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
     // TODO Define a StackLevel newtype
     stack_level: usize,
     cur_exc: Value,
-    #[cfg(feature = "debugger")] dbg: &'a mut debugger::InterpreterState,
+    #[cfg(feature = "debugger")] dbg: &mut Option<&mut debugger::DebuggingState>,
 ) -> RunResult<Value> {
     'reborrow: loop {
         // Reload the func and instr IID and locate the function. Keep it around
@@ -988,7 +987,11 @@ fn run_regular<'a>(
                             throw_exc(
                                 exc,
                                 #[cfg(feature = "debugger")]
-                                dbg,
+                                iid,
+                                #[cfg(feature = "debugger")]
+                                data,
+                                #[cfg(feature = "debugger")]
+                                &dbg,
                             )?;
                         }
                         Some(value) => {
@@ -1010,11 +1013,11 @@ fn run_regular<'a>(
                 Instr::Throw(exc) => {
                     let exc = get_operand(data, *exc)?;
 
-                    throw_exc(
-                        exc,
-                        #[cfg(feature = "debugger")]
-                        dbg,
-                    )?;
+                    #[cfg(feature = "debugger")]
+                    throw_exc(exc, iid, data, &dbg)?;
+
+                    #[cfg(not(feature = "debugger"))]
+                    throw_exc(exc)?;
                 }
                 Instr::PopExcHandler => {
                     data.top_mut()
@@ -1029,7 +1032,7 @@ fn run_regular<'a>(
 
             // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
             #[cfg(feature = "debugger")]
-            {
+            if let Some(dbg) = dbg {
                 let giid = bytecode::GlobalIID(fnid, iid);
                 let out_of_fuel = dbg.consume_1_fuel();
                 if out_of_fuel || dbg.is_breakpoint_at(&giid) {
@@ -1046,19 +1049,27 @@ fn run_regular<'a>(
     }
 }
 
+#[cfg(feature = "debugger")]
 fn throw_exc(
     exc: Value,
-    #[cfg(feature = "debugger")] dbg: &mut debugger::InterpreterState,
+    iid: bytecode::IID,
+    data: &mut stack::InterpreterData,
+    dbg: &Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
-    #[cfg(feature = "debugger")]
-    if dbg.should_break_on_throw()
-        || (dbg.should_break_on_unhandled_throw() && !data.any_exception_handler())
-    {
-        // Save the IID so that execution can resume correctly afterwards
-        data.top_mut().set_resume_iid(iid);
-        return Err(RunError::Suspended(SuspendCause::Exception(exc)));
+    if let Some(dbg) = dbg {
+        if dbg.should_break_on_throw()
+            || (dbg.should_break_on_unhandled_throw() && !data.any_exception_handler())
+        {
+            // Save the IID so that execution can resume correctly afterwards
+            data.top_mut().set_resume_iid(iid);
+            return Err(RunError::Suspended(SuspendCause::Exception(exc)));
+        }
     }
 
+    Err(RunError::Exception(exc))
+}
+#[cfg(not(feature = "debugger"))]
+fn throw_exc(exc: Value) -> RunResult<()> {
     Err(RunError::Exception(exc))
 }
 
@@ -1399,7 +1410,7 @@ pub mod debugger {
         }
 
         pub fn set_fuel(&mut self, fuel: Fuel) {
-            self.interpreter.dbg.fuel = fuel;
+            self.interpreter.dbg.as_mut().unwrap().fuel = fuel;
         }
 
         /// Set a breakpoint at the specified instruction.
@@ -1411,7 +1422,14 @@ pub mod debugger {
             &mut self,
             brange_id: BreakRangeID,
         ) -> std::result::Result<(), BreakpointError> {
-            if self.interpreter.dbg.source_bkpts.contains_key(&brange_id) {
+            if self
+                .interpreter
+                .dbg
+                .as_mut()
+                .unwrap()
+                .source_bkpts
+                .contains_key(&brange_id)
+            {
                 return Err(BreakpointError::AlreadyThere);
             }
 
@@ -1424,6 +1442,8 @@ pub mod debugger {
             let prev = self
                 .interpreter
                 .dbg
+                .as_mut()
+                .unwrap()
                 .source_bkpts
                 .insert(brange_id, SourceBreakpoint);
             assert!(prev.is_none());
@@ -1455,7 +1475,14 @@ pub mod debugger {
             &mut self,
             brange_id: BreakRangeID,
         ) -> std::result::Result<bool, BreakpointError> {
-            if !self.interpreter.dbg.source_bkpts.contains_key(&brange_id) {
+            if !self
+                .interpreter
+                .dbg
+                .as_mut()
+                .unwrap()
+                .source_bkpts
+                .contains_key(&brange_id)
+            {
                 return Ok(false);
             }
 
@@ -1471,6 +1498,8 @@ pub mod debugger {
         ) -> impl ExactSizeIterator<Item = (BreakRangeID, &SourceBreakpoint)> {
             self.interpreter
                 .dbg
+                .as_ref()
+                .unwrap()
                 .source_bkpts
                 .iter()
                 .map(|(k, v)| (*k, v))
@@ -1489,7 +1518,13 @@ pub mod debugger {
             giid: bytecode::GlobalIID,
             bkpt: InstrBreakpoint,
         ) -> std::result::Result<(), BreakpointError> {
-            let new_insert = self.interpreter.dbg.instr_bkpts.insert(giid, bkpt);
+            let new_insert = self
+                .interpreter
+                .dbg
+                .as_mut()
+                .unwrap()
+                .instr_bkpts
+                .insert(giid, bkpt);
             match new_insert {
                 None => Ok(()),
                 Some(_) => Err(BreakpointError::AlreadyThere),
@@ -1497,10 +1532,22 @@ pub mod debugger {
         }
 
         pub fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
-            let ibkpt = self.interpreter.dbg.instr_bkpts.remove(&giid);
+            let ibkpt = self
+                .interpreter
+                .dbg
+                .as_mut()
+                .unwrap()
+                .instr_bkpts
+                .remove(&giid);
             if let Some(ibkpt) = &ibkpt {
                 if let Some(brid) = &ibkpt.src_bkpt {
-                    self.interpreter.dbg.source_bkpts.remove(brid).unwrap();
+                    self.interpreter
+                        .dbg
+                        .as_mut()
+                        .unwrap()
+                        .source_bkpts
+                        .remove(brid)
+                        .unwrap();
                 }
             }
 
@@ -1508,7 +1555,13 @@ pub mod debugger {
         }
 
         pub fn instr_breakpoints(&self) -> impl '_ + ExactSizeIterator<Item = bytecode::GlobalIID> {
-            self.interpreter.dbg.instr_bkpts.keys().copied()
+            self.interpreter
+                .dbg
+                .as_ref()
+                .unwrap()
+                .instr_bkpts
+                .keys()
+                .copied()
         }
 
         pub fn loader(&self) -> &crate::loader::Loader {
@@ -1545,22 +1598,30 @@ pub mod debugger {
         }
 
         pub fn break_on_throw(&mut self) -> bool {
-            self.interpreter.dbg.break_on_throw
+            self.interpreter.dbg.as_mut().unwrap().break_on_throw
         }
         pub fn set_break_on_throw(&mut self, value: bool) {
-            self.interpreter.dbg.break_on_throw = value;
+            self.interpreter.dbg.as_mut().unwrap().break_on_throw = value;
         }
 
         pub fn break_on_unhandled_throw(&mut self) -> bool {
-            self.interpreter.dbg.break_on_unhandled_throw
+            self.interpreter
+                .dbg
+                .as_mut()
+                .unwrap()
+                .break_on_unhandled_throw
         }
         pub fn set_break_on_unhandled_throw(&mut self, value: bool) {
-            self.interpreter.dbg.break_on_unhandled_throw = value;
+            self.interpreter
+                .dbg
+                .as_mut()
+                .unwrap()
+                .break_on_unhandled_throw = value;
         }
     }
 
-    /// Extra stuff that is debugging-specific and added to the intepreter.
-    pub struct InterpreterState {
+    /// Additional debugging-specific state added to the interpreter.
+    pub struct DebuggingState {
         /// Instruction breakpoints
         instr_bkpts: HashMap<GlobalIID, InstrBreakpoint>,
 
@@ -1600,10 +1661,10 @@ pub mod debugger {
         src_bkpt: Option<BreakRangeID>,
     }
 
-    impl InterpreterState {
+    impl DebuggingState {
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
-            InterpreterState {
+            DebuggingState {
                 instr_bkpts: HashMap::new(),
                 source_bkpts: HashMap::new(),
                 fuel: Fuel::Unlimited,
