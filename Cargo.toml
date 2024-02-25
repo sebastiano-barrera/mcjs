@@ -2,6 +2,7 @@
 members = [
 	"mcjs_vm",
 	"mcjs_test262",
+	"mcjs_tools",
 ]
 resolver = "2"
 

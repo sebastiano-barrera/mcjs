@@ -1,6 +1,6 @@
 mod formatter;
 
-pub use formatter::{Dump, DumpExt, Formatter};
+pub use formatter::{Dump, Formatter};
 
 pub fn pop_while<T>(vec: &mut Vec<T>, pred: impl Fn(&T) -> bool) {
     while let Some(item) = vec.last() {

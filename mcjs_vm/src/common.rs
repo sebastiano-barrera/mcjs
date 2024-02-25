@@ -85,6 +85,12 @@ impl std::fmt::Debug for Error {
         Ok(())
     }
 }
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+impl std::error::Error for Error {}
 
 #[macro_export]
 macro_rules! error {

@@ -1048,9 +1048,6 @@ fn run_regular(
                 Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
             }
 
-            // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
-            iid.0 = next_ndx;
-
             // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
             #[cfg(feature = "debugger")]
             if let Some(dbg) = dbg {
@@ -1062,10 +1059,13 @@ fn run_regular(
                     //  1. debugging tools can see the correct IID
                     //  2. cycling suspend/resume (which is what "NEXT" is in
                     //     the debugger) won't be an infinite loop.
-                    data.top_mut().set_resume_iid(iid);
+                    data.top_mut().set_resume_iid(bytecode::IID(next_ndx));
                     return Err(RunError::Suspended(SuspendCause::Breakpoint));
                 }
             }
+            
+            // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
+            iid.0 = next_ndx;
         }
     }
 }
@@ -1393,6 +1393,12 @@ pub mod debugger {
             }
         }
     }
+    impl std::fmt::Display for BreakpointError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.message())
+        }
+    }
+    impl std::error::Error for BreakpointError {}
 
     pub fn giid(data: &stack::InterpreterData) -> bytecode::GlobalIID {
         let frame = data.top();
