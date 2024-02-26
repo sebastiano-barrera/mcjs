@@ -27,15 +27,19 @@ fn test_remove_ibkpt_with_sbkpt() {
     let branges: Vec<_> = prereq.loader.function_breakranges(fnid).unwrap().collect();
     let brid = branges[1].0;
 
-    let mut vm = prereq.make_vm();
-    let mut probe = debugger::Probe::attach(&mut vm);
-    assert_eq!(0, probe.instr_breakpoints().len());
-    probe.set_source_breakpoint(brid).unwrap();
-    assert_eq!(1, probe.instr_breakpoints().len());
+    assert_eq!(0, prereq.dbg.instr_breakpoints().len());
+    prereq
+        .dbg
+        .set_source_breakpoint(brid, &prereq.loader)
+        .unwrap();
+    assert_eq!(1, prereq.dbg.instr_breakpoints().len());
 
-    let was_there = probe.clear_source_breakpoint(brid).unwrap();
+    let was_there = prereq
+        .dbg
+        .clear_source_breakpoint(brid, &prereq.loader)
+        .unwrap();
     assert!(was_there);
-    assert_eq!(0, probe.instr_breakpoints().len());
+    assert_eq!(0, prereq.dbg.instr_breakpoints().len());
 }
 
 /// Check that a source breakpoint is deleted automatically when its
@@ -50,20 +54,21 @@ fn test_remove_sbkpt_with_ibkpt() {
     let branges: Vec<_> = prereq.loader.function_breakranges(fnid).unwrap().collect();
     let brid = branges[1].0;
 
-    let mut vm = prereq.make_vm();
-    let mut probe = debugger::Probe::attach(&mut vm);
-    assert_eq!(0, probe.source_breakpoints().len());
-    assert_eq!(0, probe.instr_breakpoints().len());
-    probe.set_source_breakpoint(brid).unwrap();
-    assert_eq!(1, probe.source_breakpoints().len());
-    assert_eq!(1, probe.instr_breakpoints().len());
+    assert_eq!(0, prereq.dbg.source_breakpoints().len());
+    assert_eq!(0, prereq.dbg.instr_breakpoints().len());
+    prereq
+        .dbg
+        .set_source_breakpoint(brid, &prereq.loader)
+        .unwrap();
+    assert_eq!(1, prereq.dbg.source_breakpoints().len());
+    assert_eq!(1, prereq.dbg.instr_breakpoints().len());
 
-    let ibkpt_giid = probe.instr_breakpoints().next().unwrap();
-    let was_there = probe.clear_instr_breakpoint(ibkpt_giid);
+    let ibkpt_giid = prereq.dbg.instr_breakpoints().next().unwrap();
+    let was_there = prereq.dbg.clear_instr_breakpoint(ibkpt_giid);
     assert!(was_there);
 
-    assert_eq!(0, probe.instr_breakpoints().len());
-    assert_eq!(0, probe.source_breakpoints().len());
+    assert_eq!(0, prereq.dbg.instr_breakpoints().len());
+    assert_eq!(0, prereq.dbg.source_breakpoints().len());
 }
 
 fn test_integration_script(filename: &str) {
@@ -91,6 +96,7 @@ struct VMPrereq {
     loader: mcjs_vm::Loader,
     root_fnid: mcjs_vm::FnId,
     realm: mcjs_vm::Realm,
+    dbg: debugger::DebuggingState,
 }
 impl VMPrereq {
     fn make_vm(&mut self) -> mcjs_vm::Interpreter {
@@ -109,9 +115,12 @@ fn prepare_vm(filename: &str) -> VMPrereq {
 
     let realm = mcjs_vm::Realm::new(&mut loader);
 
+    let dbg = debugger::DebuggingState::new();
+
     VMPrereq {
         loader,
         root_fnid,
         realm,
+        dbg,
     }
 }
