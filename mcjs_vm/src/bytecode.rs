@@ -281,106 +281,105 @@ pub enum Instr {
     Breakpoint,
 }
 
-pub trait InstrAnalyzer {
-    fn start(&mut self, opcode_name: &'static str);
-    fn read_vreg_labeled(&mut self, vreg: VReg, description: Option<&'static str>);
-    fn write_vreg_labeled(&mut self, vreg: VReg, description: Option<&'static str>);
-    fn read_vreg(&mut self, vreg: VReg) {
-        self.read_vreg_labeled(vreg, None)
-    }
-    fn write_vreg(&mut self, vreg: VReg) {
-        self.write_vreg_labeled(vreg, None)
-    }
-    fn jump_target(&mut self, iid: IID);
-    fn load_const(&mut self, item: ConstIndex);
-    fn load_null(&mut self);
-    fn load_undefined(&mut self);
-    fn load_capture(&mut self, item: CaptureIndex);
-    fn load_arg(&mut self, item: ArgIndex);
-    fn load_this(&mut self);
-    fn end(&mut self, instr: &Instr);
+#[derive(Clone, Copy)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum InstrDescriptor {
+    Description(&'static str),
+    VRegRead(VReg),
+    VRegWrite(VReg),
+    IID(IID),
+    Const(ConstIndex),
+    Capture(CaptureIndex),
+    Arg(ArgIndex),
+    Null,
+    Undefined,
+    This,
 }
 
 impl Instr {
-    pub fn analyze<A: InstrAnalyzer>(&self, an: &mut A) {
-        let opcode: &'static str = self.into();
-        an.start(opcode);
+    pub fn opcode(&self) -> &'static str {
+        // use strum::IntoStaticStr
+        self.into()
+    }
+
+    pub fn analyze(&self, mut an: impl FnMut(InstrDescriptor)) {
+        type D = InstrDescriptor;
 
         #[rustfmt::skip]
         match self {
             Instr::Nop => {}
-            Instr::LoadConst(dest, constndx) => { an.write_vreg(*dest); an.load_const(*constndx); }
-            Instr::LoadNull(dest) => { an.write_vreg(*dest); an.load_null(); }
-            Instr::LoadUndefined(dest) => { an.write_vreg(*dest); an.load_undefined(); }
-            Instr::LoadCapture(dest, capndx) => { an.write_vreg(*dest); an.load_capture(*capndx); },
-            Instr::LoadArg(dest, argndx) => { an.write_vreg(*dest); an.load_arg(*argndx); },
-            Instr::LoadThis(dest) => { an.write_vreg(*dest); an.load_this(); },
-            Instr::Copy { dst, src } => { an.write_vreg(*dst); an.read_vreg(*src); },
-            Instr::GetGlobalThis (dest) => { an.write_vreg(*dest); },
-            Instr::GetGlobal { dest, name } => { an.write_vreg(*dest); an.load_const(*name); }
-            Instr::BoolNot { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
-            Instr::UnaryMinus { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); },
-            Instr::OpAdd(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::ArithSub(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::ArithMul(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::ArithDiv(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::ArithInc(dest, arg) => { an.write_vreg(*dest); an.read_vreg(*arg); },
-            Instr::ArithDec(dest, arg) => { an.write_vreg(*dest); an.read_vreg(*arg); },
-            Instr::CmpGE(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::CmpGT(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::CmpLT(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::CmpLE(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::CmpEQ(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::CmpNE(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::BoolOpAnd(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::BoolOpOr(dst, a, b) => { an.write_vreg(*dst); an.read_vreg(*a); an.read_vreg(*b); },
-            Instr::IsInstanceOf(dst, obj, super_) => { an.write_vreg(*dst); an.read_vreg(*obj); an.read_vreg(*super_); },
-            Instr::JmpIf { cond, dest } => { an.read_vreg(*cond); an.jump_target(*dest); },
-            Instr::Jmp(dest) => { an.jump_target(*dest); }
-            Instr::PushToSink(arg) => { an.read_vreg(*arg); },
-            Instr::Return(arg) => { an.read_vreg(*arg); },
+            Instr::LoadConst(dest, constndx) => { an(D::VRegWrite(*dest)); an(D::Const(*constndx)); }
+            Instr::LoadNull(dest) => { an(D::VRegWrite(*dest)); an(D::Null); }
+            Instr::LoadUndefined(dest) => { an(D::VRegWrite(*dest)); an(D::Undefined); }
+            Instr::LoadCapture(dest, capndx) => { an(D::VRegWrite(*dest)); an(D::Capture(*capndx)); },
+            Instr::LoadArg(dest, argndx) => { an(D::VRegWrite(*dest)); an(D::Arg(*argndx)); },
+            Instr::LoadThis(dest) => { an(D::VRegWrite(*dest)); an(D::This); },
+            Instr::GetGlobalThis (dest) => { an(D::VRegWrite(*dest)); },
+            Instr::GetGlobal { dest, name } => { an(D::VRegWrite(*dest)); an(D::Const(*name)); }
+            Instr::Copy { dst: dest, src: arg } 
+            | Instr::BoolNot { dest, arg }
+            | Instr::UnaryMinus { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
+            Instr::ArithInc(dest, arg) => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
+            Instr::ArithDec(dest, arg) => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
+            Instr::OpAdd(dst, a, b)
+            | Instr::ArithSub(dst, a, b)
+            | Instr::ArithMul(dst, a, b)
+            | Instr::ArithDiv(dst, a, b)
+            | Instr::CmpGE(dst, a, b)
+            | Instr::CmpGT(dst, a, b)
+            | Instr::CmpLT(dst, a, b)
+            | Instr::CmpLE(dst, a, b)
+            | Instr::CmpEQ(dst, a, b)
+            | Instr::CmpNE(dst, a, b)
+            | Instr::BoolOpAnd(dst, a, b)
+            | Instr::BoolOpOr(dst, a, b) => { an(D::VRegWrite(*dst)); an(D::VRegRead(*a)); an(D::VRegRead(*b)); },
+            Instr::IsInstanceOf(dst, obj, super_) => { an(D::VRegWrite(*dst)); an(D::VRegRead(*obj)); an(D::VRegRead(*super_)); },
+            Instr::JmpIf { cond, dest } => { an(D::VRegRead(*cond)); an(D::IID(*dest)); },
+            Instr::Jmp(dest) => { an(D::IID(*dest)); }
+            Instr::PushToSink(arg) => { an(D::VRegRead(*arg)); },
+            Instr::Return(arg) => { an(D::VRegRead(*arg)); },
             Instr::Call {
                 return_value,
                 this,
                 callee,
             } => {
-                an.write_vreg(*return_value);
-                an.read_vreg_labeled(*this, Some("this"));
-                an.read_vreg_labeled(*callee, Some("callee"));
+                an(D::VRegWrite(*return_value));
+                an(D::Description("this"));
+                an(D::VRegRead(*this));
+                an(D::Description("callee"));
+                an(D::VRegRead(*callee));
             }
-            Instr::CallArg(arg) => { an.read_vreg(*arg); },
+            Instr::CallArg(arg) => { an(D::VRegRead(*arg)); },
             Instr::ClosureNew {
                 dest,
                 fnid: _,
                 forced_this: _,
-            } => { an.write_vreg(*dest);  },
-            Instr::ClosureAddCapture(arg) => { an.read_vreg(*arg); },
-            Instr::Unshare(reg) => { an.write_vreg(*reg); an.read_vreg(*reg); },
-            Instr::ObjCreateEmpty(dest) => { an.write_vreg(*dest); },
-            Instr::ObjSet { obj, key, value } => { an.read_vreg(*obj); an.read_vreg(*key); an.read_vreg(*value); }
-            Instr::ObjGet { dest, obj, key } => { an.write_vreg(*dest); an.read_vreg(*obj); an.read_vreg(*key); }
-            Instr::ObjGetKeys { dest, obj } => { an.write_vreg(*dest); an.read_vreg(*obj); }
-            Instr::ObjDelete { dest, obj, key } => { an.write_vreg(*dest); an.read_vreg(*obj); an.read_vreg(*key); }
-            Instr::ArrayPush { arr, value } => { an.read_vreg(*arr); an.read_vreg(*value); }
-            Instr::ArrayNth { dest, arr, index } => { an.write_vreg(*dest); an.read_vreg(*arr); an.read_vreg(*index); }
-            Instr::ArraySetNth { arr, index, value } => { an.read_vreg(*arr); an.read_vreg(*index); an.read_vreg(*value); }
-            Instr::ArrayLen { dest, arr } => { an.write_vreg(*dest); an.read_vreg(*arr); }
-            Instr::StrCreateEmpty(dest) => { an.write_vreg(*dest); }
-            Instr::StrAppend(recipient, src) => { an.read_vreg(*recipient); an.read_vreg(*src); }
-            Instr::NewIterator { dest, obj } => { an.write_vreg(*dest); an.read_vreg(*obj); }
-            Instr::IteratorGetCurrent { dest, iter } => { an.write_vreg(*dest); an.read_vreg(*iter); }
-            Instr::IteratorAdvance { iter } => { an.read_vreg(*iter); },
-            Instr::JmpIfIteratorFinished { iter, dest } => { an.read_vreg(*iter); an.jump_target(*dest); }
-            Instr::TypeOf { dest, arg } => { an.write_vreg(*dest); an.read_vreg(*arg); }
-            Instr::ImportModule(dest, mod_spec) => { an.write_vreg(*dest); an.read_vreg(*mod_spec); }
-            Instr::Throw(arg) => { an.read_vreg(*arg); }
+            } => { an(D::VRegWrite(*dest));  },
+            Instr::ClosureAddCapture(arg) => { an(D::VRegRead(*arg)); },
+            Instr::Unshare(reg) => { an(D::VRegWrite(*reg)); an(D::VRegRead(*reg)); },
+            Instr::ObjCreateEmpty(dest) => { an(D::VRegWrite(*dest)); },
+            Instr::ObjSet { obj, key, value } => { an(D::VRegRead(*obj)); an(D::VRegRead(*key)); an(D::VRegRead(*value)); }
+            Instr::ObjGet { dest, obj, key } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); an(D::VRegRead(*key)); }
+            Instr::ObjGetKeys { dest, obj } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); }
+            Instr::ObjDelete { dest, obj, key } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); an(D::VRegRead(*key)); }
+            Instr::ArrayPush { arr, value } => { an(D::VRegRead(*arr)); an(D::VRegRead(*value)); }
+            Instr::ArrayNth { dest, arr, index } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arr)); an(D::VRegRead(*index)); }
+            Instr::ArraySetNth { arr, index, value } => { an(D::VRegRead(*arr)); an(D::VRegRead(*index)); an(D::VRegRead(*value)); }
+            Instr::ArrayLen { dest, arr } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arr)); }
+            Instr::StrCreateEmpty(dest) => { an(D::VRegWrite(*dest)); }
+            Instr::StrAppend(recipient, src) => { an(D::VRegRead(*recipient)); an(D::VRegRead(*src)); }
+            Instr::NewIterator { dest, obj } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); }
+            Instr::IteratorGetCurrent { dest, iter } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*iter)); }
+            Instr::IteratorAdvance { iter } => { an(D::VRegRead(*iter)); },
+            Instr::JmpIfIteratorFinished { iter, dest } => { an(D::VRegRead(*iter)); an(D::IID(*dest)); }
+            Instr::TypeOf { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); }
+            Instr::ImportModule(dest, mod_spec) => { an(D::VRegWrite(*dest)); an(D::VRegRead(*mod_spec)); }
+            Instr::Throw(arg) => { an(D::VRegRead(*arg)); }
             Instr::Breakpoint => {},
             Instr::PopExcHandler => {},
-            Instr::PushExcHandler(iid) => { an.jump_target(*iid) },
-            Instr::GetCurrentException(dest) => { an.write_vreg(*dest); },
+            Instr::PushExcHandler(iid) => { an(D::IID(*iid)); },
+            Instr::GetCurrentException(dest) => { an(D::VRegWrite(*dest)); },
         };
-
-        an.end(self)
     }
 }
 

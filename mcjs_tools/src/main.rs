@@ -56,6 +56,8 @@ struct AppData {
     params: manager::Params,
     intrp: manager::ManagedInterpreter,
     tree: egui_tiles::Tree<Pane>,
+
+    stack_view: stack_view::State,
 }
 
 impl AppData {
@@ -63,9 +65,9 @@ impl AppData {
         let tree = egui_tiles::Tree::new_tabs(
             "main_tree",
             vec![
+                Pane::Bytecode,
                 Pane::Stack,
                 Pane::SourceCode,
-                Pane::Bytecode,
                 Pane::PAST,
                 Pane::Heap,
             ],
@@ -77,6 +79,7 @@ impl AppData {
             params,
             intrp,
             tree,
+            stack_view: stack_view::State::new(),
         }
     }
 
@@ -159,6 +162,8 @@ impl eframe::App for AppData {
                     let mut behavior = TreeBehavior {
                         intrp_state: &intrp_state,
                         cause: &cause,
+                        loader: self.intrp.loader(),
+                        stack_view: &mut self.stack_view,
                     };
                     self.tree.ui(&mut behavior, ui);
                 }
@@ -198,6 +203,8 @@ impl eframe::App for AppData {
 struct TreeBehavior<'a> {
     intrp_state: &'a stack::InterpreterData,
     cause: &'a interpreter::SuspendCause,
+    loader: &'a mcjs_vm::Loader,
+    stack_view: &'a mut stack_view::State,
 }
 
 impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
@@ -219,10 +226,10 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
     ) -> egui_tiles::UiResponse {
         let text = match pane {
             Pane::SourceCode => "Source code",
-            Pane::Bytecode => "Bytecode",
+            Pane::Bytecode => return bytecode_view::show(ui, self.loader, self.intrp_state).tiles,
             Pane::PAST => "PAST",
             Pane::Heap => "Heap",
-            Pane::Stack => return ui_stack_pane(ui, self.intrp_state, self.cause),
+            Pane::Stack => return stack_view::show(&mut self.stack_view, ui, self.intrp_state),
         };
 
         if ui
@@ -236,17 +243,144 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
     }
 }
 
-fn ui_stack_pane(
-    ui: &mut egui::Ui,
-    _intrp_state: &stack::InterpreterData,
-    _cause: &interpreter::SuspendCause,
-) -> egui_tiles::UiResponse {
-    let drag_button_res = ui.add(egui::Button::new("Stack").sense(egui::Sense::drag()));
+mod stack_view {
+    use mcjs_vm::stack;
 
-    if drag_button_res.drag_started() {
-        egui_tiles::UiResponse::DragStarted
-    } else {
-        egui_tiles::UiResponse::None
+    pub struct State {}
+
+    impl State {
+        pub fn new() -> Self {
+            State {}
+        }
+    }
+
+    pub fn show(
+        view_state: &mut State,
+        ui: &mut egui::Ui,
+        intrp_state: &stack::InterpreterData,
+    ) -> egui_tiles::UiResponse {
+        let drag_button_res = ui.add(egui::Button::new("Stack").sense(egui::Sense::drag()));
+
+        for frame in intrp_state.frames() {
+            let header = frame.header();
+            let point_str = format!("{:?}:{:?}", header.fnid, header.iid);
+            ui.selectable_label(false, point_str);
+        }
+
+        if drag_button_res.drag_started() {
+            egui_tiles::UiResponse::DragStarted
+        } else {
+            egui_tiles::UiResponse::None
+        }
+    }
+}
+
+mod bytecode_view {
+    use mcjs_vm::{bytecode, stack};
+
+    pub struct State {}
+
+    impl State {
+        pub fn new() -> Self {
+            State {}
+        }
+    }
+
+    pub struct Response {
+        pub tiles: egui_tiles::UiResponse,
+    }
+    impl Default for Response {
+        fn default() -> Self {
+            Self {
+                tiles: Default::default(),
+            }
+        }
+    }
+
+    pub fn show(
+        ui: &mut egui::Ui,
+        loader: &mcjs_vm::Loader,
+        intrp_state: &stack::InterpreterData,
+    ) -> Response {
+        let drag_start = ui
+            .add(egui::Button::new("Bytecode").sense(egui::Sense::drag()))
+            .drag_started();
+
+        let header = intrp_state.top().header();
+        let fnid = header.fnid;
+        let cur_iid = header.iid;
+
+        let func = match loader.get_function(fnid) {
+            Some(func) => func,
+            None => {
+                ui.label(format!("No such function {:?}", fnid));
+                return Response::default();
+            }
+        };
+
+        egui::ScrollArea::both().show(ui, |ui| {
+            egui::Grid::new("bytecode->instrs")
+                .num_columns(3)
+                .show(ui, |ui| {
+                    for (iid, instr) in func.instrs().iter().enumerate() {
+                        use mcjs_vm::bytecode::InstrDescriptor;
+
+                        let iid = bytecode::IID(iid.try_into().unwrap());
+
+                        ui.horizontal(|ui| {
+                            ui.set_width(40.0);
+                            ui.monospace(format!("i{}", iid.0));
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                            let mut text = egui::RichText::new(instr.opcode());
+                            if iid == cur_iid {
+                                text = text.background_color(egui::Color32::DARK_BLUE);
+                            };
+                            ui.label(text);
+                        });
+
+                        ui.horizontal(|ui| {
+                            instr.analyze(|descr| {
+                                match descr {
+                                    InstrDescriptor::Description(description) => {
+                                        ui.label(description)
+                                    }
+                                    InstrDescriptor::VRegRead(vreg) => {
+                                        ui.label(format!("v{}", vreg.0))
+                                    }
+                                    InstrDescriptor::VRegWrite(vreg) => {
+                                        ui.label(format!("*v{}", vreg.0))
+                                    }
+                                    InstrDescriptor::IID(iid) => ui.label(format!("i{}", iid.0)),
+                                    InstrDescriptor::Const(const_ndx) => {
+                                        ui.label(format!("k{}", const_ndx.0))
+                                    }
+                                    InstrDescriptor::Capture(cap_ndx) => {
+                                        ui.label(format!("cap[{}]", cap_ndx.0))
+                                    }
+                                    InstrDescriptor::Arg(arg_ndx) => {
+                                        ui.label(format!("arg[{}]", arg_ndx.0))
+                                    }
+                                    InstrDescriptor::Null => ui.label("null"),
+                                    InstrDescriptor::Undefined => ui.label("undefined"),
+                                    InstrDescriptor::This => ui.label("this"),
+                                };
+                            });
+                        });
+
+                        ui.end_row();
+                    }
+                });
+        });
+
+        Response {
+            tiles: if drag_start {
+                egui_tiles::UiResponse::DragStarted
+            } else {
+                egui_tiles::UiResponse::None
+            },
+        }
     }
 }
 
@@ -345,6 +479,10 @@ mod manager {
             }
 
             &self.state
+        }
+
+        pub(crate) fn loader(&self) -> &Loader {
+            &self.loader
         }
 
         pub fn resume(&mut self) {
