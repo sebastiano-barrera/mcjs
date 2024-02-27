@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use mcjs_vm::{interpreter, stack};
+use mcjs_vm::{
+    interpreter::{self, debugger},
+    stack,
+};
 
 fn main() {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
@@ -58,6 +61,7 @@ struct AppData {
     tree: egui_tiles::Tree<Pane>,
 
     stack_view: stack_view::State,
+    highlight: widgets::Highlight,
 }
 
 impl AppData {
@@ -80,6 +84,7 @@ impl AppData {
             intrp,
             tree,
             stack_view: stack_view::State::new(),
+            highlight: widgets::Highlight::None,
         }
     }
 
@@ -117,15 +122,30 @@ enum Pane {
     Stack,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    None,
+    Resume,
+    Restart,
+    Next,
+    SetHighlight(widgets::Highlight),
+    OpenObject(debugger::ObjectId),
+}
+impl Action {
+    fn set_if_none(&mut self, other: Action) {
+        if let Action::None = self {
+            *self = other;
+        }
+    }
+}
+impl Default for Action {
+    fn default() -> Self {
+        Action::None
+    }
+}
+
 impl eframe::App for AppData {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        enum Action {
-            None,
-            Resume,
-            Restart,
-            Next,
-        }
-
         let mut action = Action::None;
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -164,6 +184,8 @@ impl eframe::App for AppData {
                         cause: &cause,
                         loader: self.intrp.loader(),
                         stack_view: &mut self.stack_view,
+                        action: &mut action,
+                        highlight: self.highlight,
                     };
                     self.tree.ui(&mut behavior, ui);
                 }
@@ -196,6 +218,12 @@ impl eframe::App for AppData {
             Action::Next => {
                 self.intrp.next();
             }
+            Action::SetHighlight(highlight) => {
+                self.highlight = highlight;
+            }
+            Action::OpenObject(_) => {
+                eprintln!("TODO: {:?}", action);
+            }
         }
     }
 }
@@ -205,6 +233,8 @@ struct TreeBehavior<'a> {
     cause: &'a interpreter::SuspendCause,
     loader: &'a mcjs_vm::Loader,
     stack_view: &'a mut stack_view::State,
+    action: &'a mut Action,
+    highlight: widgets::Highlight,
 }
 
 impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
@@ -226,7 +256,11 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
     ) -> egui_tiles::UiResponse {
         let text = match pane {
             Pane::SourceCode => "Source code",
-            Pane::Bytecode => return bytecode_view::show(ui, self.loader, self.intrp_state).tiles,
+            Pane::Bytecode => {
+                let res = bytecode_view::show(ui, self.loader, self.intrp_state, self.highlight);
+                self.action.set_if_none(res.action);
+                return res.tiles;
+            }
             Pane::PAST => "PAST",
             Pane::Heap => "Heap",
             Pane::Stack => return stack_view::show(&mut self.stack_view, ui, self.intrp_state),
@@ -255,7 +289,7 @@ mod stack_view {
     }
 
     pub fn show(
-        view_state: &mut State,
+        _view_state: &mut State,
         ui: &mut egui::Ui,
         intrp_state: &stack::InterpreterData,
     ) -> egui_tiles::UiResponse {
@@ -276,7 +310,8 @@ mod stack_view {
 }
 
 mod bytecode_view {
-    use mcjs_vm::{bytecode, stack};
+    use super::{widgets, Action};
+    use mcjs_vm::{bytecode, interpreter, stack};
 
     pub struct State {}
 
@@ -286,27 +321,26 @@ mod bytecode_view {
         }
     }
 
+    #[derive(Default)]
     pub struct Response {
         pub tiles: egui_tiles::UiResponse,
-    }
-    impl Default for Response {
-        fn default() -> Self {
-            Self {
-                tiles: Default::default(),
-            }
-        }
+        pub action: Action,
     }
 
     pub fn show(
         ui: &mut egui::Ui,
         loader: &mcjs_vm::Loader,
         intrp_state: &stack::InterpreterData,
+        highlight: widgets::Highlight,
     ) -> Response {
+        let mut action = Action::None;
+
         let drag_start = ui
             .add(egui::Button::new("Bytecode").sense(egui::Sense::drag()))
             .drag_started();
 
-        let header = intrp_state.top().header();
+        let frame = intrp_state.top();
+        let header = frame.header();
         let fnid = header.fnid;
         let cur_iid = header.iid;
 
@@ -340,31 +374,60 @@ mod bytecode_view {
                             ui.label(text);
                         });
 
+                        let mut description = None;
                         ui.horizontal(|ui| {
                             instr.analyze(|descr| {
                                 match descr {
-                                    InstrDescriptor::Description(description) => {
-                                        ui.label(description)
+                                    InstrDescriptor::Description(descr) => {
+                                        description = Some(descr);
                                     }
                                     InstrDescriptor::VRegRead(vreg) => {
-                                        ui.label(format!("v{}", vreg.0))
+                                        let this_action = widgets::value_button(
+                                            ui,
+                                            vreg,
+                                            description,
+                                            widgets::Mode::Read,
+                                            &frame,
+                                            highlight,
+                                        );
+                                        action.set_if_none(this_action);
                                     }
                                     InstrDescriptor::VRegWrite(vreg) => {
-                                        ui.label(format!("*v{}", vreg.0))
+                                        let this_action = widgets::value_button(
+                                            ui,
+                                            vreg,
+                                            description,
+                                            widgets::Mode::Write,
+                                            &frame,
+                                            highlight,
+                                        );
+                                        action.set_if_none(this_action);
                                     }
-                                    InstrDescriptor::IID(iid) => ui.label(format!("i{}", iid.0)),
+                                    InstrDescriptor::IID(iid) => {
+                                        ui.label(format!("i{}", iid.0));
+                                    }
                                     InstrDescriptor::Const(const_ndx) => {
-                                        ui.label(format!("k{}", const_ndx.0))
+                                        ui.label(format!("k{}", const_ndx.0));
                                     }
                                     InstrDescriptor::Capture(cap_ndx) => {
-                                        ui.label(format!("cap[{}]", cap_ndx.0))
+                                        ui.label(format!("cap[{}]", cap_ndx.0));
                                     }
                                     InstrDescriptor::Arg(arg_ndx) => {
-                                        ui.label(format!("arg[{}]", arg_ndx.0))
+                                        ui.label(format!("arg[{}]", arg_ndx.0));
                                     }
-                                    InstrDescriptor::Null => ui.label("null"),
-                                    InstrDescriptor::Undefined => ui.label("undefined"),
-                                    InstrDescriptor::This => ui.label("this"),
+                                    InstrDescriptor::Null => {
+                                        ui.label(widgets::richtext_for_value(
+                                            interpreter::Value::Null,
+                                        ));
+                                    }
+                                    InstrDescriptor::Undefined => {
+                                        ui.label(widgets::richtext_for_value(
+                                            interpreter::Value::Undefined,
+                                        ));
+                                    }
+                                    InstrDescriptor::This => {
+                                        ui.label("this");
+                                    }
                                 };
                             });
                         });
@@ -375,12 +438,189 @@ mod bytecode_view {
         });
 
         Response {
+            action,
             tiles: if drag_start {
                 egui_tiles::UiResponse::DragStarted
             } else {
                 egui_tiles::UiResponse::None
             },
         }
+    }
+}
+
+mod widgets {
+    use super::Action;
+    use mcjs_vm::{
+        bytecode,
+        interpreter::{debugger, Value},
+        stack,
+    };
+
+    const COLOR_BLUE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
+    const COLOR_LIGHT_BLUE: egui::Color32 = egui::Color32::from_rgb(156, 220, 254);
+    const COLOR_ROSE: egui::Color32 = egui::Color32::from_rgb(206, 145, 120);
+    const COLOR_MAGENTA: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
+    const COLOR_GREEN: egui::Color32 = egui::Color32::from_rgb(78, 201, 176);
+    const COLOR_YELLOW: egui::Color32 = egui::Color32::from_rgb(220, 220, 170);
+    const COLOR_GREY: egui::Color32 = egui::Color32::GRAY;
+
+    const COLOR_VREG_READ: egui::Color32 = COLOR_YELLOW;
+    const COLOR_VREG_WRITE: egui::Color32 = egui::Color32::LIGHT_RED;
+    const COLOR_HIGHLIGHTED: egui::Color32 = egui::Color32::GOLD;
+    const COLOR_NUMBER: egui::Color32 = COLOR_GREEN;
+    const COLOR_SINGLETON: egui::Color32 = COLOR_BLUE;
+    const COLOR_OBJECT: egui::Color32 = COLOR_LIGHT_BLUE;
+    const COLOR_STRING: egui::Color32 = COLOR_ROSE;
+    const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
+    const COLOR_IID: egui::Color32 = COLOR_GREY;
+    const COLOR_INVALID: egui::Color32 = COLOR_GREY;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Highlight {
+        None,
+        VReg((bytecode::FnId, bytecode::VReg)),
+        Object(debugger::ObjectId),
+    }
+    impl Default for Highlight {
+        fn default() -> Self {
+            Highlight::None
+        }
+    }
+    impl Highlight {
+        fn match_vreg(&self, fnid: bytecode::FnId, vreg: bytecode::VReg) -> bool {
+            matches!(self, Highlight::VReg(h) if *h == (fnid, vreg))
+        }
+
+        fn match_obj_id(&self, obj_id: debugger::ObjectId) -> bool {
+            *self == Highlight::Object(obj_id)
+        }
+    }
+
+    pub enum Mode {
+        Read,
+        Write,
+    }
+
+    pub fn value_button(
+        ui: &mut egui::Ui,
+        vreg: bytecode::VReg,
+        description: Option<&'static str>,
+        mode: Mode,
+        frame: &stack::Frame,
+        highlight: Highlight,
+    ) -> Action {
+        let slot = frame.get_slot(vreg);
+        let read_result = frame.get_result(vreg);
+        let fnid = frame.header().fnid;
+
+        let is_highlighted = {
+            let is_vreg_hl = highlight.match_vreg(fnid, vreg);
+            let is_obj_id_hl = matches!(
+                read_result,
+                Some(Value::Object(value_obj_id)) if highlight.match_obj_id(value_obj_id)
+            );
+            is_vreg_hl || is_obj_id_hl
+        };
+
+        let stroke = if is_highlighted {
+            egui::Stroke::new(1.0, COLOR_HIGHLIGHTED)
+        } else {
+            ui.ctx().style().visuals.window_stroke
+        };
+
+        let mut action = Action::None;
+        let mut hover_action = Action::None;
+
+        let res = egui::Frame::none()
+            .stroke(stroke)
+            .rounding(egui::Rounding::same(10.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 0.0))
+            .show(ui, |ui| {
+                if let Some(description) = description {
+                    ui.label(description);
+                }
+
+                ui.label(richtext_for_vreg(vreg, mode));
+
+                if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
+                    let upv_id = format!("{:?}", upv_id);
+                    let upv_id = peel_parens(&upv_id);
+                    ui.label(format!("upv{} »", upv_id));
+                }
+
+                match read_result {
+                    None => {
+                        ui.label(
+                            egui::RichText::new("TDZ")
+                                .color(COLOR_INVALID)
+                                .small_raised(),
+                        );
+                    }
+                    Some(value @ Value::Object(obj_id)) => {
+                        let value_text = richtext_for_value(value);
+                        let res = ui.add(
+                            egui::Button::new(value_text)
+                                .small()
+                                .stroke(egui::Stroke::NONE)
+                                .rounding(egui::Rounding::same(10.0)),
+                        );
+
+                        // TODO Short text for object (e.g. string)
+
+                        if res.clicked() {
+                            action = Action::OpenObject(obj_id);
+                        }
+                        hover_action = Action::SetHighlight(Highlight::Object(obj_id));
+                    }
+                    Some(non_obj_value) => {
+                        ui.label(richtext_for_value(non_obj_value));
+                        hover_action = Action::SetHighlight(Highlight::VReg((fnid, vreg)));
+                    }
+                }
+            });
+
+        if action == Action::None && res.response.hovered() {
+            action = hover_action;
+        }
+        action
+    }
+
+    fn richtext_for_vreg(vreg: bytecode::VReg, mode: Mode) -> egui::RichText {
+        let text_color = match mode {
+            Mode::Read => COLOR_VREG_READ,
+            Mode::Write => COLOR_VREG_WRITE,
+        };
+        egui::RichText::new(format!("v{}", vreg.0)).color(text_color)
+    }
+
+    pub fn richtext_for_value(value: Value) -> egui::RichText {
+        match value {
+            Value::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_NUMBER),
+            Value::Bool(true) => egui::RichText::new("true").color(COLOR_SINGLETON),
+            Value::Bool(false) => egui::RichText::new("false").color(COLOR_SINGLETON),
+            Value::Object(obj_id) => {
+                let obj_id = format!("{:?}", obj_id);
+                let obj_id = peel_parens(&obj_id);
+                let obj_id = format!("obj{}", obj_id);
+                egui::RichText::new(obj_id).color(COLOR_OBJECT)
+            }
+            Value::Null => egui::RichText::new("null").color(COLOR_SINGLETON),
+            Value::Undefined => egui::RichText::new("undefined").color(COLOR_SINGLETON),
+            Value::SelfFunction => panic!(),
+            Value::Internal(_) => panic!(),
+        }
+    }
+
+    // Narrows a &str from "xyz(whatever)" into "whatever". (Panics if
+    // the string is not in that form).
+    //
+    // We do this because slotmap doesn't give us visibility into its
+    // IDs, so we use this hack to get a more readable string out of
+    // their Debug impl.
+    fn peel_parens(s: &str) -> &str {
+        let (_, s) = s.split_once('(').unwrap();
+        let (inside, _) = s.split_once(')').unwrap();
+        inside
     }
 }
 
