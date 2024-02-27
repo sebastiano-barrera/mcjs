@@ -61,6 +61,8 @@ struct AppData {
     tree: egui_tiles::Tree<Pane>,
 
     stack_view: stack_view::State,
+    source_view: source_view::State,
+
     highlight: widgets::Highlight,
 }
 
@@ -83,7 +85,8 @@ impl AppData {
             params,
             intrp,
             tree,
-            stack_view: stack_view::State::new(),
+            stack_view: stack_view::State::default(),
+            source_view: source_view::State::default(),
             highlight: widgets::Highlight::None,
         }
     }
@@ -184,6 +187,7 @@ impl eframe::App for AppData {
                         cause: &cause,
                         loader: self.intrp.loader(),
                         stack_view: &mut self.stack_view,
+                        source_view: &mut self.source_view,
                         action: &mut action,
                         highlight: self.highlight,
                     };
@@ -232,7 +236,10 @@ struct TreeBehavior<'a> {
     intrp_state: &'a stack::InterpreterData,
     cause: &'a interpreter::SuspendCause,
     loader: &'a mcjs_vm::Loader,
+
     stack_view: &'a mut stack_view::State,
+    source_view: &'a mut source_view::State,
+
     action: &'a mut Action,
     highlight: widgets::Highlight,
 }
@@ -255,7 +262,15 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
         pane: &mut Pane,
     ) -> egui_tiles::UiResponse {
         let text = match pane {
-            Pane::SourceCode => "Source code",
+            Pane::SourceCode => {
+                return source_view::show(
+                    ui,
+                    self.source_view,
+                    &self.intrp_state.top(),
+                    self.loader,
+                )
+                .tiles;
+            }
             Pane::Bytecode => {
                 let res = bytecode_view::show(ui, self.loader, self.intrp_state, self.highlight);
                 self.action.set_if_none(res.action);
@@ -280,13 +295,8 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
 mod stack_view {
     use mcjs_vm::stack;
 
+    #[derive(Default)]
     pub struct State {}
-
-    impl State {
-        pub fn new() -> Self {
-            State {}
-        }
-    }
 
     pub fn show(
         _view_state: &mut State,
@@ -313,13 +323,8 @@ mod bytecode_view {
     use super::{widgets, Action};
     use mcjs_vm::{bytecode, interpreter, stack};
 
+    #[derive(Default)]
     pub struct State {}
-
-    impl State {
-        pub fn new() -> Self {
-            State {}
-        }
-    }
 
     #[derive(Default)]
     pub struct Response {
@@ -440,6 +445,74 @@ mod bytecode_view {
         Response {
             action,
             tiles: if drag_start {
+                egui_tiles::UiResponse::DragStarted
+            } else {
+                egui_tiles::UiResponse::None
+            },
+        }
+    }
+}
+
+mod source_view {
+    use mcjs_vm::{bytecode, stack, FunctionLookup, Loader};
+
+    #[derive(Default)]
+    pub struct Response {
+        pub tiles: egui_tiles::UiResponse,
+    }
+
+    #[derive(Default)]
+    pub struct State {
+        func_lookup: Option<(bytecode::FnId, FunctionLookup)>,
+    }
+    impl State {
+        fn update(&mut self, fnid: bytecode::FnId, loader: &Loader) {
+            if let Some((cached_fnid, _)) = &self.func_lookup {
+                if *cached_fnid == fnid {
+                    return;
+                }
+            }
+
+            self.func_lookup = loader
+                .lookup_function(fnid)
+                .map(|src_lookup| (fnid, src_lookup));
+        }
+    }
+
+    pub fn show(
+        ui: &mut egui::Ui,
+        state: &mut State,
+        frame: &stack::Frame,
+        loader: &Loader,
+    ) -> Response {
+        let button_drag_started = ui
+            .add(egui::Button::new("Source code").sense(egui::Sense::drag()))
+            .drag_started();
+
+        let fnid = frame.header().fnid;
+        state.update(fnid, loader);
+
+        let (check_fnid, src_lookup) = match &state.func_lookup {
+            Some(value) => value,
+            None => {
+                ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("No such function with ID");
+                        ui.label(format!("{:?}", fnid));
+                    });
+                });
+                return Response::default();
+            }
+        };
+        assert_eq!(*check_fnid, fnid);
+
+        let src = src_lookup.source_file.src.as_str();
+        egui::ScrollArea::both().show(ui, |ui| {
+            ui.monospace(src);
+        });
+
+        Response {
+            tiles: if button_drag_started {
                 egui_tiles::UiResponse::DragStarted
             } else {
                 egui_tiles::UiResponse::None
