@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 use anyhow::Result;
 use mcjs_vm::{
@@ -64,6 +64,9 @@ struct AppData {
     source_view: source_view::State,
 
     highlight: widgets::Highlight,
+
+    save_error_dialog: Option<String>,
+    toast: widgets::Toast,
 }
 
 impl AppData {
@@ -88,6 +91,8 @@ impl AppData {
             stack_view: stack_view::State::default(),
             source_view: source_view::State::default(),
             highlight: widgets::Highlight::None,
+            save_error_dialog: None,
+            toast: widgets::Toast::default(),
         }
     }
 
@@ -106,6 +111,71 @@ impl AppData {
             }
         }
     }
+
+    fn save_tree_layout(&mut self) -> AppResult<()> {
+        let path = state_file_path()?;
+
+        let state = StateFileData {
+            tree_layout: Some(self.tree.clone()),
+        };
+        let encoded_content = rmp_serde::to_vec(&state).expect("bug: msgpack serialization error!");
+
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(&encoded_content)?;
+
+        self.toast.start("Layout saved.".to_string());
+        Ok(())
+    }
+
+    fn load_tree_layout(&mut self) -> AppResult<()> {
+        let path = state_file_path()?;
+        let file = std::fs::File::open(&path)?;
+        let config: StateFileData =
+            rmp_serde::from_read(file).map_err(|err| AppError::Format(err.to_string()))?;
+
+        if let Some(tree) = &config.tree_layout {
+            self.tree = tree.clone();
+        }
+
+        self.toast.start("Layout restored.".to_string());
+        Ok(())
+    }
+}
+
+fn state_file_path() -> Result<PathBuf, AppError> {
+    const DIR_SUFFIX: &'static str = "mcjs_tools";
+    const FILENAME: &'static str = "state";
+
+    let dir = dirs::preference_dir()
+        .map(|p| p.join(DIR_SUFFIX))
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|exe_path| exe_path.parent().unwrap().join(DIR_SUFFIX))
+        })
+        .ok_or_else(|| AppError::Env(format!("can't determine configuration file location!")))?;
+
+    std::fs::create_dir_all(&dir)?;
+
+    Ok(dir.join(FILENAME))
+}
+
+type AppResult<T> = std::result::Result<T, AppError>;
+#[derive(Debug, thiserror::Error)]
+enum AppError {
+    #[error("environment error: {0}")]
+    Env(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("fomat error: {0}")]
+    Format(String),
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StateFileData {
+    tree_layout: Option<egui_tiles::Tree<Pane>>,
 }
 
 fn init_interpreter(params: &manager::Params) -> manager::ManagedInterpreter {
@@ -117,6 +187,7 @@ fn init_interpreter(params: &manager::Params) -> manager::ManagedInterpreter {
     intrp
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Pane {
     SourceCode,
     Bytecode,
@@ -133,6 +204,8 @@ enum Action {
     Next,
     SetHighlight(widgets::Highlight),
     OpenObject(debugger::ObjectId),
+    SaveLayout,
+    LoadLayout,
 }
 impl Action {
     fn set_if_none(&mut self, other: Action) {
@@ -180,6 +253,19 @@ impl eframe::App for AppData {
                             self.params.filenames.len(),
                             self.params.filenames[*script_ndx].display()
                         ));
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("View⏷", |ui| {
+                                if ui.button("Save").clicked() {
+                                    action = Action::SaveLayout;
+                                }
+                                if ui.button("Load").clicked() {
+                                    action = Action::LoadLayout;
+                                }
+                            });
+
+                            self.toast.update(ui);
+                        });
                     });
 
                     let mut behavior = TreeBehavior {
@@ -211,6 +297,22 @@ impl eframe::App for AppData {
             };
         });
 
+        let clear_error = if let Some(err_message) = &self.save_error_dialog {
+            egui::Window::new("Save/Load Layout: Error!")
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.monospace(err_message);
+                    ui.button("OK").clicked()
+                })
+                .and_then(|response| response.inner)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if clear_error {
+            self.save_error_dialog = None;
+        }
+
         match action {
             Action::None => {}
             Action::Resume => {
@@ -227,6 +329,12 @@ impl eframe::App for AppData {
             }
             Action::OpenObject(_) => {
                 eprintln!("TODO: {:?}", action);
+            }
+            Action::SaveLayout => {
+                self.save_error_dialog = self.save_tree_layout().err().map(|err| err.to_string());
+            }
+            Action::LoadLayout => {
+                self.save_error_dialog = self.load_tree_layout().err().map(|err| err.to_string());
             }
         }
     }
@@ -522,6 +630,8 @@ mod source_view {
 }
 
 mod widgets {
+    use std::time::{Duration, Instant};
+
     use super::Action;
     use mcjs_vm::{
         bytecode,
@@ -681,6 +791,48 @@ mod widgets {
             Value::Undefined => egui::RichText::new("undefined").color(COLOR_SINGLETON),
             Value::SelfFunction => panic!(),
             Value::Internal(_) => panic!(),
+        }
+    }
+
+    pub struct Toast {
+        pub dur: Duration,
+        state: ToastState,
+    }
+    enum ToastState {
+        Off,
+        On {
+            message: String,
+            appear_time: Instant,
+        },
+    }
+    impl Default for Toast {
+        fn default() -> Self {
+            Toast {
+                dur: Duration::from_secs(5),
+                state: ToastState::Off,
+            }
+        }
+    }
+    impl Toast {
+        pub fn start(&mut self, message: String) {
+            let appear_time = Instant::now();
+            self.state = ToastState::On {
+                message,
+                appear_time,
+            };
+        }
+        pub fn update(&mut self, ui: &mut egui::Ui) {
+            if let ToastState::On {
+                appear_time,
+                message,
+            } = &self.state
+            {
+                if appear_time.elapsed() > self.dur {
+                    self.state = ToastState::Off;
+                } else {
+                    ui.label(message);
+                }
+            }
         }
     }
 
