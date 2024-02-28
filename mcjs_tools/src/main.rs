@@ -85,7 +85,7 @@ impl AppData {
 
         let intrp = init_interpreter(&params);
 
-        AppData {
+        let mut app = AppData {
             params,
             intrp,
             tree,
@@ -95,7 +95,12 @@ impl AppData {
             save_error_dialog: None,
             bkpt_error_dialog: None,
             toast: widgets::Toast::default(),
-        }
+        };
+
+        // Purposefully ignore the error, not a time to show it
+        let _ = app.load_tree_layout();
+
+        app
     }
 
     fn restart(&mut self) {
