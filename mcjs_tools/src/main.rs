@@ -3,7 +3,7 @@ use std::{io::Write, path::PathBuf};
 use anyhow::Result;
 use mcjs_vm::{
     interpreter::{self, debugger},
-    stack,
+    stack, bytecode,
 };
 
 fn main() {
@@ -68,6 +68,8 @@ struct AppData {
     save_error_dialog: Option<String>,
     bkpt_error_dialog: Option<String>,
     toast: widgets::Toast,
+
+    error_dialog_toast: widgets::Toast,
 }
 
 impl AppData {
@@ -95,6 +97,7 @@ impl AppData {
             save_error_dialog: None,
             bkpt_error_dialog: None,
             toast: widgets::Toast::default(),
+            error_dialog_toast: widgets::Toast::default(),
         };
 
         // Purposefully ignore the error, not a time to show it
@@ -104,7 +107,8 @@ impl AppData {
     }
 
     fn restart(&mut self) {
-        self.intrp = init_interpreter(&self.params);
+        self.intrp.restart();
+        self.intrp.resume();
     }
 
     fn resume(&mut self) {
@@ -292,9 +296,20 @@ impl eframe::App for AppData {
                 manager::State::Failed(err) => {
                     ui.heading("Interpreter failed:");
                     ui.label(format!("{:?}", err));
-                    if ui.button("Restart").clicked() {
-                        action = Action::Restart;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Restart").clicked() {
+                            action = Action::Restart;
+                        }
+
+                        if ui.button("Place breakpoint at failed instruction").clicked() {
+                            let data = err.interpreter_state();
+                            let header = data.top().header();
+                            let giid = bytecode::GlobalIID(header.fnid, header.iid);
+                            self.error_dialog_toast.start(format!("Set breakpoint at {:?}", giid));
+                            action = Action::SetInstrBreakpoint(giid);
+                        }
+                    });
+                    self.error_dialog_toast.update(ui);
                 }
             };
         });
@@ -987,6 +1002,11 @@ mod manager {
                 state: State::Ready(0),
                 dbg,
             })
+        }
+
+        pub fn restart(&mut self) {
+            self.realm = Realm::new(&mut self.loader);
+            self.state = State::Ready(0);
         }
 
         pub fn state(&self) -> &State {
