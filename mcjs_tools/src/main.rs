@@ -386,7 +386,9 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
             }
             Pane::PAST => "PAST",
             Pane::Heap => "Heap",
-            Pane::Stack => return stack_view::show(&mut self.stack_view, ui, self.intrp_state),
+            Pane::Stack => {
+                return stack_view::show(&mut self.stack_view, ui, self.intrp_state, self.loader)
+            }
         };
 
         if ui
@@ -410,14 +412,23 @@ mod stack_view {
         _view_state: &mut State,
         ui: &mut egui::Ui,
         intrp_state: &stack::InterpreterData,
+        loader: &mcjs_vm::Loader,
     ) -> egui_tiles::UiResponse {
         let drag_button_res = ui.add(egui::Button::new("Stack").sense(egui::Sense::drag()));
 
-        for frame in intrp_state.frames() {
-            let header = frame.header();
-            let point_str = format!("{:?}:{:?}", header.fnid, header.iid);
-            ui.selectable_label(false, point_str);
-        }
+        ui.with_layout(
+            egui::Layout::top_down(egui::Align::Min).with_cross_justify(true),
+            |ui| {
+                for frame in intrp_state.frames() {
+                    let header = frame.header();
+                    let lookup = loader.lookup_function(header.fnid).unwrap();
+                    let filename = lookup.source_file.name.to_string();
+
+                    let point_str = format!("{:?}:{:?} - {:?}", header.fnid, header.iid, filename);
+                    ui.selectable_label(false, point_str);
+                }
+            },
+        );
 
         if drag_button_res.drag_started() {
             egui_tiles::UiResponse::DragStarted
