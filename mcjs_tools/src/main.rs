@@ -66,6 +66,7 @@ struct AppData {
     highlight: widgets::Highlight,
 
     save_error_dialog: Option<String>,
+    bkpt_error_dialog: Option<String>,
     toast: widgets::Toast,
 }
 
@@ -92,6 +93,7 @@ impl AppData {
             source_view: source_view::State::default(),
             highlight: widgets::Highlight::None,
             save_error_dialog: None,
+            bkpt_error_dialog: None,
             toast: widgets::Toast::default(),
         }
     }
@@ -206,6 +208,8 @@ enum Action {
     OpenObject(debugger::ObjectId),
     SaveLayout,
     LoadLayout,
+    SetInstrBreakpoint(mcjs_vm::GlobalIID),
+    ClearInstrBreakpoint(mcjs_vm::GlobalIID),
 }
 impl Action {
     fn set_if_none(&mut self, other: Action) {
@@ -276,6 +280,7 @@ impl eframe::App for AppData {
                         source_view: &mut self.source_view,
                         action: &mut action,
                         highlight: self.highlight,
+                        dbg: self.intrp.debugging_state(),
                     };
                     self.tree.ui(&mut behavior, ui);
                 }
@@ -297,21 +302,8 @@ impl eframe::App for AppData {
             };
         });
 
-        let clear_error = if let Some(err_message) = &self.save_error_dialog {
-            egui::Window::new("Save/Load Layout: Error!")
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.monospace(err_message);
-                    ui.button("OK").clicked()
-                })
-                .and_then(|response| response.inner)
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        if clear_error {
-            self.save_error_dialog = None;
-        }
+        simple_dialog(ctx, "Save/Load Layout: Error!", &mut self.save_error_dialog);
+        simple_dialog(ctx, "Breakpoint error", &mut self.bkpt_error_dialog);
 
         match action {
             Action::None => {}
@@ -336,7 +328,36 @@ impl eframe::App for AppData {
             Action::LoadLayout => {
                 self.save_error_dialog = self.load_tree_layout().err().map(|err| err.to_string());
             }
+            Action::SetInstrBreakpoint(giid) => {
+                let dbg = self.intrp.debugging_state_mut();
+                if let Err(err) = dbg.set_instr_breakpoint(giid) {
+                    self.bkpt_error_dialog = Some(err.to_string());
+                }
+            }
+            Action::ClearInstrBreakpoint(giid) => {
+                let dbg = self.intrp.debugging_state_mut();
+                dbg.clear_instr_breakpoint(giid);
+            }
         }
+    }
+}
+
+fn simple_dialog(ctx: &egui::Context, title: &str, message: &mut Option<String>) {
+    let clear_error = if let Some(err_message) = &message {
+        egui::Window::new(title)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.monospace(err_message);
+                ui.button("OK").clicked()
+            })
+            .and_then(|response| response.inner)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if clear_error {
+        *message = None;
     }
 }
 
@@ -344,6 +365,7 @@ struct TreeBehavior<'a> {
     intrp_state: &'a stack::InterpreterData,
     cause: &'a interpreter::SuspendCause,
     loader: &'a mcjs_vm::Loader,
+    dbg: &'a interpreter::debugger::DebuggingState,
 
     stack_view: &'a mut stack_view::State,
     source_view: &'a mut source_view::State,
@@ -380,7 +402,14 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
                 .tiles;
             }
             Pane::Bytecode => {
-                let res = bytecode_view::show(ui, self.loader, self.intrp_state, self.highlight);
+                let is_breakpoint_set = |giid| self.dbg.is_breakpoint_at(&giid);
+                let res = bytecode_view::show(
+                    ui,
+                    self.loader,
+                    self.intrp_state,
+                    self.highlight,
+                    is_breakpoint_set,
+                );
                 self.action.set_if_none(res.action);
                 return res.tiles;
             }
@@ -456,6 +485,7 @@ mod bytecode_view {
         loader: &mcjs_vm::Loader,
         intrp_state: &stack::InterpreterData,
         highlight: widgets::Highlight,
+        is_breakpoint_set: impl Fn(bytecode::GlobalIID) -> bool,
     ) -> Response {
         let mut action = Action::None;
 
@@ -490,7 +520,16 @@ mod bytecode_view {
 
                         ui.horizontal(|ui| {
                             ui.set_width(40.0);
-                            ui.monospace(format!("i{}", iid.0));
+                            let giid = bytecode::GlobalIID(fnid, iid);
+                            let checked = is_breakpoint_set(giid);
+                            let text = format!("i{}", iid.0);
+                            if ui.selectable_label(checked, text).clicked() {
+                                if checked {
+                                    action = Action::ClearInstrBreakpoint(giid);
+                                } else {
+                                    action = Action::SetInstrBreakpoint(giid);
+                                }
+                            }
                         });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
@@ -1010,6 +1049,13 @@ mod manager {
         pub fn next(&mut self) {
             self.dbg.set_fuel(Fuel::Limited(1));
             self.resume();
+        }
+
+        pub fn debugging_state(&self) -> &interpreter::debugger::DebuggingState {
+            &self.dbg
+        }
+        pub fn debugging_state_mut(&mut self) -> &mut interpreter::debugger::DebuggingState {
+            &mut self.dbg
         }
     }
 }
