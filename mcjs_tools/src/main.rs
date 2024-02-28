@@ -2,8 +2,9 @@ use std::{io::Write, path::PathBuf};
 
 use anyhow::Result;
 use mcjs_vm::{
+    bytecode,
     interpreter::{self, debugger},
-    stack, bytecode,
+    stack,
 };
 
 fn main() {
@@ -301,11 +302,15 @@ impl eframe::App for AppData {
                             action = Action::Restart;
                         }
 
-                        if ui.button("Place breakpoint at failed instruction").clicked() {
+                        if ui
+                            .button("Place breakpoint at failed instruction")
+                            .clicked()
+                        {
                             let data = err.interpreter_state();
                             let header = data.top().header();
                             let giid = bytecode::GlobalIID(header.fnid, header.iid);
-                            self.error_dialog_toast.start(format!("Set breakpoint at {:?}", giid));
+                            self.error_dialog_toast
+                                .start(format!("Set breakpoint at {:?}", giid));
                             action = Action::SetInstrBreakpoint(giid);
                         }
                     });
@@ -631,6 +636,8 @@ mod bytecode_view {
 }
 
 mod source_view {
+    use std::sync::Arc;
+
     use mcjs_vm::{bytecode, stack, FunctionLookup, Loader};
 
     #[derive(Default)]
@@ -640,19 +647,72 @@ mod source_view {
 
     #[derive(Default)]
     pub struct State {
-        func_lookup: Option<(bytecode::FnId, FunctionLookup)>,
+        cache: Option<Cache>,
     }
     impl State {
-        fn update(&mut self, fnid: bytecode::FnId, loader: &Loader) {
-            if let Some((cached_fnid, _)) = &self.func_lookup {
-                if *cached_fnid == fnid {
+        fn update(&mut self, fnid: bytecode::FnId, loader: &Loader, ctx: &egui::Context) {
+            if let Some(cache) = &self.cache {
+                if cache.fnid == fnid {
                     return;
                 }
             }
+            self.cache = Cache::build(fnid, loader, ctx);
+        }
+    }
+    struct Cache {
+        fnid: bytecode::FnId,
+        func_lookup: FunctionLookup,
+        galley: Arc<egui::Galley>,
+    }
+    impl Cache {
+        fn build(fnid: bytecode::FnId, loader: &Loader, ctx: &egui::Context) -> Option<Cache> {
+            let func_lookup = loader.lookup_function(fnid)?;
+            let mut layout_job = egui::text::LayoutJob::default();
 
-            self.func_lookup = loader
-                .lookup_function(fnid)
-                .map(|src_lookup| (fnid, src_lookup));
+            let hl_start = func_lookup.local_range.start.0 as usize;
+            let hl_end = func_lookup.local_range.end.0 as usize;
+            let pre = &func_lookup.source_file.src[0..hl_start];
+            let hl = &func_lookup.source_file.src[hl_start..hl_end];
+            let post = &func_lookup.source_file.src[hl_end..];
+
+            let style = egui::Style::default();
+            let default_valign = egui::Align::Min;
+
+            egui::RichText::new(pre)
+                .monospace()
+                .color(style.visuals.weak_text_color())
+                .append_to(
+                    &mut layout_job,
+                    &style,
+                    egui::FontSelection::default(),
+                    default_valign,
+                );
+            egui::RichText::new(hl)
+                .monospace()
+                .color(style.visuals.strong_text_color())
+                .append_to(
+                    &mut layout_job,
+                    &style,
+                    egui::FontSelection::default(),
+                    default_valign,
+                );
+            egui::RichText::new(post)
+                .monospace()
+                .color(style.visuals.weak_text_color())
+                .append_to(
+                    &mut layout_job,
+                    &style,
+                    egui::FontSelection::default(),
+                    default_valign,
+                );
+
+            let galley = ctx.fonts(|fonts| fonts.layout_job(layout_job));
+
+            Some(Cache {
+                fnid,
+                func_lookup,
+                galley,
+            })
         }
     }
 
@@ -667,10 +727,10 @@ mod source_view {
             .drag_started();
 
         let fnid = frame.header().fnid;
-        state.update(fnid, loader);
+        state.update(fnid, loader, ui.ctx());
 
-        let (check_fnid, src_lookup) = match &state.func_lookup {
-            Some(value) => value,
+        let cache = match &state.cache {
+            Some(cache) => cache,
             None => {
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {
@@ -681,11 +741,10 @@ mod source_view {
                 return Response::default();
             }
         };
-        assert_eq!(*check_fnid, fnid);
+        assert_eq!(cache.fnid, fnid);
 
-        let src = src_lookup.source_file.src.as_str();
         egui::ScrollArea::both().show(ui, |ui| {
-            ui.monospace(src);
+            ui.label(egui::WidgetText::Galley(Arc::clone(&cache.galley)));
         });
 
         Response {
