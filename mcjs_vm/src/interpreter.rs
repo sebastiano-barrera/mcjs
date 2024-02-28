@@ -498,7 +498,6 @@ fn run_regular(
         // until we need to suspend and resume our burrow (e.g. across a call to
         // run_frame)
         let fnid = data.top().header().fnid;
-        let mut iid = data.top().header().iid;
         let func = loader.get_function(fnid).unwrap();
 
         loop {
@@ -507,6 +506,7 @@ fn run_regular(
             assert_eq!(data.len() - 1, stack_level);
             assert_eq!(data.top().header().fnid, fnid);
 
+            let iid = data.top().header().iid;
             if iid.0 as usize == func.instrs().len() {
                 // Bytecode "finished" => Implicitly return undefined
                 return Ok(Value::Undefined);
@@ -1059,7 +1059,8 @@ fn run_regular(
                 Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
             }
 
-            iid.0 = next_ndx;
+            // TODO Inefficient, but prevents a number of bugs
+            data.top_mut().set_resume_iid(bytecode::IID(next_ndx));
 
             #[cfg(feature = "debugger")]
             if let Some(dbg) = dbg {
