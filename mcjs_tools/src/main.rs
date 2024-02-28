@@ -476,13 +476,16 @@ mod bytecode_view {
             }
         };
 
-        egui::ScrollArea::both().show(ui, |ui| {
+        let instrs = func.instrs();
+        let row_height = ui.spacing().interact_size.y;
+        egui::ScrollArea::both().show_rows(ui, row_height, instrs.len(), |ui, ndx_range| {
             egui::Grid::new("bytecode->instrs")
                 .num_columns(3)
                 .show(ui, |ui| {
-                    for (iid, instr) in func.instrs().iter().enumerate() {
+                    for iid in ndx_range {
                         use mcjs_vm::bytecode::InstrDescriptor;
 
+                        let instr = &instrs[iid];
                         let iid = bytecode::IID(iid.try_into().unwrap());
 
                         ui.horizontal(|ui| {
