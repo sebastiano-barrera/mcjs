@@ -12,6 +12,14 @@ pub struct InterpreterData {
     // TODO Make tests work without this hack
     #[cfg(any(test, feature = "debugger"))]
     pub sink: Vec<Value>,
+
+    /// This flag is set right before the Interpreter is suspended due to a breakpoint of any kind.
+    ///
+    /// This is necessary to track because, the "successor" Interpreter that resumes executing with
+    /// this InterpreterData needs to 'skip' the breakpoint in order not to enter an infinite
+    /// loop of always suspending on the same breakpoint!
+    #[cfg(feature = "debugger")]
+    resuming_from_breakpoint: bool,
 }
 
 // Throughout this module, `Option<Value>` is stored instead of `Value`.  The `None` case
@@ -85,6 +93,9 @@ impl InterpreterData {
 
             #[cfg(any(test, feature = "debugger"))]
             sink: Vec::new(),
+
+            #[cfg(feature = "debugger")]
+            resuming_from_breakpoint: false,
         }
     }
 
@@ -200,10 +211,22 @@ impl InterpreterData {
         self.headers.truncate(new_len);
         self.check_invariants();
     }
+}
 
-    #[cfg(feature = "debugger")]
+#[cfg(feature = "debugger")]
+impl InterpreterData {
     pub(crate) fn any_exception_handler(&self) -> bool {
         self.headers.iter().any(|hdr| !hdr.exc_handlers.is_empty())
+    }
+
+    /// Set the "resuming from breakpoint" flag to true.
+    pub(crate) fn set_resuming_from_breakpoint(&mut self) {
+        self.resuming_from_breakpoint = true;
+    }
+
+    /// Return the "resuming from breakpoint" flag and set it to false immediately afterwards.
+    pub(crate) fn take_resuming_from_breakpoint(&mut self) -> bool {
+        std::mem::replace(&mut self.resuming_from_breakpoint, false)
     }
 }
 

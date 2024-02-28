@@ -108,15 +108,7 @@ impl AppData {
     }
 
     fn resume(&mut self) {
-        // Skip the initialized "Ready" state, as it's not relevant for the user
-        // to see
-        loop {
-            self.intrp.resume();
-            match self.intrp.state() {
-                manager::State::Ready(_) => {}
-                _ => break,
-            }
-        }
+        self.intrp.resume();
     }
 
     fn save_tree_layout(&mut self) -> AppResult<()> {
@@ -1013,45 +1005,55 @@ mod manager {
         }
 
         pub fn resume(&mut self) {
-            let state = std::mem::replace(&mut self.state, State::Finished);
-            let (script_ndx, mut intrp) = match state {
-                State::Ready(script_ndx) => {
-                    let main_fnid = self.script_fnids[script_ndx];
-                    let intrp = Interpreter::new(&mut self.realm, &mut self.loader, main_fnid);
-                    (script_ndx, intrp)
-                }
-                State::Suspended {
-                    script_ndx,
-                    intrp_state,
-                    ..
-                } => {
-                    let intrp = Interpreter::resume(&mut self.realm, &mut self.loader, intrp_state);
-                    (script_ndx, intrp)
-                }
-                State::Finished | State::Failed(_) => {
-                    return;
-                }
-            };
-
-            intrp.set_debugging_state(&mut self.dbg);
-
-            let next_script_ndx = script_ndx + 1;
-            assert!(next_script_ndx <= self.script_fnids.len());
-
-            self.state = match intrp.run() {
-                Ok(Exit::Finished(_)) => {
-                    if next_script_ndx == self.script_fnids.len() {
-                        State::Finished
-                    } else {
-                        State::Ready(next_script_ndx)
+            loop {
+                let state = std::mem::replace(&mut self.state, State::Finished);
+                let (script_ndx, mut intrp) = match state {
+                    State::Ready(script_ndx) => {
+                        let main_fnid = self.script_fnids[script_ndx];
+                        let intrp = Interpreter::new(&mut self.realm, &mut self.loader, main_fnid);
+                        (script_ndx, intrp)
                     }
+                    State::Suspended {
+                        script_ndx,
+                        intrp_state,
+                        ..
+                    } => {
+                        let intrp =
+                            Interpreter::resume(&mut self.realm, &mut self.loader, intrp_state);
+                        (script_ndx, intrp)
+                    }
+                    State::Finished | State::Failed(_) => {
+                        return;
+                    }
+                };
+
+                intrp.set_debugging_state(&mut self.dbg);
+
+                let next_script_ndx = script_ndx + 1;
+                assert!(next_script_ndx <= self.script_fnids.len());
+
+                self.state = match intrp.run() {
+                    Ok(Exit::Finished(_)) => {
+                        if next_script_ndx == self.script_fnids.len() {
+                            State::Finished
+                        } else {
+                            State::Ready(next_script_ndx)
+                        }
+                    }
+                    Ok(Exit::Suspended { intrp_state, cause }) => State::Suspended {
+                        script_ndx,
+                        intrp_state,
+                        cause,
+                    },
+                    Err(err) => State::Failed(err),
+                };
+
+                // Skip the initialized "Ready" state, as it's not relevant for the user
+                // to see
+                match &self.state {
+                    State::Ready(_) => {}
+                    _ => break,
                 }
-                Ok(Exit::Suspended { intrp_state, cause }) => State::Suspended {
-                    script_ndx,
-                    intrp_state,
-                    cause,
-                },
-                Err(err) => State::Failed(err),
             }
         }
 

@@ -208,8 +208,9 @@ impl<'a> Interpreter<'a> {
     pub fn resume(
         realm: &'a mut Realm,
         loader: &'a mut loader::Loader,
-        data: stack::InterpreterData,
+        mut data: stack::InterpreterData,
     ) -> Self {
+        data.set_resuming_from_breakpoint();
         Interpreter {
             realm,
             data,
@@ -356,7 +357,6 @@ fn run_frame<'a>(
     loader: &mut loader::Loader,
     // TODO Define a StackLevel newtype
     stack_level: usize,
-
     #[cfg(feature = "debugger")] dbg: &mut Option<&'a mut debugger::DebuggingState>,
 ) -> RunResult<Value> {
     #[allow(clippy::len_zero)]
@@ -452,7 +452,6 @@ fn run_frame<'a>(
 
             RunError::Internal(_) => {
                 t.log("returned", "due to internal error");
-                // data.pop();
                 return Err(err);
             }
 
@@ -512,8 +511,23 @@ fn run_regular(
                 // Bytecode "finished" => Implicitly return undefined
                 return Ok(Value::Undefined);
             }
+
             let instr = func.instrs()[iid.0 as usize];
             let mut next_ndx = iid.0 + 1;
+
+            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+            #[cfg(feature = "debugger")]
+            if let Some(dbg) = dbg {
+                if dbg.fuel_empty() {
+                    dbg.set_fuel(debugger::Fuel::Unlimited);
+                    force_suspend_for_breakpoint(data, iid)?;
+                }
+
+                let giid = bytecode::GlobalIID(fnid, iid);
+                if dbg.is_breakpoint_at(&giid) {
+                    suspend_for_breakpoint(data, iid)?;
+                }
+            }
 
             match &instr {
                 Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
@@ -1022,10 +1036,7 @@ fn run_regular(
                 }
 
                 Instr::Breakpoint => {
-                    // We must set the 'return-to' IID now, or the Interpreter will be back here on resume,
-                    // in an infinite loop.
-                    data.top_mut().set_resume_iid(bytecode::IID(next_ndx));
-                    return Err(RunError::Suspended(SuspendCause::Breakpoint));
+                    suspend_for_breakpoint(data, iid)?;
                 }
 
                 Instr::GetCurrentException(dest) => {
@@ -1048,24 +1059,12 @@ fn run_regular(
                 Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
             }
 
-            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+            iid.0 = next_ndx;
+
             #[cfg(feature = "debugger")]
             if let Some(dbg) = dbg {
-                let giid = bytecode::GlobalIID(fnid, iid);
-                let out_of_fuel = dbg.consume_1_fuel();
-                if out_of_fuel || dbg.is_breakpoint_at(&giid) {
-                    // Important: Commit a pre-increased IID before suspending,
-                    // so that:
-                    //  1. debugging tools can see the correct IID
-                    //  2. cycling suspend/resume (which is what "NEXT" is in
-                    //     the debugger) won't be an infinite loop.
-                    data.top_mut().set_resume_iid(bytecode::IID(next_ndx));
-                    return Err(RunError::Suspended(SuspendCause::Breakpoint));
-                }
+                dbg.consume_1_fuel();
             }
-            
-            // Gotta increase IID even if we're about to suspend, or we'll be back here on resume
-            iid.0 = next_ndx;
         }
     }
 }
@@ -1092,6 +1091,37 @@ fn throw_exc(
 #[cfg(not(feature = "debugger"))]
 fn throw_exc(exc: Value) -> RunResult<()> {
     Err(RunError::Exception(exc))
+}
+
+/// Save the interpreter state and return `Err(RunError::Suspended(SuspendCause::Breakpoint))` *if*
+/// the interpreter is in fact supposed to do so.  In case the interpreter is supposed *not* to
+/// suspend and continue execution, it returns `Ok(())`.
+///
+/// The return value is designed so that you can just `try!` a call to it (i.e.
+/// `suspend_for_breakpoint(...)?`) in the body of `run_regular` and get the proper behavior.
+fn suspend_for_breakpoint(data: &mut stack::InterpreterData, iid: bytecode::IID) -> RunResult<()> {
+    #[cfg(feature = "debugger")]
+    if !data.take_resuming_from_breakpoint() {
+        return force_suspend_for_breakpoint(data, iid);
+    }
+
+    // In case of cfg(not(feature = "debugger")), just always keep going
+    // Don't suspend. Execute the instruction and keep going
+    Ok(())
+}
+
+/// Save the interpreter state and return `Err(RunError::Suspended(SuspendCause::Breakpoint))`
+///
+/// The return value is designed so that you can just `try!` a call to it (i.e.
+/// `suspend_for_breakpoint(...)?`) in the body of `run_regular` and get the proper behavior.
+fn force_suspend_for_breakpoint(data: &mut stack::InterpreterData, iid: bytecode::IID) -> RunResult<()> {
+    // Important: Commit the *current* IID to the interpreter state so that:
+    //  1. debugging tools can see the correct IID
+    //  2. a successor interpreter will resume by *repeating* the instruction where the
+    //     suspension happened. That will result in a second call to `suspend_for_breakpoint`,
+    //     which will return `Ok(())` on this second run allowing execution to continue.
+    data.top_mut().set_resume_iid(iid);
+    return Err(RunError::Suspended(SuspendCause::Breakpoint));
 }
 
 // TODO(cleanup) inline this function? It now adds nothing
@@ -1458,6 +1488,7 @@ pub mod debugger {
         break_on_throw: bool,
     }
 
+    #[derive(Debug, PartialEq, Eq)]
     pub enum Fuel {
         Limited(usize),
         Unlimited,
@@ -1486,21 +1517,16 @@ pub mod debugger {
         pub fn set_fuel(&mut self, fuel: Fuel) {
             self.fuel = fuel;
         }
-
-        /// Consume 1 unit of fuel.  Returns true iff the tank is empty.
-        pub fn consume_1_fuel(&mut self) -> bool {
+        pub fn fuel_empty(&self) -> bool {
+            self.fuel == Fuel::Limited(0)
+        }
+        pub fn consume_1_fuel(&mut self) {
             match &mut self.fuel {
                 Fuel::Limited(count) => {
                     assert!(*count > 0);
                     *count -= 1;
-                    if *count == 0 {
-                        self.fuel = Fuel::Unlimited;
-                        true
-                    } else {
-                        false
-                    }
                 }
-                Fuel::Unlimited => false,
+                Fuel::Unlimited => {}
             }
         }
 
