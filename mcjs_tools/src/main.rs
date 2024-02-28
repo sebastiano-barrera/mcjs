@@ -509,8 +509,16 @@ mod bytecode_view {
         let instrs = func.instrs();
         let row_height = ui.spacing().interact_size.y;
         egui::ScrollArea::both().show_rows(ui, row_height, instrs.len(), |ui, ndx_range| {
+            let cur_iid_ndx = cur_iid.0 as usize; // copy to move into closure
             egui::Grid::new("bytecode->instrs")
                 .num_columns(3)
+                .with_row_color(move |ndx, style| {
+                    if ndx + ndx_range.start == cur_iid_ndx {
+                        Some(style.visuals.extreme_bg_color)
+                    } else {
+                        None
+                    }
+                })
                 .show(ui, |ui| {
                     for iid in ndx_range {
                         use mcjs_vm::bytecode::InstrDescriptor;
@@ -533,11 +541,7 @@ mod bytecode_view {
                         });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
-                            let mut text = egui::RichText::new(instr.opcode());
-                            if iid == cur_iid {
-                                text = text.background_color(egui::Color32::DARK_BLUE);
-                            };
-                            ui.label(text);
+                            ui.label(egui::RichText::new(instr.opcode()));
                         });
 
                         let mut description = None;
