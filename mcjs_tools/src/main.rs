@@ -636,9 +636,9 @@ mod bytecode_view {
 }
 
 mod source_view {
-    use std::sync::Arc;
+    use std::{ops::Range, sync::Arc};
 
-    use mcjs_vm::{bytecode, stack, FunctionLookup, Loader};
+    use mcjs_vm::{bytecode, stack, Loader};
 
     #[derive(Default)]
     pub struct Response {
@@ -651,68 +651,123 @@ mod source_view {
     }
     impl State {
         fn update(&mut self, fnid: bytecode::FnId, loader: &Loader, ctx: &egui::Context) {
+            let galley_type = GalleyType::Function;
             if let Some(cache) = &self.cache {
-                if cache.fnid == fnid {
+                if cache.is_valid(fnid, galley_type) {
                     return;
                 }
             }
-            self.cache = Cache::build(fnid, loader, ctx);
+            self.cache = Cache::build(fnid, loader, ctx, galley_type);
         }
     }
+
     struct Cache {
         fnid: bytecode::FnId,
-        func_lookup: FunctionLookup,
+        breakranges: Vec<(mcjs_vm::BreakRangeID, Range<usize>)>,
         galley: Arc<egui::Galley>,
+        galley_type: GalleyType,
+    }
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum GalleyType {
+        Function,
+        BreakRange(mcjs_vm::BreakRangeID),
     }
     impl Cache {
-        fn build(fnid: bytecode::FnId, loader: &Loader, ctx: &egui::Context) -> Option<Cache> {
-            let func_lookup = loader.lookup_function(fnid)?;
-            let mut layout_job = egui::text::LayoutJob::default();
+        fn is_valid(&self, fnid: bytecode::FnId, galley_type: GalleyType) -> bool {
+            self.fnid == fnid && self.galley_type == galley_type
+        }
 
-            let hl_start = func_lookup.local_range.start.0 as usize;
-            let hl_end = func_lookup.local_range.end.0 as usize;
-            let pre = &func_lookup.source_file.src[0..hl_start];
-            let hl = &func_lookup.source_file.src[hl_start..hl_end];
-            let post = &func_lookup.source_file.src[hl_end..];
+        fn build(
+            fnid: bytecode::FnId,
+            loader: &Loader,
+            ctx: &egui::Context,
+            galley_type: GalleyType,
+        ) -> Option<Cache> {
+            let func_lookup = loader.lookup_function(fnid)?;
+            let start_pos = func_lookup.source_file.start_pos;
+            let breakranges: Vec<_> = loader
+                .function_breakranges(fnid)?
+                .map(|(brid, brange)| {
+                    let lo = (brange.lo - start_pos).0 as usize;
+                    let hi = (brange.hi - start_pos).0 as usize;
+                    (brid, lo..hi)
+                })
+                .collect();
 
             let style = egui::Style::default();
+            let hl_start = func_lookup.local_range.start.0 as usize;
+            let hl_end = func_lookup.local_range.end.0 as usize;
+            let normal_color = style.visuals.weak_text_color();
+            let hl_color = style.visuals.strong_text_color();
+            let galley = GalleyHighlightParams {
+                full_text: &func_lookup.source_file.src,
+                hl_start,
+                hl_end,
+                normal_color,
+                style: &style,
+                hl_color,
+                ctx,
+            }
+            .to_galley();
+
+            Some(Cache {
+                fnid,
+                galley,
+                breakranges,
+                galley_type,
+            })
+        }
+    }
+
+    struct GalleyHighlightParams<'a> {
+        full_text: &'a str,
+
+        hl_start: usize,
+        hl_end: usize,
+        normal_color: egui::Color32,
+        hl_color: egui::Color32,
+
+        style: &'a egui::Style,
+        ctx: &'a egui::Context,
+    }
+    impl<'a> GalleyHighlightParams<'a> {
+        fn to_galley(self) -> Arc<egui::Galley> {
+            let pre = &self.full_text[0..self.hl_start];
+            let hl = &self.full_text[self.hl_start..self.hl_end];
+            let post = &self.full_text[self.hl_end..];
+
             let default_valign = egui::Align::Min;
 
+            let mut layout_job = egui::text::LayoutJob::default();
             egui::RichText::new(pre)
                 .monospace()
-                .color(style.visuals.weak_text_color())
+                .color(self.normal_color)
                 .append_to(
                     &mut layout_job,
-                    &style,
+                    self.style,
                     egui::FontSelection::default(),
                     default_valign,
                 );
             egui::RichText::new(hl)
                 .monospace()
-                .color(style.visuals.strong_text_color())
+                .color(self.hl_color)
                 .append_to(
                     &mut layout_job,
-                    &style,
+                    self.style,
                     egui::FontSelection::default(),
                     default_valign,
                 );
             egui::RichText::new(post)
                 .monospace()
-                .color(style.visuals.weak_text_color())
+                .color(self.normal_color)
                 .append_to(
                     &mut layout_job,
-                    &style,
+                    self.style,
                     egui::FontSelection::default(),
                     default_valign,
                 );
 
-            let galley = ctx.fonts(|fonts| fonts.layout_job(layout_job));
-
-            Some(Cache {
-                fnid,
-                func_lookup,
-                galley,
-            })
+            self.ctx.fonts(|fonts| fonts.layout_job(layout_job))
         }
     }
 
@@ -744,7 +799,14 @@ mod source_view {
         assert_eq!(cache.fnid, fnid);
 
         egui::ScrollArea::both().show(ui, |ui| {
-            ui.label(egui::WidgetText::Galley(Arc::clone(&cache.galley)));
+            let text = egui::WidgetText::Galley(Arc::clone(&cache.galley));
+            let label = egui::Label::new(text).sense(egui::Sense::click());
+            let res = ui.add(label);
+            if res.secondary_clicked() {
+                let click_pos = res.interact_pointer_pos().unwrap() - res.rect.min;
+                let offset = cache.galley.cursor_from_pos(click_pos).ccursor.index;
+                todo!(" -- list the relevant break ranges");
+            }
         });
 
         Response {
