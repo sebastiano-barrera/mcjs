@@ -19,7 +19,7 @@ from testcases tc
 order by path asc;
 
 -- name: InsertRun :exec
-insert into runs (path_hash, version, is_strict, error_category, error_message_hash)
+insert or ignore into runs (path_hash, version, is_strict, error_category, error_message_hash)
 values (?, ?, ?, ?, ?);
 
 -- name: DeleteRunsForVersion :exec

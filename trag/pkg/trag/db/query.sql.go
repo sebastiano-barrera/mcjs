@@ -29,7 +29,7 @@ func (q *Queries) DeleteRunsForVersion(ctx context.Context, version sql.NullStri
 }
 
 const insertRun = `-- name: InsertRun :exec
-insert into runs (path_hash, version, is_strict, error_category, error_message_hash)
+insert or ignore into runs (path_hash, version, is_strict, error_category, error_message_hash)
 values (?, ?, ?, ?, ?)
 `
 

@@ -20,7 +20,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha1"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -218,7 +218,7 @@ func scanTestCase(testCaseFilename string) (meta testCaseMetadata, err error) {
 
 func internString(ctx context.Context, queries *tragdb.Queries, s string) string {
 	hash := sha1.Sum([]byte(s))
-	hashBase64 := base64.StdEncoding.EncodeToString(hash[:])
+	hashBase64 := hex.EncodeToString(hash[:])
 	queries.InsertString(ctx, tragdb.InsertStringParams{
 		String: sql.NullString{String: s, Valid: true},
 		Hash:   sql.NullString{String: hashBase64, Valid: true},
