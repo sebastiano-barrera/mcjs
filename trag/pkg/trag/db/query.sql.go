@@ -20,8 +20,8 @@ type AssignGroupParams struct {
 	GroupHash sql.NullString
 }
 
-// NOTE that we're using "or replace": *assigning* a group name to a path
-// overrides any previous assignments.
+// Assign a group naem to a path (both represented as a hash). Overrides any
+// previous assignments.
 func (q *Queries) AssignGroup(ctx context.Context, arg AssignGroupParams) error {
 	_, err := q.db.ExecContext(ctx, assignGroup, arg.PathHash, arg.GroupHash)
 	return err
@@ -34,6 +34,74 @@ delete from testcases
 func (q *Queries) ClearTestCases(ctx context.Context) error {
 	_, err := q.db.ExecContext(ctx, clearTestCases)
 	return err
+}
+
+const countFailuresByVersion = `-- name: CountFailuresByVersion :many
+select version, count(*) from runs
+where error_message_hash is null
+group by version
+`
+
+type CountFailuresByVersionRow struct {
+	Version sql.NullString
+	Count   int64
+}
+
+func (q *Queries) CountFailuresByVersion(ctx context.Context) ([]CountFailuresByVersionRow, error) {
+	rows, err := q.db.QueryContext(ctx, countFailuresByVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountFailuresByVersionRow
+	for rows.Next() {
+		var i CountFailuresByVersionRow
+		if err := rows.Scan(&i.Version, &i.Count); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countSuccessesByVersion = `-- name: CountSuccessesByVersion :many
+select version, count(*) from runs
+where error_message_hash is not null
+group by version
+`
+
+type CountSuccessesByVersionRow struct {
+	Version sql.NullString
+	Count   int64
+}
+
+func (q *Queries) CountSuccessesByVersion(ctx context.Context) ([]CountSuccessesByVersionRow, error) {
+	rows, err := q.db.QueryContext(ctx, countSuccessesByVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountSuccessesByVersionRow
+	for rows.Next() {
+		var i CountSuccessesByVersionRow
+		if err := rows.Scan(&i.Version, &i.Count); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const deleteRunsForVersion = `-- name: DeleteRunsForVersion :exec

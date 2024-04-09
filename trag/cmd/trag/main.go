@@ -13,24 +13,27 @@ package main
 //			- [ ] run debugger on test case
 //		Analysis
 //			- [*] compare test results between VM versions
-//			- [ ] generate status page ("Are we ECMAScript yet?")
+//			- [*] generate status page ("Are we ECMAScript yet?")
 //			- [*] quick overview, broken down per directory
+//		Extras
+//			- [ ] add a bunch of 'not null' to the schema
 
 import (
 	"bufio"
 	"context"
 	"crypto/sha1"
+	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html/template"
 	"log"
 	"os"
 	"os/exec"
 	"path"
 	"strings"
-
-	"database/sql"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -45,6 +48,9 @@ var (
 	initFS            *flag.FlagSet
 	initTestsFilename *string
 
+	chartFS               *flag.FlagSet
+	chartTemplateFilename *string
+
 	subcommands map[string]func([]string)
 )
 
@@ -55,9 +61,13 @@ func init() {
 	initFS = flag.NewFlagSet("init", flag.ExitOnError)
 	initTestsFilename = initFS.String("tests", "", "Test list file.")
 
+	chartFS = flag.NewFlagSet("template", flag.ExitOnError)
+	chartTemplateFilename = chartFS.String("template", "", "Template file. By default, an embedded template is used.")
+
 	subcommands = map[string]func([]string){
-		"init": mainInit,
-		"run":  mainRunFull,
+		"init":           mainInit,
+		"run":            mainRunFull,
+		"generate-chart": mainGenerateChart,
 	}
 }
 
@@ -418,4 +428,153 @@ func runFullSuite(dbFilename string) error {
 		return readError
 	}
 	return nil
+}
+
+func mainGenerateChart(args []string) {
+	err := chartFS.Parse(args)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	templateHTML := defaultChartsTemplate
+	if *chartTemplateFilename != "" {
+		templateHTMLBytes, err := os.ReadFile(*chartTemplateFilename)
+		if err != nil {
+			log.Fatalf("can't open template file: %s: %s", *chartTemplateFilename, err)
+		}
+		templateHTML = string(templateHTMLBytes)
+	}
+
+	err = generateChart(templateHTML)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+type commit struct {
+	CommitID, Message        string
+	CountPassed, CountFailed int64
+	PercentPassedText            string
+}
+
+//go:embed charts.html
+var defaultChartsTemplate string
+
+func generateChart(templateHTML string) error {
+	tmpl, err := template.New("page").Parse(templateHTML)
+	if err != nil {
+		return fmt.Errorf("parsing template: %w", err)
+	}
+
+	commits, err := listCommits()
+	if err != nil {
+		return fmt.Errorf("listing relevant commits: %w", err)
+	}
+
+	// open db
+	dbFilename := *flagDBPath
+	db, err := sql.Open("sqlite3", dbFilename)
+	if err != nil {
+		return fmt.Errorf("open db %s: %w", dbFilename, err)
+	}
+	defer db.Close()
+
+	ctx := context.TODO()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	byHash := make(map[string]*commit)
+	for i := range commits {
+		byHash[commits[i].CommitID] = &commits[i]
+	}
+
+	queries := tragdb.New(db).WithTx(tx)
+	successes, err := queries.CountSuccessesByVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("query error: %w", err)
+	}
+
+	failures, err := queries.CountFailuresByVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("query error: %w", err)
+	}
+
+	for _, success := range successes {
+		commit, ok := byHash[success.Version.String]
+		if !ok || !success.Version.Valid {
+			continue
+		}
+		commit.CountPassed = success.Count
+	}
+
+	for _, failure := range failures {
+		commit, ok := byHash[failure.Version.String]
+		if !ok || !failure.Version.Valid {
+			continue
+		}
+		commit.CountFailed = failure.Count
+	}
+
+	filteredCommits := make([]commit, 0, len(commits))
+	for i := range commits {
+		c := &commits[i]
+		total := c.CountPassed + c.CountFailed
+		percentPassed := float32(c.CountPassed) / float32(total) * 100
+		c.PercentPassedText = fmt.Sprintf("%.1f%%", percentPassed)
+
+		if total > 0 {
+			filteredCommits = append(filteredCommits, commits[i])
+		}
+	}
+
+	err = tmpl.ExecuteTemplate(os.Stdout, "page", struct{ Commits []commit }{
+		Commits: filteredCommits,
+	})
+	if err != nil {
+		return fmt.Errorf("rendering template: %w", err)
+	}
+
+	return nil
+}
+
+func listCommits() ([]commit, error) {
+	var commits []commit
+
+	// collect commits to show
+	// the first commit (32fb4783) is hardcoded, and it's just the first
+	// commit where I started running tests and collecting results
+	cmd := exec.Command("git", "log", "--format=%H|%s", "32fb4783c60d1ffeb6db872600425fdf1e900225..")
+	cmdOutput, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("couldn't get output pipe for `git log` command: %w", err)
+	}
+	defer cmdOutput.Close()
+	err = cmd.Start()
+	if err != nil {
+		return nil, fmt.Errorf("couldn't list commits (`git log` command): %w", err)
+	}
+
+	scnr := bufio.NewScanner(cmdOutput)
+	for scnr.Scan() {
+		line := scnr.Text()
+		sepNdx := strings.IndexRune(line, '|')
+		if sepNdx == -1 {
+			log.Printf("warning: skipping invalid line: %s", line)
+			continue
+		}
+
+		commits = append(commits, commit{
+			CommitID: line[0:sepNdx],
+			Message:  line[sepNdx+1:],
+		})
+	}
+
+	err = scnr.Err()
+	if err != nil {
+		return nil, fmt.Errorf("reading error: %w", err)
+	}
+	return commits, nil
 }

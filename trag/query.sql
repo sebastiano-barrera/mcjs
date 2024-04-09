@@ -31,5 +31,18 @@ values (?, ?);
 -- name: DeleteRunsForVersion :exec
 delete from runs where version = ?;
 
+-- name: CountSuccessesByVersion :many
+select version, count(*) from runs
+where error_message_hash is not null
+group by version;
+
+-- name: CountFailuresByVersion :many
+select version, count(*) from runs
+where error_message_hash is null
+group by version;
+
+
+
+
 
 

@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+  <head>
+    <title>mcjs - Are we ECMAScript yet?</title>
+    <meta charset="utf-8">
+
+    <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+    <script type="text/javascript">
+      google.charts.load('current', {'packages': ['corechart']})
+      google.charts.setOnLoadCallback(drawChart)
+
+      function drawChart() {
+        const data = new google.visualization.arrayToDataTable([
+          ['version', '# passed', '# failed'],
+          {{range .Commits}}
+          [ {{.CommitID}}, {{.CountPassed}}, {{.CountFailed}} ],
+          {{end}}
+        ])
+
+        const options = {
+          width: 800,
+          height: 400,
+          isStacked: true,
+        }
+        const element = document.getElementById('chart')
+        const chart = new google.visualization.AreaChart(element)
+        chart.draw(data, options)
+      }
+    </script>
+
+    <style>
+      body { font-family: serif; }
+      h1 { text-align: center; }
+      body > * {
+        max-width: 800px;
+        margin: auto;
+        margin-bottom: 1.5cm;
+      }
+
+      table {
+        margin: auto; 
+        border-top: 1px solid grey;
+        border-bottom: 1px solid grey;
+      }
+      thead {
+        font-weight: bold;
+        white-space: nowrap;
+      }
+      tbody td {
+        font-family: monospace;
+        vertical-align: top;
+      }
+      tbody td {
+        text-align: right;
+        margin: 0;
+        padding: 0 5px;
+      }
+      tbody td:last-child {
+        text-align: left;
+      }
+      tbody tr:hover {
+        background-color: #eff6ff;
+      }
+      tbody a {
+        color: #1d4ed8;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>mcjs: <i>Are we ECMAScript yet?</i></h1>
+    <p>
+      This is about <a href="https://github.com/sebastiano-barrera/mcjs/">mcjs</a>, a toy implementation of JavaScript inspired by LuaJIT that I'm writing for fun and learning.  Learn more in the <a href="https://sebastiano.pages.dev/posts/mcjs-intro/">blog post</a>.
+    </p>
+
+    <p>
+    This chart tracks how much of the <i>test/language/</i> section of the <a href="https://github.com/tc39/test262/">Test262 ECMAScript Test Suite</a> mcjs passes today. Feels good to see the line go up!
+    </p>
+
+    <div id="chart"></div>
+
+    <table>
+      <thead>
+        <tr>
+          <td>Commit</td>
+          <td>% OK</td>
+          <td># OK</td>
+          <td># Fail</td>
+          <td>Summary</td>
+        </tr>
+      </thead>
+
+      <tbody>
+        {{range .Commits}}
+          <tr>
+            <td>
+              <a href="https://github.com/sebastiano-barrera/mcjs/commit/{{.CommitID}}">
+                {{.CommitID}}
+              </a>
+            </td>
+            <td>{{.PercentPassedText}}</td>
+            <td>{{.CountPassed}}</td>
+            <td>{{.CountFailed}}</td>
+            <td class="align-left">{{.Message}}</td>
+          </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </body>
+
+</html>
+
+
+<!-- vim:sw=2:sts=2:et:ai
+-->
