@@ -10,6 +10,23 @@ import (
 	"database/sql"
 )
 
+const assignGroup = `-- name: AssignGroup :exec
+insert or replace into groups (path_hash, group_hash)
+values (?, ?)
+`
+
+type AssignGroupParams struct {
+	PathHash  sql.NullString
+	GroupHash sql.NullString
+}
+
+// NOTE that we're using "or replace": *assigning* a group name to a path
+// overrides any previous assignments.
+func (q *Queries) AssignGroup(ctx context.Context, arg AssignGroupParams) error {
+	_, err := q.db.ExecContext(ctx, assignGroup, arg.PathHash, arg.GroupHash)
+	return err
+}
+
 const clearTestCases = `-- name: ClearTestCases :exec
 delete from testcases
 `

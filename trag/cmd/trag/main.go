@@ -12,9 +12,9 @@ package main
 //			- [ ] run specific test case
 //			- [ ] run debugger on test case
 //		Analysis
-//			- [ ] compare test results between VM versions
+//			- [*] compare test results between VM versions
 //			- [ ] generate status page ("Are we ECMAScript yet?")
-//			- [ ] quick overview, broken down per directory
+//			- [*] quick overview, broken down per directory
 
 import (
 	"bufio"
@@ -147,23 +147,35 @@ func initDatabase(dbFilename, testListFilename string) error {
 	}
 
 	for testListScnr.Scan() {
+		// testCaseFilename is relative to the test262 root
 		testCaseFilename := testListScnr.Text()
+		testCaseFilenameHHex := internString(ctx, queries, testCaseFilename)
+
+		// groups are labeled by their directiories
+		groupName := path.Dir(testCaseFilename)
+		groupNameHHex := internString(ctx, queries, groupName)
 
 		// from the file, we get the path relative to the test262 root
 		fullFilename := path.Join(*flagTest262Root, testCaseFilename)
-
 		meta, err := scanTestCase(fullFilename)
 		if err != nil {
 			return fmt.Errorf("scanning test case %s: %w", testCaseFilename, err)
 		}
 
-		testCaseFilenameHB64 := internString(ctx, queries, testCaseFilename)
 		err = queries.InsertTestCase(ctx, tragdb.InsertTestCaseParams{
-			PathHash:      sql.NullString{String: testCaseFilenameHB64, Valid: true},
+			PathHash:      sql.NullString{String: testCaseFilenameHHex, Valid: true},
 			ExpectedError: sql.NullString{String: meta.expectedError, Valid: true},
 		})
 		if err != nil {
 			return fmt.Errorf("inserting test case: %w", err)
+		}
+
+		err = queries.AssignGroup(ctx, tragdb.AssignGroupParams{
+			PathHash:  sql.NullString{String: testCaseFilenameHHex, Valid: true},
+			GroupHash: sql.NullString{String: groupNameHHex, Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("assigning group name: %w", err)
 		}
 	}
 
@@ -218,12 +230,12 @@ func scanTestCase(testCaseFilename string) (meta testCaseMetadata, err error) {
 
 func internString(ctx context.Context, queries *tragdb.Queries, s string) string {
 	hash := sha1.Sum([]byte(s))
-	hashBase64 := hex.EncodeToString(hash[:])
+	hashHex := hex.EncodeToString(hash[:])
 	queries.InsertString(ctx, tragdb.InsertStringParams{
 		String: sql.NullString{String: s, Valid: true},
-		Hash:   sql.NullString{String: hashBase64, Valid: true},
+		Hash:   sql.NullString{String: hashHex, Valid: true},
 	})
-	return hashBase64
+	return hashHex
 }
 
 func mainRunFull(args []string) {
@@ -362,17 +374,17 @@ func runFullSuite(dbFilename string) error {
 			continue
 		}
 
-		relPathHB64 := internString(ctx, queries, relPath)
+		relPathHHex := internString(ctx, queries, relPath)
 
 		record := tragdb.InsertRunParams{
-			PathHash: sql.NullString{String: relPathHB64, Valid: true},
+			PathHash: sql.NullString{String: relPathHHex, Valid: true},
 			Version:  sql.NullString{String: vmVersion, Valid: true},
 			IsStrict: sql.NullBool{Bool: logItem.IsStrict, Valid: true},
 		}
 		if logItem.Error != nil {
 			record.ErrorCategory = sql.NullString{String: logItem.Error.Category, Valid: true}
-			messageHB64 := internString(ctx, queries, logItem.Error.Message)
-			record.ErrorMessageHash = sql.NullString{String: messageHB64, Valid: true}
+			messageHHex := internString(ctx, queries, logItem.Error.Message)
+			record.ErrorMessageHash = sql.NullString{String: messageHHex, Valid: true}
 		}
 
 		err = queries.InsertRun(ctx, record)

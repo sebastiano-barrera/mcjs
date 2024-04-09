@@ -8,6 +8,11 @@ import (
 	"database/sql"
 )
 
+type Group struct {
+	PathHash  sql.NullString
+	GroupHash sql.NullString
+}
+
 type Run struct {
 	PathHash         sql.NullString
 	IsStrict         sql.NullBool

@@ -22,6 +22,12 @@ order by path asc;
 insert or ignore into runs (path_hash, version, is_strict, error_category, error_message_hash)
 values (?, ?, ?, ?, ?);
 
+-- name: AssignGroup :exec
+-- Assign a group naem to a path (both represented as a hash). Overrides any
+-- previous assignments.
+insert or replace into groups (path_hash, group_hash)
+values (?, ?);
+
 -- name: DeleteRunsForVersion :exec
 delete from runs where version = ?;
 

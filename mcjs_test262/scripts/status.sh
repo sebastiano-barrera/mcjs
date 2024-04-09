@@ -12,13 +12,15 @@ fi
 
 {
 	echo "# version: $version"
-	sqlite3 -box ../out/tests.db <<-EOF 
+	sqlite3 -readonly -box ../out/tests.db <<-EOF 
 	with q as (
-		select dirname
-		, success
+		select sg.string as dirname
+		, (error_message_hash is null) as success
 		, count(*) as count
-		from general
+		from runs, groups g, strings sg
 		where version = '${version}'
+			and g.path_hash = runs.path_hash
+			and g.group_hash = sg.hash
 		group by dirname, success 
 		order by dirname, success
 	)
