@@ -9,24 +9,24 @@ import (
 )
 
 type Group struct {
-	PathHash  sql.NullString
-	GroupHash sql.NullString
+	PathHash  string
+	GroupHash string
 }
 
 type Run struct {
-	PathHash         sql.NullString
-	IsStrict         sql.NullBool
+	PathHash         string
+	IsStrict         bool
 	ErrorCategory    sql.NullString
-	Version          sql.NullString
+	Version          string
 	ErrorMessageHash sql.NullString
 }
 
 type String struct {
-	String sql.NullString
-	Hash   sql.NullString
+	String string
+	Hash   string
 }
 
 type Testcase struct {
-	PathHash      sql.NullString
+	PathHash      string
 	ExpectedError sql.NullString
 }

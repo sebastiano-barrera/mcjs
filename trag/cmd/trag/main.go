@@ -16,7 +16,7 @@ package main
 //			- [*] generate status page ("Are we ECMAScript yet?")
 //			- [*] quick overview, broken down per directory
 //		Extras
-//			- [ ] add a bunch of 'not null' to the schema
+//			- [*] add a bunch of 'not null' to the schema
 
 import (
 	"bufio"
@@ -173,7 +173,7 @@ func initDatabase(dbFilename, testListFilename string) error {
 		}
 
 		err = queries.InsertTestCase(ctx, tragdb.InsertTestCaseParams{
-			PathHash:      sql.NullString{String: testCaseFilenameHHex, Valid: true},
+			PathHash:      testCaseFilenameHHex,
 			ExpectedError: sql.NullString{String: meta.expectedError, Valid: true},
 		})
 		if err != nil {
@@ -181,8 +181,8 @@ func initDatabase(dbFilename, testListFilename string) error {
 		}
 
 		err = queries.AssignGroup(ctx, tragdb.AssignGroupParams{
-			PathHash:  sql.NullString{String: testCaseFilenameHHex, Valid: true},
-			GroupHash: sql.NullString{String: groupNameHHex, Valid: true},
+			PathHash:  testCaseFilenameHHex,
+			GroupHash: groupNameHHex,
 		})
 		if err != nil {
 			return fmt.Errorf("assigning group name: %w", err)
@@ -242,8 +242,8 @@ func internString(ctx context.Context, queries *tragdb.Queries, s string) string
 	hash := sha1.Sum([]byte(s))
 	hashHex := hex.EncodeToString(hash[:])
 	queries.InsertString(ctx, tragdb.InsertStringParams{
-		String: sql.NullString{String: s, Valid: true},
-		Hash:   sql.NullString{String: hashHex, Valid: true},
+		String: s,
+		Hash:   hashHex,
 	})
 	return hashHex
 }
@@ -323,7 +323,7 @@ func runFullSuite(dbFilename string) error {
 	// which automatically happens on error)
 	err = queries.DeleteRunsForVersion(
 		ctx,
-		sql.NullString{String: vmVersion, Valid: true},
+		vmVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to delete previously recorded runs for version %s: %w", vmVersion, err)
@@ -387,9 +387,9 @@ func runFullSuite(dbFilename string) error {
 		relPathHHex := internString(ctx, queries, relPath)
 
 		record := tragdb.InsertRunParams{
-			PathHash: sql.NullString{String: relPathHHex, Valid: true},
-			Version:  sql.NullString{String: vmVersion, Valid: true},
-			IsStrict: sql.NullBool{Bool: logItem.IsStrict, Valid: true},
+			PathHash: relPathHHex,
+			Version:  vmVersion,
+			IsStrict: logItem.IsStrict,
 		}
 		if logItem.Error != nil {
 			record.ErrorCategory = sql.NullString{String: logItem.Error.Category, Valid: true}
@@ -454,7 +454,7 @@ func mainGenerateChart(args []string) {
 type commit struct {
 	CommitID, Message        string
 	CountPassed, CountFailed int64
-	PercentPassedText            string
+	PercentPassedText        string
 }
 
 //go:embed charts.html
@@ -503,16 +503,16 @@ func generateChart(templateHTML string) error {
 	}
 
 	for _, success := range successes {
-		commit, ok := byHash[success.Version.String]
-		if !ok || !success.Version.Valid {
+		commit, ok := byHash[success.Version]
+		if !ok {
 			continue
 		}
 		commit.CountPassed = success.Count
 	}
 
 	for _, failure := range failures {
-		commit, ok := byHash[failure.Version.String]
-		if !ok || !failure.Version.Valid {
+		commit, ok := byHash[failure.Version]
+		if !ok {
 			continue
 		}
 		commit.CountFailed = failure.Count

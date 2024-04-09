@@ -16,8 +16,8 @@ values (?, ?)
 `
 
 type AssignGroupParams struct {
-	PathHash  sql.NullString
-	GroupHash sql.NullString
+	PathHash  string
+	GroupHash string
 }
 
 // Assign a group naem to a path (both represented as a hash). Overrides any
@@ -43,7 +43,7 @@ group by version
 `
 
 type CountFailuresByVersionRow struct {
-	Version sql.NullString
+	Version string
 	Count   int64
 }
 
@@ -77,7 +77,7 @@ group by version
 `
 
 type CountSuccessesByVersionRow struct {
-	Version sql.NullString
+	Version string
 	Count   int64
 }
 
@@ -108,7 +108,7 @@ const deleteRunsForVersion = `-- name: DeleteRunsForVersion :exec
 delete from runs where version = ?
 `
 
-func (q *Queries) DeleteRunsForVersion(ctx context.Context, version sql.NullString) error {
+func (q *Queries) DeleteRunsForVersion(ctx context.Context, version string) error {
 	_, err := q.db.ExecContext(ctx, deleteRunsForVersion, version)
 	return err
 }
@@ -119,9 +119,9 @@ values (?, ?, ?, ?, ?)
 `
 
 type InsertRunParams struct {
-	PathHash         sql.NullString
-	Version          sql.NullString
-	IsStrict         sql.NullBool
+	PathHash         string
+	Version          string
+	IsStrict         bool
 	ErrorCategory    sql.NullString
 	ErrorMessageHash sql.NullString
 }
@@ -143,8 +143,8 @@ insert into strings (string, hash)
 `
 
 type InsertStringParams struct {
-	String sql.NullString
-	Hash   sql.NullString
+	String string
+	Hash   string
 }
 
 func (q *Queries) InsertString(ctx context.Context, arg InsertStringParams) error {
@@ -159,7 +159,7 @@ insert into
 `
 
 type InsertTestCaseParams struct {
-	PathHash      sql.NullString
+	PathHash      string
 	ExpectedError sql.NullString
 }
 

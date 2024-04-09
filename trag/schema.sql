@@ -1,25 +1,25 @@
 CREATE TABLE IF NOT EXISTS runs
-	( path_hash varchar
-	, is_strict boolean
+	( path_hash varchar not null
+	, is_strict boolean not null
 	, error_category varchar
-	, version varchar
+	, version varchar not null
 	, error_message_hash varchar
 	);
 
 CREATE TABLE IF NOT EXISTS testcases
-	( path_hash varchar
+	( path_hash varchar not null
 	, expected_error varchar
 	);
 
 CREATE TABLE IF NOT EXISTS strings
-	( string varchar
-	, hash varchar
+	( string varchar not null
+	, hash varchar not null
 	, unique (hash)
 	);
 
 CREATE TABLE IF NOT EXISTS groups
-	( path_hash varchar
-	, group_hash varchar
+	( path_hash varchar not null
+	, group_hash varchar not null
 	, unique (path_hash)
 	);
 
