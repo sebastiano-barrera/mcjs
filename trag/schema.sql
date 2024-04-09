@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS runs
 CREATE TABLE IF NOT EXISTS testcases
 	( path_hash varchar not null
 	, expected_error varchar
+	, unique (path_hash)
 	);
 
 CREATE TABLE IF NOT EXISTS strings

@@ -153,7 +153,7 @@ func (q *Queries) InsertString(ctx context.Context, arg InsertStringParams) erro
 }
 
 const insertTestCase = `-- name: InsertTestCase :exec
-insert into 
+insert or replace into 
 	testcases (path_hash, expected_error)
 	values (?, ?)
 `

@@ -4,7 +4,7 @@ insert into strings (string, hash)
 	values (?, ?);
 
 -- name: InsertTestCase :exec
-insert into 
+insert or replace into 
 	testcases (path_hash, expected_error)
 	values (?, ?);
 
