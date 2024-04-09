@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -317,6 +318,7 @@ func runFullSuite(dbFilename string) error {
 		return fmt.Errorf("test runner: failed to get build version: %s", err)
 	}
 	vmVersion := string(vmVersionBytes)
+	vmVersion = strings.TrimSpace(vmVersion)
 
 	// delete runs for the same version
 	// (cool that we can 'restore' them by rolling the transaction back,
@@ -358,6 +360,10 @@ func runFullSuite(dbFilename string) error {
 	}
 
 	cmdOutputScnr := bufio.NewScanner(cmdOutput)
+	// pre-allocate a fixed LARGE buffer (4 MB)
+	// the one-line-per-JSON format can produce some pretty large lines
+	cmdOutputScnr.Buffer(make([]byte, 0, 4 * 1024 * 1024), 0)
+	nInserts := 0
 	for cmdOutputScnr.Scan() {
 		line := cmdOutputScnr.Text()
 		log.Println("output line:", line)
@@ -378,9 +384,9 @@ func runFullSuite(dbFilename string) error {
 		// test runner emits full path to test case, while db `runs`
 		// record needs to match record in `testcases`, where path is
 		// relative to test262 root.
-		relPath, hasPrefix := strings.CutPrefix(logItem.FullPath, config.Test262Root)
-		if !hasPrefix {
-			log.Printf("discarding line, test case path is not under test262 root path: %s", logItem.FullPath)
+		relPath, err := filepath.Rel(config.Test262Root, logItem.FullPath)
+		if err != nil {
+			log.Printf("skipping invalid test case path: %s: %s", logItem.FullPath, err)
 			continue
 		}
 
@@ -406,17 +412,15 @@ func runFullSuite(dbFilename string) error {
 			// subprocess will get killed in the defer block
 			return fmt.Errorf("error while inserting in DB: %w", err)
 		}
+		nInserts++
 	}
 
 	readError := cmdOutputScnr.Err()
 	if readError != nil {
-		// don't return now, just wrap it for later
-		readError = fmt.Errorf("test runner: read: %s\n", err)
-	}
-
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("test runner failed: %s", err)
+		// error => fuck the process, but let's still commit the
+		// partial data that we managed to collect (the next run can
+		// overwrite it).
+		readError = fmt.Errorf("test runner: read: %s\n", readError)
 	}
 
 	err = tx.Commit()
@@ -424,10 +428,8 @@ func runFullSuite(dbFilename string) error {
 		return fmt.Errorf("error while committing transaction (data will be discarded!): %s", err)
 	}
 
-	if readError != nil {
-		return readError
-	}
-	return nil
+	log.Printf("work finished. transaction committed with %d inserts", nInserts)
+	return readError
 }
 
 func mainGenerateChart(args []string) {
