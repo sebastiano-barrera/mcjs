@@ -43,83 +43,61 @@ import (
 )
 
 var (
-	flagDBPath      *string
-	flagTest262Root *string
+	flagDBPath      *string = flag.String("db", "tests.db", "Path to the database")
+	flagTest262Root *string = flag.String("test262", "", "Path to the test262 repository")
 
-	initFS            *flag.FlagSet
-	initTestsFilename *string
+	flagInitEnabled       *bool   = flag.Bool("init", false, "Initialize database")
+	flagInitTestsFilename *string = flag.String("initTests", "", "For -init: Test list file")
 
-	chartFS               *flag.FlagSet
-	chartTemplateFilename *string
+	flagRunEnabled *bool = flag.Bool("run", false, "Run test cases")
 
-	subcommands map[string]func([]string)
+	flagChartEnabled          *bool   = flag.Bool("chart", false, "Generate the 'Are we ECMAscript yet?' page")
+	flagChartTemplateFilename *string = flag.String("chartTemplate", "", "For -chart: Template file. By default, an embedded template is used.")
 )
 
-func init() {
-	flagDBPath = flag.String("db", "tests.db", "Path to the database")
-	flagTest262Root = flag.String("test262", "", "Path to the test262 repository")
-
-	initFS = flag.NewFlagSet("init", flag.ExitOnError)
-	initTestsFilename = initFS.String("tests", "", "Test list file.")
-
-	chartFS = flag.NewFlagSet("template", flag.ExitOnError)
-	chartTemplateFilename = chartFS.String("template", "", "Template file. By default, an embedded template is used.")
-
-	subcommands = map[string]func([]string){
-		"init":           mainInit,
-		"run":            mainRunFull,
-		"generate-chart": mainGenerateChart,
-	}
-}
-
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "-help" {
-		mainHelp()
-		return
-	}
+	var err error
 
 	flag.Parse()
-	args := flag.Args()
+	anySubcommand := false
 
-	if len(args) == 0 {
+	if *flagInitEnabled {
+		if *flagInitTestsFilename == "" {
+			log.Fatal("Test cases list file is required. Pass it with -tests.")
+		}
+
+		err = initDatabase(*flagDBPath, *flagInitTestsFilename)
+		anySubcommand = true
+	}
+
+	if *flagRunEnabled {
+		err = runFullSuite(*flagDBPath)
+		anySubcommand = true
+	}
+
+	if *flagChartEnabled {
+		templateHTML := defaultChartsTemplate
+
+		if *flagChartTemplateFilename != "" {
+			templateHTMLBytes, err := os.ReadFile(*flagChartTemplateFilename)
+			if err != nil {
+				log.Fatalf("can't open template file: %s: %s", *flagChartTemplateFilename, err)
+			}
+
+			templateHTML = string(templateHTMLBytes)
+		}
+
+		err = generateChart(templateHTML)
+		anySubcommand = true
+	}
+
+	if !anySubcommand {
 		log.Fatalf("no subcommand passed. check with -help.")
 	}
-
-	handler, ok := subcommands[args[0]]
-	if ok {
-		handler(args[1:])
-		return
-	}
-
-	log.Fatalf("no such subcommand `%s`. check usage with -help.", os.Args[1])
-}
-
-func mainHelp() {
-	flag.Usage()
-
-	fmt.Print("subcommands: ")
-	first := true
-	for cmd := range subcommands {
-		if !first {
-			fmt.Print(", ")
-		}
-		fmt.Printf("%s", cmd)
-		first = false
-	}
-	fmt.Println()
-}
-
-func mainInit(args []string) {
-	initFS.Parse(args)
-
-	if *initTestsFilename == "" {
-		log.Fatal("Test cases list file is required. Pass it with -tests.")
-	}
-
-	err := initDatabase(*flagDBPath, *initTestsFilename)
 	if err != nil {
 		log.Fatal(err)
 	}
+
 }
 
 func initDatabase(dbFilename, testListFilename string) error {
@@ -249,17 +227,6 @@ func internString(ctx context.Context, queries *tragdb.Queries, s string) string
 	return hashHex
 }
 
-func mainRunFull(args []string) {
-	if len(args) != 0 {
-		log.Fatalf("no command line args supported yet")
-	}
-
-	err := runFullSuite(*flagDBPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
 func runFullSuite(dbFilename string) error {
 	if *flagTest262Root == "" {
 		return fmt.Errorf("required flag not passed: -test262")
@@ -362,7 +329,7 @@ func runFullSuite(dbFilename string) error {
 	cmdOutputScnr := bufio.NewScanner(cmdOutput)
 	// pre-allocate a fixed LARGE buffer (4 MB)
 	// the one-line-per-JSON format can produce some pretty large lines
-	cmdOutputScnr.Buffer(make([]byte, 0, 4 * 1024 * 1024), 0)
+	cmdOutputScnr.Buffer(make([]byte, 0, 4*1024*1024), 0)
 	nInserts := 0
 	for cmdOutputScnr.Scan() {
 		line := cmdOutputScnr.Text()
@@ -430,27 +397,6 @@ func runFullSuite(dbFilename string) error {
 
 	log.Printf("work finished. transaction committed with %d inserts", nInserts)
 	return readError
-}
-
-func mainGenerateChart(args []string) {
-	err := chartFS.Parse(args)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	templateHTML := defaultChartsTemplate
-	if *chartTemplateFilename != "" {
-		templateHTMLBytes, err := os.ReadFile(*chartTemplateFilename)
-		if err != nil {
-			log.Fatalf("can't open template file: %s: %s", *chartTemplateFilename, err)
-		}
-		templateHTML = string(templateHTMLBytes)
-	}
-
-	err = generateChart(templateHTML)
-	if err != nil {
-		log.Fatal(err)
-	}
 }
 
 type commit struct {
