@@ -325,11 +325,9 @@ pub fn init_stack(
 /// is, not necessarily detected at run-time).
 ///
 /// For external callers, this function returns when:
-///  - the interpreter has finished its work (gone through the program without
-///    errors)
+///  - the interpreter has finished its work (gone through the program without errors)
 ///  - an unhandled exception has been thrown
-///  - the debugger has suspended execution (e.g. a breakpoint has been
-///    reached).
+///  - the debugger has suspended execution (e.g. a breakpoint has been reached).
 ///
 /// If a bug is detected (e.g. assertion failed), the function panics. The
 /// interpreter's data is not unwind-safe in general, so execution can only
@@ -343,10 +341,9 @@ pub fn init_stack(
 /// For a call coming from within `run_internal` itself (recursively), it
 /// returns when:
 ///  - the function has returned successfully (no exception)
-///  - an as-of-yet-unhandled exception has been thrown (may be handled by one
-///    of the parent frames or bubble up to the user unhandled)
-///  - the debugger has suspended execution (e.g. a breakpoint has been
-///    reached).
+///  - an as-of-yet-unhandled exception has been thrown (may be handled by one of the
+///    parent frames or bubble up to the user unhandled)
+///  - the debugger has suspended execution (e.g. a breakpoint has been reached).
 ///
 /// Upon starting, `run_internal` calls itself again with a 1-higher
 /// `stack_level` so as to restore the mapping between JS and native stacks.
@@ -375,8 +372,8 @@ fn run_frame<'a>(
         let err = if stack_level < data.len() - 1 {
             t.log("loop", "climbing stack");
 
-            // We're not the top of the stack, which means we're suspended waiting for a called function.
-            // Keep running code until it's our turn.
+            // We're not the top of the stack, which means we're suspended waiting for a called
+            // function. Keep running code until it's our turn.
             let res = run_frame(
                 data,
                 realm,
@@ -524,8 +521,12 @@ fn run_regular(
                 }
 
                 let giid = bytecode::GlobalIID(fnid, iid);
-                if dbg.is_breakpoint_at(&giid) {
+                if let Some(bkpt) = dbg.instr_bkpt_at(&giid) {
                     suspend_for_breakpoint(data, iid)?;
+
+                    if bkpt.delete_on_hit {
+                        dbg.clear_instr_bkpt(giid);
+                    }
                 }
             }
 
@@ -1017,7 +1018,8 @@ fn run_regular(
                                 exc.set_proto(Some(exc_proto));
                             }
 
-                            // Duplicate with the Instr::Throw implementation. Not sure how to improve.
+                            // Duplicate with the Instr::Throw implementation. Not sure how to
+                            // improve.
                             let exc = Value::Object(exc_oid);
                             throw_exc(
                                 exc,
@@ -1094,12 +1096,14 @@ fn throw_exc(exc: Value) -> RunResult<()> {
     Err(RunError::Exception(exc))
 }
 
-/// Save the interpreter state and return `Err(RunError::Suspended(SuspendCause::Breakpoint))` *if*
-/// the interpreter is in fact supposed to do so.  In case the interpreter is supposed *not* to
-/// suspend and continue execution, it returns `Ok(())`.
+/// Save the interpreter state and return
+/// `Err(RunError::Suspended(SuspendCause::Breakpoint))` *if* the interpreter is in fact
+/// supposed to do so.  In case the interpreter is supposed *not* to suspend and continue
+/// execution, it returns `Ok(())`.
 ///
 /// The return value is designed so that you can just `try!` a call to it (i.e.
-/// `suspend_for_breakpoint(...)?`) in the body of `run_regular` and get the proper behavior.
+/// `suspend_for_breakpoint(...)?`) in the body of `run_regular` and get the proper
+/// behavior.
 fn suspend_for_breakpoint(data: &mut stack::InterpreterData, iid: bytecode::IID) -> RunResult<()> {
     #[cfg(feature = "debugger")]
     if !data.take_resuming_from_breakpoint() {
@@ -1111,11 +1115,16 @@ fn suspend_for_breakpoint(data: &mut stack::InterpreterData, iid: bytecode::IID)
     Ok(())
 }
 
-/// Save the interpreter state and return `Err(RunError::Suspended(SuspendCause::Breakpoint))`
+/// Save the interpreter state and return
+/// `Err(RunError::Suspended(SuspendCause::Breakpoint))`
 ///
 /// The return value is designed so that you can just `try!` a call to it (i.e.
-/// `suspend_for_breakpoint(...)?`) in the body of `run_regular` and get the proper behavior.
-fn force_suspend_for_breakpoint(data: &mut stack::InterpreterData, iid: bytecode::IID) -> RunResult<()> {
+/// `suspend_for_breakpoint(...)?`) in the body of `run_regular` and get the proper
+/// behavior.
+fn force_suspend_for_breakpoint(
+    data: &mut stack::InterpreterData,
+    iid: bytecode::IID,
+) -> RunResult<()> {
     // Important: Commit the *current* IID to the interpreter state so that:
     //  1. debugging tools can see the correct IID
     //  2. a successor interpreter will resume by *repeating* the instruction where the
@@ -1411,8 +1420,8 @@ pub mod debugger {
 
     #[derive(Debug)]
     pub enum BreakpointError {
-        /// Breakpoint already set at the given location (can't have more than 1 at the same
-        /// location).
+        /// Breakpoint already set at the given location (can't have more than 1 at the
+        /// same location).
         AlreadyThere,
         InvalidLocation,
     }
@@ -1468,8 +1477,8 @@ pub mod debugger {
 
         /// Source breakpoints, indexed by their ID.
         ///
-        /// Each source breakpoint corresponds to exactly to one instruction breakpoint, which is
-        /// added/deleted together with it.
+        /// Each source breakpoint corresponds to exactly to one instruction breakpoint,
+        /// which is added/deleted together with it.
         source_bkpts: HashMap<BreakRangeID, SourceBreakpoint>,
 
         /// This special flag can be used to cause the interpreter to suspend
@@ -1495,12 +1504,30 @@ pub mod debugger {
         Unlimited,
     }
 
-    // There is nothing here for now. The mere existence of an entry in Interpreter.source_bktps is
-    // enough (but some addtional parameters might have to be includede here later)
+    // There is nothing here for now. The mere existence of an entry in
+    // Interpreter.source_bktps is enough (but some addtional parameters might have to be
+    // includede here later)
     pub struct SourceBreakpoint;
 
     pub struct InstrBreakpoint {
         src_bkpt: Option<BreakRangeID>,
+
+        /// Delete this breakpoint as soon as it's hit.
+        ///
+        /// Typical use case is temporary breakpoints (which are in turn used for the
+        /// debugger's function "next", which doesn't follow call/return).
+        pub delete_on_hit: bool,
+    }
+
+    // This instance is important because module users must not be able to write private
+    // members of InstrBreakpoint, not even for initialization.
+    impl Default for InstrBreakpoint {
+        fn default() -> Self {
+            InstrBreakpoint {
+                src_bkpt: None,
+                delete_on_hit: false,
+            }
+        }
     }
 
     impl DebuggingState {
@@ -1552,8 +1579,9 @@ pub mod debugger {
             let giid = giid_of_break_range(loader, brange_id)?;
             let bkpt = InstrBreakpoint {
                 src_bkpt: Some(brange_id),
+                delete_on_hit: false,
             };
-            self.add_instr_bkpt(giid, bkpt)?;
+            self.set_instr_bkpt(giid, bkpt)?;
 
             let prev = self.source_bkpts.insert(brange_id, SourceBreakpoint);
             assert!(prev.is_none());
@@ -1575,7 +1603,7 @@ pub mod debugger {
             }
 
             let giid = giid_of_break_range(loader, brange_id)?;
-            let was_there = self.clear_instr_breakpoint(giid);
+            let was_there = self.clear_instr_bkpt(giid);
             assert!(was_there);
 
             Ok(true)
@@ -1591,15 +1619,7 @@ pub mod debugger {
         // Instruction breakpoints
         //
 
-        pub fn set_instr_breakpoint(
-            &mut self,
-            giid: bytecode::GlobalIID,
-        ) -> std::result::Result<(), BreakpointError> {
-            let bkpt = InstrBreakpoint { src_bkpt: None };
-            self.add_instr_bkpt(giid, bkpt)
-        }
-
-        fn add_instr_bkpt(
+        pub fn set_instr_bkpt(
             &mut self,
             giid: bytecode::GlobalIID,
             bkpt: InstrBreakpoint,
@@ -1611,7 +1631,7 @@ pub mod debugger {
             }
         }
 
-        pub fn clear_instr_breakpoint(&mut self, giid: bytecode::GlobalIID) -> bool {
+        pub fn clear_instr_bkpt(&mut self, giid: bytecode::GlobalIID) -> bool {
             let ibkpt = self.instr_bkpts.remove(&giid);
 
             if let Some(ibkpt) = &ibkpt {
@@ -1623,12 +1643,12 @@ pub mod debugger {
             ibkpt.is_some()
         }
 
-        pub fn instr_breakpoints(&self) -> impl '_ + ExactSizeIterator<Item = bytecode::GlobalIID> {
+        pub fn instr_bkpts(&self) -> impl '_ + ExactSizeIterator<Item = bytecode::GlobalIID> {
             self.instr_bkpts.keys().copied()
         }
 
-        pub fn is_breakpoint_at(&self, giid: &bytecode::GlobalIID) -> bool {
-            self.instr_bkpts.contains_key(giid)
+        pub fn instr_bkpt_at(&self, giid: &bytecode::GlobalIID) -> Option<&InstrBreakpoint> {
+            self.instr_bkpts.get(giid)
         }
 
         pub fn set_break_on_throw(&mut self, value: bool) {

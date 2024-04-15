@@ -3,7 +3,10 @@ use std::{io::Write, path::PathBuf};
 use anyhow::Result;
 use mcjs_vm::{
     bytecode,
-    interpreter::{self, debugger},
+    interpreter::{
+        self,
+        debugger::{self, InstrBreakpoint},
+    },
     stack,
 };
 
@@ -206,6 +209,7 @@ enum Action {
     Resume,
     Restart,
     Next,
+    Into,
     SetHighlight(widgets::Highlight),
     OpenObject(debugger::ObjectId),
     SaveLayout,
@@ -251,6 +255,9 @@ impl eframe::App for AppData {
                         }
                         if ui.button("Next").clicked() {
                             action = Action::Next;
+                        }
+                        if ui.button("Into").clicked() {
+                            action = Action::Into;
                         }
 
                         ui.label(format!(
@@ -331,7 +338,12 @@ impl eframe::App for AppData {
                 self.restart();
             }
             Action::Next => {
-                self.intrp.next();
+                if let Err(err) = self.intrp.next() {
+                    self.bkpt_error_dialog = Some(err.to_string());
+                }
+            }
+            Action::Into => {
+                self.intrp.next_into();
             }
             Action::SetHighlight(highlight) => {
                 self.highlight = highlight;
@@ -347,13 +359,13 @@ impl eframe::App for AppData {
             }
             Action::SetInstrBreakpoint(giid) => {
                 let dbg = self.intrp.debugging_state_mut();
-                if let Err(err) = dbg.set_instr_breakpoint(giid) {
+                if let Err(err) = dbg.set_instr_bkpt(giid, InstrBreakpoint::default()) {
                     self.bkpt_error_dialog = Some(err.to_string());
                 }
             }
             Action::ClearInstrBreakpoint(giid) => {
                 let dbg = self.intrp.debugging_state_mut();
-                dbg.clear_instr_breakpoint(giid);
+                dbg.clear_instr_bkpt(giid);
             }
         }
     }
@@ -419,7 +431,7 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
                 .tiles;
             }
             Pane::Bytecode => {
-                let is_breakpoint_set = |giid| self.dbg.is_breakpoint_at(&giid);
+                let is_breakpoint_set = |giid| self.dbg.instr_bkpt_at(&giid).is_some();
                 let res = bytecode_view::show(
                     ui,
                     self.loader,
@@ -1045,7 +1057,8 @@ mod manager {
 
     use mcjs_vm::{
         bytecode,
-        interpreter::{self, debugger::Fuel, Exit, Interpreter},
+        interpreter::debugger::{Fuel, InstrBreakpoint},
+        interpreter::{self, Exit, Interpreter},
         stack, Loader, Realm,
     };
 
@@ -1113,7 +1126,8 @@ mod manager {
                 script_fnids.push(main_fnid);
 
                 // Place a breakpoint at the start of each file
-                dbg.set_instr_breakpoint(bytecode::GlobalIID(main_fnid, bytecode::IID(0)))?;
+                let giid = bytecode::GlobalIID(main_fnid, bytecode::IID(0));
+                dbg.set_instr_bkpt(giid, InstrBreakpoint::default())?;
             }
 
             Ok(ManagedInterpreter {
@@ -1198,9 +1212,31 @@ mod manager {
             }
         }
 
-        pub fn next(&mut self) {
+        pub fn next_into(&mut self) {
             self.dbg.set_fuel(Fuel::Limited(1));
             self.resume();
+        }
+
+        pub fn next(&mut self) -> Result<()> {
+            // "Next" without following call/return
+            //  == Set a temporary breakpoint on the following instruction, then resume.
+            let intrp_state = match self.state() {
+                State::Suspended { intrp_state, .. } => intrp_state,
+                _ => return Ok(()),
+            };
+
+            let header = intrp_state.top().header();
+            let next_iid = bytecode::IID(header.iid.0 + 1);
+            let giid = bytecode::GlobalIID(header.fnid, next_iid);
+
+            let mut bkpt = InstrBreakpoint::default();
+            bkpt.delete_on_hit = true;
+
+            let dbg = self.debugging_state_mut();
+            dbg.set_instr_bkpt(giid, bkpt).map_err(Error::Debugger)?;
+
+            self.resume();
+            Ok(())
         }
 
         pub fn debugging_state(&self) -> &interpreter::debugger::DebuggingState {

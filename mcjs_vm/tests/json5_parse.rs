@@ -27,19 +27,19 @@ fn test_remove_ibkpt_with_sbkpt() {
     let branges: Vec<_> = prereq.loader.function_breakranges(fnid).unwrap().collect();
     let brid = branges[1].0;
 
-    assert_eq!(0, prereq.dbg.instr_breakpoints().len());
+    assert_eq!(0, prereq.dbg.instr_bkpts().len());
     prereq
         .dbg
         .set_source_breakpoint(brid, &prereq.loader)
         .unwrap();
-    assert_eq!(1, prereq.dbg.instr_breakpoints().len());
+    assert_eq!(1, prereq.dbg.instr_bkpts().len());
 
     let was_there = prereq
         .dbg
         .clear_source_breakpoint(brid, &prereq.loader)
         .unwrap();
     assert!(was_there);
-    assert_eq!(0, prereq.dbg.instr_breakpoints().len());
+    assert_eq!(0, prereq.dbg.instr_bkpts().len());
 }
 
 /// Check that a source breakpoint is deleted automatically when its
@@ -55,19 +55,19 @@ fn test_remove_sbkpt_with_ibkpt() {
     let brid = branges[1].0;
 
     assert_eq!(0, prereq.dbg.source_breakpoints().len());
-    assert_eq!(0, prereq.dbg.instr_breakpoints().len());
+    assert_eq!(0, prereq.dbg.instr_bkpts().len());
     prereq
         .dbg
         .set_source_breakpoint(brid, &prereq.loader)
         .unwrap();
     assert_eq!(1, prereq.dbg.source_breakpoints().len());
-    assert_eq!(1, prereq.dbg.instr_breakpoints().len());
+    assert_eq!(1, prereq.dbg.instr_bkpts().len());
 
-    let ibkpt_giid = prereq.dbg.instr_breakpoints().next().unwrap();
-    let was_there = prereq.dbg.clear_instr_breakpoint(ibkpt_giid);
+    let ibkpt_giid = prereq.dbg.instr_bkpts().next().unwrap();
+    let was_there = prereq.dbg.clear_instr_bkpt(ibkpt_giid);
     assert!(was_there);
 
-    assert_eq!(0, prereq.dbg.instr_breakpoints().len());
+    assert_eq!(0, prereq.dbg.instr_bkpts().len());
     assert_eq!(0, prereq.dbg.source_breakpoints().len());
 }
 
