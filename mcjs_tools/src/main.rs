@@ -64,15 +64,14 @@ struct AppData {
     intrp: manager::ManagedInterpreter,
     tree: egui_tiles::Tree<Pane>,
 
+    focus_frame_ndx: usize,
     stack_view: stack_view::State,
     source_view: source_view::State,
-
     highlight: widgets::Highlight,
 
     save_error_dialog: Option<String>,
     bkpt_error_dialog: Option<String>,
     toast: widgets::Toast,
-
     error_dialog_toast: widgets::Toast,
 }
 
@@ -95,6 +94,7 @@ impl AppData {
             params,
             intrp,
             tree,
+            focus_frame_ndx: 0,
             stack_view: stack_view::State::default(),
             source_view: source_view::State::default(),
             highlight: widgets::Highlight::None,
@@ -249,7 +249,7 @@ impl eframe::App for AppData {
                 manager::State::Suspended {
                     script_ndx,
                     intrp_state,
-                    cause,
+                    cause: _,
                 } => {
                     ui.horizontal(|ui| {
                         if ui.button("Continue").clicked() {
@@ -304,7 +304,7 @@ impl eframe::App for AppData {
 
                     let mut behavior = TreeBehavior {
                         intrp_state: &intrp_state,
-                        cause: &cause,
+                        frame_focus_ndx: &mut self.focus_frame_ndx,
                         loader: self.intrp.loader(),
                         stack_view: &mut self.stack_view,
                         source_view: &mut self.source_view,
@@ -422,9 +422,13 @@ fn simple_dialog(ctx: &egui::Context, title: &str, message: &mut Option<String>)
 
 struct TreeBehavior<'a> {
     intrp_state: &'a stack::InterpreterData,
-    cause: &'a interpreter::SuspendCause,
     loader: &'a mcjs_vm::Loader,
     dbg: &'a interpreter::debugger::DebuggingState,
+
+    /// The currently focused frame index.
+    ///
+    /// `0` is for the stack top. Higher numbers are for frames lower in the stack.
+    frame_focus_ndx: &'a mut usize,
 
     stack_view: &'a mut stack_view::State,
     source_view: &'a mut source_view::State,
@@ -450,22 +454,19 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
         _tile_id: egui_tiles::TileId,
         pane: &mut Pane,
     ) -> egui_tiles::UiResponse {
+        // frame_focus_ndx is 0=top, while frames() is first=bottom
+        let frame_ndx = self.intrp_state.len() - 1 - *self.frame_focus_ndx;
+        let frame = self.intrp_state.nth_frame(frame_ndx);
         let text = match pane {
             Pane::SourceCode => {
-                return source_view::show(
-                    ui,
-                    self.source_view,
-                    &self.intrp_state.top(),
-                    self.loader,
-                )
-                .tiles;
+                return source_view::show(ui, self.source_view, &frame, self.loader).tiles;
             }
             Pane::Bytecode => {
                 let is_breakpoint_set = |giid| self.dbg.instr_bkpt_at(&giid).is_some();
                 let res = bytecode_view::show(
                     ui,
                     self.loader,
-                    self.intrp_state,
+                    &frame,
                     self.highlight,
                     is_breakpoint_set,
                 );
@@ -475,7 +476,17 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
             Pane::PAST => "PAST",
             Pane::Heap => "Heap",
             Pane::Stack => {
-                return stack_view::show(&mut self.stack_view, ui, self.intrp_state, self.loader)
+                use stack_view::Action;
+                let action =
+                    stack_view::show(&mut self.stack_view, ui, self.intrp_state, self.loader);
+                return match action {
+                    Action::SetFrameIndex(ndx) => {
+                        *self.frame_focus_ndx = ndx;
+                        egui_tiles::UiResponse::None
+                    }
+                    Action::TabDragStarted => egui_tiles::UiResponse::DragStarted,
+                    Action::None => egui_tiles::UiResponse::None,
+                };
             }
         };
 
@@ -496,33 +507,42 @@ mod stack_view {
     #[derive(Default)]
     pub struct State {}
 
+    pub enum Action {
+        SetFrameIndex(usize),
+        TabDragStarted,
+        None,
+    }
+
     pub fn show(
         _view_state: &mut State,
         ui: &mut egui::Ui,
         intrp_state: &stack::InterpreterData,
         loader: &mcjs_vm::Loader,
-    ) -> egui_tiles::UiResponse {
+    ) -> Action {
+        let mut action = Action::None;
+
         let drag_button_res = ui.add(egui::Button::new("Stack").sense(egui::Sense::drag()));
+        if drag_button_res.drag_started() {
+            action = Action::TabDragStarted;
+        }
 
         ui.with_layout(
             egui::Layout::top_down(egui::Align::Min).with_cross_justify(true),
             |ui| {
-                for frame in intrp_state.frames() {
+                for (frame_ndx, frame) in intrp_state.frames().enumerate() {
                     let header = frame.header();
                     let lookup = loader.lookup_function(header.fnid).unwrap();
                     let filename = lookup.source_file.name.to_string();
 
                     let point_str = format!("{:?}:{:?} - {:?}", header.fnid, header.iid, filename);
-                    ui.selectable_label(false, point_str);
+                    if ui.selectable_label(false, point_str).clicked() {
+                        action = Action::SetFrameIndex(frame_ndx);
+                    }
                 }
             },
         );
 
-        if drag_button_res.drag_started() {
-            egui_tiles::UiResponse::DragStarted
-        } else {
-            egui_tiles::UiResponse::None
-        }
+        action
     }
 }
 
@@ -542,7 +562,7 @@ mod bytecode_view {
     pub fn show(
         ui: &mut egui::Ui,
         loader: &mcjs_vm::Loader,
-        intrp_state: &stack::InterpreterData,
+        frame: &stack::Frame,
         highlight: widgets::Highlight,
         is_breakpoint_set: impl Fn(bytecode::GlobalIID) -> bool,
     ) -> Response {
@@ -552,7 +572,6 @@ mod bytecode_view {
             .add(egui::Button::new("Bytecode").sense(egui::Sense::drag()))
             .drag_started();
 
-        let frame = intrp_state.top();
         let header = frame.header();
         let fnid = header.fnid;
         let cur_iid = header.iid;

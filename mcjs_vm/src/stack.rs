@@ -149,7 +149,7 @@ impl InterpreterData {
         self.check_invariants();
     }
 
-    pub(crate) fn nth_frame(&self, ndx: usize) -> Frame {
+    pub fn nth_frame(&self, ndx: usize) -> Frame {
         let header = &self.headers[ndx];
         let regs_offset = header.regs_offset as usize;
         let regs_count = header.regs_count as usize;
