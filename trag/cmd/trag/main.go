@@ -49,7 +49,9 @@ var (
 	flagInitEnabled       *bool   = flag.Bool("init", false, "Initialize database")
 	flagInitTestsFilename *string = flag.String("initTests", "", "For -init: Test list file")
 
-	flagRunEnabled *bool = flag.Bool("run", false, "Run test cases")
+	flagRunEnabled  *bool   = flag.Bool("run", false, "Run test cases")
+	flagRunFilter   *string = flag.String("runFilter", "", "Only run test cases whose path contains this string")
+	flagRunNoRecord *bool   = flag.Bool("runNoRecord", false, "When passed, the test run is not recorded (no changes at all are made to the database)")
 
 	flagChartEnabled          *bool   = flag.Bool("chart", false, "Generate the 'Are we ECMAscript yet?' page")
 	flagChartTemplateFilename *string = flag.String("chartTemplate", "", "For -chart: Template file. By default, an embedded template is used.")
@@ -261,13 +263,16 @@ func runFullSuite(dbFilename string) error {
 
 	config := runnerConfig{
 		Test262Root: *flagTest262Root,
-		TestFiles:   make([]string, len(relPaths)),
+		TestFiles:   make([]string, 0, len(relPaths)),
 	}
-	for i, relPath := range relPaths {
+	for _, relPath := range relPaths {
 		if !relPath.Valid {
 			panic("this query should not have returned a null!")
 		}
-		config.TestFiles[i] = relPath.String
+		if !strings.Contains(relPath.String, *flagRunFilter) {
+			continue
+		}
+		config.TestFiles = append(config.TestFiles, relPath.String)
 	}
 
 	configFile, err := os.CreateTemp("", "mcjs_test262.json-*")
@@ -287,15 +292,17 @@ func runFullSuite(dbFilename string) error {
 	vmVersion := string(vmVersionBytes)
 	vmVersion = strings.TrimSpace(vmVersion)
 
-	// delete runs for the same version
-	// (cool that we can 'restore' them by rolling the transaction back,
-	// which automatically happens on error)
-	err = queries.DeleteRunsForVersion(
-		ctx,
-		vmVersion,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to delete previously recorded runs for version %s: %w", vmVersion, err)
+	if !*flagRunNoRecord {
+		// delete runs for the same version
+		// (cool that we can 'restore' them by rolling the transaction back,
+		// which automatically happens on error)
+		err = queries.DeleteRunsForVersion(
+			ctx,
+			vmVersion,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to delete previously recorded runs for version %s: %w", vmVersion, err)
+		}
 	}
 
 	// run test runner
@@ -334,6 +341,10 @@ func runFullSuite(dbFilename string) error {
 	for cmdOutputScnr.Scan() {
 		line := cmdOutputScnr.Text()
 		log.Println("output line:", line)
+
+		if *flagRunNoRecord {
+			break
+		}
 
 		var logItem struct {
 			FullPath string `json:"file_path"`
@@ -390,9 +401,11 @@ func runFullSuite(dbFilename string) error {
 		readError = fmt.Errorf("test runner: read: %s\n", readError)
 	}
 
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("error while committing transaction (data will be discarded!): %s", err)
+	if !*flagRunNoRecord {
+		err = tx.Commit()
+		if err != nil {
+			return fmt.Errorf("error while committing transaction (data will be discarded!): %s", err)
+		}
 	}
 
 	log.Printf("work finished. transaction committed with %d inserts", nInserts)
