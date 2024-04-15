@@ -216,6 +216,8 @@ enum Action {
     LoadLayout,
     SetInstrBreakpoint(mcjs_vm::GlobalIID),
     ClearInstrBreakpoint(mcjs_vm::GlobalIID),
+    SetBreakOnThrow(bool),
+    SetBreakOnUnhandledThrow(bool),
 }
 impl Action {
     fn set_if_none(&mut self, other: Action) {
@@ -259,6 +261,21 @@ impl eframe::App for AppData {
                         if ui.button("Into").clicked() {
                             action = Action::Into;
                         }
+
+                        ui.menu_button("Break⏷", |ui| {
+                            let mut on = self.intrp.debugging_state().should_break_on_throw();
+                            if ui.checkbox(&mut on, "on throw").changed() {
+                                action = Action::SetBreakOnThrow(on);
+                            }
+
+                            let mut on = self
+                                .intrp
+                                .debugging_state()
+                                .should_break_on_unhandled_throw();
+                            if ui.checkbox(&mut on, "on unhandled throw").changed() {
+                                action = Action::SetBreakOnUnhandledThrow(on);
+                            }
+                        });
 
                         ui.label(format!(
                             "{}/{}  {}",
@@ -366,6 +383,15 @@ impl eframe::App for AppData {
             Action::ClearInstrBreakpoint(giid) => {
                 let dbg = self.intrp.debugging_state_mut();
                 dbg.clear_instr_bkpt(giid);
+            }
+
+            Action::SetBreakOnThrow(value) => {
+                self.intrp.debugging_state_mut().set_break_on_throw(value);
+            }
+            Action::SetBreakOnUnhandledThrow(value) => {
+                self.intrp
+                    .debugging_state_mut()
+                    .set_break_on_unhandled_throw(value);
             }
         }
     }
