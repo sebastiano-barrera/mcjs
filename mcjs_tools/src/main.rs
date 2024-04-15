@@ -285,6 +285,10 @@ impl eframe::App for AppData {
                         ));
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Restart").clicked() {
+                                action = Action::Restart;
+                            }
+
                             ui.menu_button("View⏷", |ui| {
                                 if ui.button("Save").clicked() {
                                     action = Action::SaveLayout;
