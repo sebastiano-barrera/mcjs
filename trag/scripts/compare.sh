@@ -13,7 +13,7 @@ version_pre="$(git rev-parse "$1")"
 version_post="$(git rev-parse "$2")"
 
 echo "# comparing $version_pre -> $version_post"
-sqlite3 -readonly -box ../out/tests.db <<EOF 
+sqlite3 -readonly -box ../data/tests.db <<EOF 
 	with a as (
 		select path_hash
 		, is_strict

@@ -4,15 +4,14 @@ cd "$(dirname "$0")"
 
 if [ -z "$1" ]
 then
-	version="$(git rev-parse HEAD)"
-	[ -z "$(git status --porcelain)" ] || version="dirty"
+	version="$(cargo run -p mcjs_test262 -- --version)"
 else
 	version="$(git rev-parse "$1")"
 fi
 
 {
 	echo "# version: $version"
-	sqlite3 -readonly -box ../out/tests.db <<-EOF 
+	sqlite3 -readonly -box ../data/tests.db <<-EOF 
 	with q as (
 		select sg.string as dirname
 		, (error_message_hash is null) as success
@@ -36,5 +35,5 @@ fi
 	from q2
 	;
 EOF
-} | tee ../out/status.txt
+} | tee ../data/status.txt
 

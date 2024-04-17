@@ -12,7 +12,7 @@ fi
 
 {
 	echo "# version: $version"
-	sqlite3 -readonly -box ../out/tests.db <<-EOF 
+	sqlite3 -readonly -box ../data/tests.db <<-EOF 
 select is_strict, path.string as path 
 from runs, strings path 
 where path_hash = path.hash
