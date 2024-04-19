@@ -304,6 +304,7 @@ func runFullSuite(dbFilename string) error {
 			return fmt.Errorf("failed to delete previously recorded runs for version %s: %w", vmVersion, err)
 		}
 	}
+	log.Println("vm version:", vmVersion)
 
 	// run test runner
 	cmd := exec.Command(
@@ -408,7 +409,7 @@ func runFullSuite(dbFilename string) error {
 		}
 	}
 
-	log.Printf("work finished. transaction committed with %d inserts", nInserts)
+	log.Printf("work finished. transaction committed. %d inserts, version = %s", nInserts, vmVersion)
 	return readError
 }
 
