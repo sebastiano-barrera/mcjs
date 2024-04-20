@@ -14,18 +14,28 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         let array_proto = heap.array_proto();
         {
             let mut array_proto_obj = heap.get(array_proto).unwrap().borrow_mut();
-            array_proto_obj.set_own_element_or_property("push".into(), Value::Object(Array_push));
-            array_proto_obj.set_own_element_or_property("pop".into(), Value::Object(Array_pop));
+            array_proto_obj.set_own(
+                "push".into(),
+                heap::Property::non_enumerable(Value::Object(Array_push)),
+            );
+            array_proto_obj.set_own(
+                "pop".into(),
+                heap::Property::non_enumerable(Value::Object(Array_pop)),
+            );
         }
 
         let Array_isArray = heap.new_function(Closure::Native(nf_Array_isArray));
         let array_ctor = heap.new_function(Closure::Native(nf_Array));
         {
             let mut array_ctor_obj = heap.get(array_ctor).unwrap().borrow_mut();
-            array_ctor_obj
-                .set_own_element_or_property("isArray".into(), Value::Object(Array_isArray));
-            array_ctor_obj
-                .set_own_element_or_property("prototype".into(), Value::Object(array_proto));
+            array_ctor_obj.set_own(
+                "isArray".into(),
+                heap::Property::non_enumerable(Value::Object(Array_isArray)),
+            );
+            array_ctor_obj.set_own(
+                "prototype".into(),
+                heap::Property::non_enumerable(Value::Object(array_proto)),
+            );
         }
 
         array_ctor
@@ -38,11 +48,16 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         let toString = heap.new_function(Closure::Native(nf_Number_prototype_toString));
 
         let mut Number_obj = heap.get(Number).unwrap().borrow_mut();
-        Number_obj
-            .set_own_element_or_property("prototype".into(), Value::Object(heap.number_proto()));
+        Number_obj.set_own(
+            "prototype".into(),
+            heap::Property::non_enumerable(Value::Object(heap.number_proto())),
+        );
 
         let mut number_proto_obj = heap.get(heap.number_proto()).unwrap().borrow_mut();
-        number_proto_obj.set_own_element_or_property("toString".into(), Value::Object(toString))
+        number_proto_obj.set_own(
+            "toString".into(),
+            heap::Property::non_enumerable(Value::Object(toString)),
+        )
     }
 
     let String = heap.new_function(Closure::Native(nf_String));
@@ -52,8 +67,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let Function = heap.new_function(Closure::Native(nf_Function));
     {
         let mut Function_obj = heap.get(Function).unwrap().borrow_mut();
-        Function_obj
-            .set_own_element_or_property("prototype".into(), Value::Object(heap.func_proto()));
+        Function_obj.set_own(
+            "prototype".into(),
+            heap::Property::non_enumerable(Value::Object(heap.func_proto())),
+        );
     }
 
     let cash_print = heap.new_function(Closure::Native(nf_cash_print));
@@ -61,7 +78,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let func_bind = heap.new_function(Closure::Native(nf_Function_bind));
     {
         let mut func_proto = heap.get(heap.func_proto()).unwrap().borrow_mut();
-        func_proto.set_own_element_or_property("bind".into(), Value::Object(func_bind));
+        func_proto.set_own(
+            "bind".into(),
+            heap::Property::non_enumerable(Value::Object(func_bind)),
+        );
     }
 
     let ReferenceError = heap.new_ordinary_object();
@@ -70,14 +90,38 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
 
     let global = heap.new_ordinary_object();
     let mut global_obj = heap.get(global).unwrap().borrow_mut();
-    global_obj.set_own_element_or_property("Array".into(), Value::Object(array_ctor));
-    global_obj.set_own_element_or_property("RegExp".into(), Value::Object(RegExp));
-    global_obj.set_own_element_or_property("Number".into(), Value::Object(Number));
-    global_obj.set_own_element_or_property("String".into(), Value::Object(String));
-    global_obj.set_own_element_or_property("Boolean".into(), Value::Object(Boolean));
-    global_obj.set_own_element_or_property("Function".into(), Value::Object(Function));
-    global_obj.set_own_element_or_property("$print".into(), Value::Object(cash_print));
-    global_obj.set_own_element_or_property("ReferenceError".into(), Value::Object(ReferenceError));
+    global_obj.set_own(
+        "Array".into(),
+        heap::Property::enumerable(Value::Object(array_ctor)),
+    );
+    global_obj.set_own(
+        "RegExp".into(),
+        heap::Property::enumerable(Value::Object(RegExp)),
+    );
+    global_obj.set_own(
+        "Number".into(),
+        heap::Property::enumerable(Value::Object(Number)),
+    );
+    global_obj.set_own(
+        "String".into(),
+        heap::Property::enumerable(Value::Object(String)),
+    );
+    global_obj.set_own(
+        "Boolean".into(),
+        heap::Property::enumerable(Value::Object(Boolean)),
+    );
+    global_obj.set_own(
+        "Function".into(),
+        heap::Property::enumerable(Value::Object(Function)),
+    );
+    global_obj.set_own(
+        "$print".into(),
+        heap::Property::enumerable(Value::Object(cash_print)),
+    );
+    global_obj.set_own(
+        "ReferenceError".into(),
+        heap::Property::enumerable(Value::Object(ReferenceError)),
+    );
 
     global
 }
@@ -172,7 +216,7 @@ fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Val
                 println!("{:?} [{} properties]", obj_id, props.len());
 
                 for prop in props {
-                    let value = obj.get_own_element_or_property(IndexOrKey::Key(&prop));
+                    let value = obj.get_own(IndexOrKey::Key(&prop));
                     println!("  - {:?} = {:?}", prop, value);
                 }
             }

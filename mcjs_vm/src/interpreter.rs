@@ -746,7 +746,7 @@ fn run_regular(
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let value = get_operand(data, *value)?;
 
-                    obj.set_own_element_or_property(key.to_ref(), value);
+                    obj.set_own(key.to_ref(), heap::Property::enumerable(value));
                 }
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = get_operand_object(data, realm, *obj)?;
@@ -754,14 +754,13 @@ fn run_regular(
                     let key = value_to_index_or_key(&realm.heap, &key);
 
                     let value = match key {
-                        Some(ik @ heap::IndexOrKeyOwned::Index(_)) => {
-                            obj.get_own_element_or_property(ik.to_ref())
-                        }
+                        Some(ik @ heap::IndexOrKeyOwned::Index(_)) => obj.get_own(ik.to_ref()),
                         Some(heap::IndexOrKeyOwned::Key(key)) => {
                             realm.heap.get_property_chained(&obj, &key)
                         }
                         None => None,
                     }
+                    .map(|p| p.value)
                     .unwrap_or(Value::Undefined);
 
                     data.top_mut().set_result(*dest, value);
@@ -787,7 +786,7 @@ fn run_regular(
                         let key = get_operand(data, *key)?;
                         let key = value_to_index_or_key(&realm.heap, &key)
                             .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                        obj.delete_own_element_or_property(key.to_ref());
+                        obj.delete_own(key.to_ref());
                     }
 
                     data.top_mut().set_result(*dest, Value::Bool(true));
@@ -1001,12 +1000,17 @@ fn run_regular(
                     };
 
                     let global_this = realm.heap.get(realm.global_obj).unwrap().borrow();
-                    let lookup_result = global_this.get_own_element_or_property(key);
+                    let lookup_result = global_this.get_own(key);
 
                     match lookup_result {
-                        None | Some(Value::Undefined) => {
+                        None
+                        | Some(heap::Property {
+                            value: Value::Undefined,
+                            ..
+                        }) => {
                             let exc_proto = global_this
-                                .get_own_element_or_property(IndexOrKey::Key("ReferenceError"))
+                                .get_own(IndexOrKey::Key("ReferenceError"))
+                                .map(|p| p.value)
                                 .expect("missing required builtin: ReferenceError")
                                 .expect_obj()
                                 .expect("bug: ReferenceError is not an object?!");
@@ -1031,8 +1035,8 @@ fn run_regular(
                                 &dbg,
                             )?;
                         }
-                        Some(value) => {
-                            data.top_mut().set_result(*dest, value);
+                        Some(prop) => {
+                            data.top_mut().set_result(*dest, prop.value);
                         }
                     }
                 }
