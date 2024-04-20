@@ -2348,4 +2348,25 @@ mod tests {
         let output = quick_run("sink(eval('11'))");
         assert_eq!(&output.sink, &[Some(Literal::Number(11.0))]);
     }
+
+    #[test]
+    fn test_array_properties() {
+        let output = quick_run(
+            r#"
+            const arr = ['a', 123, {}]
+            for (const name in arr) {
+              sink(name);
+            }
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::String("0".to_string())),
+                Some(Literal::String("1".to_string())),
+                Some(Literal::String("2".to_string())),
+            ]
+        );
+    }
 }
