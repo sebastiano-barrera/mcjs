@@ -7,64 +7,56 @@ use crate::common::Result;
 use crate::error;
 use crate::heap::{self, IndexOrKey, Object};
 
-use std::collections::HashMap;
-
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
-    let mut global = HashMap::new();
-
-    {
+    let array_ctor = {
         let Array_push = heap.new_function(Closure::Native(nf_Array_push));
         let Array_pop = heap.new_function(Closure::Native(nf_Array_pop));
-        let array_proto_oid = heap.array_proto();
+        let array_proto = heap.array_proto();
         {
-            let mut array_proto = heap.get(array_proto_oid).unwrap().borrow_mut();
-            array_proto.set_own_element_or_property("push".into(), Value::Object(Array_push));
-            array_proto.set_own_element_or_property("pop".into(), Value::Object(Array_pop));
+            let mut array_proto_obj = heap.get(array_proto).unwrap().borrow_mut();
+            array_proto_obj.set_own_element_or_property("push".into(), Value::Object(Array_push));
+            array_proto_obj.set_own_element_or_property("pop".into(), Value::Object(Array_pop));
         }
 
         let Array_isArray = heap.new_function(Closure::Native(nf_Array_isArray));
-        let mut array_ctor_props = HashMap::new();
-        array_ctor_props.insert("isArray".to_string(), Value::Object(Array_isArray));
-        array_ctor_props.insert("prototype".to_string(), Value::Object(array_proto_oid));
-        let array_ctor = heap.new_ordinary_object(array_ctor_props);
-        heap.init_function(array_ctor, Closure::Native(nf_Array));
+        let array_ctor = heap.new_function(Closure::Native(nf_Array));
+        {
+            let mut array_ctor_obj = heap.get(array_ctor).unwrap().borrow_mut();
+            array_ctor_obj
+                .set_own_element_or_property("isArray".into(), Value::Object(Array_isArray));
+            array_ctor_obj
+                .set_own_element_or_property("prototype".into(), Value::Object(array_proto));
+        }
 
-        global.insert("Array".to_string(), Value::Object(array_ctor));
-    }
+        array_ctor
+    };
 
     let RegExp = heap.new_function(Closure::Native(nf_RegExp));
-    global.insert("RegExp".to_string(), Value::Object(RegExp));
 
-    let mut number_cons_props = HashMap::new();
-    number_cons_props.insert("prototype".to_string(), Value::Object(heap.number_proto()));
+    let Number = heap.new_function(Closure::Native(nf_Number));
     {
-        let Number_prototype_toString =
-            heap.new_function(Closure::Native(nf_Number_prototype_toString));
-        let oid = heap.number_proto();
-        let mut number_proto = heap.get(oid).unwrap().borrow_mut();
-        number_proto.set_own_element_or_property(
-            "toString".into(),
-            Value::Object(Number_prototype_toString),
-        )
+        let toString = heap.new_function(Closure::Native(nf_Number_prototype_toString));
+
+        let mut Number_obj = heap.get(Number).unwrap().borrow_mut();
+        Number_obj
+            .set_own_element_or_property("prototype".into(), Value::Object(heap.number_proto()));
+
+        let mut number_proto_obj = heap.get(heap.number_proto()).unwrap().borrow_mut();
+        number_proto_obj.set_own_element_or_property("toString".into(), Value::Object(toString))
     }
-    let Number = heap.new_ordinary_object(number_cons_props);
-    heap.init_function(Number, Closure::Native(nf_Number));
-    global.insert("Number".to_string(), Value::Object(Number));
 
     let String = heap.new_function(Closure::Native(nf_String));
-    global.insert("String".to_string(), Value::Object(String));
 
     let Boolean = heap.new_function(Closure::Native(nf_Boolean));
-    global.insert("Boolean".to_string(), Value::Object(Boolean));
 
-    let mut func_cons_props = HashMap::new();
-    func_cons_props.insert("prototype".to_string(), Value::Object(heap.func_proto()));
-    let Function = heap.new_ordinary_object(func_cons_props);
-    heap.init_function(Function, Closure::Native(nf_Function));
-    global.insert("Function".to_string(), Value::Object(Function));
+    let Function = heap.new_function(Closure::Native(nf_Function));
+    {
+        let mut Function_obj = heap.get(Function).unwrap().borrow_mut();
+        Function_obj
+            .set_own_element_or_property("prototype".into(), Value::Object(heap.func_proto()));
+    }
 
     let cash_print = heap.new_function(Closure::Native(nf_cash_print));
-    global.insert("$print".to_string(), Value::Object(cash_print));
 
     let func_bind = heap.new_function(Closure::Native(nf_Function_bind));
     {
@@ -72,21 +64,22 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         func_proto.set_own_element_or_property("bind".into(), Value::Object(func_bind));
     }
 
-    {
-        let oid = heap.new_ordinary_object(HashMap::new());
-        global.insert("ReferenceError".to_string(), Value::Object(oid));
-    }
-
-    // builtins.insert("Boolean".into(), NativeFnId::BooleanNew as u32);
-    // builtins.insert("Object".into(), NativeFnId::ObjectNew as u32);
-    // builtins.insert("parseInt".into(), NativeFnId::ParseInt as u32);
-    // builtins.insert("SyntaxError".into(), NativeFnId::SyntaxErrorNew as u32);
-    // builtins.insert("TypeError".into(), NativeFnId::TypeErrorNew as u32);
-    // builtins.insert("Math_floor".into(), NativeFnId::MathFloor as u32);
+    let ReferenceError = heap.new_ordinary_object();
 
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
-    heap.new_ordinary_object(global)
+    let global = heap.new_ordinary_object();
+    let mut global_obj = heap.get(global).unwrap().borrow_mut();
+    global_obj.set_own_element_or_property("Array".into(), Value::Object(array_ctor));
+    global_obj.set_own_element_or_property("RegExp".into(), Value::Object(RegExp));
+    global_obj.set_own_element_or_property("Number".into(), Value::Object(Number));
+    global_obj.set_own_element_or_property("String".into(), Value::Object(String));
+    global_obj.set_own_element_or_property("Boolean".into(), Value::Object(Boolean));
+    global_obj.set_own_element_or_property("Function".into(), Value::Object(Function));
+    global_obj.set_own_element_or_property("$print".into(), Value::Object(cash_print));
+    global_obj.set_own_element_or_property("ReferenceError".into(), Value::Object(ReferenceError));
+
+    global
 }
 
 fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Value> {
@@ -118,7 +111,7 @@ fn nf_Array_pop(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> Result<Va
 
 fn nf_RegExp(realm: &mut Realm, _this: &Value, _: &[Value]) -> Result<Value> {
     // TODO
-    let oid = realm.heap.new_ordinary_object(HashMap::new());
+    let oid = realm.heap.new_ordinary_object();
     Ok(Value::Object(oid))
 }
 

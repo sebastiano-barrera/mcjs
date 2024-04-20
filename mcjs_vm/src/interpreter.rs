@@ -736,7 +736,7 @@ fn run_regular(
                 }
 
                 Instr::ObjCreateEmpty(dest) => {
-                    let oid = realm.heap.new_ordinary_object(HashMap::new());
+                    let oid = realm.heap.new_ordinary_object();
                     data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 Instr::ObjSet { obj, key, value } => {
@@ -1012,7 +1012,7 @@ fn run_regular(
                                 .expect("bug: ReferenceError is not an object?!");
                             // sadly, the borrowck needs some hand-holding here
                             drop(global_this);
-                            let exc_oid = realm.heap.new_ordinary_object(HashMap::new());
+                            let exc_oid = realm.heap.new_ordinary_object();
                             {
                                 let mut exc = realm.heap.get(exc_oid).unwrap().borrow_mut();
                                 exc.set_proto(Some(exc_proto));

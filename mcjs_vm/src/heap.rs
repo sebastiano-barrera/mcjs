@@ -127,10 +127,10 @@ impl Heap {
         self.bool_proto
     }
 
-    pub(crate) fn new_ordinary_object(&mut self, properties: HashMap<String, Value>) -> ObjectId {
+    pub(crate) fn new_ordinary_object(&mut self) -> ObjectId {
         self.objects.insert(RefCell::new(HeapObject {
             proto_id: Some(self.object_proto),
-            properties,
+            properties: HashMap::new(),
             exotic_part: Exotic::None,
         }))
     }
@@ -158,17 +158,17 @@ impl Heap {
     }
 
     pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectId {
-        let oid = self.new_ordinary_object(HashMap::new());
+        let oid = self.new_ordinary_object();
         self.init_array(oid, elements);
         oid
     }
     pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectId {
-        let oid = self.new_ordinary_object(HashMap::new());
+        let oid = self.new_ordinary_object();
         self.init_function(oid, closure);
         oid
     }
     pub(crate) fn new_string(&mut self, string: String) -> ObjectId {
-        let oid = self.new_ordinary_object(HashMap::new());
+        let oid = self.new_ordinary_object();
         self.init_string(oid, string);
         oid
     }
@@ -231,8 +231,13 @@ impl Heap {
 #[derive(Debug, Clone)]
 pub struct HeapObject {
     proto_id: Option<ObjectId>,
-    properties: HashMap<String, Value>,
+    properties: HashMap<String, Property>,
     exotic_part: Exotic,
+}
+#[derive(Debug, Clone, Copy)]
+struct Property {
+    value: Value,
+    is_enumerable: bool,
 }
 impl HeapObject {
     pub fn as_str(&self) -> Option<&str> {
@@ -320,7 +325,7 @@ impl Object for HeapObject {
             (Exotic::String { string }, IndexOrKey::Key("length")) => {
                 Some(Value::Number(string.len() as f64))
             }
-            (_, IndexOrKey::Key(key)) => self.properties.get(key).copied(),
+            (_, IndexOrKey::Key(key)) => self.properties.get(key).map(|prop| prop.value),
             (_, IndexOrKey::Index(_)) => None,
         }
     }
@@ -350,7 +355,13 @@ impl Object for HeapObject {
                 // do nothing
             }
             (_, IndexOrKey::Key(key)) => {
-                self.properties.insert(key.to_owned(), value);
+                self.properties.insert(
+                    key.to_owned(),
+                    Property {
+                        value,
+                        is_enumerable: false,
+                    },
+                );
             }
         }
     }
@@ -386,9 +397,15 @@ impl Object for HeapObject {
     fn own_properties(&self) -> Vec<String> {
         let mut props: Vec<_> = self.properties.keys().cloned().collect();
 
-        match self.exotic_part {
+        match &self.exotic_part {
             Exotic::None | Exotic::Function { .. } => {}
-            Exotic::Array { .. } | Exotic::String { .. } => {
+            Exotic::Array { elements } => {
+                for i in 0..elements.len() {
+                    props.push(i.to_string());
+                }
+                props.push("length".to_owned());
+            }
+            Exotic::String { .. } => {
                 props.push("length".to_owned());
             }
         }
