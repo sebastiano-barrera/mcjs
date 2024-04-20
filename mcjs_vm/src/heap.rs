@@ -29,7 +29,7 @@ pub trait Object {
 
     // I know, inefficient, but so, *so* simple, and enum_dispatch-able.
     // TODO: make it slightly better, return a Cow<'static, str>
-    fn own_properties(&self) -> Vec<String>;
+    fn own_properties(&self, only_enumerable: bool) -> Vec<String>;
 
     fn type_of(&self) -> Typeof;
     fn proto(&self, heap: &Heap) -> Option<ObjectId>;
@@ -419,8 +419,14 @@ impl Object for HeapObject {
         }
     }
 
-    fn own_properties(&self) -> Vec<String> {
-        let mut props: Vec<_> = self.properties.keys().cloned().collect();
+    fn own_properties(&self, only_enumerable: bool) -> Vec<String> {
+        let mut props: Vec<_> = self
+            .properties
+            .iter()
+            .filter(|(_, prop)| !only_enumerable || prop.is_enumerable)
+            .map(|(key, _)| key)
+            .cloned()
+            .collect();
 
         match &self.exotic_part {
             Exotic::None | Exotic::Function { .. } => {}
@@ -428,10 +434,14 @@ impl Object for HeapObject {
                 for i in 0..elements.len() {
                     props.push(i.to_string());
                 }
-                props.push("length".to_owned());
+                if !only_enumerable {
+                    props.push("length".to_owned());
+                }
             }
             Exotic::String { .. } => {
-                props.push("length".to_owned());
+                if !only_enumerable {
+                    props.push("length".to_owned());
+                }
             }
         }
 
@@ -497,11 +507,11 @@ impl<'h> Object for ValueObjectRef<'h> {
         }
     }
 
-    fn own_properties(&self) -> Vec<String> {
+    fn own_properties(&self, only_enumerable: bool) -> Vec<String> {
         match self {
             ValueObjectRef::Number(_, _) => Vec::new(),
             ValueObjectRef::Bool(_, _) => Vec::new(),
-            ValueObjectRef::Heap(ho) => ho.borrow().own_properties(),
+            ValueObjectRef::Heap(ho) => ho.borrow().own_properties(only_enumerable),
         }
     }
 

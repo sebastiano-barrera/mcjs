@@ -769,7 +769,7 @@ fn run_regular(
                     // TODO Something more efficient?
                     let obj = get_operand_object(data, realm, *obj)?;
                     let keys = obj
-                        .own_properties()
+                        .own_properties(true)
                         .into_iter()
                         .map(|name| Value::Object(realm.heap.new_string(name)))
                         .collect();
