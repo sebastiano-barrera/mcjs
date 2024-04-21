@@ -206,7 +206,14 @@ pub enum Instr {
     Unshare(VReg),
 
     ObjCreateEmpty(VReg),
+    /// Set an enumerable property on an object
     ObjSet {
+        obj: VReg,
+        key: VReg,
+        value: VReg,
+    },
+    /// Set a non-enumerable property on an object
+    ObjSetN {
         obj: VReg,
         key: VReg,
         value: VReg,
@@ -216,7 +223,18 @@ pub enum Instr {
         obj: VReg,
         key: VReg,
     },
-    ObjGetKeys {
+    /// Get an object's Own Enumerable properties
+    ObjGetKeysOE {
+        dest: VReg,
+        obj: VReg,
+    },
+    /// Get an object's Inherited Enumerable properties
+    ObjGetKeysIE {
+        dest: VReg,
+        obj: VReg,
+    },
+    /// Get an object's Own properties, both enumerable and non-enumerable
+    ObjGetKeysO {
         dest: VReg,
         obj: VReg,
     },
@@ -358,9 +376,12 @@ impl Instr {
             Instr::ClosureAddCapture(arg) => { an(D::VRegRead(*arg)); },
             Instr::Unshare(reg) => { an(D::VRegWrite(*reg)); an(D::VRegRead(*reg)); },
             Instr::ObjCreateEmpty(dest) => { an(D::VRegWrite(*dest)); },
-            Instr::ObjSet { obj, key, value } => { an(D::VRegRead(*obj)); an(D::VRegRead(*key)); an(D::VRegRead(*value)); }
+            Instr::ObjSet { obj, key, value }
+	    | Instr::ObjSetN { obj, key, value } => { an(D::VRegRead(*obj)); an(D::VRegRead(*key)); an(D::VRegRead(*value)); }
             Instr::ObjGet { dest, obj, key } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); an(D::VRegRead(*key)); }
-            Instr::ObjGetKeys { dest, obj } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); }
+            Instr::ObjGetKeysOE { dest, obj }
+	    | Instr::ObjGetKeysIE { dest, obj }
+	    | Instr::ObjGetKeysO { dest, obj } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); }
             Instr::ObjDelete { dest, obj, key } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); an(D::VRegRead(*key)); }
             Instr::ArrayPush { arr, value } => { an(D::VRegRead(*arr)); an(D::VRegRead(*value)); }
             Instr::ArrayNth { dest, arr, index } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arr)); an(D::VRegRead(*index)); }

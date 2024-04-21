@@ -1,8 +1,25 @@
 mod formatter;
 
-pub use formatter::{Dump, Formatter};
+#[macro_export]
+macro_rules! define_flag {
+    ($type_name:ident) => {
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        enum $type_name {
+            Yes,
+            No,
+        }
+
+        impl Into<bool> for $type_name {
+            fn into(self) -> bool {
+                self == Self::Yes
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 pub use formatter::DumpExt;
+pub use formatter::{Dump, Formatter};
 
 pub fn pop_while<T>(vec: &mut Vec<T>, pred: impl Fn(&T) -> bool) {
     while let Some(item) = vec.last() {

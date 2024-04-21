@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::{
     bytecode::{self, FnId, Instr, VReg, IID},
     common::{self, Result},
-    error,
+    define_flag, error,
     heap::{self, IndexOrKey, Object},
     loader,
     stack::{self, UpvalueId},
@@ -740,13 +740,10 @@ fn run_regular(
                     data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 Instr::ObjSet { obj, key, value } => {
-                    let mut obj = get_operand_object(data, realm, *obj)?;
-                    let key = get_operand(data, *key)?;
-                    let key = value_to_index_or_key(&realm.heap, &key)
-                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let value = get_operand(data, *value)?;
-
-                    obj.set_own(key.to_ref(), heap::Property::enumerable(value));
+                    obj_set(data, realm, obj, key, value, true)?;
+                }
+                Instr::ObjSetN { obj, key, value } => {
+                    obj_set(data, realm, obj, key, value, false)?;
                 }
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = get_operand_object(data, realm, *obj)?;
@@ -765,18 +762,30 @@ fn run_regular(
 
                     data.top_mut().set_result(*dest, value);
                 }
-                Instr::ObjGetKeys { dest, obj } => {
-                    // TODO Something more efficient?
-                    let obj = get_operand_object(data, realm, *obj)?;
-                    let keys = obj
-                        .own_properties(true)
-                        .into_iter()
-                        .map(|name| Value::Object(realm.heap.new_string(name)))
-                        .collect();
-
-                    let keys_oid = realm.heap.new_array(keys);
-                    data.top_mut().set_result(*dest, Value::Object(keys_oid));
-                }
+                Instr::ObjGetKeysOE { dest, obj } => obj_get_keys(
+                    data,
+                    realm,
+                    obj,
+                    dest,
+                    OnlyEnumerable::Yes,
+                    IncludeInherited::No,
+                )?,
+                Instr::ObjGetKeysIE { dest, obj } => obj_get_keys(
+                    data,
+                    realm,
+                    obj,
+                    dest,
+                    OnlyEnumerable::Yes,
+                    IncludeInherited::Yes,
+                )?,
+                Instr::ObjGetKeysO { dest, obj } => obj_get_keys(
+                    data,
+                    realm,
+                    obj,
+                    dest,
+                    OnlyEnumerable::No,
+                    IncludeInherited::No,
+                )?,
                 Instr::ObjDelete { dest, obj, key } => {
                     // TODO Adjust return value: true for all cases except when the property is an
                     // own non-configurable property, in which case false is returned in non-strict
@@ -1074,6 +1083,59 @@ fn run_regular(
             }
         }
     }
+}
+
+fn obj_set(
+    data: &mut stack::InterpreterData,
+    realm: &mut Realm,
+    obj: &VReg,
+    key: &VReg,
+    value: &VReg,
+    is_enumerable: bool,
+) -> RunResult<()> {
+    let mut obj = get_operand_object(data, realm, *obj)?;
+    let key = get_operand(data, *key)?;
+    let key = value_to_index_or_key(&realm.heap, &key)
+        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+    let value = get_operand(data, *value)?;
+    obj.set_own(
+        key.to_ref(),
+        heap::Property {
+            value,
+            is_enumerable,
+        },
+    );
+    Ok(())
+}
+
+define_flag!(OnlyEnumerable);
+define_flag!(IncludeInherited);
+
+fn obj_get_keys(
+    data: &mut stack::InterpreterData,
+    realm: &mut Realm,
+    obj: &VReg,
+    dest: &VReg,
+    only_enumerable: OnlyEnumerable,
+    include_inherited: IncludeInherited,
+) -> RunResult<()> {
+    let obj = get_operand_object(data, realm, *obj)?;
+    let mut keys = Vec::new();
+
+    obj.own_properties(only_enumerable.into(), &mut keys);
+    if include_inherited.into() {
+        realm
+            .heap
+            .list_properties_prototypes(&obj, only_enumerable.into(), &mut keys);
+    }
+
+    let keys = keys
+        .into_iter()
+        .map(|name| Value::Object(realm.heap.new_string(name)))
+        .collect();
+    let keys_oid = realm.heap.new_array(keys);
+    data.top_mut().set_result(*dest, Value::Object(keys_oid));
+    Ok(())
 }
 
 #[cfg(feature = "debugger")]
@@ -2357,9 +2419,10 @@ mod tests {
     fn test_array_properties() {
         let output = quick_run(
             r#"
-            const arr = ['a', 123, {}]
+            const arr = ['a', 123, false]
             for (const name in arr) {
               sink(name);
+              sink(arr[name]);
             }
             "#,
         );
@@ -2368,8 +2431,11 @@ mod tests {
             &output.sink,
             &[
                 Some(Literal::String("0".to_string())),
+                Some(Literal::String("a".to_string())),
                 Some(Literal::String("1".to_string())),
+                Some(Literal::Number(123.0)),
                 Some(Literal::String("2".to_string())),
+                Some(Literal::Bool(false)),
             ]
         );
     }

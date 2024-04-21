@@ -1,29 +1,32 @@
 //! PAST->Bytecode compiler.
 //!
-//! This is the second and last phase of the bytecode compiler, after the JavaScript->PAST step.
+//! This is the second and last phase of the bytecode compiler, after the JavaScript->PAST
+//! step.
 //!
 //! It works pretty much as you'd expect, taking full advantage of knowing the full set of
 //! declarations of each scope/block.
-//!
 
 // ## Error handling
 //
-// Compilation errors arising in this phase are to be considered fully unexpected, and are handled
-// exclusively by panicking. (The panic is only caught at the topmost level in `compile_module` so
-// that the entire application does not have to crash.) The motivation for this is twofold.
+// Compilation errors arising in this phase are to be considered fully unexpected, and are
+// handled exclusively by panicking. (The panic is only caught at the topmost level in
+// `compile_module` so that the entire application does not have to crash.) The motivation
+// for this is twofold.
 //
-// First, a malformed PAST can come *exclusively* from a bug in the JavaScript->PAST phase, not
-// from any mistake made by our user in their JavaScript code. Such user errors should be caught
-// and reported by the JavaScript->PAST phase, in which case that phase terminates with an error,
-// without producing any PAST.  If a PAST comes out of that phase, then it's supposed to be fully
-// correct. There is no point in continuing the compilation in the presence of a certified bug.
+// First, a malformed PAST can come *exclusively* from a bug in the JavaScript->PAST
+// phase, not from any mistake made by our user in their JavaScript code. Such user errors
+// should be caught and reported by the JavaScript->PAST phase, in which case that phase
+// terminates with an error, without producing any PAST.  If a PAST comes out of that
+// phase, then it's supposed to be fully correct. There is no point in continuing the
+// compilation in the presence of a certified bug.
 //
-// Second, interrupting the compilation 'in the middle' would leave our internal data structures in
-// a logically invalid state, missing some invariants (details in the `builder` module). There is
-// no easy way to prevent the ensuing problems, only hard ones (e.g. putting changes in an
-// auxiliary structure to be committed/rolled-back afterwards; copying the FnBuilder, changing only
-// one of the two copies and then discarding one of them).  But there is no point: if a compiler
-// bug is detected, we might as well throw the entire thing out with just a message.
+// Second, interrupting the compilation 'in the middle' would leave our internal data
+// structures in a logically invalid state, missing some invariants (details in the
+// `builder` module). There is no easy way to prevent the ensuing problems, only hard ones
+// (e.g. putting changes in an auxiliary structure to be committed/rolled-back afterwards;
+// copying the FnBuilder, changing only one of the two copies and then discarding one of
+// them).  But there is no point: if a compiler bug is detected, we might as well throw
+// the entire thing out with just a message.
 
 use std::collections::HashSet;
 
@@ -468,7 +471,7 @@ fn compile_expr(
         Expr::ObjectGetKeys(obj) => {
             let obj = compile_expr(fnb, None, block, *obj);
             let dest = get_dest(fnb);
-            fnb.emit(Instr::ObjGetKeys { dest, obj });
+            fnb.emit(Instr::ObjGetKeysOE { dest, obj });
             dest
         }
         Expr::CreateClosure { func } => {
@@ -517,10 +520,10 @@ fn compile_expr(
                     value: proto,
                 });
 
-                // <function_object>.prototype = globalThis.Function
+                // <function_object>.constructor = globalThis.Function
                 let ctor = compile_read_global(fnb, "Function".into());
                 compile_load_const(fnb, key, Literal::String("constructor".to_string()));
-                fnb.emit(Instr::ObjSet {
+                fnb.emit(Instr::ObjSetN {
                     obj: dest,
                     key,
                     value: ctor,
@@ -683,7 +686,7 @@ fn compile_new(
     });
 
     compile_load_const(fnb, key, Literal::String("constructor".into()));
-    fnb.emit(Instr::ObjSet {
+    fnb.emit(Instr::ObjSetN {
         obj,
         key,
         value: constructor,

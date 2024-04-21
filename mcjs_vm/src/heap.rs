@@ -1,6 +1,6 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::{borrow::Cow, cell::RefCell};
 
 use crate::interpreter::{Closure, Value};
 
@@ -27,9 +27,8 @@ pub trait Object {
     /// the prototype chain in any way.
     fn delete_own(&mut self, index_or_key: IndexOrKey);
 
-    // I know, inefficient, but so, *so* simple, and enum_dispatch-able.
-    // TODO: make it slightly better, return a Cow<'static, str>
-    fn own_properties(&self, only_enumerable: bool) -> Vec<String>;
+    // I know, inefficient, but so, *so* simple
+    fn own_properties(&self, only_enumerable: bool, out: &mut Vec<String>);
 
     fn type_of(&self) -> Typeof;
     fn proto(&self, heap: &Heap) -> Option<ObjectId>;
@@ -45,10 +44,31 @@ pub enum Typeof {
     Boolean,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IndexOrKey<'a> {
     Index(usize),
     Key(&'a str),
+}
+impl<'a> IndexOrKey<'a> {
+    fn ensure_number_is_index(self) -> Self {
+        match self {
+            IndexOrKey::Index(_) => self,
+            IndexOrKey::Key(key) => {
+                if let Some(num_key) = key.parse().ok() {
+                    IndexOrKey::Index(num_key)
+                } else {
+                    self
+                }
+            }
+        }
+    }
+
+    fn ensure_number_is_key(&self) -> Cow<'a, str> {
+        match self {
+            IndexOrKey::Index(num) => Cow::Owned(num.to_string()),
+            IndexOrKey::Key(key) => Cow::Borrowed(key),
+        }
+    }
 }
 impl<'a> From<&'a str> for IndexOrKey<'a> {
     fn from(value: &'a str) -> Self {
@@ -232,6 +252,19 @@ impl Heap {
             None
         }
     }
+
+    pub fn list_properties_prototypes<O: ?Sized + Object>(
+        &self,
+        obj: &O,
+        only_enumerable: bool,
+        out: &mut Vec<String>,
+    ) {
+        if let Some(proto_oid) = obj.proto(self) {
+            let proto = self.get(proto_oid).unwrap().borrow();
+            proto.own_properties(only_enumerable, out);
+            self.list_properties_prototypes(proto.deref(), only_enumerable, out);
+        }
+    }
 }
 
 /// An ordinary object, i.e. one that you can create in JavaScript with the `{a: 1, b: 2}`
@@ -343,18 +376,24 @@ impl Object for HeapObject {
             return Some(Property::non_enumerable(Value::Object(proto_oid)));
         }
 
-        match (&self.exotic_part, index_or_key) {
-            (Exotic::Array { elements }, IndexOrKey::Key("length")) => Some(
-                Property::non_enumerable(Value::Number(elements.len() as f64)),
-            ),
-            (Exotic::Array { elements }, IndexOrKey::Index(index)) => {
-                elements.get(index).copied().map(Property::enumerable)
+        match &self.exotic_part {
+            Exotic::Array { elements } => match index_or_key.ensure_number_is_index() {
+                IndexOrKey::Key("length") => Some(Property::non_enumerable(Value::Number(
+                    elements.len() as f64,
+                ))),
+                IndexOrKey::Index(index) => elements.get(index).copied().map(Property::enumerable),
+                _ => None,
+            },
+            Exotic::String { string } => match index_or_key {
+                IndexOrKey::Key("length") => {
+                    Some(Property::non_enumerable(Value::Number(string.len() as f64)))
+                }
+                _ => None,
+            },
+            Exotic::None | Exotic::Function { .. } => {
+                let key = index_or_key.ensure_number_is_key();
+                self.properties.get(key.as_ref()).copied()
             }
-            (Exotic::String { string }, IndexOrKey::Key("length")) => {
-                Some(Property::non_enumerable(Value::Number(string.len() as f64)))
-            }
-            (_, IndexOrKey::Key(key)) => self.properties.get(key).copied(),
-            (_, IndexOrKey::Index(_)) => None,
         }
     }
     fn set_own(&mut self, index_or_key: IndexOrKey, property: Property) {
@@ -419,33 +458,29 @@ impl Object for HeapObject {
         }
     }
 
-    fn own_properties(&self, only_enumerable: bool) -> Vec<String> {
-        let mut props: Vec<_> = self
-            .properties
-            .iter()
-            .filter(|(_, prop)| !only_enumerable || prop.is_enumerable)
-            .map(|(key, _)| key)
-            .cloned()
-            .collect();
+    fn own_properties(&self, only_enumerable: bool, out: &mut Vec<String>) {
+        for (key, prop) in self.properties.iter() {
+            if !only_enumerable || prop.is_enumerable {
+                out.push(key.clone());
+            }
+        }
 
         match &self.exotic_part {
             Exotic::None | Exotic::Function { .. } => {}
             Exotic::Array { elements } => {
                 for i in 0..elements.len() {
-                    props.push(i.to_string());
+                    out.push(i.to_string());
                 }
                 if !only_enumerable {
-                    props.push("length".to_owned());
+                    out.push("length".to_owned());
                 }
             }
             Exotic::String { .. } => {
                 if !only_enumerable {
-                    props.push("length".to_owned());
+                    out.push("length".to_owned());
                 }
             }
         }
-
-        props
     }
 
     fn proto(&self, _heap: &Heap) -> Option<ObjectId> {
@@ -507,11 +542,10 @@ impl<'h> Object for ValueObjectRef<'h> {
         }
     }
 
-    fn own_properties(&self, only_enumerable: bool) -> Vec<String> {
+    fn own_properties(&self, only_enumerable: bool, out: &mut Vec<String>) {
         match self {
-            ValueObjectRef::Number(_, _) => Vec::new(),
-            ValueObjectRef::Bool(_, _) => Vec::new(),
-            ValueObjectRef::Heap(ho) => ho.borrow().own_properties(only_enumerable),
+            ValueObjectRef::Number(_, _) | ValueObjectRef::Bool(_, _) => {}
+            ValueObjectRef::Heap(ho) => ho.borrow().own_properties(only_enumerable, out),
         }
     }
 

@@ -212,7 +212,8 @@ fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Val
             if let Some(s) = obj.as_str() {
                 println!("  {:?}", s);
             } else {
-                let props = obj.own_properties(false);
+                let mut props = Vec::new();
+                obj.own_properties(false, &mut props);
                 println!("{:?} [{} properties]", obj_id, props.len());
 
                 for prop in props {

@@ -12,7 +12,7 @@ fn LocalFnId(0)
   ObjSet { obj: v9, key: v10, value: v11 }
   GetGlobal { dest: v12, name: const[1] }
   LoadConst(v10, const[2])
-  ObjSet { obj: v9, key: v10, value: v12 }
+  ObjSetN { obj: v9, key: v10, value: v12 }
   LoadUndefined(v8)
   Call { return_value: v13, this: v8, callee: v9 }
 fn LocalFnId(1)
@@ -28,7 +28,7 @@ fn LocalFnId(1)
   ObjSet { obj: v8, key: v10, value: v11 }
   GetGlobal { dest: v12, name: const[1] }
   LoadConst(v10, const[2])
-  ObjSet { obj: v8, key: v10, value: v12 }
+  ObjSetN { obj: v8, key: v10, value: v12 }
   LoadConst(v9, const[3])
 fn LocalFnId(2)
   k0 Number(3.0)
