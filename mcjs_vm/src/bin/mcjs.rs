@@ -8,21 +8,15 @@ use mcjs_vm::{FnId, Interpreter, Loader, Realm};
 fn main() {
     let config = parse_args();
 
-    let cwd = std::env::current_dir().unwrap();
-    let mut loader = Loader::new(Some(cwd));
+    let mut loader = Loader::new_cwd();
     let mut realm = Realm::new(&mut loader);
 
     for path in config.paths {
         let path = PathBuf::from(&path).canonicalize().unwrap();
         let content = std::fs::read_to_string(&path).expect("could not read file");
 
-        let filename = path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .expect("can't convert main filename to UTF-8");
         let main_fnid = loader
-            .load_script(Some(filename.to_owned()), content)
+            .load_script(Some(path), content)
             .expect("compile error");
 
         if config.dump_bytecode {

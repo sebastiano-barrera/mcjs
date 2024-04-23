@@ -5,6 +5,7 @@ fn main() {
     let filename = std::env::args()
         .nth(1)
         .expect("usage: compile_bytecode <filename.js>");
+    let filename = std::path::PathBuf::from(filename);
     let content = std::fs::read_to_string(Path::new(&filename)).expect("error while reading file");
 
     let mut native_fns = HashMap::new();
@@ -22,8 +23,8 @@ fn main() {
         native_fns.insert(JsWord::from(word), 123);
     }
 
-    let mut loader = mcjs_vm::Loader::new(None);
-    match loader.load_script(Some(filename.clone()), content) {
+    let mut loader = mcjs_vm::Loader::new_cwd();
+    match loader.load_script(Some(filename), content) {
         Err(err) => {
             eprintln!("error:");
             eprintln!("{}", err.message());

@@ -56,12 +56,13 @@ pub struct Block {
     /// Set of declarations. No ordering.
     decls: Vec<Decl>,
 
-    /// Ordered sequence of function assignments. Not really indexable. Sematics: they happen after
-    /// any initialization for `decls`, and before all `stmts`.
+    /// Ordered sequence of function assignments. Not really indexable. Sematics: they
+    /// happen after any initialization for `decls`, and before all `stmts`.
     ///
-    /// These assignments are distinct from StmtOp::Assign because we want to 'carve out' a
-    /// dedicated space at the beginning of each block where function assignments can be added
-    /// without shifting every statement forward (therefore invalidating already emitted StmtID's).
+    /// These assignments are distinct from StmtOp::Assign because we want to 'carve out'
+    /// a dedicated space at the beginning of each block where function assignments
+    /// can be added without shifting every statement forward (therefore invalidating
+    /// already emitted StmtID's).
     fn_asmts: Vec<FnAsmt>,
 
     /// Ordered sequence of statements.  Indexable via StmtID.
@@ -442,11 +443,7 @@ pub use builder::{BlockID, TmpID};
 use builder::{Builder, FnBuilder};
 
 mod builder {
-    use std::rc::Rc;
-
-    use swc_atoms::JsWord;
-
-    use crate::common::{Error, MultiErrResult, MultiError};
+    use crate::common::{Error, MultiError};
     use crate::util::pop_while;
 
     use super::*;
@@ -478,9 +475,10 @@ mod builder {
 
         /// The stack of currently open nested blocks.
         ///
-        /// Compilation works by appending Stmt and Expr nodes into the last (innermost) block. As
-        /// compilation progresses, the last block is attached into the previous/parent block, until
-        /// we finish with a single block that constitutes the function's body.
+        /// Compilation works by appending Stmt and Expr nodes into the last (innermost)
+        /// block. As compilation progresses, the last block is attached into the
+        /// previous/parent block, until we finish with a single block that
+        /// constitutes the function's body.
         blocks: Vec<Block>,
 
         /// The stack of 'current spans' that can be set via `FnBuilder::with_span`
@@ -521,8 +519,8 @@ mod builder {
             }
         }
 
-        /// Create a function with the given StrictMode. (It can change later, for example if the
-        /// function's first statement is "use strict").
+        /// Create a function with the given StrictMode. (It can change later, for example
+        /// if the function's first statement is "use strict").
         pub fn new_function(&mut self, initial_strict_mode: StrictMode) -> FnBuilder {
             FnBuilder::new(self, initial_strict_mode)
         }
@@ -1479,8 +1477,9 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
                     StrictMode::Strict => false,
                     StrictMode::Sloppy => true,
                 },
-                // At the toplevel scope of a script or a function, function declarations can conflict (like `var`)
-                // In a block, they can NOT conflict (like let/const).
+                // At the toplevel scope of a script or a function, function declarations can
+                // conflict (like `var`) In a block, they can NOT conflict (like
+                // let/const).
                 is_conflicting: (fnb.blocks_depth() > 1),
             });
 
@@ -1924,8 +1923,8 @@ fn compile_call(
     // We special-case the eval('string literal') syntax to remove the call to eval, because
     // several tests in test262 rely on it, and this is simpler than alternatives.
     //
-    // Any form of 'eval' that doesn't match these if's trickles through and gets compiled as a
-    // regular function call, where it will fail at the PAST stage.
+    // Any form of 'eval' that doesn't match these if's trickles through and gets compiled as
+    // a regular function call, where it will fail at the PAST stage.
     if let swc_ecma_ast::Expr::Ident(ident) = callee {
         if &ident.sym == "eval" {
             if let Some(arg) = args.first() {

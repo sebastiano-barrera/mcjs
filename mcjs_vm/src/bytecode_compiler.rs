@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use swc_common::sync::Lrc;
 use swc_ecma_ast::EsVersion;
@@ -7,6 +6,7 @@ use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
 use crate::bytecode::{self, LocalFnId};
 use crate::common::{MultiError, Result};
+use crate::loader::FileID;
 use crate::{error, tracing};
 
 pub use swc_common::SourceMap;
@@ -32,7 +32,7 @@ pub struct CompileFlags {
 ///
 /// Influences the way that declarations work in the toplevel.  The distinction
 /// is made largely at compile time, so we have to know here.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum SourceType {
     Script,
     Module,
@@ -40,14 +40,14 @@ pub enum SourceType {
 
 /// Compile the given chunk of source code into executable bytecode.
 ///
-/// The given `filename` is used *exclusively* for composing error messages and
+/// The given `file_id` is used *exclusively* for composing error messages and
 /// to initialize the returned source map with a significant identifier for the
 /// compiled file.  It does not have to reflect an existing entity in any file
-/// system.
+/// system, and is not checked in any way.
 ///
 /// See `CompiledChunk` for details on the executable bytecode's representation.
 pub fn compile_file(
-    filename: String,
+    file_id: &FileID,
     content: String,
     source_map: Lrc<SourceMap>,
     flags: CompileFlags,
@@ -57,10 +57,16 @@ pub fn compile_file(
     let t = tracing::section("compile_file");
     t.log("source", &content);
 
-    let path: PathBuf = filename.into();
-    let filename = swc_common::FileName::Real(path.clone());
+    let swc_path = match &file_id {
+        FileID::Anon(_) => swc_common::FileName::Anon,
+        FileID::File(path) => swc_common::FileName::Real(path.clone()),
+    };
+    let display_filename = match file_id {
+        FileID::Anon(_) => "<input>".to_string(),
+        FileID::File(path) => path.to_string_lossy().into_owned(),
+    };
 
-    let source_file = source_map.new_source_file(filename, content);
+    let source_file = source_map.new_source_file(swc_path, content);
     let input = StringInput::from(source_file.as_ref());
 
     let err_handler = mk_error_handler(&source_map);
@@ -80,10 +86,10 @@ pub fn compile_file(
                     e.into_diagnostic(&err_handler).emit();
                     error!("parse error")
                 })
-                .with_context(error!("while parsing file: {}", path.display()))?;
+                .with_context(error!("while parsing file: {}", display_filename))?;
 
             compile_module(&module_ast, flags, Lrc::clone(&source_map)).with_context(
-                error!("while compiling module: {}", path.display())
+                error!("while compiling module: {}", display_filename)
                     .with_source_map(Lrc::clone(&source_map)),
             )?
         }
@@ -94,10 +100,10 @@ pub fn compile_file(
                     e.into_diagnostic(&err_handler).emit();
                     error!("parse error")
                 })
-                .with_context(error!("while parsing file: {}", path.display()))?;
+                .with_context(error!("while parsing file: {}", display_filename))?;
 
             compile_script(script_ast, flags, Lrc::clone(&source_map)).with_context(
-                error!("while compiling script: {}", path.display())
+                error!("while compiling script: {}", display_filename)
                     .with_source_map(Lrc::clone(&source_map)),
             )?
         }
@@ -172,8 +178,8 @@ fn compile_module(
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
 
-    // At this level, function.unbound_names contains the list of variables that should be accessed
-    // via `globalThis`.
+    // At this level, function.unbound_names contains the list of variables that should be
+    // accessed via `globalThis`.
     let module = past_to_bytecode::compile_module(&function, flags.min_lfnid)?;
     Ok(module)
 }
@@ -190,8 +196,8 @@ fn compile_script(
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
 
-    // At this level, function.unbound_names contains the list of variables that should be accessed
-    // via `globalThis`.
+    // At this level, function.unbound_names contains the list of variables that should be
+    // accessed via `globalThis`.
     let module = past_to_bytecode::compile_module(&function, flags.min_lfnid)?;
     Ok(module)
 }

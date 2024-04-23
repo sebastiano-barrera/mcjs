@@ -947,7 +947,7 @@ mod builder {
                 .push(bytecode::BreakRange {
                     lo: span.lo,
                     hi: span.hi,
-                    local_fnid: self.lfnid,
+                    fnid: bytecode::FnId(self.lfnid),
                     iid_start,
                     iid_end,
                 });

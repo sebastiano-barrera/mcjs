@@ -22,27 +22,6 @@ impl std::fmt::Debug for IID {
     }
 }
 
-/// Global ID of a module.  Can be used, among other things, to fetch the Module object
-/// from importing modules.
-// me: "64K modules ought to be enough for anyone."
-// guy with knife: node_modules
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize)]
-pub struct ModuleId(pub u16);
-
-pub const SCRIPT_MODULE_ID: ModuleId = ModuleId(0);
-
-impl From<u16> for ModuleId {
-    fn from(value: u16) -> Self {
-        if value == SCRIPT_MODULE_ID.0 {
-            panic!(
-                "invalid module ID: value {} is reserved for code in script context",
-                SCRIPT_MODULE_ID.0
-            );
-        }
-        ModuleId(value)
-    }
-}
-
 /// ID of a function within a specific module. (The same ID can correspond to a
 /// different function, in the context of a different modules.)
 ///
@@ -54,12 +33,13 @@ pub struct LocalFnId(pub u16);
 /// Global ID of a function, composing a module ID and a local function ID.  ///
 /// This ID is sufficient to identify a function across the entire loaded codebase,
 /// regardless of the module it belongs to.
+// TODO Merge FnId and LocalFnId (maybe make the integer wider).
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize)]
-pub struct FnId(pub ModuleId, pub LocalFnId);
+pub struct FnId(pub LocalFnId);
 
 impl std::fmt::Debug for FnId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "m{}:f{}", self.0 .0, self.1 .0)
+        write!(f, "f{}", self.0.0)
     }
 }
 
@@ -74,15 +54,13 @@ impl std::fmt::Debug for GlobalIID {
 
 impl GlobalIID {
     pub fn parse_string(s: &str) -> Option<Self> {
-        let (mod_id_s, s) = s.split_once('.')?;
-        let (lfnid_s, iid_s) = s.split_once('.')?;
+        let (fnid_s, iid_s) = s.split_once('.')?;
 
-        let mod_id: u16 = mod_id_s.parse().ok()?;
-        let lfnid: u16 = lfnid_s.parse().ok()?;
+        let lfnid: u16 = fnid_s.parse().ok()?;
         let iid: u16 = iid_s.parse().ok()?;
 
         Some(GlobalIID(
-            FnId(ModuleId(mod_id), LocalFnId(lfnid)),
+            FnId(LocalFnId(lfnid)),
             IID(iid),
         ))
     }
@@ -439,7 +417,7 @@ impl From<String> for Literal {
 pub struct BreakRange {
     pub lo: swc_common::BytePos,
     pub hi: swc_common::BytePos,
-    pub local_fnid: LocalFnId,
+    pub fnid: FnId,
     pub iid_start: IID,
     pub iid_end: IID,
 }

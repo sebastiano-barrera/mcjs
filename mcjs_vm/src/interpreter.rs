@@ -119,7 +119,8 @@ impl std::fmt::Debug for Closure {
 
 pub struct Realm {
     heap: heap::Heap,
-    module_objs: HashMap<bytecode::ModuleId, heap::ObjectId>,
+    // Key is the root fnid of each module
+    module_objs: HashMap<bytecode::FnId, heap::ObjectId>,
     global_obj: heap::ObjectId,
 }
 
@@ -878,8 +879,7 @@ fn run_regular(
                     }
 
                     let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
-                    let module_id = data.top().header().fnid.0;
-                    let fnid = bytecode::FnId(module_id, *fnid);
+                    let fnid = bytecode::FnId(*fnid);
                     let closure = Closure::JS(JSClosure {
                         fnid,
                         upvalues,
@@ -907,17 +907,15 @@ fn run_regular(
                 Instr::ImportModule(dest, module_path) => {
                     use common::Context;
 
-                    let bytecode::FnId(import_site, _) = fnid;
                     let module_path = get_operand_string(data, realm, *module_path)?.to_string();
-
                     let root_fnid = loader
-                        .load_import(&module_path, Some(import_site))
+                        .load_import(&module_path, fnid)
                         .with_context(error!("while trying to import '{}'", module_path))?;
 
                     // Commit before reborrowing
                     data.top_mut().set_resume_iid(bytecode::IID(iid.0 + 1));
 
-                    if let Some(module_oid) = realm.module_objs.get(&root_fnid.0) {
+                    if let Some(module_oid) = realm.module_objs.get(&root_fnid) {
                         data.top_mut().set_result(*dest, Value::Object(*module_oid));
                     } else {
                         let root_fn = loader.get_function(root_fnid).unwrap();
@@ -939,6 +937,13 @@ fn run_regular(
                             #[cfg(feature = "debugger")]
                             dbg,
                         )?;
+
+                        // TODO TODO After the function above returns,
+                        // the return value needs to be assigned to
+                        // realm.module_objs. But it can't be done here!
+                        // Because maybe run_frame returned due to hitting a
+                        // breakpoint, and we're going to have to 'walk up the
+                        // stack' again through another path!
                     }
 
                     // This satisfies the borrow checker (`loader.load_import`
@@ -1518,10 +1523,7 @@ pub mod debugger {
         let break_range: &bytecode::BreakRange = loader
             .get_break_range(brange_id)
             .ok_or(BreakpointError::InvalidLocation)?;
-        Ok(bytecode::GlobalIID(
-            bytecode::FnId(brange_id.module_id(), break_range.local_fnid),
-            break_range.iid_start,
-        ))
+        Ok(bytecode::GlobalIID(break_range.fnid, break_range.iid_start))
     }
 
     /// Get the instruction pointer for the n-th frame (0 = top)
@@ -1752,10 +1754,9 @@ mod tests {
     }
 
     fn prepare_vm(code: &str) -> VMPrereq {
-        let filename = "<input>".to_string();
-        let mut loader = loader::Loader::new(None);
+        let mut loader = loader::Loader::new_cwd();
         let chunk_fnid = loader
-            .load_script(Some(filename), code.to_string())
+            .load_script(None, code.to_string())
             .expect("couldn't compile test script");
         let realm = Realm::new(&mut loader);
         VMPrereq {
