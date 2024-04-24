@@ -136,7 +136,7 @@ impl AppData {
 
     fn load_tree_layout(&mut self) -> AppResult<()> {
         let path = state_file_path()?;
-        let file = std::fs::File::open(&path)?;
+        let file = std::fs::File::open(path)?;
         let config: StateFileData =
             rmp_serde::from_read(file).map_err(|err| AppError::Format(err.to_string()))?;
 
@@ -150,8 +150,8 @@ impl AppData {
 }
 
 fn state_file_path() -> Result<PathBuf, AppError> {
-    const DIR_SUFFIX: &'static str = "mcjs_tools";
-    const FILENAME: &'static str = "state";
+    const DIR_SUFFIX: &str = "mcjs_tools";
+    const FILENAME: &str = "state";
 
     let dir = dirs::preference_dir()
         .map(|p| p.join(DIR_SUFFIX))
@@ -160,7 +160,7 @@ fn state_file_path() -> Result<PathBuf, AppError> {
                 .ok()
                 .map(|exe_path| exe_path.parent().unwrap().join(DIR_SUFFIX))
         })
-        .ok_or_else(|| AppError::Env(format!("can't determine configuration file location!")))?;
+        .ok_or_else(|| AppError::Env("can't determine configuration file location!".to_string()))?;
 
     std::fs::create_dir_all(&dir)?;
 
@@ -203,8 +203,9 @@ enum Pane {
     Stack,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 enum Action {
+    #[default]
     None,
     Resume,
     Restart,
@@ -224,11 +225,6 @@ impl Action {
         if let Action::None = self {
             *self = other;
         }
-    }
-}
-impl Default for Action {
-    fn default() -> Self {
-        Action::None
     }
 }
 
@@ -303,7 +299,7 @@ impl eframe::App for AppData {
                     });
 
                     let mut behavior = TreeBehavior {
-                        intrp_state: &intrp_state,
+                        intrp_state,
                         frame_focus_ndx: &mut self.focus_frame_ndx,
                         loader: self.intrp.loader(),
                         stack_view: &mut self.stack_view,
@@ -472,8 +468,7 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
             Pane::Heap => "Heap",
             Pane::Stack => {
                 use stack_view::Action;
-                let action =
-                    stack_view::show(&mut self.stack_view, ui, self.intrp_state, self.loader);
+                let action = stack_view::show(self.stack_view, ui, self.intrp_state, self.loader);
                 return match action {
                     Action::SetFrameIndex(ndx) => {
                         *self.frame_focus_ndx = ndx;
@@ -630,7 +625,7 @@ mod bytecode_view {
                                             vreg,
                                             description,
                                             widgets::Mode::Read,
-                                            &frame,
+                                            frame,
                                             highlight,
                                         );
                                         action.set_if_none(this_action);
@@ -641,7 +636,7 @@ mod bytecode_view {
                                             vreg,
                                             description,
                                             widgets::Mode::Write,
-                                            &frame,
+                                            frame,
                                             highlight,
                                         );
                                         action.set_if_none(this_action);
@@ -764,7 +759,7 @@ mod source_view {
                 hl_color,
                 ctx,
             }
-            .to_galley();
+            .into_galley();
 
             Some(Cache {
                 fnid,
@@ -787,7 +782,7 @@ mod source_view {
         ctx: &'a egui::Context,
     }
     impl<'a> GalleyHighlightParams<'a> {
-        fn to_galley(self) -> Arc<egui::Galley> {
+        fn into_galley(self) -> Arc<egui::Galley> {
             let pre = &self.full_text[0..self.hl_start];
             let hl = &self.full_text[self.hl_start..self.hl_end];
             let post = &self.full_text[self.hl_end..];
@@ -904,17 +899,14 @@ mod widgets {
     const COLOR_IID: egui::Color32 = COLOR_GREY;
     const COLOR_INVALID: egui::Color32 = COLOR_GREY;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub enum Highlight {
+        #[default]
         None,
         VReg((bytecode::FnId, bytecode::VReg)),
         Object(debugger::ObjectId),
     }
-    impl Default for Highlight {
-        fn default() -> Self {
-            Highlight::None
-        }
-    }
+
     impl Highlight {
         fn match_vreg(&self, fnid: bytecode::FnId, vreg: bytecode::VReg) -> bool {
             matches!(self, Highlight::VReg(h) if *h == (fnid, vreg))

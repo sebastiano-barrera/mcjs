@@ -54,7 +54,7 @@ impl<'a> IndexOrKey<'a> {
         match self {
             IndexOrKey::Index(_) => self,
             IndexOrKey::Key(key) => {
-                if let Some(num_key) = key.parse().ok() {
+                if let Ok(num_key) = key.parse() {
                     IndexOrKey::Index(num_key)
                 } else {
                     self

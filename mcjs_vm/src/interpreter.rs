@@ -281,6 +281,8 @@ impl<'a> Interpreter<'a> {
                 #[cfg(feature = "debugger")]
                 intrp_state: self.data,
             }),
+
+            #[cfg(feature = "debugger")]
             Err(RunError::Suspended(cause)) => Ok(Exit::Suspended {
                 cause,
                 #[cfg(feature = "debugger")]
@@ -349,13 +351,13 @@ pub fn init_stack(
 /// Upon starting, `run_internal` calls itself again with a 1-higher
 /// `stack_level` so as to restore the mapping between JS and native stacks.
 /// Then it resumes JS execution.
-fn run_frame<'a>(
+fn run_frame(
     data: &mut stack::InterpreterData,
     realm: &mut Realm,
     loader: &mut loader::Loader,
     // TODO Define a StackLevel newtype
     stack_level: usize,
-    #[cfg(feature = "debugger")] dbg: &mut Option<&'a mut debugger::DebuggingState>,
+    #[cfg(feature = "debugger")] dbg: &mut Option<&mut debugger::DebuggingState>,
 ) -> RunResult<Value> {
     #[allow(clippy::len_zero)]
     {
@@ -454,6 +456,7 @@ fn run_frame<'a>(
             }
 
             // Keep the stack around in this case
+            #[cfg(feature = "debugger")]
             RunError::Suspended(ref cause) => {
                 t.log("returned", &format!("suspending due to {:?}", cause));
                 return Err(err);
@@ -467,6 +470,7 @@ type RunResult<T> = std::result::Result<T, RunError>;
 #[derive(Debug)]
 enum RunError {
     Exception(Value),
+    #[cfg(feature = "debugger")]
     Suspended(SuspendCause),
     Internal(common::Error),
 }
@@ -1045,7 +1049,7 @@ fn run_regular(
                                 #[cfg(feature = "debugger")]
                                 data,
                                 #[cfg(feature = "debugger")]
-                                &dbg,
+                                dbg,
                             )?;
                         }
                         Some(prop) => {
@@ -1065,7 +1069,7 @@ fn run_regular(
                     let exc = get_operand(data, *exc)?;
 
                     #[cfg(feature = "debugger")]
-                    throw_exc(exc, iid, data, &dbg)?;
+                    throw_exc(exc, iid, data, dbg)?;
 
                     #[cfg(not(feature = "debugger"))]
                     throw_exc(exc)?;
@@ -1175,6 +1179,9 @@ fn throw_exc(exc: Value) -> RunResult<()> {
 /// `suspend_for_breakpoint(...)?`) in the body of `run_regular` and get the proper
 /// behavior.
 fn suspend_for_breakpoint(data: &mut stack::InterpreterData, iid: bytecode::IID) -> RunResult<()> {
+    #[cfg(not(feature = "debugger"))]
+    let _ = (data, iid);
+
     #[cfg(feature = "debugger")]
     if !data.take_resuming_from_breakpoint() {
         return force_suspend_for_breakpoint(data, iid);
@@ -1191,6 +1198,7 @@ fn suspend_for_breakpoint(data: &mut stack::InterpreterData, iid: bytecode::IID)
 /// The return value is designed so that you can just `try!` a call to it (i.e.
 /// `suspend_for_breakpoint(...)?`) in the body of `run_regular` and get the proper
 /// behavior.
+#[cfg(feature = "debugger")]
 fn force_suspend_for_breakpoint(
     data: &mut stack::InterpreterData,
     iid: bytecode::IID,
@@ -1201,7 +1209,7 @@ fn force_suspend_for_breakpoint(
     //     suspension happened. That will result in a second call to `suspend_for_breakpoint`,
     //     which will return `Ok(())` on this second run allowing execution to continue.
     data.top_mut().set_resume_iid(iid);
-    return Err(RunError::Suspended(SuspendCause::Breakpoint));
+    Err(RunError::Suspended(SuspendCause::Breakpoint))
 }
 
 // TODO(cleanup) inline this function? It now adds nothing
@@ -1576,6 +1584,7 @@ pub mod debugger {
     // includede here later)
     pub struct SourceBreakpoint;
 
+    #[derive(Default)]
     pub struct InstrBreakpoint {
         src_bkpt: Option<BreakRangeID>,
 
@@ -1588,14 +1597,6 @@ pub mod debugger {
 
     // This instance is important because module users must not be able to write private
     // members of InstrBreakpoint, not even for initialization.
-    impl Default for InstrBreakpoint {
-        fn default() -> Self {
-            InstrBreakpoint {
-                src_bkpt: None,
-                delete_on_hit: false,
-            }
-        }
-    }
 
     impl DebuggingState {
         #[allow(clippy::new_without_default)]

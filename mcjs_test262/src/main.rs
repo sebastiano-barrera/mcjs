@@ -47,7 +47,6 @@ fn run_test(params: &CliOptions) -> Result<(), TestError> {
         let mut realm = mcjs_vm::Realm::new(&mut loader);
 
         for (ndx, file_path) in params.files.iter().enumerate() {
-            let file_path_str = file_path.to_string_lossy().into_owned();
             let mut content = std::fs::read_to_string(&file_path).map_err(TestError::Read)?;
 
             if ndx == params.files.len() - 1 && params.is_last_strict {
@@ -55,7 +54,7 @@ fn run_test(params: &CliOptions) -> Result<(), TestError> {
             }
 
             let chunk_fnid = loader
-                .load_script(Some(file_path), content)
+                .load_script(Some(file_path.clone()), content)
                 .map_err(TestError::Load)?;
 
             let mut interpreter = mcjs_vm::Interpreter::new(&mut realm, &mut loader, chunk_fnid);

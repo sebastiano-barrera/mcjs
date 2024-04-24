@@ -2183,12 +2183,12 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_function_in_non_allowed_position() {
-        const CODE: &'static str = r#""use strict"; do function g() {} while (false)"#;
+        const CODE: &str = r#""use strict"; do function g() {} while (false)"#;
         quick_compile(CODE.to_string());
     }
     #[test]
     fn test_function_in_allowed_position() {
-        const CODE: &'static str = r#""use strict"; do { function g() {} } while (false)"#;
+        const CODE: &str = r#""use strict"; do { function g() {} } while (false)"#;
         quick_compile(CODE.to_string());
     }
 
@@ -2202,40 +2202,40 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_redecl_let() {
-        const CODE: &'static str = "let i = 1; let i = 3;";
+        const CODE: &str = "let i = 1; let i = 3;";
         quick_compile(CODE.to_string());
     }
     #[test]
     fn test_redecl_let_negative() {
-        const CODE: &'static str = "let i = 1; let j = 3;";
+        const CODE: &str = "let i = 1; let j = 3;";
         quick_compile(CODE.to_string());
     }
     #[test]
     #[should_panic]
     fn test_redecl_const() {
-        const CODE: &'static str = "const i = 1; const i = 3;";
+        const CODE: &str = "const i = 1; const i = 3;";
         quick_compile(CODE.to_string());
     }
     #[test]
     fn test_redecl_const_negative() {
-        const CODE: &'static str = "const i = 1; const j = 3;";
+        const CODE: &str = "const i = 1; const j = 3;";
         quick_compile(CODE.to_string());
     }
     #[test]
     #[should_panic]
     fn test_redecl_switch() {
-        const CODE: &'static str = "switch(0) { case 1: const i = 1; default: const i = 3; }";
+        const CODE: &str = "switch(0) { case 1: const i = 1; default: const i = 3; }";
         quick_compile(CODE.to_string());
     }
     #[test]
     fn test_redecl_switch_negative() {
-        const CODE: &'static str = "switch(0) { case 1: const i = 1; default: const j = 3; }";
+        const CODE: &str = "switch(0) { case 1: const i = 1; default: const j = 3; }";
         quick_compile(CODE.to_string());
     }
 
     fn quick_compile(src: String) -> super::Function {
         let (swc_ast, source_map) = crate::bytecode_compiler::quick_parse_script(src);
-        let function = super::compile_script(&swc_ast, source_map).unwrap();
-        function
+
+        super::compile_script(&swc_ast, source_map).unwrap()
     }
 }

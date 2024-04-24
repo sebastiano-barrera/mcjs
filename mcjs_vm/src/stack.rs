@@ -13,18 +13,19 @@ pub struct InterpreterData {
     #[cfg(any(test, feature = "debugger"))]
     pub sink: Vec<Value>,
 
-    /// This flag is set right before the Interpreter is suspended due to a breakpoint of any kind.
+    /// This flag is set right before the Interpreter is suspended due to a breakpoint of
+    /// any kind.
     ///
-    /// This is necessary to track because, the "successor" Interpreter that resumes executing with
-    /// this InterpreterData needs to 'skip' the breakpoint in order not to enter an infinite
-    /// loop of always suspending on the same breakpoint!
+    /// This is necessary to track because, the "successor" Interpreter that resumes
+    /// executing with this InterpreterData needs to 'skip' the breakpoint in order
+    /// not to enter an infinite loop of always suspending on the same breakpoint!
     #[cfg(feature = "debugger")]
     resuming_from_breakpoint: bool,
 }
 
 // Throughout this module, `Option<Value>` is stored instead of `Value`.  The `None` case
-// represents an uninitialized storage location corresponding to a variable still in the temporal
-// dead zone.   See [1] for the source-level semantics in JavaScript.
+// represents an uninitialized storage location corresponding to a variable still in the
+// temporal dead zone.   See [1] for the source-level semantics in JavaScript.
 //
 // [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/let#temporal_dead_zone_tdz
 
@@ -224,7 +225,8 @@ impl InterpreterData {
         self.resuming_from_breakpoint = true;
     }
 
-    /// Return the "resuming from breakpoint" flag and set it to false immediately afterwards.
+    /// Return the "resuming from breakpoint" flag and set it to false immediately
+    /// afterwards.
     pub(crate) fn take_resuming_from_breakpoint(&mut self) -> bool {
         std::mem::replace(&mut self.resuming_from_breakpoint, false)
     }
@@ -253,7 +255,8 @@ impl<'a> Frame<'a> {
 
     /// Return the value of the given virtual register.
     ///
-    /// Returns `None` iff the value is still uninitialized (i.e. in the temporal dead zone).
+    /// Returns `None` iff the value is still uninitialized (i.e. in the temporal dead
+    /// zone).
     pub fn get_result(&self, vreg: bytecode::VReg) -> Option<Value> {
         let slot = &self.values[vreg.0 as usize];
         match slot {
@@ -288,7 +291,8 @@ impl<'a> Frame<'a> {
     }
 
     pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
-        // another/better approach: add N slots to the header and use them as cache for the closure's captures.
+        // another/better approach: add N slots to the header and use them as cache for the
+        // closure's captures.
         self.header
             .captures
             .get(capture_ndx.0 as usize)
@@ -303,8 +307,8 @@ impl<'a> Frame<'a> {
     ///
     /// The return value has (unfortunately) two levels of `Option` with distinct meaning:
     /// - the outer Option is None iff the given `upv_id` is invalid.
-    /// - the inner Option is None iff the upvalue exists but contains an uninitialized value (i.e.
-    ///   in the temporal dead zone).
+    /// - the inner Option is None iff the upvalue exists but contains an uninitialized
+    ///   value (i.e. in the temporal dead zone).
     pub fn deref_upvalue(&self, upv_id: UpvalueId) -> Option<Option<Value>> {
         self.upv_alloc.get(upv_id).copied()
     }

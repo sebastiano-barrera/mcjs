@@ -52,10 +52,7 @@ impl GlobalIID {
         let fnid = fnid_s.parse().ok()?;
         let iid = iid_s.parse().ok()?;
 
-        Some(GlobalIID(
-            FnId(fnid),
-            IID(iid),
-        ))
+        Some(GlobalIID(FnId(fnid), IID(iid)))
     }
 }
 
@@ -305,7 +302,7 @@ impl Instr {
             Instr::LoadThis(dest) => { an(D::VRegWrite(*dest)); an(D::This); },
             Instr::GetGlobalThis (dest) => { an(D::VRegWrite(*dest)); },
             Instr::GetGlobal { dest, name } => { an(D::VRegWrite(*dest)); an(D::Const(*name)); }
-            Instr::Copy { dst: dest, src: arg } 
+            Instr::Copy { dst: dest, src: arg }
             | Instr::BoolNot { dest, arg }
             | Instr::UnaryMinus { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
             Instr::ArithInc(dest, arg) => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },

@@ -37,6 +37,7 @@ impl<W: std::fmt::Write> Formatter<W> {
         self.indent_level -= 1;
     }
 
+    #[cfg(test)]
     pub fn finish(self) -> W {
         self.writer
     }
@@ -72,10 +73,12 @@ impl<W: std::fmt::Write> std::fmt::Write for Formatter<W> {
     }
 }
 
+#[cfg(test)]
 pub trait DumpExt {
     fn dump_to_string(&self) -> String;
 }
 
+#[cfg(test)]
 impl<T: Dump> DumpExt for T {
     fn dump_to_string(&self) -> String {
         let mut fmter = Formatter::new(String::new());

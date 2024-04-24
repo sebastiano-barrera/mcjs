@@ -7,7 +7,7 @@ use mcjs_vm::interpreter::{debugger, Exit, Interpreter, Realm, Value};
 
 #[test]
 fn test_inline_breakpoint() {
-    const SOURCE_CODE: &'static str = "
+    const SOURCE_CODE: &str = "
 function foo() {
     sink(1);
     debugger;

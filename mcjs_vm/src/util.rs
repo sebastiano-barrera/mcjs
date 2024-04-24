@@ -9,9 +9,9 @@ macro_rules! define_flag {
             No,
         }
 
-        impl Into<bool> for $type_name {
-            fn into(self) -> bool {
-                self == Self::Yes
+        impl From<$type_name> for bool {
+            fn from(value: $type_name) -> bool {
+                value == $type_name::Yes
             }
         }
     };

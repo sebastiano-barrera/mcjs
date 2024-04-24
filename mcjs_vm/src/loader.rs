@@ -226,7 +226,7 @@ impl Loader {
         } else if is_valid_package_name(import_path) {
             // Package name ("bare import specifier")
             let pkg_name = import_path;
-            let package = self.resolve_package_import(&directory, pkg_name)?;
+            let package = self.resolve_package_import(directory, pkg_name)?;
             let mod_path = package.root_path.join(&package.main_filename);
             self.load_module(&mod_path)
         } else {
@@ -259,7 +259,7 @@ impl Loader {
 
             if let Some(package) = self.packages.get(&pkg_dir) {
                 // Cached; return immediately
-                return Ok(Rc::clone(&package));
+                return Ok(Rc::clone(package));
             }
 
             if pkg_dir.join("package.json").is_file() {

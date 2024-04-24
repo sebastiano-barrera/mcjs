@@ -215,8 +215,9 @@ mod internal {
                 Sink::File(f) => {
                     f.write_all(data.as_bytes()).unwrap();
 
-                    // inefficient, but tracing is often employed when the program is crashing. we might be
-                    // crashing right after returning from this call, so let's flush immediately.
+                    // inefficient, but tracing is often employed when the program is crashing. we
+                    // might be crashing right after returning from this call, so let's flush
+                    // immediately.
                     f.flush().unwrap();
                 }
                 #[cfg(test)]

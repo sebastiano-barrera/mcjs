@@ -127,7 +127,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
 }
 
 fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Value> {
-    let value = if let Some(Value::Object(oid)) = args.get(0) {
+    let value = if let Some(Value::Object(oid)) = args.first() {
         let obj = realm
             .heap
             .get(*oid)
@@ -144,7 +144,7 @@ fn nf_Array_push(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Valu
     // TODO Proper error handling, instead of these unwrap
     let oid = this.expect_obj().unwrap();
     let mut arr = realm.heap.get(oid).unwrap().borrow_mut();
-    let value = *args.get(0).unwrap();
+    let value = *args.first().unwrap();
     arr.array_push(value);
     Ok(Value::Undefined)
 }
@@ -184,7 +184,7 @@ fn nf_Number_prototype_toString(realm: &mut Realm, this: &Value, _: &[Value]) ->
 }
 
 fn nf_String(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Value> {
-    let value = args.get(0).copied();
+    let value = args.first().copied();
     let heap = &realm.heap;
 
     let value_str = value
@@ -243,7 +243,7 @@ fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<V
         }
     };
 
-    let forced_this = Some(args.get(0).copied().unwrap_or(Value::Undefined));
+    let forced_this = Some(args.first().copied().unwrap_or(Value::Undefined));
 
     let new_closure = Closure::JS(JSClosure {
         forced_this,
