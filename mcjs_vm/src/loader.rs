@@ -32,7 +32,6 @@ pub struct Loader {
 
     // Key is the absolute filename of the (previously loaded) module
     files: HashMap<PathBuf, Rc<FileInfo>>,
-    repl_frags: HashMap<usize, Rc<FileInfo>>,
 
     // A single source map for literally all of the code that is ever
     // loaded through this Loader.
@@ -136,7 +135,6 @@ impl Loader {
             func_extra: HashMap::new(),
             packages: HashMap::new(),
             files: HashMap::new(),
-            repl_frags: HashMap::new(),
             source_map: Rc::new(swc_common::SourceMap::default()),
             boot_script_fnid: None,
         };
@@ -355,10 +353,9 @@ impl Loader {
                 .push(br);
         }
 
-        match file_id {
-            FileID::Anon(id) => self.repl_frags.insert(id, file),
-            FileID::File(path) => self.files.insert(path, file),
-        };
+        if let FileID::File(path) = file_id {
+            self.files.insert(path, file);
+        }
 
         Ok(root_fnid)
     }
