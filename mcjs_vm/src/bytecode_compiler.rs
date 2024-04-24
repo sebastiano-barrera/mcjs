@@ -4,7 +4,7 @@ use swc_common::sync::Lrc;
 use swc_ecma_ast::EsVersion;
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
-use crate::bytecode::{self, LocalFnId};
+use crate::bytecode::{self, FnId};
 use crate::common::{MultiError, Result};
 use crate::loader::FileID;
 use crate::{error, tracing};
@@ -17,14 +17,14 @@ mod js_to_past;
 mod past_to_bytecode;
 
 pub struct CompiledChunk {
-    pub root_fnid: LocalFnId,
-    pub functions: HashMap<LocalFnId, bytecode::Function>,
+    pub root_fnid: FnId,
+    pub functions: HashMap<FnId, bytecode::Function>,
     pub source_map: Rc<SourceMap>,
     pub breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
 pub struct CompileFlags {
-    pub min_lfnid: u16,
+    pub min_fnid: u32,
     pub source_type: SourceType,
 }
 
@@ -161,8 +161,8 @@ pub(crate) fn quick_parse_script(src: String) -> (swc_ecma_ast::Script, Rc<Sourc
 }
 
 struct CompiledModule {
-    root_fnid: LocalFnId,
-    functions: HashMap<LocalFnId, bytecode::Function>,
+    root_fnid: FnId,
+    functions: HashMap<FnId, bytecode::Function>,
     breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
@@ -180,7 +180,7 @@ fn compile_module(
 
     // At this level, function.unbound_names contains the list of variables that should be
     // accessed via `globalThis`.
-    let module = past_to_bytecode::compile_module(&function, flags.min_lfnid)?;
+    let module = past_to_bytecode::compile_module(&function, flags.min_fnid)?;
     Ok(module)
 }
 
@@ -198,6 +198,6 @@ fn compile_script(
 
     // At this level, function.unbound_names contains the list of variables that should be
     // accessed via `globalThis`.
-    let module = past_to_bytecode::compile_module(&function, flags.min_lfnid)?;
+    let module = past_to_bytecode::compile_module(&function, flags.min_fnid)?;
     Ok(module)
 }

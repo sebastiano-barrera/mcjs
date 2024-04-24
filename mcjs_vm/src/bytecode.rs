@@ -22,24 +22,17 @@ impl std::fmt::Debug for IID {
     }
 }
 
-/// ID of a function within a specific module. (The same ID can correspond to a
-/// different function, in the context of a different modules.)
+/// Global ID of a function.
 ///
-/// Implements Ord, so it's possible to quickly and cheaply check if a set of
-/// LocalFnIds are disjoint from another.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord, Serialize)]
-pub struct LocalFnId(pub u16);
-
-/// Global ID of a function, composing a module ID and a local function ID.  ///
-/// This ID is sufficient to identify a function across the entire loaded codebase,
-/// regardless of the module it belongs to.
+/// This ID is sufficient to identify a function across the entire loaded
+/// codebase, regardless of the module it belongs to.
 // TODO Merge FnId and LocalFnId (maybe make the integer wider).
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize)]
-pub struct FnId(pub LocalFnId);
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct FnId(pub u32);
 
 impl std::fmt::Debug for FnId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "f{}", self.0.0)
+        write!(f, "f{}", self.0)
     }
 }
 
@@ -56,11 +49,11 @@ impl GlobalIID {
     pub fn parse_string(s: &str) -> Option<Self> {
         let (fnid_s, iid_s) = s.split_once('.')?;
 
-        let lfnid: u16 = fnid_s.parse().ok()?;
-        let iid: u16 = iid_s.parse().ok()?;
+        let fnid = fnid_s.parse().ok()?;
+        let iid = iid_s.parse().ok()?;
 
         Some(GlobalIID(
-            FnId(LocalFnId(lfnid)),
+            FnId(fnid),
             IID(iid),
         ))
     }
@@ -177,7 +170,7 @@ pub enum Instr {
 
     ClosureNew {
         dest: VReg,
-        fnid: LocalFnId,
+        fnid: FnId,
         forced_this: Option<VReg>,
     },
     ClosureAddCapture(VReg),

@@ -22,7 +22,7 @@ pub struct Loader {
 
     next_anon_id: usize,
 
-    max_fnid: u16,
+    max_fnid: u32,
     functions: HashMap<bytecode::FnId, bytecode::Function>,
     func_extra: HashMap<bytecode::FnId, FuncInfo>,
 
@@ -40,9 +40,6 @@ pub struct Loader {
 
     boot_script_fnid: Option<bytecode::FnId>,
 }
-
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
-struct PackageId(u16);
 
 struct FuncInfo {
     file: Rc<FileInfo>,
@@ -82,21 +79,13 @@ struct Package {
     main_filename: PathBuf,
 }
 
-struct Module {
-    root_fnid: bytecode::LocalFnId,
-    source_map: Rc<swc_common::SourceMap>,
-    breakable_ranges: Vec<bytecode::BreakRange>,
-    abs_path: PathBuf,
-    // The package that the module belongs to could be cached from abs_path.
-    // Worth the increase in complexity/trickiness?
-}
-
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub struct BreakRangeID(bytecode::FnId, usize);
 
 impl std::fmt::Display for BreakRangeID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "br{},{}", self.0 .0 .0, self.1)
+        let BreakRangeID(fnid, ndx) = self;
+        write!(f, "br{},{}", fnid.0, ndx)
     }
 }
 
@@ -106,7 +95,7 @@ impl BreakRangeID {
         let (fnid_s, ndx_s) = s.split_once(',')?;
         let fnid = fnid_s.parse().ok()?;
         let ndx = ndx_s.parse().ok()?;
-        Some(BreakRangeID(bytecode::FnId(bytecode::LocalFnId(fnid)), ndx))
+        Some(BreakRangeID(bytecode::FnId(fnid), ndx))
     }
 }
 
@@ -174,6 +163,13 @@ impl Loader {
         self.functions.keys()
     }
 
+    fn get_file(&self, file_id: &FileID) -> Option<&Rc<FileInfo>> {
+        match file_id {
+            FileID::Anon(ndx) => self.repl_frags.get(&ndx),
+            FileID::File(path) => self.files.get(path),
+        }
+    }
+
     /// Load a module (only if necessary) from an import statement.
     ///
     /// The arguments reflect the "coordinates" of the import statement:
@@ -194,16 +190,12 @@ impl Loader {
     pub fn load_import(
         &mut self,
         import_path: &str,
-        import_site: bytecode::FnId,
+        import_site: &FileID,
     ) -> Result<bytecode::FnId> {
         // The starting point is the module's parent package
-        let importing_file = Rc::clone(
-            &self
-                .func_extra
-                .get(&import_site)
-                .expect("no such function")
-                .file,
-        );
+        let importing_file = self
+            .get_file(&import_site)
+            .unwrap_or_else(|| error!("no such file for this ID"));
 
         if import_path.starts_with("./") {
             // relative paths (.e.g './asd/lol.js')
@@ -303,9 +295,9 @@ impl Loader {
             assert_eq!(source_type, bytecode_compiler::SourceType::Script);
         }
 
-        let min_lfnid = self.max_fnid + 1;
+        let min_fnid = self.max_fnid + 1;
         let flags = bytecode_compiler::CompileFlags {
-            min_lfnid,
+            min_fnid,
             source_type,
         };
 
@@ -317,7 +309,7 @@ impl Loader {
             source_map: _,
             breakable_ranges,
         } = bytecode_compiler::compile_file(&file_id, content, source_map, flags)?;
-        assert!(functions.keys().all(|lfnid| lfnid.0 >= min_lfnid));
+        assert!(functions.keys().all(|lfnid| lfnid.0 >= min_fnid));
         if let Some(cur_max_fnid) = functions.keys().max() {
             assert!(self.max_fnid <= cur_max_fnid.0);
             self.max_fnid = cur_max_fnid.0;
@@ -327,16 +319,12 @@ impl Loader {
         }
 
         assert!(directory.is_absolute());
-        let root_fnid = bytecode::FnId(root_fnid);
         let file = Rc::new(FileInfo {
             root_fnid,
             directory,
         });
 
-        let functions = functions
-            .into_iter()
-            .map(|(lfnid, func)| (bytecode::FnId(lfnid), func));
-        self.add_functions(functions, &file);
+        self.add_functions(functions.into_iter(), &file);
 
         for br in breakable_ranges {
             self.func_extra
@@ -491,28 +479,6 @@ impl FunctionLookup {
         let end = self.local_range.end.0 as usize;
         start..end
     }
-}
-
-fn resolve_path_by_suffix<'a>(
-    all_paths: impl Iterator<Item = &'a Path>,
-    filename: &str,
-) -> Result<&'a Path> {
-    let mut matching_paths = all_paths.filter(|path| path.ends_with(filename));
-    let resolved = matching_paths.next().ok_or(error!(
-        "no module with path `{}` (either full or suffix)",
-        filename
-    ))?;
-
-    // TODO Could it be useful to return all the matching paths? To help the user
-    // narrow it down?
-    if matching_paths.next().is_some() {
-        return Err(error!(
-            "ambiguous filename: multiple loaded files match suffix `{}`",
-            filename
-        ));
-    }
-
-    Ok(resolved)
 }
 
 fn is_valid_package_name(import_path: &str) -> bool {

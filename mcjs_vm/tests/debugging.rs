@@ -17,9 +17,9 @@ function foo() {
 foo();
         ";
 
-    let mut loader = mcjs_vm::Loader::new(None);
+    let mut loader = mcjs_vm::Loader::new_cwd();
     let main_fnid = loader
-        .load_script(Some("foo.js".to_string()), SOURCE_CODE.to_string())
+        .load_script(Some(PathBuf::from("foo.js")), SOURCE_CODE.to_string())
         .unwrap();
 
     let mut realm = Realm::new(&mut loader);
@@ -33,12 +33,7 @@ foo();
         Exit::Suspended { intrp_state, .. } => intrp_state,
     };
 
-    {
-        let bytecode::GlobalIID(fnid, _) = debugger::giid(&intrp_state);
-        let bytecode::FnId(mod_id, _) = fnid;
-        assert_eq!(mod_id, bytecode::SCRIPT_MODULE_ID);
-        assert_eq!(&intrp_state.sink, &[Value::Number(1.0)]);
-    }
+    assert_eq!(&intrp_state.sink, &[Value::Number(1.0)]);
 
     let finish_data = Interpreter::resume(&mut realm, &mut loader, intrp_state)
         .run()
@@ -59,12 +54,11 @@ fn test_pos_breakpoint() {
     let base_path = manifest_dir.join("test-resources/test-scripts/debugging/");
 
     // Simulate `import ... from 'test_pkg'` from a script
-    let mut loader = mcjs_vm::Loader::new(Some(base_path));
+    let mut loader = mcjs_vm::Loader::new(base_path);
 
     let main_fnid = loader.load_import("./breakme-0.js", None).unwrap();
 
     let module_id = main_fnid.0;
-    assert_ne!(module_id, bytecode::SCRIPT_MODULE_ID);
 
     // Hardcoded. Must be updated if breakme-0.js changes
     let pos = swc_common::BytePos(166);

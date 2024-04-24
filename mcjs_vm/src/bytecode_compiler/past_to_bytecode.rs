@@ -41,9 +41,9 @@ use crate::{error, tracing};
 
 use builder::{FnBuilder, Loc, ModuleBuilder};
 
-pub fn compile_module(func: &js_to_past::Function, min_lfnid: u16) -> Result<CompiledModule> {
+pub fn compile_module(func: &js_to_past::Function, min_fnid: u32) -> Result<CompiledModule> {
     let res = std::panic::catch_unwind(move || {
-        let mut module_builder = builder::ModuleBuilder::new(min_lfnid);
+        let mut module_builder = builder::ModuleBuilder::new(min_fnid);
 
         let globals: HashSet<_> = func.unbound_names.iter().cloned().collect();
 
@@ -119,7 +119,7 @@ fn compile_function<'a>(
     module_builder: &'a mut ModuleBuilder,
     captures: Vec<DeclName>,
     func: &js_to_past::Function,
-) -> bytecode::LocalFnId {
+) -> bytecode::FnId {
     let mut fnb = builder::FnBuilder::new(globals, module_builder);
     fnb.set_strict_mode(func.strict_mode);
 
@@ -740,30 +740,30 @@ mod builder {
     use js_to_past::BlockID;
 
     pub(super) struct ModuleBuilder {
-        fns: HashMap<bytecode::LocalFnId, bytecode::Function>,
-        next_lfnid: u16,
+        fns: HashMap<bytecode::FnId, bytecode::Function>,
+        next_fnid: u32,
         breakable_ranges: Vec<bytecode::BreakRange>,
     }
     impl ModuleBuilder {
-        pub(super) fn new(min_fnid: u16) -> Self {
+        pub(super) fn new(min_fnid: u32) -> Self {
             ModuleBuilder {
                 fns: HashMap::new(),
-                next_lfnid: min_fnid,
+                next_fnid: min_fnid,
                 breakable_ranges: Vec::new(),
             }
         }
 
-        pub(super) fn gen_id(&mut self) -> bytecode::LocalFnId {
-            let lfnid = bytecode::LocalFnId(self.next_lfnid);
-            self.next_lfnid += 1;
+        pub(super) fn gen_id(&mut self) -> bytecode::FnId {
+            let lfnid = bytecode::FnId(self.next_fnid);
+            self.next_fnid += 1;
             lfnid
         }
 
-        pub(super) fn put_fn(&mut self, lfnid: bytecode::LocalFnId, function: bytecode::Function) {
+        pub(super) fn put_fn(&mut self, lfnid: bytecode::FnId, function: bytecode::Function) {
             self.fns.insert(lfnid, function);
         }
 
-        pub(super) fn build(self, root_fnid: bytecode::LocalFnId) -> CompiledModule {
+        pub(super) fn build(self, root_fnid: bytecode::FnId) -> CompiledModule {
             CompiledModule {
                 root_fnid,
                 functions: self.fns,
@@ -784,7 +784,7 @@ mod builder {
 
         globals: &'a HashSet<JsWord>,
         module_builder: &'a mut ModuleBuilder,
-        lfnid: bytecode::LocalFnId,
+        fnid: bytecode::FnId,
     }
 
     type BoxedAction = Box<dyn FnOnce(&mut FnBuilder)>;
@@ -821,7 +821,7 @@ mod builder {
                 globals,
                 module_builder,
                 deferred_actions: Vec::new(),
-                lfnid,
+                fnid: lfnid,
             }
         }
 
@@ -947,7 +947,7 @@ mod builder {
                 .push(bytecode::BreakRange {
                     lo: span.lo,
                     hi: span.hi,
-                    fnid: bytecode::FnId(self.lfnid),
+                    fnid: self.fnid,
                     iid_start,
                     iid_end,
                 });
@@ -971,7 +971,7 @@ mod builder {
             self.deferred_actions.push(Box::new(action));
         }
 
-        pub(super) fn build(mut self, span: swc_common::Span) -> bytecode::LocalFnId {
+        pub(super) fn build(mut self, span: swc_common::Span) -> bytecode::FnId {
             assert!(self.blocks.is_empty());
 
             let deferred_actions = std::mem::take(&mut self.deferred_actions);
@@ -991,8 +991,8 @@ mod builder {
             }
             .build();
 
-            self.module_builder.put_fn(self.lfnid, bc_func);
-            self.lfnid
+            self.module_builder.put_fn(self.fnid, bc_func);
+            self.fnid
         }
 
         pub(crate) fn resolve_name(&self, name: &DeclName) -> Loc {
@@ -1099,7 +1099,7 @@ mod tests {
         insta::assert_snapshot!(dump_functions(&compiled_module.functions));
     }
 
-    fn dump_functions(functions: &HashMap<bytecode::LocalFnId, bytecode::Function>) -> String {
+    fn dump_functions(functions: &HashMap<bytecode::FnId, bytecode::Function>) -> String {
         let mut ids: Vec<_> = functions.keys().copied().collect();
         ids.sort();
 

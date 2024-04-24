@@ -879,9 +879,8 @@ fn run_regular(
                     }
 
                     let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
-                    let fnid = bytecode::FnId(*fnid);
                     let closure = Closure::JS(JSClosure {
-                        fnid,
+                        fnid: *fnid,
                         upvalues,
                         forced_this,
                     });

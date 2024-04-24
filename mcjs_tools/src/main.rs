@@ -463,13 +463,8 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
             }
             Pane::Bytecode => {
                 let is_breakpoint_set = |giid| self.dbg.instr_bkpt_at(&giid).is_some();
-                let res = bytecode_view::show(
-                    ui,
-                    self.loader,
-                    &frame,
-                    self.highlight,
-                    is_breakpoint_set,
-                );
+                let res =
+                    bytecode_view::show(ui, self.loader, &frame, self.highlight, is_breakpoint_set);
                 self.action.set_if_none(res.action);
                 return res.tiles;
             }
@@ -1160,7 +1155,10 @@ mod manager {
                 return Err(Error::NoFiles);
             }
 
-            let mut loader = Loader::new(params.main_directory.clone());
+            let mut loader = match &params.main_directory {
+                Some(p) => Loader::new(p.clone()),
+                None => Loader::new_cwd(),
+            };
             let realm = Realm::new(&mut loader);
 
             let mut dbg = interpreter::debugger::DebuggingState::new();
@@ -1170,8 +1168,7 @@ mod manager {
                 let mut content = String::new();
                 std::fs::File::open(filename)?.read_to_string(&mut content)?;
 
-                let filename = filename.to_string_lossy().into_owned();
-                let main_fnid = loader.load_script(Some(filename), content)?;
+                let main_fnid = loader.load_script(Some(filename.clone()), content)?;
                 script_fnids.push(main_fnid);
 
                 // Place a breakpoint at the start of each file

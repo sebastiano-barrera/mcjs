@@ -43,7 +43,7 @@ fn parse_options() -> CliOptions {
 
 fn run_test(params: &CliOptions) -> Result<(), TestError> {
     let res = std::panic::catch_unwind(move || {
-        let mut loader = mcjs_vm::Loader::new(None);
+        let mut loader = mcjs_vm::Loader::new_cwd();
         let mut realm = mcjs_vm::Realm::new(&mut loader);
 
         for (ndx, file_path) in params.files.iter().enumerate() {
@@ -55,7 +55,7 @@ fn run_test(params: &CliOptions) -> Result<(), TestError> {
             }
 
             let chunk_fnid = loader
-                .load_script(Some(file_path_str), content)
+                .load_script(Some(file_path), content)
                 .map_err(TestError::Load)?;
 
             let mut interpreter = mcjs_vm::Interpreter::new(&mut realm, &mut loader, chunk_fnid);
