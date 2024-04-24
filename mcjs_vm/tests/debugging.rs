@@ -54,11 +54,11 @@ fn test_pos_breakpoint() {
     let base_path = manifest_dir.join("test-resources/test-scripts/debugging/");
 
     // Simulate `import ... from 'test_pkg'` from a script
-    let mut loader = mcjs_vm::Loader::new(base_path);
+    let mut loader = mcjs_vm::Loader::new(base_path.clone());
 
-    let main_fnid = loader.load_import("./breakme-0.js", None).unwrap();
-
-    let module_id = main_fnid.0;
+    let main_fnid = loader
+        .load_import_from_dir("./breakme-0.js", &base_path)
+        .unwrap();
 
     // Hardcoded. Must be updated if breakme-0.js changes
     let pos = swc_common::BytePos(166);
@@ -67,7 +67,7 @@ fn test_pos_breakpoint() {
 
     // Resolve into the (potentially multiple) GIIDs
     let break_range_ids: Vec<_> = loader
-        .resolve_break_loc(module_id, pos)
+        .resolve_break_loc(main_fnid, pos)
         .unwrap()
         .into_iter()
         .map(|(brid, _)| brid)
@@ -88,7 +88,7 @@ fn test_pos_breakpoint() {
 
         let giid = debugger::giid(&intrp_state);
         eprintln!("we are at: {:?}; sink = {:?}", giid, intrp_state.sink);
-        if giid.0 .1 == bytecode::LocalFnId(2) {
+        if giid.0 == bytecode::FnId(2) {
             assert_eq!(&intrp_state.sink, &[Value::Number(1.0)]);
         } else {
             assert_eq!(&intrp_state.sink, &[]);

@@ -2,14 +2,14 @@
 source: mcjs_vm/src/bytecode_compiler/past_to_bytecode.rs
 expression: dump_functions(&compiled_module.functions)
 ---
-fn LocalFnId(0)
+fn f0
   k0 JsWord(Atom('myFunction' type=dynamic))
   k1 String("prototype")
   k2 JsWord(Atom('Function' type=static))
   k3 String("constructor")
   GetGlobalThis(v8)
   LoadConst(v9, const[0])
-  ClosureNew { dest: v10, fnid: LocalFnId(1), forced_this: None }
+  ClosureNew { dest: v10, fnid: f1, forced_this: None }
   LoadConst(v11, const[1])
   ObjCreateEmpty(v12)
   ObjSet { obj: v10, key: v11, value: v12 }
@@ -17,7 +17,7 @@ fn LocalFnId(0)
   LoadConst(v11, const[3])
   ObjSetN { obj: v10, key: v11, value: v13 }
   ObjSet { obj: v8, key: v9, value: v10 }
-fn LocalFnId(1)
+fn f1
   k0 Number(3.0)
   LoadConst(v8, const[0])
   Return(v8)

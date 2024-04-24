@@ -908,7 +908,7 @@ fn run_regular(
 
                     let module_path = get_operand_string(data, realm, *module_path)?.to_string();
                     let root_fnid = loader
-                        .load_import(&module_path, fnid)
+                        .load_import_from_fn(&module_path, fnid)
                         .with_context(error!("while trying to import '{}'", module_path))?;
 
                     // Commit before reborrowing

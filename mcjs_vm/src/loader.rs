@@ -55,6 +55,22 @@ pub enum FileID {
     File(PathBuf),
 }
 
+#[derive(Clone, Copy)]
+pub enum FileIDRef<'a> {
+    Anon(usize),
+    File(&'a Path),
+}
+
+impl FileID {
+    // AsRef and Borrow are not quite right here
+    fn as_fileidref(&self) -> FileIDRef {
+        match self {
+            FileID::Anon(ndx) => FileIDRef::Anon(*ndx),
+            FileID::File(path) => FileIDRef::File(path),
+        }
+    }
+}
+
 /// Represents a "file" containing executable JavaScript code.
 ///
 /// This is a unified representation for 3 types of files:
@@ -163,11 +179,8 @@ impl Loader {
         self.functions.keys()
     }
 
-    fn get_file(&self, file_id: &FileID) -> Option<&Rc<FileInfo>> {
-        match file_id {
-            FileID::Anon(ndx) => self.repl_frags.get(&ndx),
-            FileID::File(path) => self.files.get(path),
-        }
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
     }
 
     /// Load a module (only if necessary) from an import statement.
@@ -183,31 +196,39 @@ impl Loader {
     ///    - *bare specifiers* (e.g. `react`) are for importing another package. The other
     ///      package's main module is loaded.
     ///
-    ///  - `import_site`: the ID of the function where the import statement is located.
-    ///    Because import statements can only be present at the top-level of a module,
-    ///    this *must* to be a module's root function. An error will be returned
-    ///    otherwise.
-    pub fn load_import(
+    ///  - `import_site`: the ID of the file where the import statement is located.
+    pub fn load_import_from_fn(
         &mut self,
         import_path: &str,
-        import_site: &FileID,
+        importing_fnid: bytecode::FnId,
     ) -> Result<bytecode::FnId> {
-        // The starting point is the module's parent package
-        let importing_file = self
-            .get_file(&import_site)
-            .unwrap_or_else(|| error!("no such file for this ID"));
+        let directory = &self
+            .func_extra
+            .get(&importing_fnid)
+            .ok_or_else(|| error!("no such file for this ID"))?
+            .file
+            .directory
+            .clone();
 
+        self.load_import_from_dir(import_path, directory)
+    }
+
+    pub fn load_import_from_dir(
+        &mut self,
+        import_path: &str,
+        directory: &Path,
+    ) -> Result<bytecode::FnId> {
         if import_path.starts_with("./") {
             // relative paths (.e.g './asd/lol.js')
-            assert!(importing_file.directory.is_absolute());
-            let mod_path = importing_file.directory.join(import_path);
-            self.load_module(mod_path)
+            assert!(directory.is_absolute());
+            let mod_path = directory.join(import_path);
+            self.load_module(&mod_path)
         } else if is_valid_package_name(import_path) {
             // Package name ("bare import specifier")
             let pkg_name = import_path;
-            let package = self.resolve_package_import(&importing_file.directory, pkg_name)?;
+            let package = self.resolve_package_import(&directory, pkg_name)?;
             let mod_path = package.root_path.join(&package.main_filename);
-            self.load_module(mod_path)
+            self.load_module(&mod_path)
         } else {
             Err(error!(
                 "invalid module path: `{}` (only allowed: './relative/paths', and 'package-name')",
@@ -259,14 +280,14 @@ impl Loader {
         }
     }
 
-    fn load_module(&mut self, module_path: PathBuf) -> Result<bytecode::FnId> {
+    fn load_module(&mut self, module_path: &Path) -> Result<bytecode::FnId> {
         assert!(module_path.is_absolute());
 
-        if let Some(file_info) = self.files.get(&module_path) {
+        if let Some(file_info) = self.files.get(module_path) {
             return Ok(file_info.root_fnid);
         }
 
-        let content = std::fs::read_to_string(&module_path).map_err(|err| {
+        let content = std::fs::read_to_string(module_path).map_err(|err| {
             Error::from(err).with_context(error!(
                 "while loading module `{}`",
                 module_path.to_string_lossy()
@@ -274,7 +295,7 @@ impl Loader {
         })?;
 
         self.load_code(
-            FileID::File(module_path),
+            FileID::File(module_path.to_owned()),
             content,
             bytecode_compiler::SourceType::Module,
         )
@@ -308,7 +329,7 @@ impl Loader {
             functions,
             source_map: _,
             breakable_ranges,
-        } = bytecode_compiler::compile_file(&file_id, content, source_map, flags)?;
+        } = bytecode_compiler::compile_file(file_id.as_fileidref(), content, source_map, flags)?;
         assert!(functions.keys().all(|lfnid| lfnid.0 >= min_fnid));
         if let Some(cur_max_fnid) = functions.keys().max() {
             assert!(self.max_fnid <= cur_max_fnid.0);

@@ -21,8 +21,12 @@ fn test_load_json5_parse() {
 fn test_remove_ibkpt_with_sbkpt() {
     // Just load *some* code
     let mut prereq = prepare_vm("./test_parse.mjs");
+    let base_path = prereq.loader.base_path().to_owned();
 
-    let fnid = prereq.loader.load_import("json5", None).unwrap();
+    let fnid = prereq
+        .loader
+        .load_import_from_dir("json5", &base_path)
+        .unwrap();
 
     let branges: Vec<_> = prereq.loader.function_breakranges(fnid).unwrap().collect();
     let brid = branges[1].0;
@@ -48,8 +52,12 @@ fn test_remove_ibkpt_with_sbkpt() {
 fn test_remove_sbkpt_with_ibkpt() {
     // Just load *some* code
     let mut prereq = prepare_vm("./test_parse.mjs");
+    let base_path = prereq.loader.base_path().to_owned();
 
-    let fnid = prereq.loader.load_import("json5", None).unwrap();
+    let fnid = prereq
+        .loader
+        .load_import_from_dir("json5", &base_path)
+        .unwrap();
 
     let branges: Vec<_> = prereq.loader.function_breakranges(fnid).unwrap().collect();
     let brid = branges[1].0;
@@ -108,9 +116,9 @@ fn prepare_vm(filename: &str) -> VMPrereq {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root_path = manifest_dir.join("test-resources/test-scripts/json5/");
 
-    let mut loader = mcjs_vm::Loader::new(Some(root_path.clone()));
+    let mut loader = mcjs_vm::Loader::new(root_path.clone());
     let root_fnid = loader
-        .load_import(filename, None)
+        .load_import_from_dir(filename, &root_path)
         .expect("error while compiling script");
 
     let realm = mcjs_vm::Realm::new(&mut loader);

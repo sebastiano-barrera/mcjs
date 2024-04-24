@@ -6,7 +6,7 @@ use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
 use crate::bytecode::{self, FnId};
 use crate::common::{MultiError, Result};
-use crate::loader::FileID;
+use crate::loader::FileIDRef;
 use crate::{error, tracing};
 
 pub use swc_common::SourceMap;
@@ -47,7 +47,7 @@ pub enum SourceType {
 ///
 /// See `CompiledChunk` for details on the executable bytecode's representation.
 pub fn compile_file(
-    file_id: &FileID,
+    file_id: FileIDRef,
     content: String,
     source_map: Lrc<SourceMap>,
     flags: CompileFlags,
@@ -57,13 +57,13 @@ pub fn compile_file(
     let t = tracing::section("compile_file");
     t.log("source", &content);
 
-    let swc_path = match &file_id {
-        FileID::Anon(_) => swc_common::FileName::Anon,
-        FileID::File(path) => swc_common::FileName::Real(path.clone()),
+    let swc_path = match file_id {
+        FileIDRef::Anon(_) => swc_common::FileName::Anon,
+        FileIDRef::File(path) => swc_common::FileName::Real(path.to_owned()),
     };
     let display_filename = match file_id {
-        FileID::Anon(_) => "<input>".to_string(),
-        FileID::File(path) => path.to_string_lossy().into_owned(),
+        FileIDRef::Anon(_) => "<input>".to_string(),
+        FileIDRef::File(path) => path.to_string_lossy().into_owned(),
     };
 
     let source_file = source_map.new_source_file(swc_path, content);

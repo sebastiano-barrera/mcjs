@@ -2,11 +2,11 @@
 source: mcjs_vm/src/bytecode_compiler/past_to_bytecode.rs
 expression: dump_functions(&compiled_module.functions)
 ---
-fn LocalFnId(0)
+fn f0
   k0 String("prototype")
   k1 JsWord(Atom('Function' type=static))
   k2 String("constructor")
-  ClosureNew { dest: v9, fnid: LocalFnId(1), forced_this: None }
+  ClosureNew { dest: v9, fnid: f1, forced_this: None }
   LoadConst(v10, const[0])
   ObjCreateEmpty(v11)
   ObjSet { obj: v9, key: v10, value: v11 }
@@ -15,13 +15,13 @@ fn LocalFnId(0)
   ObjSetN { obj: v9, key: v10, value: v12 }
   LoadUndefined(v8)
   Call { return_value: v13, this: v8, callee: v9 }
-fn LocalFnId(1)
+fn f1
   k0 String("prototype")
   k1 JsWord(Atom('Function' type=static))
   k2 String("constructor")
   k3 Number(2.0)
   LoadUndefined(v8)
-  ClosureNew { dest: v8, fnid: LocalFnId(2), forced_this: None }
+  ClosureNew { dest: v8, fnid: f2, forced_this: None }
   ClosureAddCapture(v9)
   LoadConst(v10, const[0])
   ObjCreateEmpty(v11)
@@ -30,7 +30,7 @@ fn LocalFnId(1)
   LoadConst(v10, const[2])
   ObjSetN { obj: v8, key: v10, value: v12 }
   LoadConst(v9, const[3])
-fn LocalFnId(2)
+fn f2
   k0 Number(3.0)
   k1 Number(3.0)
   LoadCapture(v8, capture[0])
