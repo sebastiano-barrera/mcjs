@@ -14,7 +14,7 @@ use crate::{
 mod builtins;
 
 // Public versions of the private `Result` and `Error` above
-pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
+pub type InterpreterResult<T> = std::result::Result<T, Box<InterpreterError>>;
 pub struct InterpreterError {
     pub error: crate::common::Error,
 
@@ -271,16 +271,16 @@ impl<'a> Interpreter<'a> {
                     sink,
                 }))
             }
-            Err(RunError::Exception(exc)) => Err(InterpreterError {
+            Err(RunError::Exception(exc)) => Err(Box::new(InterpreterError {
                 error: error!("unhandled exception: {:?}", exc),
                 #[cfg(feature = "debugger")]
                 intrp_state: self.data,
-            }),
-            Err(RunError::Internal(common_err)) => Err(InterpreterError {
+            })),
+            Err(RunError::Internal(common_err)) => Err(Box::new(InterpreterError {
                 error: common_err,
                 #[cfg(feature = "debugger")]
                 intrp_state: self.data,
-            }),
+            })),
 
             #[cfg(feature = "debugger")]
             Err(RunError::Suspended(cause)) => Ok(Exit::Suspended {

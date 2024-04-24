@@ -1121,7 +1121,7 @@ mod manager {
             cause: interpreter::SuspendCause,
         },
         Finished,
-        Failed(interpreter::InterpreterError),
+        Failed(Box<interpreter::InterpreterError>),
     }
 
     type Result<T> = std::result::Result<T, Error>;
