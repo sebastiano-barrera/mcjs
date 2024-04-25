@@ -120,7 +120,7 @@ impl std::fmt::Debug for Closure {
 pub struct Realm {
     heap: heap::Heap,
     // Key is the root fnid of each module
-    module_objs: HashMap<bytecode::FnId, heap::ObjectId>,
+    module_objs: HashMap<bytecode::FnId, Value>,
     global_obj: heap::ObjectId,
 }
 
@@ -918,8 +918,8 @@ fn run_regular(
                     // Commit before reborrowing
                     data.top_mut().set_resume_iid(bytecode::IID(iid.0 + 1));
 
-                    if let Some(module_oid) = realm.module_objs.get(&root_fnid) {
-                        data.top_mut().set_result(*dest, Value::Object(*module_oid));
+                    if let Some(&module_value) = realm.module_objs.get(&root_fnid) {
+                        data.top_mut().set_result(*dest, module_value);
                     } else {
                         let root_fn = loader.get_function(root_fnid).unwrap();
 
@@ -932,7 +932,7 @@ fn run_regular(
 
                         // We don't care about return value: don't set a return
                         // value target reg, discard it here
-                        run_frame(
+                        let ret_value = run_frame(
                             data,
                             realm,
                             loader,
@@ -941,12 +941,8 @@ fn run_regular(
                             dbg,
                         )?;
 
-                        // TODO TODO After the function above returns,
-                        // the return value needs to be assigned to
-                        // realm.module_objs. But it can't be done here!
-                        // Because maybe run_frame returned due to hitting a
-                        // breakpoint, and we're going to have to 'walk up the
-                        // stack' again through another path!
+                        let prev = realm.module_objs.insert(root_fnid, ret_value);
+                        assert!(prev.is_none());
                     }
 
                     // This satisfies the borrow checker (`loader.load_import`
@@ -1756,7 +1752,7 @@ mod tests {
     fn prepare_vm(code: &str) -> VMPrereq {
         let mut loader = loader::Loader::new_cwd();
         let chunk_fnid = loader
-            .load_script(None, code.to_string())
+            .load_script_anon(code.to_string())
             .expect("couldn't compile test script");
         let realm = Realm::new(&mut loader);
         VMPrereq {

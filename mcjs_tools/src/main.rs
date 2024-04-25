@@ -1157,10 +1157,7 @@ mod manager {
 
             let mut script_fnids = Vec::new();
             for filename in &params.filenames {
-                let mut content = String::new();
-                std::fs::File::open(filename)?.read_to_string(&mut content)?;
-
-                let main_fnid = loader.load_script(Some(filename.clone()), content)?;
+                let main_fnid = loader.load_script_file(filename)?;
                 script_fnids.push(main_fnid);
 
                 // Place a breakpoint at the start of each file

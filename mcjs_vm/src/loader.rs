@@ -18,6 +18,8 @@ use crate::error;
 pub struct Loader {
     /// This is the "current directory" used the import resolution algoritm for
     /// import statements that appear in REPL fragments.
+    ///
+    /// Always absolute.
     base_path: PathBuf,
 
     next_anon_id: usize,
@@ -127,6 +129,7 @@ impl Loader {
     /// imports (e.g. when `import * as x from './asd/lol'` appears in a script/REPL
     /// chunk).
     pub fn new(base_path: PathBuf) -> Self {
+        let base_path = base_path.canonicalize().unwrap();
         let mut loader = Loader {
             base_path,
             next_anon_id: 0,
@@ -140,8 +143,7 @@ impl Loader {
         };
 
         let fnid = loader
-            .load_script(
-                None,
+            .load_script_anon(
                 r#"
                 // TODO TODO TODO This needs to be updated to support more than 8 args
                 Function.prototype.call = function (new_this, arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
@@ -378,28 +380,34 @@ impl Loader {
         }
     }
 
-    /// Compile a new chunk of script code.
+    /// Compile a new chunk of anonymous script code.
     ///
-    /// Since we're not in a browser, the only script code that should
-    /// realistically pass through here is a  REPL chunk.
-    ///
-    /// The main characteristic of script code (at compile time) is that functions and
-    /// variables defined in script context always have module ID ==
-    /// `bytecode::SCRIPT_MODULE_ID`.  In other words, they appear as if coming from a
-    /// single file, even though they go through the compiler in chunks.
-    pub fn load_script(
-        &mut self,
-        filename: Option<PathBuf>,
-        content: String,
-    ) -> Result<bytecode::FnId> {
-        let file_id = match filename {
-            Some(path) => FileID::File(path),
-            None => {
-                self.next_anon_id += 1;
-                FileID::Anon(self.next_anon_id)
-            }
+    /// "Anonymous" here means that the code is not linked to any file. This is the case,
+    /// for example, for a piece of code coming from a REPL or similar tool.
+    pub fn load_script_anon(&mut self, content: String) -> Result<bytecode::FnId> {
+        let file_id = {
+            self.next_anon_id += 1;
+            FileID::Anon(self.next_anon_id)
         };
         self.load_code(file_id, content, bytecode_compiler::SourceType::Script)
+    }
+
+    pub fn load_script_file(&mut self, filename: &Path) -> Result<bytecode::FnId> {
+        // Make path absolute without accessing the filesystem (like Path::canonicalize
+        // would do).
+        let filename = filename.canonicalize().unwrap();
+        let content = std::fs::read_to_string(&filename).map_err(|err| {
+            Error::from(err).with_context(error!(
+                "while loading script `{}`",
+                filename.to_string_lossy()
+            ))
+        })?;
+
+        self.load_code(
+            FileID::File(filename),
+            content,
+            bytecode_compiler::SourceType::Script,
+        )
     }
 
     pub fn resolve_break_loc(

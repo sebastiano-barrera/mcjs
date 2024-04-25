@@ -6,7 +6,6 @@ fn main() {
         .nth(1)
         .expect("usage: compile_bytecode <filename.js>");
     let filename = std::path::PathBuf::from(filename);
-    let content = std::fs::read_to_string(Path::new(&filename)).expect("error while reading file");
 
     let mut native_fns = HashMap::new();
     let words = [
@@ -24,7 +23,7 @@ fn main() {
     }
 
     let mut loader = mcjs_vm::Loader::new_cwd();
-    match loader.load_script(Some(filename), content) {
+    match loader.load_script_file(&filename) {
         Err(err) => {
             eprintln!("error:");
             eprintln!("{}", err.message());

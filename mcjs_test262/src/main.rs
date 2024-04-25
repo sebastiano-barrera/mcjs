@@ -53,9 +53,7 @@ fn run_test(params: &CliOptions) -> Result<(), TestError> {
                 content.insert_str(0, "\"use strict\";");
             }
 
-            let chunk_fnid = loader
-                .load_script(Some(file_path.clone()), content)
-                .map_err(TestError::Load)?;
+            let chunk_fnid = loader.load_script_anon(content).map_err(TestError::Load)?;
 
             let mut interpreter = mcjs_vm::Interpreter::new(&mut realm, &mut loader, chunk_fnid);
             let mut dbg = DebuggingState::new();

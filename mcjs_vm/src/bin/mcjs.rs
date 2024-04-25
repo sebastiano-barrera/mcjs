@@ -13,11 +13,7 @@ fn main() {
 
     for path in config.paths {
         let path = PathBuf::from(&path).canonicalize().unwrap();
-        let content = std::fs::read_to_string(&path).expect("could not read file");
-
-        let main_fnid = loader
-            .load_script(Some(path), content)
-            .expect("compile error");
+        let main_fnid = loader.load_script_file(&path).expect("compile error");
 
         if config.dump_bytecode {
             for fnid in loader.functions() {
@@ -54,7 +50,7 @@ fn main() {
                 break;
             }
 
-            let res = loader.load_script(None, line.clone());
+            let res = loader.load_script_anon(line.clone());
 
             match res {
                 Ok(fnid) => {
