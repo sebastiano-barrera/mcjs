@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 use swc_atoms::JsWord;
 
 fn main() {

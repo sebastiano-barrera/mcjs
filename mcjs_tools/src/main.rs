@@ -1088,7 +1088,7 @@ mod widgets {
 }
 
 mod manager {
-    use std::{io::Read, path::PathBuf};
+    use std::path::PathBuf;
     use thiserror::Error;
 
     use mcjs_vm::{
