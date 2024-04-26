@@ -355,74 +355,6 @@ fn run(
     loader: &mut loader::Loader,
     #[cfg(feature = "debugger")] dbg: &mut Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
-    assert!(!data.is_empty());
-
-    let t = crate::tracing::section("run");
-
-    loop {
-        let loop_header = format!(
-            "regular execution {:?}{:?}",
-            data.top().header().fnid,
-            data.top().header().iid,
-        );
-        t.log("loop", &loop_header);
-
-        return run_regular(
-            data,
-            realm,
-            loader,
-            #[cfg(feature = "debugger")]
-            dbg,
-        );
-    }
-}
-
-type RunResult<T> = std::result::Result<T, RunError>;
-/// The error type only used internally by `run_frame` and `run_internal`.
-#[derive(Debug)]
-enum RunError {
-    Exception(Value),
-    #[cfg(feature = "debugger")]
-    Suspended(SuspendCause),
-    Internal(common::Error),
-}
-impl From<common::Error> for RunError {
-    fn from(err: common::Error) -> Self {
-        RunError::Internal(err)
-    }
-}
-
-#[derive(Debug)]
-pub enum SuspendCause {
-    Breakpoint,
-    Exception(Value),
-}
-
-fn do_return(ret_val: Value, data: &mut stack::InterpreterData, realm: &mut Realm) {
-    let hdr = data.top().header();
-    if hdr.is_module_root_fn {
-        let module_root_fnid = hdr.fnid;
-        let prev = realm.module_objs.insert(module_root_fnid, ret_val);
-        assert!(prev.is_none());
-    }
-
-    data.pop();
-    if !data.is_empty() {
-        if let Some(rv_reg) = data.top_mut().take_return_target() {
-            data.top_mut().set_result(rv_reg, ret_val);
-        }
-    }
-}
-
-fn run_regular(
-    data: &mut stack::InterpreterData,
-    realm: &mut Realm,
-    loader: &mut loader::Loader,
-    #[cfg(feature = "debugger")] dbg: &mut Option<&mut debugger::DebuggingState>,
-) -> RunResult<()> {
-    // we do `continue 'reborrow` every time the stack might have changed
-    // (frames added/removed/modified), so we need to reset `fnid` and `func`
-    // based on whatever is at the top of the stack.
     'reborrow: loop {
         if data.is_empty() {
             // We're done.
@@ -802,8 +734,8 @@ fn run_regular(
                 // This is always handled in the code for ClosureNew
                 Instr::ClosureAddCapture(_) => {
                     unreachable!(
-                        "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
-                    )
+                            "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
+                        )
                 }
                 Instr::Unshare(reg) => {
                     data.top_mut().ensure_inline(*reg);
@@ -901,8 +833,8 @@ fn run_regular(
                             bytecode::Literal::String(s) => s,
                             bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
                             _ => panic!(
-                            "malformed bytecode: GetGlobal argument `name` not a string literal"
-                        ),
+                                "malformed bytecode: GetGlobal argument `name` not a string literal"
+                            ),
                         };
                         heap::IndexOrKey::Key(str_literal)
                     };
@@ -984,6 +916,43 @@ fn run_regular(
             if let Some(dbg) = dbg {
                 dbg.consume_1_fuel();
             }
+        }
+    }
+}
+
+type RunResult<T> = std::result::Result<T, RunError>;
+/// The error type only used internally by `run_frame` and `run_internal`.
+#[derive(Debug)]
+enum RunError {
+    Exception(Value),
+    #[cfg(feature = "debugger")]
+    Suspended(SuspendCause),
+    Internal(common::Error),
+}
+impl From<common::Error> for RunError {
+    fn from(err: common::Error) -> Self {
+        RunError::Internal(err)
+    }
+}
+
+#[derive(Debug)]
+pub enum SuspendCause {
+    Breakpoint,
+    Exception(Value),
+}
+
+fn do_return(ret_val: Value, data: &mut stack::InterpreterData, realm: &mut Realm) {
+    let hdr = data.top().header();
+    if hdr.is_module_root_fn {
+        let module_root_fnid = hdr.fnid;
+        let prev = realm.module_objs.insert(module_root_fnid, ret_val);
+        assert!(prev.is_none());
+    }
+
+    data.pop();
+    if !data.is_empty() {
+        if let Some(rv_reg) = data.top_mut().take_return_target() {
+            data.top_mut().set_result(rv_reg, ret_val);
         }
     }
 }

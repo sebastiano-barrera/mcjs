@@ -229,20 +229,11 @@ impl InterpreterData {
         &self.sink
     }
 
-    pub(crate) fn truncate(&mut self, new_len: usize) {
-        assert!(new_len <= self.headers.len());
-        self.headers.truncate(new_len);
-        self.check_invariants();
-    }
-
     pub(crate) fn get_cur_exc(&self) -> Option<Value> {
         self.cur_exc
     }
     pub(crate) fn set_cur_exc(&mut self, value: Value) {
         self.cur_exc = Some(value);
-    }
-    pub(crate) fn clear_cur_exc(&mut self) {
-        self.cur_exc = None;
     }
 }
 
