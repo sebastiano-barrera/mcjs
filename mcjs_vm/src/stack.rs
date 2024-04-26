@@ -9,6 +9,10 @@ pub struct InterpreterData {
     headers: Vec<FrameHeader>,
     values: Vec<Slot>,
 
+    /// The "current exception", i.e. the exception being handled (in the `catch` block
+    /// that is currently running).
+    cur_exc: Option<Value>,
+
     // TODO Make tests work without this hack
     #[cfg(any(test, feature = "debugger"))]
     pub sink: Vec<Value>,
@@ -17,8 +21,8 @@ pub struct InterpreterData {
     /// any kind.
     ///
     /// This is necessary to track because, the "successor" Interpreter that resumes
-    /// executing with this InterpreterData needs to 'skip' the breakpoint in order
-    /// not to enter an infinite loop of always suspending on the same breakpoint!
+    /// executing with this InterpreterData needs to 'skip' the breakpoint in order not to
+    /// enter an infinite loop of always suspending on the same breakpoint!
     #[cfg(feature = "debugger")]
     resuming_from_breakpoint: bool,
 }
@@ -66,12 +70,23 @@ pub struct FrameHeader {
     pub fnid: bytecode::FnId,
     pub iid: bytecode::IID,
     pub this: Value,
+
+    /// Where to store the return value in *this* frame (the caller's frame).
     pub return_target: Option<VReg>,
+
     // TODO Avoid this heap alloc?
     pub captures: Box<[UpvalueId]>,
+
     /// Exception handlers, ordered by scope, *local to this stack frame*
     /// Cheap (not allocated) until we enter a 'try' block (PushExcHandler)
+    // TODO Move to a shared vector, like for registers?
     pub exc_handlers: Vec<bytecode::IID>,
+
+    /// True iff this frame represents a call to a module's root function.
+    ///
+    /// In this case, the return value can be cached for future imports of the same
+    /// module. (None of the other mechanisms related to the return value changes.)
+    pub is_module_root_fn: bool,
 }
 
 #[derive(Clone)]
@@ -80,6 +95,7 @@ pub(crate) struct CallMeta<'a> {
     pub n_regs: u32,
     pub captures: &'a [UpvalueId],
     pub this: Value,
+    pub is_module_root_fn: bool,
 }
 
 impl InterpreterData {
@@ -91,6 +107,7 @@ impl InterpreterData {
             upv_alloc: slotmap::SlotMap::with_key(),
             headers: Vec::with_capacity(Self::INIT_CAPACITY),
             values: Vec::with_capacity(Self::INIT_CAPACITY),
+            cur_exc: None,
 
             #[cfg(any(test, feature = "debugger"))]
             sink: Vec::new(),
@@ -118,6 +135,7 @@ impl InterpreterData {
             return_target: None,
             captures: call_meta.captures.to_owned().into_boxed_slice(),
             exc_handlers: Vec::new(),
+            is_module_root_fn: call_meta.is_module_root_fn,
         };
 
         for _ in 0..frame_hdr.regs_count {
@@ -143,6 +161,10 @@ impl InterpreterData {
         debug_assert_eq!(n_values_total, self.values.len());
     }
 
+    /// Pop a frame from the stack.
+    ///
+    /// Panics if the stack is currently empty.  (Also contains some asserts that check
+    /// invariants.)
     pub(crate) fn pop(&mut self) {
         let frame_hdr = self.headers.pop().unwrap();
         self.values
@@ -211,6 +233,16 @@ impl InterpreterData {
         assert!(new_len <= self.headers.len());
         self.headers.truncate(new_len);
         self.check_invariants();
+    }
+
+    pub(crate) fn get_cur_exc(&self) -> Option<Value> {
+        self.cur_exc
+    }
+    pub(crate) fn set_cur_exc(&mut self, value: Value) {
+        self.cur_exc = Some(value);
+    }
+    pub(crate) fn clear_cur_exc(&mut self) {
+        self.cur_exc = None;
     }
 }
 
