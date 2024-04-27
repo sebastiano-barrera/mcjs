@@ -6,8 +6,8 @@ use mcjs_vm::{
     interpreter::{
         self,
         debugger::{self, InstrBreakpoint},
+        stack,
     },
-    stack,
 };
 
 fn main() {
@@ -492,7 +492,7 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
 }
 
 mod stack_view {
-    use mcjs_vm::stack;
+    use mcjs_vm::interpreter::stack;
 
     #[derive(Default)]
     pub struct State {}
@@ -538,7 +538,7 @@ mod stack_view {
 
 mod bytecode_view {
     use super::{widgets, Action};
-    use mcjs_vm::{bytecode, interpreter, stack};
+    use mcjs_vm::{bytecode, interpreter, interpreter::stack};
 
     #[derive(Default)]
     pub struct State {}
@@ -689,7 +689,7 @@ mod bytecode_view {
 mod source_view {
     use std::{ops::Range, sync::Arc};
 
-    use mcjs_vm::{bytecode, stack, Loader};
+    use mcjs_vm::{bytecode, interpreter::stack, Loader};
 
     #[derive(Default)]
     pub struct Response {
@@ -876,8 +876,7 @@ mod widgets {
     use super::Action;
     use mcjs_vm::{
         bytecode,
-        interpreter::{debugger, Value},
-        stack,
+        interpreter::{debugger, stack, Value},
     };
 
     const COLOR_BLUE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
@@ -1094,8 +1093,8 @@ mod manager {
     use mcjs_vm::{
         bytecode,
         interpreter::debugger::{Fuel, InstrBreakpoint},
-        interpreter::{self, Exit, Interpreter},
-        stack, Loader, Realm,
+        interpreter::{self, stack, Exit, Interpreter},
+        Loader, Realm,
     };
 
     #[derive(Debug)]

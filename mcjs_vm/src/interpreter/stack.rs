@@ -1,5 +1,8 @@
+/// [1] "this" substituion: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
+use std::rc::Rc;
+
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX};
-use crate::interpreter::Value;
+use crate::interpreter::{JSClosure, Value};
 
 /// The interpreter's stack.
 ///
@@ -8,6 +11,10 @@ pub struct InterpreterData {
     upv_alloc: Upvalues,
     headers: Vec<FrameHeader>,
     values: Vec<Slot>,
+
+    /// The value of `this` to be used in non-strict mode when "this" substituion [1]
+    /// happens.  It should always be the same as the realm's `globalThis`/`window`.
+    default_this: Value,
 
     /// The "current exception", i.e. the exception being handled (in the `catch` block
     /// that is currently running).
@@ -62,7 +69,7 @@ impl FrameSnapshot {
         }
     }
 
-    fn restore(self, upvalues: &Vec<UpvalueId>, slots_buffer: &mut Vec<Slot>) -> FrameHeader {
+    fn restore(self, closure: Rc<JSClosure>, slots_buffer: &mut Vec<Slot>) -> FrameHeader {
         let header = FrameHeader {
             regs_offset: slots_buffer.len().try_into().unwrap(),
             regs_count: self.slots.len().try_into().unwrap(),
@@ -70,9 +77,9 @@ impl FrameSnapshot {
             iid: self.iid,
             this: self.this,
             return_target: self.return_target,
-            captures: upvalues.clone().into_boxed_slice(),
             exc_handlers: self.exc_handlers,
             is_module_root_fn: self.is_module_root_fn,
+            closure,
         };
 
         slots_buffer.extend(self.slots);
@@ -117,7 +124,6 @@ impl From<Slot> for SlotDebug {
     }
 }
 
-#[derive(Debug)]
 pub struct FrameHeader {
     regs_offset: u32,
     regs_count: u32,
@@ -128,9 +134,6 @@ pub struct FrameHeader {
     /// Where to store the return value in *this* frame (the caller's frame).
     pub return_target: Option<VReg>,
 
-    // TODO Avoid this heap alloc?
-    pub captures: Box<[UpvalueId]>,
-
     /// Exception handlers, ordered by scope, *local to this stack frame*
     /// Cheap (not allocated) until we enter a 'try' block (PushExcHandler)
     // TODO Move to a shared vector, like for registers?
@@ -140,16 +143,10 @@ pub struct FrameHeader {
     ///
     /// In this case, the return value can be cached for future imports of the same
     /// module. (None of the other mechanisms related to the return value changes.)
+    // TODO Move this to closure
     pub is_module_root_fn: bool,
-}
 
-#[derive(Clone)]
-pub(crate) struct CallMeta<'a> {
-    pub fnid: bytecode::FnId,
-    pub n_regs: u32,
-    pub captures: &'a [UpvalueId],
-    pub this: Value,
-    pub is_module_root_fn: bool,
+    pub closure: Rc<JSClosure>,
 }
 
 impl InterpreterData {
@@ -161,6 +158,8 @@ impl InterpreterData {
             upv_alloc: slotmap::SlotMap::with_key(),
             headers: Vec::with_capacity(Self::INIT_CAPACITY),
             values: Vec::with_capacity(Self::INIT_CAPACITY),
+            default_this: Value::Undefined,
+
             cur_exc: None,
 
             #[cfg(any(test, feature = "debugger"))]
@@ -171,6 +170,10 @@ impl InterpreterData {
         }
     }
 
+    pub fn set_default_this(&mut self, value: Value) {
+        self.default_this = value;
+    }
+
     pub fn len(&self) -> usize {
         self.headers.len()
     }
@@ -179,19 +182,83 @@ impl InterpreterData {
         self.len() == 0
     }
 
-    pub(crate) fn push(&mut self, call_meta: CallMeta) {
+    /// Push onto the stack a frame for a simple call to the given function, with no
+    /// arguments and no captures.
+    ///
+    /// A closure is created on-the-fly for purpose of this one call.
+    ///
+    /// `this` is always used (there is not going to be any 'forced this' on the closure,
+    /// nor any "this" substitution kicking in).
+    pub(crate) fn push_direct(
+        &mut self,
+        fnid: bytecode::FnId,
+        func: &bytecode::Function,
+        this: Value,
+    ) {
+        let closure = Rc::new(JSClosure {
+            fnid,
+            upvalues: Vec::new(),
+            forced_this: Some(this),
+            generator_snapshot: None,
+        });
+
         let frame_hdr = FrameHeader {
             regs_offset: self.values.len().try_into().unwrap(),
-            regs_count: call_meta.n_regs + ARGS_COUNT_MAX as u32,
-            fnid: call_meta.fnid,
+            regs_count: func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
+            fnid,
             iid: bytecode::IID(0),
-            this: call_meta.this,
+            this,
             return_target: None,
-            captures: call_meta.captures.to_owned().into_boxed_slice(),
             exc_handlers: Vec::new(),
-            is_module_root_fn: call_meta.is_module_root_fn,
+            is_module_root_fn: false,
+            closure,
         };
 
+        for _ in 0..frame_hdr.regs_count {
+            self.values.push(Slot::Inline(None));
+        }
+        self.headers.push(frame_hdr);
+
+        self.check_invariants();
+    }
+
+    /// Push a stack frame for a call to the given closure.
+    ///
+    /// The first (bytecode::ARGS_COUNT_MAX) registers (destined for call arguments) are
+    /// all initialized `undefined`.
+    ///
+    /// In the new stack frame, `local_this` is used as the value for `this` unless the
+    /// closure has a `forced_this` value (result of `Function.prototype.bind`) or "this"
+    /// substitution happens [1].
+    pub(crate) fn push_call(
+        &mut self,
+        closure: Rc<JSClosure>,
+        local_this: Value,
+        loader: &crate::Loader,
+    ) {
+        let callee_func = loader.get_function(closure.fnid).unwrap();
+
+        let is_strict = callee_func.is_strict_mode();
+        let this = match (&closure.forced_this, is_strict, local_this) {
+            (Some(value), _, _) => *value,
+            // "this" substitution (see [1]).  If I understand this correctly, we don't
+            // need to box anything right now.  We just pass the value, and the callee
+            // will box it when needed.
+            (_, false, Value::Null | Value::Undefined) => self.default_this,
+            (_, _, _) => local_this,
+        };
+
+        let frame_hdr = FrameHeader {
+            regs_offset: self.values.len().try_into().unwrap(),
+            regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
+            fnid: closure.fnid,
+            iid: bytecode::IID(0),
+            this,
+            return_target: None,
+            closure,
+            exc_handlers: Vec::new(),
+            is_module_root_fn: false,
+        };
         for _ in 0..frame_hdr.regs_count {
             self.values.push(Slot::Inline(None));
         }
@@ -371,13 +438,14 @@ impl<'a> Frame<'a> {
         // another/better approach: add N slots to the header and use them as cache for the
         // closure's captures.
         self.header
-            .captures
+            .closure
+            .upvalues
             .get(capture_ndx.0 as usize)
             .copied()
             .expect("capture index is out of range")
     }
     pub fn captures(&self) -> impl '_ + ExactSizeIterator<Item = UpvalueId> {
-        self.header.captures.iter().copied()
+        self.header.closure.upvalues.iter().copied()
     }
 
     /// Get the upvalue with the given ID.
@@ -461,5 +529,13 @@ impl<'a> FrameMut<'a> {
     }
     pub(crate) fn push_exc_handler(&mut self, iid: bytecode::IID) {
         self.header.exc_handlers.push(iid)
+    }
+
+    pub(crate) fn set_is_module_root_fn(&mut self) {
+        self.header.is_module_root_fn = true;
+    }
+
+    pub(crate) fn save_snapshot(&mut self, resume_iid: bytecode::IID) {
+        todo!()
     }
 }

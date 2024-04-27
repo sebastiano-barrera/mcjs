@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 
+use std::rc::Rc;
+
 use super::{literal_to_value, value_to_string, Closure, JSClosure, Realm, Value};
 
 use crate::bytecode;
@@ -229,27 +231,28 @@ fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Val
 }
 
 fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
-    let js_closure = {
-        let obj_id = this.expect_obj()?;
-        let obj = realm
-            .heap
-            .get(obj_id)
-            .ok_or_else(|| error!("no such object"))?
-            .borrow();
-        let closure = obj.as_closure().ok_or_else(|| error!("not a function"))?;
-        match closure {
-            Closure::Native(_) => return Err(error!("can't bind a native function (yet)")),
-            Closure::JS(jsc) => jsc.clone(),
-        }
+    let obj_id = this.expect_obj()?;
+    let obj = realm
+        .heap
+        .get(obj_id)
+        .ok_or_else(|| error!("no such object"))?
+        .borrow();
+    let closure = obj.as_closure().ok_or_else(|| error!("not a function"))?;
+    let js_closure = match closure {
+        Closure::Native(_) => return Err(error!("can't bind a native function (yet)")),
+        Closure::JS(jsc) => jsc,
     };
 
     let forced_this = Some(args.first().copied().unwrap_or(Value::Undefined));
-
-    let new_closure = Closure::JS(JSClosure {
+    let new_closure = JSClosure {
         forced_this,
-        ..js_closure
-    });
+        fnid: js_closure.fnid,
+        upvalues: js_closure.upvalues.clone(),
+        generator_snapshot: js_closure.generator_snapshot.clone(),
+    };
 
-    let new_obj_id = realm.heap.new_function(new_closure);
+    drop(obj);
+
+    let new_obj_id = realm.heap.new_function(Closure::JS(Rc::new(new_closure)));
     Ok(Value::Object(new_obj_id))
 }

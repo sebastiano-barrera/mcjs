@@ -1,6 +1,6 @@
-use std::cell::Ref;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::{cell::Ref, rc::Rc};
 
 use crate::{
     bytecode::{self, FnId, Instr, VReg, IID},
@@ -8,10 +8,14 @@ use crate::{
     define_flag, error,
     heap::{self, IndexOrKey, Object},
     loader,
-    stack::{self, UpvalueId},
 };
 
 mod builtins;
+pub mod stack;
+
+#[cfg(feature = "debugger")]
+pub use stack::SlotDebug;
+use stack::UpvalueId;
 
 // Public versions of the private `Result` and `Error` above
 pub type InterpreterResult<T> = std::result::Result<T, Box<InterpreterError>>;
@@ -81,7 +85,7 @@ gen_value_expect!(expect_obj, Object, heap::ObjectId);
 #[derive(Clone)]
 pub enum Closure {
     Native(NativeFunction),
-    JS(JSClosure),
+    JS(Rc<JSClosure>),
 }
 
 type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> Result<Value>;
@@ -94,7 +98,6 @@ pub struct JSClosure {
     forced_this: Option<Value>,
     generator_snapshot: Option<stack::FrameSnapshot>,
 }
-
 impl JSClosure {
     #[cfg(feature = "debugger")]
     pub fn fnid(&self) -> FnId {
@@ -105,6 +108,7 @@ impl JSClosure {
         &self.upvalues
     }
 }
+
 impl std::fmt::Debug for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -200,7 +204,8 @@ impl<'a> Interpreter<'a> {
     pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters, then put it into an Interpreter
-        let data = init_stack(loader, realm, fnid);
+        let mut data = init_stack(loader, realm, fnid);
+        data.set_default_this(Value::Object(realm.global_obj));
         Interpreter {
             realm,
             data,
@@ -301,17 +306,8 @@ pub fn init_stack(
 ) -> stack::InterpreterData {
     let mut data = stack::InterpreterData::new();
     let root_fn = loader.get_function(fnid).unwrap();
-
     let global_this = Value::Object(realm.global_obj);
-
-    data.push(stack::CallMeta {
-        fnid,
-        n_regs: root_fn.n_regs() as u32,
-        captures: &[],
-        this: global_this,
-        is_module_root_fn: false,
-    });
-
+    data.push_direct(fnid, root_fn, global_this);
     data
 }
 
@@ -477,7 +473,9 @@ fn run(
                 Instr::Jmp(IID(dest_ndx)) => {
                     next_ndx = *dest_ndx;
                 }
-                Instr::SetResumePoint(_) => todo!("SetResumePoint"),
+                Instr::SetResumePoint(resume_iid) => {
+                    data.top_mut().save_snapshot(*resume_iid);
+                }
                 Instr::Return(value) => {
                     let return_value = get_operand(data, *value)?;
                     do_return(return_value, data, realm);
@@ -523,40 +521,17 @@ fn run(
 
                     match closure {
                         Closure::JS(closure) => {
-                            let callee_func = loader.get_function(closure.fnid).unwrap();
                             let n_params = bytecode::ARGS_COUNT_MAX as usize;
                             arg_vals.truncate(n_params);
                             arg_vals.resize(n_params, Value::Undefined);
                             assert_eq!(arg_vals.len(), n_params);
 
-                            let this = closure
-                                .forced_this
-                                .map(Ok)
-                                .unwrap_or_else(|| get_operand(data, *this))?;
-                            // "this" substitution: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
-                            // If I understand this correctly, we don't need to box anything right
-                            // now.  We just pass the value, and the callee will box it when
-                            // needed.
-                            let this = match (callee_func.is_strict_mode(), this) {
-                                (false, Value::Null | Value::Undefined) => {
-                                    Value::Object(realm.global_obj)
-                                }
-                                (_, other) => other,
-                            };
+                            let this = get_operand(data, *this)?;
 
-                            // Only used if we re-enter run_internal via suspend+resume
                             data.top_mut().set_return_target(*return_value_reg);
-
-                            // Commit the IID that we want to return to
                             data.top_mut().set_resume_iid(return_to_iid);
 
-                            data.push(stack::CallMeta {
-                                fnid: closure.fnid,
-                                n_regs: callee_func.n_regs() as u32,
-                                captures: &closure.upvalues,
-                                this,
-                                is_module_root_fn: false,
-                            });
+                            data.push_call(Rc::clone(closure), this, loader);
                             for (i, arg) in arg_vals.into_iter().enumerate() {
                                 data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
                             }
@@ -728,12 +703,12 @@ fn run(
                     }
 
                     let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
-                    let closure = Closure::JS(JSClosure {
+                    let closure = Closure::JS(Rc::new(JSClosure {
                         fnid: *fnid,
                         upvalues,
                         forced_this,
                         generator_snapshot: None,
-                    });
+                    }));
 
                     let oid = realm.heap.new_function(closure);
                     data.top_mut().set_result(*dest, Value::Object(oid));
@@ -768,14 +743,8 @@ fn run(
                         data.top_mut().set_result(*dest, module_value);
                     } else {
                         let root_fn = loader.get_function(root_fnid).unwrap();
-
-                        data.push(stack::CallMeta {
-                            fnid: root_fnid,
-                            n_regs: root_fn.n_regs() as u32,
-                            captures: &[],
-                            this: Value::Undefined,
-                            is_module_root_fn: true,
-                        });
+                        data.push_direct(root_fnid, root_fn, Value::Undefined);
+                        data.top_mut().set_is_module_root_fn();
                     }
 
                     // This satisfies the borrow checker
@@ -1384,7 +1353,8 @@ impl From<std::cmp::Ordering> for ValueOrdering {
 pub mod debugger {
     use std::collections::HashMap;
 
-    use crate::{bytecode, loader, stack};
+    use super::stack;
+    use crate::{bytecode, loader};
     use crate::{heap, GlobalIID};
 
     pub use super::SuspendCause;
