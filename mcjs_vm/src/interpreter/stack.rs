@@ -197,9 +197,9 @@ impl InterpreterData {
 
         let gen_snap = closure.generator_snapshot.borrow_mut().take();
 
-        let frame_hdr = if let Some(gen_snap) = gen_snap {
+        if let Some(gen_snap) = gen_snap {
             // resume the suspended of the generator
-            FrameHeader {
+            let frame_hdr = FrameHeader {
                 regs_offset: self.values.len().try_into().unwrap(),
                 regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
                 fnid: closure.fnid,
@@ -209,10 +209,14 @@ impl InterpreterData {
                 closure,
                 exc_handlers: gen_snap.exc_handlers,
                 is_module_root_fn: gen_snap.is_module_root_fn,
-            }
+            };
+
+            assert_eq!(frame_hdr.regs_count as usize, gen_snap.slots.len());
+            self.values.extend(gen_snap.slots);
+            self.headers.push(frame_hdr);
         } else {
             // brand new call (or just not a generator)
-            FrameHeader {
+            let frame_hdr = FrameHeader {
                 regs_offset: self.values.len().try_into().unwrap(),
                 regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
                 fnid: closure.fnid,
@@ -222,13 +226,13 @@ impl InterpreterData {
                 closure,
                 exc_handlers: Vec::new(),
                 is_module_root_fn: false,
+            };
+            for _ in 0..frame_hdr.regs_count {
+                self.values.push(Slot::Inline(None));
             }
+            self.headers.push(frame_hdr);
         };
 
-        for _ in 0..frame_hdr.regs_count {
-            self.values.push(Slot::Inline(None));
-        }
-        self.headers.push(frame_hdr);
         self.check_invariants();
     }
 
