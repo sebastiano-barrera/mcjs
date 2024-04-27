@@ -74,6 +74,10 @@ macro_rules! gen_value_expect {
 gen_value_expect!(expect_num, Number, f64);
 gen_value_expect!(expect_obj, Object, heap::ObjectId);
 
+/// A *reference* to a closure.
+///
+/// It can be cloned, and the resulting value will "point" to the same closure as the
+/// first one. (These semantics are also in `Value`, and `Closure` inherits them from it).
 #[derive(Clone)]
 pub enum Closure {
     Native(NativeFunction),
@@ -82,12 +86,13 @@ pub enum Closure {
 
 type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> Result<Value>;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct JSClosure {
     fnid: FnId,
     /// TODO There oughta be a better data structure for this
     upvalues: Vec<UpvalueId>,
     forced_this: Option<Value>,
+    generator_snapshot: Option<stack::FrameSnapshot>,
 }
 
 impl JSClosure {
@@ -726,6 +731,7 @@ fn run(
                         fnid: *fnid,
                         upvalues,
                         forced_this,
+                        generator_snapshot: None,
                     });
 
                     let oid = realm.heap.new_function(closure);
@@ -2325,6 +2331,41 @@ mod tests {
                 Some(Literal::Number(123.0)),
                 Some(Literal::String("2".to_string())),
                 Some(Literal::Bool(false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_generator_basic() {
+        let output = quick_run(
+            r#"
+function* makeGenerator() {
+  yield 'first';
+  for (let i=0; i < 5; i++) {
+    yield i * 2;
+  }
+  yield 'last';
+}
+
+const generator = makeGenerator();
+let item;
+do {
+  item = generator.next();
+  sink(item);
+} while (!item.done);
+        "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::String("first".to_string())),
+                Some(Literal::Number(0.0)),
+                Some(Literal::Number(2.0)),
+                Some(Literal::Number(4.0)),
+                Some(Literal::Number(6.0)),
+                Some(Literal::Number(8.0)),
+                Some(Literal::String("last".to_string())),
             ]
         );
     }

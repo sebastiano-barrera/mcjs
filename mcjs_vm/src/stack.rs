@@ -27,6 +27,60 @@ pub struct InterpreterData {
     resuming_from_breakpoint: bool,
 }
 
+// Right now I think it's fine to compare and clone FrameSnapshot objects
+#[derive(PartialEq, Clone)]
+pub struct FrameSnapshot {
+    // restoring a frame from a snapshot starts from the JSClosure object that contains
+    // the FrameSnapshot.  a FrameSnapshot stores whatever is required that isn't already
+    // stored there.
+    //
+    // see `FrameHeader` for a description of the fields
+    fnid: bytecode::FnId,
+    iid: bytecode::IID,
+    this: Value,
+    return_target: Option<VReg>,
+    exc_handlers: Vec<bytecode::IID>,
+    is_module_root_fn: bool,
+
+    // only the slots corresponding to this exact frame.  the restored FrameHeader hdr
+    // will have `hdr.regs_count == slots.len()`.
+    slots: Vec<Slot>,
+}
+
+impl FrameSnapshot {
+    fn capture(header: FrameHeader, all_slots: &Vec<Slot>) -> Self {
+        let ofs = all_slots.len() - header.regs_count as usize;
+        let slots = all_slots[ofs..].to_vec();
+        FrameSnapshot {
+            fnid: header.fnid,
+            iid: header.iid,
+            this: header.this,
+            return_target: header.return_target,
+            exc_handlers: header.exc_handlers,
+            is_module_root_fn: header.is_module_root_fn,
+            slots,
+        }
+    }
+
+    fn restore(self, upvalues: &Vec<UpvalueId>, slots_buffer: &mut Vec<Slot>) -> FrameHeader {
+        let header = FrameHeader {
+            regs_offset: slots_buffer.len().try_into().unwrap(),
+            regs_count: self.slots.len().try_into().unwrap(),
+            fnid: self.fnid,
+            iid: self.iid,
+            this: self.this,
+            return_target: self.return_target,
+            captures: upvalues.clone().into_boxed_slice(),
+            exc_handlers: self.exc_handlers,
+            is_module_root_fn: self.is_module_root_fn,
+        };
+
+        slots_buffer.extend(self.slots);
+
+        header
+    }
+}
+
 // Throughout this module, `Option<Value>` is stored instead of `Value`.  The `None` case
 // represents an uninitialized storage location corresponding to a variable still in the
 // temporal dead zone.   See [1] for the source-level semantics in JavaScript.
@@ -37,7 +91,7 @@ slotmap::new_key_type! { pub struct UpvalueId; }
 
 type Upvalues = slotmap::SlotMap<UpvalueId, Option<Value>>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Slot {
     Inline(Option<Value>),
     Upvalue(UpvalueId),
