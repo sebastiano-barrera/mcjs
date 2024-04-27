@@ -477,6 +477,7 @@ fn run(
                 Instr::Jmp(IID(dest_ndx)) => {
                     next_ndx = *dest_ndx;
                 }
+                Instr::SetResumePoint(_) => todo!("SetResumePoint"),
                 Instr::Return(value) => {
                     let return_value = get_operand(data, *value)?;
                     do_return(return_value, data, realm);

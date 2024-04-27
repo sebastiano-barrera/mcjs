@@ -9,6 +9,7 @@ use std::{collections::HashSet, rc::Rc};
 use swc_atoms::JsWord;
 use swc_common::Spanned;
 
+use crate::define_flag;
 use crate::{common::MultiErrResult, error, impl_debug_via_dump, tracing, util};
 
 macro_rules! unsupported_node {
@@ -100,7 +101,7 @@ impl Block {
                     | StmtOp::TryEnd
                     | StmtOp::Debugger => {}
                     StmtOp::IfNot { test } => check_expr_id(test),
-                    StmtOp::Jump(target) => check_stmt_id(target),
+                    StmtOp::Jump(target) | StmtOp::SetResumePoint(target) => check_stmt_id(target),
                     StmtOp::Return(eid) => check_expr_id(eid),
                     StmtOp::Assign(_, eid) => check_expr_id(eid),
                     StmtOp::Unshare(_) => {}
@@ -357,6 +358,9 @@ pub enum StmtOp {
     },
     Jump(StmtID),
     Return(ExprID),
+    /// Set the 'resume point', the IID that this generator's next() function (it has to
+    /// be!) will resume to
+    SetResumePoint(StmtID),
 
     Assign(Option<DeclName>, ExprID),
     Unshare(DeclName),
@@ -497,6 +501,11 @@ mod builder {
         /// string literal.
         completion_value_var: Option<DeclName>,
         strict_mode: StrictMode,
+
+        /// Whether this function is the `next()` method of a generator.  This is a
+        /// specific function that is emitted as part of the compilation process for
+        /// *generator functions*. See the comment in `compile_function` for context.
+        is_generator_next: bool,
     }
 
     #[derive(PartialEq, Eq)]
@@ -537,11 +546,19 @@ mod builder {
                 errors: Vec::new(),
                 completion_value_var: None,
                 strict_mode: initial_strict_mode,
+                is_generator_next: false,
             };
             // The function's outermost block. Will be retrieved via `pop_block` by `build`
             fnb.push_block();
             fnb.allow_fn_decl();
             fnb
+        }
+
+        pub(super) fn is_generator_next(&self) -> bool {
+            self.is_generator_next
+        }
+        pub(super) fn set_is_generator_next(&mut self) {
+            self.is_generator_next = true;
         }
 
         pub(super) fn source_map(&self) -> &swc_common::SourceMap {
@@ -1035,7 +1052,16 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                     fnb.add_expr(Expr::Undefined)
                 };
 
-                fnb.add_stmt(StmtOp::Return(expr));
+                if fnb.is_generator_next() {
+                    // for a generator's next() function, we want to compile
+                    //    return (x)
+                    // into
+                    //    return { value: x, done: true }
+                    // see the comment in `compile_function` for context.
+                    compile_yield(fnb, expr, YieldDone::Yes);
+                } else {
+                    fnb.add_stmt(StmtOp::Return(expr));
+                }
             }
 
             swc_ecma_ast::Stmt::Break(break_stmt) => {
@@ -1409,6 +1435,30 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
         }
     })
+}
+
+define_flag!(YieldDone);
+
+fn compile_yield(fnb: &mut FnBuilder<'_>, expr: ExprID, done: YieldDone) {
+    let iterator_item = fnb.add_expr(Expr::ObjectCreate);
+    let (_, iterator_item) = create_tmp(fnb, iterator_item);
+
+    let key = fnb.add_expr(Expr::StringLiteral("value".into()));
+    fnb.add_stmt(StmtOp::ObjectSet {
+        obj: iterator_item,
+        key,
+        value: expr,
+    });
+
+    let key = fnb.add_expr(Expr::StringLiteral("done".into()));
+    let done = fnb.add_expr(Expr::BoolLiteral(done.into()));
+    fnb.add_stmt(StmtOp::ObjectSet {
+        obj: iterator_item,
+        key,
+        value: done,
+    });
+
+    fnb.add_stmt(StmtOp::Return(iterator_item));
 }
 
 fn compile_block(fnb: &mut FnBuilder, block_stmt: &swc_ecma_ast::BlockStmt) {
@@ -1797,10 +1847,32 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
             },
             swc_ecma_ast::Expr::Paren(paren_expr) => compile_expr(fnb, &paren_expr.expr),
 
+            swc_ecma_ast::Expr::Yield(yield_expr) => {
+		if yield_expr.delegate {
+		    // `yield*` currently unsupported
+		    unsupported_node!(expr);
+		}
+
+		let expr = match &yield_expr.arg {
+		    Some(arg) => compile_expr(fnb, &*arg),
+		    None => fnb.add_expr(Expr::Undefined),
+		};
+
+
+		let set_resume = fnb.add_stmt(StmtOp::Pending);
+		compile_yield(fnb, expr, YieldDone::No);
+
+		let after_yield = fnb.peek_stmt_id();
+		fnb.set_stmt(set_resume, StmtOp::SetResumePoint(after_yield));
+
+		// TODO Implement sending value
+		fnb.add_expr(Expr::Undefined)
+	    },
+
+
             swc_ecma_ast::Expr::SuperProp(_)
             | swc_ecma_ast::Expr::TaggedTpl(_)
             | swc_ecma_ast::Expr::Class(_)
-            | swc_ecma_ast::Expr::Yield(_)
             | swc_ecma_ast::Expr::MetaProp(_)
             | swc_ecma_ast::Expr::Await(_)
             | swc_ecma_ast::Expr::JSXMember(_)
@@ -2029,25 +2101,88 @@ fn compile_function(
     if swc_func.is_async {
         panic!("unsupported: async functions");
     }
-    if swc_func.is_generator {
-        panic!("unsupported: generator functions");
-    }
-    if swc_func.return_type.is_some() {
-        panic!("unsupported: TypeScript syntax (return type)");
-    }
-    if swc_func.type_params.is_some() {
-        panic!("unsupported: TypeScript syntax (return type)");
+    if swc_func.return_type.is_some() || swc_func.type_params.is_some() {
+        eprintln!("bytecode_compiler: warning: discarding types in function literal");
     }
 
     let stmts = &swc_func.body.as_ref().unwrap().stmts;
-    let mut fnb = builder.new_function(initial_strict_mode);
-    for stmt in stmts {
-        compile_stmt(&mut fnb, stmt);
+
+    if swc_func.is_generator {
+        // we generate somewhat augmented PAST like this (using pseudo-syntax for the
+        // SetResumePoint primitive).  this is the function we're compiling:
+        //
+        //   function* makeGenerator() {
+        //       for (let i=0; i < 5; ++i) {
+        // 	  yield i * 2;
+        //       }
+        //   }
+        //
+        // and this is what we want to translate it into:
+        //
+        //   function makeGenerator() {
+        //     return {
+        //       next() {
+        //         for (let i=0; i < 5; ++i) {
+        //           $resumeAfter {
+        //             return { value: (i * 2), done: false };
+        //           }
+        //         }
+        //         return { value: undefined, done: true };
+        //       }
+        //     }
+        //   }
+        //
+        // $resumeAfter takes a snapshot of the current stack frame and writes it into the
+        // current closure so that, the next time it is called it does not start with a
+        // fresh new stack frame, but by restoring the snapshot. This way, the function
+        // will resume execution right at the end of $resumeAfter, with all of its state
+        // restored.
+        //
+        // to get the result above, some tweaks are also made to the compilation of
+        // `return` statements.
+
+        let next_fn = {
+            let mut fnb = builder.new_function(initial_strict_mode);
+            fnb.set_is_generator_next();
+
+            // statments go into 'next()'; yield statements are going to be compiled by
+            // `compile_yield` which *expects* to be in the inner function!
+            for stmt in stmts {
+                compile_stmt(&mut fnb, stmt);
+            }
+            let strict_mode = fnb.strict_mode();
+            let next_fn_body = fnb.build()?;
+            compile_function_from_parts(swc_func.span, &[], strict_mode, next_fn_body)
+        };
+
+        let mut fnb = builder.new_function(initial_strict_mode);
+        let next_fn = fnb.add_expr(Expr::CreateClosure {
+            func: Box::new(next_fn),
+        });
+        let iterator_wrapper = fnb.add_expr(Expr::ObjectCreate);
+        let (_, iterator_wrapper) = create_tmp(&mut fnb, iterator_wrapper);
+        let key = fnb.add_expr(Expr::StringLiteral("next".into()));
+        fnb.add_stmt(StmtOp::ObjectSet {
+            obj: iterator_wrapper,
+            key,
+            value: next_fn,
+        });
+        fnb.add_stmt(StmtOp::Return(iterator_wrapper));
+
+        let strict_mode = fnb.strict_mode();
+        let body = fnb.build()?;
+        let func = compile_function_from_parts(swc_func.span, &swc_func.params, strict_mode, body);
+        Ok(func)
+    } else {
+        let mut fnb = builder.new_function(initial_strict_mode);
+        for stmt in stmts {
+            compile_stmt(&mut fnb, stmt);
+        }
+        let strict_mode = fnb.strict_mode();
+        let body = fnb.build()?;
+        let func = compile_function_from_parts(swc_func.span, &swc_func.params, strict_mode, body);
+        Ok(func)
     }
-    let strict_mode = fnb.strict_mode();
-    let body = fnb.build()?;
-    let func = compile_function_from_parts(swc_func.span, &swc_func.params, strict_mode, body);
-    Ok(func)
 }
 
 fn compile_function_from_parts(

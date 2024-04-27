@@ -248,6 +248,15 @@ fn compile_one_stmt<'a>(
                 fnb.set_instr(iid, Instr::Jmp(target));
             });
         }
+        StmtOp::SetResumePoint(target_sid) => {
+            let iid = fnb.reserve_instr();
+            let target_sid = *target_sid;
+            fnb.on_block_completion(move |fnb| {
+                let target = fnb.iid_of_stmt(target_sid);
+                fnb.set_instr(iid, Instr::SetResumePoint(target));
+            });
+        }
+
         StmtOp::TryBegin { handler } => {
             let iid = fnb.reserve_instr();
 
