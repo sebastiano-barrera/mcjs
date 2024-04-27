@@ -21,9 +21,10 @@ expression: function.dump_to_string()
               exprs:
                 e0: Read(x)
                 e1: NumberLiteral(3.0)
+                e2: Read(x)
               stmts:
                 [67-72] Assign(Some(x), e1)
-                [67-72] Assign(None, e1)
+                [67-72] Assign(None, e2)
             }
           e1: NumberLiteral(2.0)
         stmts:

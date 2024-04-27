@@ -32,8 +32,6 @@ fn f1
   LoadConst(v9, const[3])
 fn f2
   k0 Number(3.0)
-  k1 Number(3.0)
   LoadCapture(v8, capture[0])
   LoadConst(v8, const[0])
-  LoadConst(v9, const[1])
 

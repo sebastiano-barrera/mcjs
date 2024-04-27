@@ -1726,8 +1726,12 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                     let loc = DeclName::Js(ident.sym.clone());
                     let init_value = fnb.add_expr(Expr::Read(loc.clone()));
                     let value = compile_assignment(fnb, assign_expr, init_value);
-                    fnb.add_stmt(StmtOp::Assign(Some(loc), value));
-                    value
+                    fnb.add_stmt(StmtOp::Assign(Some(loc.clone()), value));
+                    // Important. If anybody wants to use the value of the expression,
+                    // they should read the varable we just assigned (an operation that
+                    // has no side effects) instead of evaluating the rhs expr again
+                    // (which may contain a call!)
+                    fnb.add_expr(Expr::Read(loc))
                 } else if let Some(target_expr) = assign_expr.left.as_expr() {
                     match target_expr {
                         swc_ecma_ast::Expr::Member(member_expr) => {
