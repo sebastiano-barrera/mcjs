@@ -102,8 +102,8 @@ impl Serialize for TestError {
 
         let (category, message) = match self {
             TestError::Read(err) => ("read", err.to_string()),
-            TestError::Load(err) => ("load", err.message()),
-            TestError::Run(err) => ("run", err.message()),
+            TestError::Load(err) => ("load", err.to_string()),
+            TestError::Run(err) => ("run", err.to_string()),
             TestError::Panic(err) => ("panic", err.to_string()),
         };
 

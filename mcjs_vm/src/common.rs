@@ -1,88 +1,118 @@
-use std::rc::Rc;
+use std::{fmt::Write, rc::Rc};
 
 use swc_common::{SourceMap, Span};
 
-struct Item {
-    span: Option<Span>,
+use crate::{bytecode, Loader};
+
+pub struct ErrorItem {
+    src_span: Option<Span>,
+    src_giid: Option<bytecode::GlobalIID>,
     vm_filename: String,
     vm_lineno: u32,
     message: String,
 }
 
-impl std::fmt::Debug for Item {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(span) = self.span {
-            write!(
-                f,
-                "{:?}: {} [VM code at {}:{}]",
-                span, self.message, self.vm_filename, self.vm_lineno
-            )
-        } else {
-            write!(
-                f,
-                "{} [VM code at {}:{}]",
-                self.message, self.vm_filename, self.vm_lineno
-            )
+impl ErrorItem {
+    pub(crate) fn new(message: String, vm_filename: String, vm_lineno: u32) -> Self {
+        ErrorItem {
+            src_span: None,
+            src_giid: None,
+            vm_filename,
+            vm_lineno,
+            message,
         }
     }
-}
 
-impl Item {
-    fn message(&self, buf: &mut String, source_map: Option<&SourceMap>, indent_level: usize) {
-        use std::fmt::Write;
+    pub(crate) fn set_giid(&mut self, giid: bytecode::GlobalIID) {
+        self.src_giid = Some(giid);
+    }
 
-        for _ in 0..indent_level {
-            write!(buf, "  ").unwrap();
+    fn write_to<W: Write>(&self, out: &mut W, loader: Option<&Loader>) {
+        if let Some(bytecode::GlobalIID(fnid, iid)) = &self.src_giid {
+            write!(out, "f{}/i{}: ", fnid.0, iid.0).unwrap();
         }
 
-        match (source_map, self.span) {
-            (Some(source_map), Some(span)) => {
-                let lo = source_map.lookup_char_pos(span.lo);
-                let hi = source_map.lookup_char_pos(span.hi);
+        let src_span = self.src_span.or_else(|| {
+            // No span? Try getting one out of the giid, if we have it
+            let loader = loader?;
+            let giid = self.src_giid?;
+            let bytecode::GlobalIID(fnid, iid) = giid;
+            let breakranges = loader.function_breakranges(fnid)?;
+            let breakrange = breakranges
+                .map(|(_, br)| br)
+                .filter(|br| br.iid_start <= iid && iid < br.iid_end)
+                .min_by_key(|br| br.hi - br.lo)?;
+
+            Some(swc_common::Span::new(
+                breakrange.lo,
+                breakrange.hi,
+                swc_common::SyntaxContext::default(),
+            ))
+        });
+
+        if let Some(src_span) = &src_span {
+            let source_map = loader.map(|l| l.get_source_map());
+            if let Some(source_map) = source_map {
+                let lo = source_map.lookup_char_pos(src_span.lo);
+                let hi = source_map.lookup_char_pos(src_span.hi);
                 write!(
-                    buf,
-                    "{}: {},{} - {},{}: {} [VM code at {}:{}]",
-                    lo.file.name,
-                    lo.line,
-                    lo.col_display,
-                    hi.line,
-                    hi.col_display,
-                    self.message,
-                    self.vm_filename,
-                    self.vm_lineno
+                    out,
+                    "{}: {},{} - {},{}: ",
+                    lo.file.name, lo.line, lo.col_display, hi.line, hi.col_display,
                 )
                 .unwrap();
-            }
-
-            (None, Some(span)) => {
+            } else {
                 write!(
-                    buf,
+                    out,
                     "byte {} - byte {}: {} [VM code at {}:{}]",
-                    span.lo.0, span.hi.0, self.message, self.vm_filename, self.vm_lineno
+                    src_span.lo.0, src_span.hi.0, self.message, self.vm_filename, self.vm_lineno
                 )
                 .unwrap();
             }
-
-            (_, None) => buf.push_str(self.message.as_str()),
         }
+
+        write!(out, "{}", self.message).unwrap();
     }
 }
 
 pub struct Error {
-    head: Item,
-    chain: Vec<Item>,
+    head: ErrorItem,
+    chain: Vec<ErrorItem>,
     source_map: Option<Rc<SourceMap>>,
 }
 
-impl std::fmt::Debug for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message())?;
-        let mut buf = String::new();
+impl Error {
+    pub(crate) fn new(head: ErrorItem) -> Self {
+        Error {
+            head,
+            chain: Vec::new(),
+            source_map: None,
+        }
+    }
+
+    pub(crate) fn from_err<E: std::error::Error>(value: E) -> Self {
+        let message = value.to_string();
+        Error::new(ErrorItem::new(message, String::new(), 0))
+    }
+
+    pub(crate) fn push_context(&mut self, context: ErrorItem) {
+        self.chain.push(context);
+    }
+
+    fn write_to<W: Write>(&self, out: &mut W, loader: Option<&Loader>) -> std::fmt::Result {
+        self.head.write_to(out, loader);
+        writeln!(out)?;
         for ctx_item in self.chain.iter() {
-            ctx_item.message(&mut buf, self.source_map.as_deref(), 0);
-            write!(f, "\n  {}", buf)?;
+            write!(out, "    ")?;
+            ctx_item.write_to(out, loader);
+            writeln!(out, "")?;
         }
         Ok(())
+    }
+}
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.write_to(f, None)
     }
 }
 impl std::fmt::Display for Error {
@@ -93,75 +123,51 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[macro_export]
-macro_rules! error {
+macro_rules! error_item {
     ($($args:expr),+) => {{
         let message = format!($($args),*);
-        $crate::common::Error::new(message, file!().to_owned(), line!())
+        $crate::common::ErrorItem::new(
+            message,
+            file!().to_owned(),
+            line!(),
+        )
     }}
 }
 
-impl From<std::io::Error> for Error {
-    fn from(io_err: std::io::Error) -> Error {
-        error!("{}", io_err)
-    }
-}
-
-impl Error {
-    pub(crate) fn new(message: String, src_filename: String, src_lineno: u32) -> Self {
-        Error {
-            head: Item {
-                span: None,
-                vm_filename: src_filename,
-                vm_lineno: src_lineno,
-                message,
-            },
-            chain: Vec::new(),
-            source_map: None,
-        }
-    }
-
-    pub(crate) fn with_source_map(mut self, source_map: Rc<SourceMap>) -> Self {
-        self.source_map = Some(source_map);
-        self
-    }
-
-    pub fn message(&self) -> String {
-        self.message_ex(0)
-    }
-
-    pub fn message_ex(&self, indent_level: usize) -> String {
-        let mut buf = String::new();
-        let sm = self.source_map.as_ref().map(|rc| rc.as_ref());
-        self.head.message(&mut buf, sm, indent_level);
-        for ctx_item in self.chain.iter() {
-            buf.push('\n');
-            ctx_item.message(&mut buf, sm, indent_level + 1);
-        }
-
-        buf
-    }
-}
-
-pub trait Context<Err> {
-    fn with_context(self, other: Err) -> Self;
-}
-
-impl Context<Error> for Error {
-    fn with_context(mut self, mut other: Self) -> Self {
-        self.chain.push(other.head);
-        self.chain.extend(other.chain);
-        if self.source_map.is_none() {
-            self.source_map = other.source_map.take();
-        }
-        self
-    }
+#[macro_export]
+macro_rules! error {
+    ($($args:expr),+) => {{
+        use crate::error_item;
+        $crate::common::Error::new(error_item!($($args),*))
+    }}
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl<T> Context<Error> for Result<T> {
-    fn with_context(self, other: Error) -> Self {
+pub trait Context<E> {
+    fn with_context(self, other: E) -> Self;
+    fn with_source_map(self, source_map: Rc<SourceMap>) -> Self;
+}
+
+impl Context<ErrorItem> for Error {
+    fn with_context(mut self, context: ErrorItem) -> Self {
+        self.push_context(context);
+        self
+    }
+
+    fn with_source_map(mut self, source_map: Rc<SourceMap>) -> Self {
+        self.source_map = Some(source_map);
+        self
+    }
+}
+
+impl<T> Context<ErrorItem> for std::result::Result<T, Error> {
+    fn with_context(self, other: ErrorItem) -> Self {
         self.map_err(|err| err.with_context(other))
+    }
+
+    fn with_source_map(self, source_map: Rc<SourceMap>) -> Self {
+        self.map_err(|err| err.with_source_map(source_map))
     }
 }
 
@@ -170,32 +176,40 @@ pub type MultiErrResult<T> = std::result::Result<T, MultiError>;
 pub struct MultiError(pub Vec<Error>);
 
 impl MultiError {
-    pub fn message(&self) -> String {
-        use std::fmt::Write;
-        let mut buf = String::new();
-
-        writeln!(buf, "{} errors:\n", self.0.len()).unwrap();
-        for (ndx, err) in self.0.iter().enumerate() {
-            writeln!(buf, "error #{}:", ndx + 1).unwrap();
-            writeln!(buf, "{}", err.message_ex(1)).unwrap();
-        }
-
-        buf
-    }
-
     pub fn into_single(self) -> Error {
         assert!(!self.0.is_empty());
         if self.0.len() == 1 {
             self.0.into_iter().next().unwrap()
         } else {
-            error!("{}", self.message())
+            let mut str_buf = String::new();
+            write!(str_buf, "{:?}", self).unwrap();
+            error!("{}", str_buf)
         }
     }
 }
 
 impl std::fmt::Debug for MultiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "{}", self.message())
+        writeln!(f, "{} errors:", self.0.len())?;
+        for (ndx, err) in self.0.iter().enumerate() {
+            writeln!(f, "error #{}: {}", ndx + 1, err)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct ErrorWithLoader<'a> {
+    err: Error,
+    loader: &'a Loader,
+}
+impl Error {
+    pub(crate) fn with_loader<'a>(self, loader: &'a Loader) -> ErrorWithLoader<'a> {
+        ErrorWithLoader { err: self, loader }
+    }
+}
+impl<'a> std::fmt::Debug for ErrorWithLoader<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.err.write_to(f, Some(self.loader))
     }
 }
 

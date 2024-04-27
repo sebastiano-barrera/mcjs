@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::{cell::Ref, rc::Rc};
 
+use crate::error_item;
 use crate::{
     bytecode::{self, FnId, Instr, VReg, IID},
     common::{self, Result},
@@ -312,7 +313,42 @@ pub fn init_stack(
     data
 }
 
-/// Run bytecode until the stack .  This is the core of the interpreter.
+/// Just a wrapper for `run_inner` that adds some useful context about the interpreter's
+/// state to errors.
+///
+/// See `run_inner` for details.
+fn run(
+    data: &mut stack::InterpreterData,
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+    #[cfg(feature = "debugger")] dbg: &mut Option<&mut debugger::DebuggingState>,
+) -> RunResult<()> {
+    run_inner(
+        data,
+        realm,
+        loader,
+        #[cfg(feature = "debugger")]
+        dbg,
+    )
+    .map_err(|err| {
+        match err {
+            // do nothing
+            RunError::Exception(_) | RunError::Suspended(_) => err,
+            RunError::Internal(mut err) => {
+                for frame in data.frames() {
+                    let mut ctx = error_item!("<- interpreter was here");
+                    let giid = bytecode::GlobalIID(frame.header().fnid, frame.header().iid);
+                    ctx.set_giid(giid);
+                    err.push_context(ctx);
+                }
+
+                RunError::Internal(err)
+            }
+        }
+    })
+}
+
+/// Run bytecode until the stack is depleted.  This is the core of the interpreter.
 ///
 /// Before and after each call, `data` must hold the interpreter's state in
 /// enough detail that this function can resume execution even across separate
@@ -351,7 +387,7 @@ pub fn init_stack(
 /// Upon starting, `run_internal` calls itself again with a 1-higher
 /// `stack_level` so as to restore the mapping between JS and native stacks.
 /// Then it resumes JS execution.
-fn run(
+fn run_inner(
     data: &mut stack::InterpreterData,
     realm: &mut Realm,
     loader: &mut loader::Loader,
@@ -735,7 +771,7 @@ fn run(
                     let module_path = get_operand_string(data, realm, *module_path)?.to_string();
                     let root_fnid = loader
                         .load_import_from_fn(&module_path, fnid)
-                        .with_context(error!("while trying to import '{}'", module_path))?;
+                        .with_context(error_item!("while trying to import '{}'", module_path))?;
 
                     // Commit before reborrowing
                     data.top_mut().set_resume_iid(bytecode::IID(iid.0 + 1));
@@ -1610,7 +1646,13 @@ mod tests {
         let res = std::panic::catch_unwind(|| {
             let mut prereq = prepare_vm(code);
             let vm = prereq.make_vm();
-            vm.run().unwrap().expect_finished()
+            match vm.run() {
+                Ok(exit) => exit.expect_finished(),
+                Err(err_box) => {
+                    let error = err_box.error.with_loader(&prereq.loader);
+                    panic!("{:?}", error);
+                }
+            }
         });
 
         if let Err(err) = &res {

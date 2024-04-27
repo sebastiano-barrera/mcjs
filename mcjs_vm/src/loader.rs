@@ -3,10 +3,10 @@ use std::path::Path;
 use std::rc::Rc;
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::bytecode;
 use crate::bytecode_compiler;
 use crate::common::{Context, Error, Result};
 use crate::error;
+use crate::{bytecode, error_item};
 
 /// A `Loader` manages the loading, compilation and storage of all parts of a
 /// JavaScript codebase.
@@ -264,7 +264,7 @@ impl Loader {
 
             if pkg_dir.join("package.json").is_file() {
                 let package = parse_package(&pkg_dir).map_err(|err| {
-                    err.with_context(error!("while loading imported package '{}'", pkg_name))
+                    err.with_context(error_item!("while loading imported package '{}'", pkg_name))
                 })?;
                 let package = Rc::new(package);
 
@@ -288,7 +288,7 @@ impl Loader {
         }
 
         let content = std::fs::read_to_string(module_path).map_err(|err| {
-            Error::from(err).with_context(error!(
+            Error::from_err(err).with_context(error_item!(
                 "while loading module `{}`",
                 module_path.to_string_lossy()
             ))
@@ -397,7 +397,7 @@ impl Loader {
         // would do).
         let filename = filename.canonicalize().unwrap();
         let content = std::fs::read_to_string(&filename).map_err(|err| {
-            Error::from(err).with_context(error!(
+            Error::from_err(err).with_context(error_item!(
                 "while loading script `{}`",
                 filename.to_string_lossy()
             ))
@@ -459,8 +459,8 @@ impl Loader {
     }
 
     // TODO Remove the _fnid parameter (we now have a single source map for everything)
-    pub fn get_source_map(&self, _fnid: bytecode::FnId) -> Option<&Rc<swc_common::SourceMap>> {
-        Some(&self.source_map)
+    pub fn get_source_map(&self) -> &swc_common::SourceMap {
+        Rc::as_ref(&self.source_map)
     }
 
     pub fn lookup_function(&self, fnid: bytecode::FnId) -> Option<FunctionLookup> {
@@ -519,22 +519,22 @@ fn is_valid_package_name(import_path: &str) -> bool {
 fn parse_package(pkg_path: &Path) -> Result<Package> {
     let pkg_json_path = pkg_path.join("package.json");
     let pkg_json_file = std::fs::File::open(&pkg_json_path)
-        .map_err(Error::from)
-        .with_context(error!(
+        .map_err(Error::from_err)
+        .with_context(error_item!(
             "while opening package.json for {}",
             pkg_path.to_string_lossy()
         ))?;
 
     let pkg_spec_raw = std::io::read_to_string(&pkg_json_file)
-        .map_err(Error::from)
-        .with_context(error!(
+        .map_err(Error::from_err)
+        .with_context(error_item!(
             "while reading package spec [{}]",
             pkg_json_path.to_string_lossy()
         ))?;
 
     let json_value = json::parse(&pkg_spec_raw)
         .map_err(|err| error!("JSON parse error: {}", err))
-        .with_context(error!(
+        .with_context(error_item!(
             "while parsing the JSON in package.json file [{}]",
             pkg_json_path.to_string_lossy()
         ))?;

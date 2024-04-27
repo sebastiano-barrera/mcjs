@@ -26,7 +26,7 @@ fn main() {
     match loader.load_script_file(&filename) {
         Err(err) => {
             eprintln!("error:");
-            eprintln!("{}", err.message());
+            eprintln!("{}", err);
             eprintln!();
         }
         Ok(fnid) => {

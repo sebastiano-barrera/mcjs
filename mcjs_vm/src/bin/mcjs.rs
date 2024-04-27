@@ -57,7 +57,7 @@ fn main() {
                     run_to_completion(&mut realm, &mut loader, fnid);
                 }
                 Err(err) => {
-                    println!(" (!!) compile error: {}", err.message());
+                    println!(" (!!) compile error: {}", err);
                 }
             }
         }
