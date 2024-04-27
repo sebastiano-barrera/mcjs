@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::{cell::Ref, rc::Rc};
@@ -96,7 +97,7 @@ pub struct JSClosure {
     /// TODO There oughta be a better data structure for this
     upvalues: Vec<UpvalueId>,
     forced_this: Option<Value>,
-    generator_snapshot: Option<stack::FrameSnapshot>,
+    generator_snapshot: RefCell<Option<stack::FrameSnapshot>>,
 }
 impl JSClosure {
     #[cfg(feature = "debugger")]
@@ -473,7 +474,7 @@ fn run(
                 Instr::Jmp(IID(dest_ndx)) => {
                     next_ndx = *dest_ndx;
                 }
-                Instr::SetResumePoint(resume_iid) => {
+                Instr::SaveFrameSnapshot(resume_iid) => {
                     data.top_mut().save_snapshot(*resume_iid);
                 }
                 Instr::Return(value) => {
@@ -707,7 +708,7 @@ fn run(
                         fnid: *fnid,
                         upvalues,
                         forced_this,
-                        generator_snapshot: None,
+                        generator_snapshot: RefCell::new(None),
                     }));
 
                     let oid = realm.heap.new_function(closure);

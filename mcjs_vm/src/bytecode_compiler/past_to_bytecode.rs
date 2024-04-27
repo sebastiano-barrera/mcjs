@@ -250,10 +250,10 @@ fn compile_one_stmt<'a>(
         }
         StmtOp::SetResumePoint(target_sid) => {
             let iid = fnb.reserve_instr();
-            let target_sid = *target_sid;
+            let resume_sid = *target_sid;
             fnb.on_block_completion(move |fnb| {
-                let target = fnb.iid_of_stmt(target_sid);
-                fnb.set_instr(iid, Instr::SetResumePoint(target));
+                let resume_iid = fnb.iid_of_stmt(resume_sid);
+                fnb.set_instr(iid, Instr::SaveFrameSnapshot(resume_iid));
             });
         }
 

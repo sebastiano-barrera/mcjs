@@ -1,4 +1,5 @@
-/// [1] "this" substituion: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
+//! [1] "this" substituion: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX};
@@ -32,60 +33,6 @@ pub struct InterpreterData {
     /// enter an infinite loop of always suspending on the same breakpoint!
     #[cfg(feature = "debugger")]
     resuming_from_breakpoint: bool,
-}
-
-// Right now I think it's fine to compare and clone FrameSnapshot objects
-#[derive(PartialEq, Clone)]
-pub struct FrameSnapshot {
-    // restoring a frame from a snapshot starts from the JSClosure object that contains
-    // the FrameSnapshot.  a FrameSnapshot stores whatever is required that isn't already
-    // stored there.
-    //
-    // see `FrameHeader` for a description of the fields
-    fnid: bytecode::FnId,
-    iid: bytecode::IID,
-    this: Value,
-    return_target: Option<VReg>,
-    exc_handlers: Vec<bytecode::IID>,
-    is_module_root_fn: bool,
-
-    // only the slots corresponding to this exact frame.  the restored FrameHeader hdr
-    // will have `hdr.regs_count == slots.len()`.
-    slots: Vec<Slot>,
-}
-
-impl FrameSnapshot {
-    fn capture(header: FrameHeader, all_slots: &Vec<Slot>) -> Self {
-        let ofs = all_slots.len() - header.regs_count as usize;
-        let slots = all_slots[ofs..].to_vec();
-        FrameSnapshot {
-            fnid: header.fnid,
-            iid: header.iid,
-            this: header.this,
-            return_target: header.return_target,
-            exc_handlers: header.exc_handlers,
-            is_module_root_fn: header.is_module_root_fn,
-            slots,
-        }
-    }
-
-    fn restore(self, closure: Rc<JSClosure>, slots_buffer: &mut Vec<Slot>) -> FrameHeader {
-        let header = FrameHeader {
-            regs_offset: slots_buffer.len().try_into().unwrap(),
-            regs_count: self.slots.len().try_into().unwrap(),
-            fnid: self.fnid,
-            iid: self.iid,
-            this: self.this,
-            return_target: self.return_target,
-            exc_handlers: self.exc_handlers,
-            is_module_root_fn: self.is_module_root_fn,
-            closure,
-        };
-
-        slots_buffer.extend(self.slots);
-
-        header
-    }
 }
 
 // Throughout this module, `Option<Value>` is stored instead of `Value`.  The `None` case
@@ -199,7 +146,7 @@ impl InterpreterData {
             fnid,
             upvalues: Vec::new(),
             forced_this: Some(this),
-            generator_snapshot: None,
+            generator_snapshot: RefCell::new(None),
         });
 
         let frame_hdr = FrameHeader {
@@ -239,8 +186,8 @@ impl InterpreterData {
         let callee_func = loader.get_function(closure.fnid).unwrap();
 
         let is_strict = callee_func.is_strict_mode();
-        let this = match (&closure.forced_this, is_strict, local_this) {
-            (Some(value), _, _) => *value,
+        let this = match (closure.forced_this, is_strict, local_this) {
+            (Some(value), _, _) => value,
             // "this" substitution (see [1]).  If I understand this correctly, we don't
             // need to box anything right now.  We just pass the value, and the callee
             // will box it when needed.
@@ -248,22 +195,40 @@ impl InterpreterData {
             (_, _, _) => local_this,
         };
 
-        let frame_hdr = FrameHeader {
-            regs_offset: self.values.len().try_into().unwrap(),
-            regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
-            fnid: closure.fnid,
-            iid: bytecode::IID(0),
-            this,
-            return_target: None,
-            closure,
-            exc_handlers: Vec::new(),
-            is_module_root_fn: false,
+        let gen_snap = closure.generator_snapshot.borrow_mut().take();
+
+        let frame_hdr = if let Some(gen_snap) = gen_snap {
+            // resume the suspended of the generator
+            FrameHeader {
+                regs_offset: self.values.len().try_into().unwrap(),
+                regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
+                fnid: closure.fnid,
+                iid: gen_snap.iid,
+                this: gen_snap.this,
+                return_target: gen_snap.return_target,
+                closure,
+                exc_handlers: gen_snap.exc_handlers,
+                is_module_root_fn: gen_snap.is_module_root_fn,
+            }
+        } else {
+            // brand new call (or just not a generator)
+            FrameHeader {
+                regs_offset: self.values.len().try_into().unwrap(),
+                regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
+                fnid: closure.fnid,
+                iid: bytecode::IID(0),
+                this,
+                return_target: None,
+                closure,
+                exc_handlers: Vec::new(),
+                is_module_root_fn: false,
+            }
         };
+
         for _ in 0..frame_hdr.regs_count {
             self.values.push(Slot::Inline(None));
         }
         self.headers.push(frame_hdr);
-
         self.check_invariants();
     }
 
@@ -535,7 +500,40 @@ impl<'a> FrameMut<'a> {
         self.header.is_module_root_fn = true;
     }
 
-    pub(crate) fn save_snapshot(&mut self, resume_iid: bytecode::IID) {
-        todo!()
+    pub(super) fn save_snapshot(&mut self, resume_iid: bytecode::IID) {
+        let hdr = &mut self.header;
+
+        let snapshot = FrameSnapshot {
+            // Note that this (likely) points to a different IID than the header!
+            iid: resume_iid,
+            this: hdr.this,
+            return_target: hdr.return_target,
+            exc_handlers: hdr.exc_handlers.clone(),
+            is_module_root_fn: hdr.is_module_root_fn,
+            // pity for this allocation
+            slots: self.values.to_vec(),
+        };
+
+        let mut generator_snapshot = hdr.closure.generator_snapshot.borrow_mut();
+        *generator_snapshot = Some(snapshot);
     }
+}
+
+// Right now I think it's fine to compare and clone FrameSnapshot objects
+#[derive(PartialEq, Clone)]
+pub struct FrameSnapshot {
+    // restoring a frame from a snapshot starts from the JSClosure object that contains
+    // the FrameSnapshot.  a FrameSnapshot stores whatever is required that isn't already
+    // stored there.
+    //
+    // see `FrameHeader` for a description of the fields
+    iid: bytecode::IID,
+    this: Value,
+    return_target: Option<VReg>,
+    exc_handlers: Vec<bytecode::IID>,
+    is_module_root_fn: bool,
+
+    // only the slots corresponding to this exact frame.  the restored FrameHeader hdr
+    // will have `hdr.regs_count == slots.len()`.
+    slots: Vec<Slot>,
 }

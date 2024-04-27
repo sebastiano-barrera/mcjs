@@ -154,7 +154,7 @@ pub enum Instr {
         dest: IID,
     },
     Jmp(IID),
-    SetResumePoint(IID),
+    SaveFrameSnapshot(IID),
     PushToSink(VReg),
     Return(VReg),
 
@@ -323,7 +323,7 @@ impl Instr {
             Instr::IsInstanceOf(dst, obj, super_) => { an(D::VRegWrite(*dst)); an(D::VRegRead(*obj)); an(D::VRegRead(*super_)); },
             Instr::JmpIf { cond, dest } => { an(D::VRegRead(*cond)); an(D::IID(*dest)); },
             Instr::Jmp(dest)
-     	    | Instr::SetResumePoint(dest) => { an(D::IID(*dest)); },
+     	    | Instr::SaveFrameSnapshot(dest) => { an(D::IID(*dest)); },
             Instr::PushToSink(arg) => { an(D::VRegRead(*arg)); },
             Instr::Return(arg) => { an(D::VRegRead(*arg)); },
 
