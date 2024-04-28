@@ -88,9 +88,9 @@ pub fn compile_module(func: &js_to_past::Function, min_fnid: u32) -> Result<Comp
 fn trace_dump_module(module: &CompiledModule) {
     let t = tracing::section("bytecode");
     for (fnid, func) in &module.functions {
-        use std::fmt::Write;
+        use std::io::Write;
 
-        let mut buf = String::new();
+        let mut buf = Vec::new();
 
         let mode_name = if func.is_strict_mode() {
             "strict"
@@ -100,16 +100,9 @@ fn trace_dump_module(module: &CompiledModule) {
         writeln!(buf, "mode: {}", mode_name).unwrap();
 
         writeln!(buf).unwrap();
-        writeln!(buf, "-- consts").unwrap();
-        for (ndx, lit) in func.consts().iter().enumerate() {
-            writeln!(buf, "  k{:<4} {:?}", ndx, lit).unwrap();
-        }
+        func.dump(&mut buf).unwrap();
 
-        writeln!(buf, "-- instrs").unwrap();
-        for (ndx, instr) in func.instrs().iter().enumerate() {
-            writeln!(buf, "  {:4} {:?}", ndx, instr).unwrap();
-        }
-
+        let buf = String::from_utf8(buf).unwrap();
         t.log(&format!("{:?}", fnid), &buf);
     }
 }
@@ -1057,6 +1050,7 @@ mod tests {
             .to_string(),
         );
 
+        let mut lock = std::io::stdout().lock();
         for (lfnid, func) in functions.iter() {
             println!(
                 "== function {:?} {}",
@@ -1064,7 +1058,7 @@ mod tests {
                 if lfnid == &root_fnid { "[root]" } else { "" }
             );
 
-            func.dump();
+            func.dump(&mut lock).unwrap();
         }
     }
 

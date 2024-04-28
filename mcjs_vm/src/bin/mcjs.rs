@@ -6,6 +6,7 @@ use std::{
 use mcjs_vm::{FnId, Interpreter, Loader, Realm};
 
 fn main() {
+    let mut stdout = std::io::stdout().lock();
     let config = parse_args();
 
     let mut loader = Loader::new_cwd();
@@ -22,7 +23,11 @@ fn main() {
                     fnid,
                     if fnid == &main_fnid { "[root]" } else { "" }
                 );
-                loader.get_function(*fnid).unwrap().dump();
+                loader
+                    .get_function(*fnid)
+                    .unwrap()
+                    .dump(&mut stdout)
+                    .unwrap();
             }
         }
 

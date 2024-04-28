@@ -512,18 +512,28 @@ impl Function {
         &self.span
     }
 
-    pub fn dump(&self) {
-        println!("-- consts");
-        for (ndx, literal) in self.consts.iter().enumerate() {
-            println!(" {:4} {:?}", ndx, literal);
-        }
-
-        println!("-- instrs");
+    pub fn dump<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
+        writeln!(out, "-- instrs")?;
         for (ndx, instr) in self.instrs.iter().enumerate() {
-            println!(" {:4} {:?}", ndx, instr);
+            write!(out, " {:4} {:15}  ", ndx, instr.opcode())?;
+            instr.analyze(|desc| match desc {
+                InstrDescriptor::Description(txt) => write!(out, "{}:", txt).unwrap(),
+                InstrDescriptor::VRegRead(vreg) => write!(out, "{:?}  ", vreg).unwrap(),
+                InstrDescriptor::VRegWrite(vreg) => write!(out, "{:?}<-  ", vreg).unwrap(),
+                InstrDescriptor::IID(iid) => write!(out, "{:?}  ", iid).unwrap(),
+                InstrDescriptor::Const(const_ndx) => {
+                    let val = &self.consts[const_ndx.0 as usize];
+                    write!(out, "k{:?}  ", val).unwrap();
+                }
+                InstrDescriptor::Capture(cap_ndx) => write!(out, "cap[{}]  ", cap_ndx.0).unwrap(),
+                InstrDescriptor::Arg(arg_ndx) => write!(out, "arg[{}]  ", arg_ndx.0).unwrap(),
+                InstrDescriptor::Null => write!(out, "null  ").unwrap(),
+                InstrDescriptor::Undefined => write!(out, "undefined  ").unwrap(),
+                InstrDescriptor::This => write!(out, "this  ").unwrap(),
+            });
+            writeln!(out)?;
         }
-
-        println!();
+        Ok(())
     }
 }
 
