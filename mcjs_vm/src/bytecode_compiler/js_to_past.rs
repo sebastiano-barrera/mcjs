@@ -2154,6 +2154,14 @@ fn compile_function(
             for stmt in stmts {
                 compile_stmt(&mut fnb, stmt);
             }
+
+            // append an artificial `return undefined` statement to the function, so that
+            // even if the function doesn't end with a `return` statement, we can stil
+            // guarantee that if the function terminates, it does so with a `{ done: true
+            // }` item
+            let undef = fnb.add_expr(Expr::Undefined);
+            compile_yield(&mut fnb, undef, YieldDone::Yes);
+
             let strict_mode = fnb.strict_mode();
             let next_fn_body = fnb.build()?;
             compile_function_from_parts(swc_func.span, &[], strict_mode, next_fn_body)

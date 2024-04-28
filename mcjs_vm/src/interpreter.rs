@@ -2380,6 +2380,7 @@ do {
                 Some(Literal::Number(6.0)),
                 Some(Literal::Number(8.0)),
                 Some(Literal::Number(123.0)),
+                Some(Literal::Undefined),
             ]
         );
     }
