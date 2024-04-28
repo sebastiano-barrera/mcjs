@@ -2358,14 +2358,14 @@ function* makeGenerator() {
   for (let i=0; i < 5; i++) {
     yield i * 2;
   }
-  yield 'last';
+  yield 123;
 }
 
 const generator = makeGenerator();
 let item;
 do {
   item = generator.next();
-  sink(item);
+  sink(item.value);
 } while (!item.done);
         "#,
         );
@@ -2379,7 +2379,7 @@ do {
                 Some(Literal::Number(4.0)),
                 Some(Literal::Number(6.0)),
                 Some(Literal::Number(8.0)),
-                Some(Literal::String("last".to_string())),
+                Some(Literal::Number(123.0)),
             ]
         );
     }
