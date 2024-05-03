@@ -1057,25 +1057,20 @@ fn throw_exc(
     }
 
     loop {
-        if let Some(handler_iid) = data.top_mut().pop_exc_handler() {
-            // t.log(
-            //     "exception handling",
-            //     &format!("internally @ {:?}", handler_iid),
-            // );
+        if data.is_empty() {
+            // we're out of frames! the exception is unhandled
+            return Err(RunError::Exception(exc));
+        }
 
+        // note: top_mut panics if the stack is empty; must be checked beforehand!
+        if let Some(handler_iid) = data.top_mut().pop_exc_handler() {
             data.set_cur_exc(exc);
             data.top_mut().set_resume_iid(handler_iid);
             return Ok(());
         }
 
         // no handler in this frame
-
-        if data.is_empty() {
-            // we're out of frames! the exception is unhandled
-            return Err(RunError::Exception(exc));
-        }
-
-        // pop one frame and retry
+        // => pop one frame and retry
         data.pop();
     }
 }
