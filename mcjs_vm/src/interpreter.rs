@@ -333,7 +333,9 @@ fn run(
     .map_err(|err| {
         match err {
             // do nothing
-            RunError::Exception(_) | RunError::Suspended(_) => err,
+            RunError::Exception(_) => err,
+            #[cfg(feature = "debugger")]
+            RunError::Suspended(_) => err,
             RunError::Internal(mut err) => {
                 for frame in data.frames() {
                     let mut ctx = error_item!("<- interpreter was here");
@@ -2392,6 +2394,7 @@ do {
         use crate::Loader;
 
         #[test]
+        #[cfg(feature = "debugger")]
         fn test_inline_breakpoint() {
             const SOURCE_CODE: &str = "
 function foo() {
@@ -2401,7 +2404,7 @@ function foo() {
 }
 
 foo();
-        ";
+";
 
             let mut loader = Loader::new_cwd();
             let main_fnid = loader.load_script_anon(SOURCE_CODE.to_string()).unwrap();
@@ -2433,6 +2436,7 @@ foo();
         }
 
         #[test]
+        #[cfg(feature = "debugger")]
         fn test_pos_breakpoint() {
             let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             let base_path = manifest_dir.join("test-resources/test-scripts/debugging/");
