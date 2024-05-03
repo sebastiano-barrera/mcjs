@@ -326,16 +326,34 @@ impl eframe::App for AppData {
                             action = Action::Restart;
                         }
 
+                        let data = err.interpreter_state();
+                        // if the stack is empty, we don't have enough info to locate the
+                        // 'failed instruction'
                         if ui
-                            .button("Place breakpoint at failed instruction")
+                            .add_enabled(
+                                !data.is_empty(),
+                                egui::Button::new("Place breakpoint at failed instruction"),
+                            )
                             .clicked()
                         {
-                            let data = err.interpreter_state();
                             let header = data.top().header();
                             let giid = bytecode::GlobalIID(header.fnid, header.iid);
                             self.error_dialog_toast
                                 .start(format!("Set breakpoint at {:?}", giid));
                             action = Action::SetInstrBreakpoint(giid);
+                        }
+
+                        let mut on = self.intrp.debugging_state().should_break_on_throw();
+                        if ui.checkbox(&mut on, "Break on throw").changed() {
+                            action = Action::SetBreakOnThrow(on);
+                        }
+
+                        let mut on = self
+                            .intrp
+                            .debugging_state()
+                            .should_break_on_unhandled_throw();
+                        if ui.checkbox(&mut on, "Break on unhandled throw").changed() {
+                            action = Action::SetBreakOnUnhandledThrow(on);
                         }
                     });
                     self.error_dialog_toast.update(ui);
