@@ -1031,11 +1031,7 @@ mod tests {
 
     #[test]
     fn test_global_var() {
-        let CompiledModule {
-            functions,
-            root_fnid,
-            ..
-        } = quick_compile(
+        quick_compile(
             "
                 (function() {
                     (function() {
@@ -1049,17 +1045,6 @@ mod tests {
                 "
             .to_string(),
         );
-
-        let mut lock = std::io::stdout().lock();
-        for (lfnid, func) in functions.iter() {
-            println!(
-                "== function {:?} {}",
-                lfnid,
-                if lfnid == &root_fnid { "[root]" } else { "" }
-            );
-
-            func.dump(&mut lock).unwrap();
-        }
     }
 
     #[test]
