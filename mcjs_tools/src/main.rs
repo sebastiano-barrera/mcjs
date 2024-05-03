@@ -469,22 +469,27 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
         pane: &mut Pane,
     ) -> egui_tiles::UiResponse {
         // frame_focus_ndx is 0=top, while frames() is first=bottom
-        let frame_ndx = self.intrp_state.len() - 1 - *self.frame_focus_ndx;
-        let frame = self.intrp_state.nth_frame(frame_ndx);
-        let text = match pane {
-            Pane::SourceCode => {
+        let frame = if *self.frame_focus_ndx < self.intrp_state.len() {
+            let frame_ndx = self.intrp_state.len() - 1 - *self.frame_focus_ndx;
+            Some(self.intrp_state.nth_frame(frame_ndx))
+        } else {
+            None
+        };
+
+        let text = match (pane, frame) {
+            (Pane::SourceCode, Some(frame)) => {
                 return source_view::show(ui, self.source_view, &frame, self.loader).tiles;
             }
-            Pane::Bytecode => {
+            (Pane::Bytecode, Some(frame)) => {
                 let is_breakpoint_set = |giid| self.dbg.instr_bkpt_at(&giid).is_some();
                 let res =
                     bytecode_view::show(ui, self.loader, &frame, self.highlight, is_breakpoint_set);
                 self.action.set_if_none(res.action);
                 return res.tiles;
             }
-            Pane::PAST => "PAST",
-            Pane::Heap => "Heap",
-            Pane::Stack => {
+            (Pane::PAST, _) => "PAST",
+            (Pane::Heap, _) => "Heap",
+            (Pane::Stack, _) => {
                 use stack_view::Action;
                 let action = stack_view::show(self.stack_view, ui, self.intrp_state, self.loader);
                 return match action {
@@ -495,6 +500,10 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
                     Action::TabDragStarted => egui_tiles::UiResponse::DragStarted,
                     Action::None => egui_tiles::UiResponse::None,
                 };
+            }
+            (_, None) => {
+                ui.label(" - No frame - ");
+                return egui_tiles::UiResponse::None;
             }
         };
 
