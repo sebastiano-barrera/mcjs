@@ -714,7 +714,7 @@ mod bytecode_view {
 }
 
 mod source_view {
-    use std::{ops::Range, sync::Arc};
+    use std::sync::Arc;
 
     use mcjs_vm::{bytecode, interpreter::stack, Loader};
 
@@ -728,72 +728,55 @@ mod source_view {
         cache: Option<Cache>,
     }
     impl State {
-        fn update(&mut self, fnid: bytecode::FnId, loader: &Loader, ctx: &egui::Context) {
-            let galley_type = GalleyType::Function;
+        fn update(&mut self, giid: bytecode::GlobalIID, loader: &Loader, ctx: &egui::Context) {
             if let Some(cache) = &self.cache {
-                if cache.is_valid(fnid, galley_type) {
+                if cache.is_valid(giid) {
                     return;
                 }
             }
-            self.cache = Cache::build(fnid, loader, ctx, galley_type);
+            self.cache = Cache::build(giid, loader, ctx);
         }
     }
 
     struct Cache {
-        fnid: bytecode::FnId,
-        breakranges: Vec<(mcjs_vm::BreakRangeID, Range<usize>)>,
+        giid: bytecode::GlobalIID,
         galley: Arc<egui::Galley>,
-        galley_type: GalleyType,
-    }
-    #[derive(PartialEq, Eq, Clone, Copy)]
-    enum GalleyType {
-        Function,
-        BreakRange(mcjs_vm::BreakRangeID),
     }
     impl Cache {
-        fn is_valid(&self, fnid: bytecode::FnId, galley_type: GalleyType) -> bool {
-            self.fnid == fnid && self.galley_type == galley_type
+        fn is_valid(&self, giid: bytecode::GlobalIID) -> bool {
+            self.giid == giid
         }
 
-        fn build(
-            fnid: bytecode::FnId,
-            loader: &Loader,
-            ctx: &egui::Context,
-            galley_type: GalleyType,
-        ) -> Option<Cache> {
+        fn build(giid: bytecode::GlobalIID, loader: &Loader, ctx: &egui::Context) -> Option<Cache> {
+            let bytecode::GlobalIID(fnid, iid) = giid;
+
             let func_lookup = loader.lookup_function(fnid)?;
             let start_pos = func_lookup.source_file.start_pos;
-            let breakranges: Vec<_> = loader
+            // the "tightest" breakrange that still encloses the GIID
+            let (hl_start, hl_end) = loader
                 .function_breakranges(fnid)?
-                .map(|(brid, brange)| {
+                .filter(|(_, brange)| brange.iid_start <= iid && iid < brange.iid_end)
+                .min_by_key(|(_, brange)| brange.hi - brange.lo)
+                .map(|(_, brange)| {
                     let lo = (brange.lo - start_pos).0 as usize;
                     let hi = (brange.hi - start_pos).0 as usize;
-                    (brid, lo..hi)
+                    (lo, hi)
                 })
-                .collect();
+                // no breakrange found => highlight "an empty interval" (nothing)
+                .unwrap_or((0, 0));
 
-            let style = egui::Style::default();
-            let hl_start = func_lookup.local_range.start.0 as usize;
-            let hl_end = func_lookup.local_range.end.0 as usize;
-            let normal_color = style.visuals.weak_text_color();
-            let hl_color = style.visuals.strong_text_color();
             let galley = GalleyHighlightParams {
                 full_text: &func_lookup.source_file.src,
                 hl_start,
                 hl_end,
-                normal_color,
-                style: &style,
-                hl_color,
+                normal_color: egui::Style::default().visuals.weak_text_color(),
+                style: &egui::Style::default(),
+                hl_color: egui::Style::default().visuals.strong_text_color(),
                 ctx,
             }
             .into_galley();
 
-            Some(Cache {
-                fnid,
-                galley,
-                breakranges,
-                galley_type,
-            })
+            Some(Cache { giid, galley })
         }
     }
 
@@ -860,7 +843,9 @@ mod source_view {
             .drag_started();
 
         let fnid = frame.header().fnid;
-        state.update(fnid, loader, ui.ctx());
+        let iid = frame.header().iid;
+        let giid = bytecode::GlobalIID(fnid, iid);
+        state.update(giid, loader, ui.ctx());
 
         let cache = match &state.cache {
             Some(cache) => cache,
@@ -874,7 +859,7 @@ mod source_view {
                 return Response::default();
             }
         };
-        assert_eq!(cache.fnid, fnid);
+        assert_eq!(cache.giid, giid);
 
         egui::ScrollArea::both().show(ui, |ui| {
             let text = egui::WidgetText::Galley(Arc::clone(&cache.galley));
