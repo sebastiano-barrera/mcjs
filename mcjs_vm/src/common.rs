@@ -103,7 +103,7 @@ impl Error {
         self.chain.push(context);
     }
 
-    fn write_to<W: Write>(&self, out: &mut W, loader: Option<&Loader>) -> std::fmt::Result {
+    pub fn write_to<W: Write>(&self, out: &mut W, loader: Option<&Loader>) -> std::fmt::Result {
         self.head.write_to(out, loader);
         writeln!(out)?;
         for ctx_item in self.chain.iter() {

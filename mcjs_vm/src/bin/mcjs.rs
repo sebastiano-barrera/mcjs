@@ -71,7 +71,19 @@ fn main() {
 
 fn run_to_completion(realm: &mut Realm, loader: &mut Loader, fnid: FnId) {
     let intrp = Interpreter::new(realm, loader, fnid);
-    intrp.run().expect("runtime error").expect_finished();
+    match intrp.run() {
+        Ok(exit) => {
+            exit.expect_finished();
+        }
+        Err(err) => {
+            let detailed_message = {
+                let mut buf = String::new();
+                err.error.write_to(&mut buf, Some(loader)).unwrap();
+                buf
+            };
+            panic!("{}", detailed_message);
+        }
+    }
 }
 
 struct Config {
