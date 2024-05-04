@@ -329,10 +329,6 @@ impl InterpreterData {
 
 #[cfg(feature = "debugger")]
 impl InterpreterData {
-    pub(crate) fn any_exception_handler(&self) -> bool {
-        self.headers.iter().any(|hdr| !hdr.exc_handlers.is_empty())
-    }
-
     /// Set the "resuming from breakpoint" flag to true.
     pub(crate) fn set_resuming_from_breakpoint(&mut self) {
         self.resuming_from_breakpoint = true;

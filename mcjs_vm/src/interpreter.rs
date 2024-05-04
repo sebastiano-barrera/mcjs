@@ -1045,10 +1045,21 @@ fn throw_exc(
     data: &mut stack::InterpreterData,
     #[cfg(feature = "debugger")] dbg: &Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
+    // depth of the stack frame that has an exception handler = the number of stack frames
+    // to remove from the top as a result of unwinding for exception handling
+    //
+    // None iff there is no exception handler anywhere on the stack (exception is going to be
+    // unhandled)
+    let handler_depth = data
+        .frames()
+        .enumerate()
+        .find(|(_, frame)| !frame.header().exc_handlers.is_empty())
+        .map(|(ndx, _)| ndx);
+
     #[cfg(feature = "debugger")]
     if let Some(dbg) = dbg {
         if dbg.should_break_on_throw()
-            || (dbg.should_break_on_unhandled_throw() && !data.any_exception_handler())
+            || (dbg.should_break_on_unhandled_throw() && handler_depth.is_some())
         {
             // Save the IID so that execution can resume correctly afterwards
             data.top_mut().set_resume_iid(iid);
@@ -1056,22 +1067,25 @@ fn throw_exc(
         }
     }
 
-    loop {
-        if data.is_empty() {
-            // we're out of frames! the exception is unhandled
+    match handler_depth {
+        None => {
+            // NOTE: We return the error but we PRESERVE the state of the stack.  The
+            // interpreter's state (including the stack) is supposed to be discarded
+            // before late anyway, but this gives an opportunity to use the stack for
+            // adding extra context to the error value.
             return Err(RunError::Exception(exc));
         }
 
-        // note: top_mut panics if the stack is empty; must be checked beforehand!
-        if let Some(handler_iid) = data.top_mut().pop_exc_handler() {
+        Some(handler_depth) => {
+            for _ in 0..handler_depth {
+                data.pop();
+            }
+
+            let handler_iid = data.top_mut().pop_exc_handler().unwrap();
             data.set_cur_exc(exc);
             data.top_mut().set_resume_iid(handler_iid);
             return Ok(());
         }
-
-        // no handler in this frame
-        // => pop one frame and retry
-        data.pop();
     }
 }
 
