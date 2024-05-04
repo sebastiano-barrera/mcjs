@@ -26,6 +26,10 @@ impl ErrorItem {
     pub(crate) fn set_giid(&mut self, giid: bytecode::GlobalIID) {
         self.src_giid = Some(giid);
     }
+    pub(crate) fn with_giid(mut self, giid: bytecode::GlobalIID) -> Self {
+        self.set_giid(giid);
+        self
+    }
 
     fn write_to<W: Write>(&self, out: &mut W, loader: Option<&Loader>) {
         if let Some(bytecode::GlobalIID(fnid, iid)) = &self.src_giid {

@@ -280,11 +280,22 @@ impl<'a> Interpreter<'a> {
                     sink,
                 }))
             }
-            Err(RunError::Exception(exc)) => Err(Box::new(InterpreterError {
-                error: error!("unhandled exception: {:?}", exc),
-                #[cfg(feature = "debugger")]
-                intrp_state: self.data,
-            })),
+            Err(RunError::Exception(exc)) => {
+                let mut error = error!("unhandled exception: {:?}", exc);
+                // the stack is maintained intact if the exception was unhandled.
+                // See `throw_exc`
+                for frame in self.data.frames() {
+                    let hdr = frame.header();
+                    let context = error_item!("while running this")
+                        .with_giid(bytecode::GlobalIID(hdr.fnid, hdr.iid));
+                    error.push_context(context);
+                }
+                Err(Box::new(InterpreterError {
+                    error,
+                    #[cfg(feature = "debugger")]
+                    intrp_state: self.data,
+                }))
+            }
             Err(RunError::Internal(common_err)) => Err(Box::new(InterpreterError {
                 error: common_err,
                 #[cfg(feature = "debugger")]
