@@ -117,6 +117,7 @@ impl Heap {
         let new_ordinary = || HeapObject {
             proto_id: None,
             properties: HashMap::new(),
+            order: Vec::new(),
             exotic_part: Exotic::None,
         };
 
@@ -162,6 +163,7 @@ impl Heap {
         self.objects.insert(RefCell::new(HeapObject {
             proto_id: Some(self.object_proto),
             properties: HashMap::new(),
+            order: Vec::new(),
             exotic_part: Exotic::None,
         }))
     }
@@ -271,11 +273,13 @@ impl Heap {
 /// syntax.
 ///
 /// It stores key-value pairs where keys ("properties") are strings, and any JS value can
-/// be stored as value.
+/// be stored as value. It also stores the order in which keys were inserted, so that they
+/// are visited in the same order on iteration.
 #[derive(Debug, Clone)]
 pub struct HeapObject {
     proto_id: Option<ObjectId>,
     properties: HashMap<String, Property>,
+    order: Vec<String>,
     exotic_part: Exotic,
 }
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -425,7 +429,11 @@ impl Object for HeapObject {
                 // do nothing
             }
             (_, IndexOrKey::Key(key)) => {
-                self.properties.insert(key.to_owned(), property);
+                let prev = self.properties.insert(key.to_owned(), property);
+                if prev.is_none() {
+                    self.order.push(key.to_string());
+                }
+                debug_assert_eq!(1, self.order.iter().filter(|x| *x == key).count());
             }
         }
     }
@@ -459,12 +467,6 @@ impl Object for HeapObject {
     }
 
     fn own_properties(&self, only_enumerable: bool, out: &mut Vec<String>) {
-        for (key, prop) in self.properties.iter() {
-            if !only_enumerable || prop.is_enumerable {
-                out.push(key.clone());
-            }
-        }
-
         match &self.exotic_part {
             Exotic::None | Exotic::Function { .. } => {}
             Exotic::Array { elements } => {
@@ -479,6 +481,13 @@ impl Object for HeapObject {
                 if !only_enumerable {
                     out.push("length".to_owned());
                 }
+            }
+        }
+
+        for key in &self.order {
+            let prop = self.properties.get(key).unwrap();
+            if !only_enumerable || prop.is_enumerable {
+                out.push(key.clone());
             }
         }
     }
