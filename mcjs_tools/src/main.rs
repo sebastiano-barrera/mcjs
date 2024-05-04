@@ -1,13 +1,10 @@
 use std::{io::Write, path::PathBuf};
 
 use anyhow::Result;
-use mcjs_vm::{
-    bytecode,
-    interpreter::{
-        self,
-        debugger::{self, InstrBreakpoint},
-        stack,
-    },
+use mcjs_vm::interpreter::{
+    self,
+    debugger::{self, InstrBreakpoint},
+    stack,
 };
 
 fn main() {
@@ -320,27 +317,25 @@ impl eframe::App for AppData {
                 }
                 manager::State::Failed(err) => {
                     ui.heading("Interpreter failed:");
-                    ui.label(format!("{:?}", err));
+                    ui.label(err.message());
                     ui.horizontal(|ui| {
                         if ui.button("Restart").clicked() {
                             action = Action::Restart;
                         }
 
-                        let data = err.interpreter_state();
+                        let giid = err.giid();
                         // if the stack is empty, we don't have enough info to locate the
                         // 'failed instruction'
                         if ui
                             .add_enabled(
-                                !data.is_empty(),
+                                giid.is_some(),
                                 egui::Button::new("Place breakpoint at failed instruction"),
                             )
                             .clicked()
                         {
-                            let header = data.top().header();
-                            let giid = bytecode::GlobalIID(header.fnid, header.iid);
                             self.error_dialog_toast
                                 .start(format!("Set breakpoint at {:?}", giid));
-                            action = Action::SetInstrBreakpoint(giid);
+                            action = Action::SetInstrBreakpoint(giid.unwrap());
                         }
 
                         let mut on = self.intrp.debugging_state().should_break_on_throw();
@@ -1132,7 +1127,36 @@ mod manager {
             cause: interpreter::SuspendCause,
         },
         Finished,
-        Failed(Box<interpreter::InterpreterError>),
+        Failed(InterpreterError),
+    }
+
+    /// An alternative form of `interpreter::InterpreterError` that is geared towards
+    /// being displayed to the user.
+    pub struct InterpreterError {
+        message: String,
+        giid: Option<bytecode::GlobalIID>,
+    }
+    impl InterpreterError {
+        pub fn message(&self) -> &str {
+            &self.message
+        }
+        pub fn giid(&self) -> Option<bytecode::GlobalIID> {
+            self.giid
+        }
+
+        fn from_vm_error(value: &interpreter::InterpreterError, loader: Option<&Loader>) -> Self {
+            let mut message = String::new();
+            value.error.write_to(&mut message, loader).unwrap();
+            let data = value.interpreter_state();
+            let giid = if data.is_empty() {
+                None
+            } else {
+                let hdr = data.top().header();
+                let giid = bytecode::GlobalIID(hdr.fnid, hdr.iid);
+                Some(giid)
+            };
+            InterpreterError { message, giid }
+        }
     }
 
     type Result<T> = std::result::Result<T, Error>;
@@ -1246,7 +1270,10 @@ mod manager {
                         intrp_state,
                         cause,
                     },
-                    Err(err) => State::Failed(err),
+                    Err(ierr) => {
+                        let err = InterpreterError::from_vm_error(&*ierr, Some(&self.loader));
+                        State::Failed(err)
+                    }
                 };
 
                 // Skip the initialized "Ready" state, as it's not relevant for the user
