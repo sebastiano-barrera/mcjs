@@ -2,12 +2,12 @@
 
 use std::rc::Rc;
 
-use super::{literal_to_value, value_to_string, Closure, JSClosure, Realm, Value};
+use super::{literal_to_value, show_value, value_to_string, Closure, JSClosure, Realm, Value};
 
 use crate::bytecode;
 use crate::common::Result;
 use crate::error;
-use crate::heap::{self, IndexOrKey, Object};
+use crate::heap::{self, Object};
 
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let array_ctor = {
@@ -208,24 +208,9 @@ fn nf_Function(_realm: &mut Realm, _this: &Value, _: &[Value]) -> Result<Value> 
 }
 
 fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Value> {
+    let mut out = std::io::stdout().lock();
     for arg in args {
-        if let Value::Object(obj_id) = arg {
-            let obj = realm.heap.get(*obj_id).unwrap().borrow();
-            if let Some(s) = obj.as_str() {
-                println!("  {:?}", s);
-            } else {
-                let mut props = Vec::new();
-                obj.own_properties(false, &mut props);
-                println!("{:?} [{} properties]", obj_id, props.len());
-
-                for prop in props {
-                    let value = obj.get_own(IndexOrKey::Key(&prop));
-                    println!("  - {:?} = {:?}", prop, value);
-                }
-            }
-        } else {
-            println!("{:?}", arg);
-        }
+        show_value(&mut out, *arg, realm);
     }
     Ok(Value::Undefined)
 }

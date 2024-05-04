@@ -1144,9 +1144,9 @@ mod manager {
             self.giid
         }
 
-        fn from_vm_error(value: &interpreter::InterpreterError, loader: Option<&Loader>) -> Self {
+        fn from_vm_error(value: &interpreter::InterpreterError, loader: &Loader) -> Self {
             let mut message = String::new();
-            value.error.write_to(&mut message, loader).unwrap();
+            value.error.write_to(&mut message, Some(loader)).unwrap();
             let data = value.interpreter_state();
             let giid = if data.is_empty() {
                 None
@@ -1271,7 +1271,7 @@ mod manager {
                         cause,
                     },
                     Err(ierr) => {
-                        let err = InterpreterError::from_vm_error(&*ierr, Some(&self.loader));
+                        let err = InterpreterError::from_vm_error(&*ierr, &self.loader);
                         State::Failed(err)
                     }
                 };

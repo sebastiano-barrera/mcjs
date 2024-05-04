@@ -281,7 +281,16 @@ impl<'a> Interpreter<'a> {
                 }))
             }
             Err(RunError::Exception(exc)) => {
-                let mut error = error!("unhandled exception: {:?}", exc);
+                let head_message = {
+                    let mut buf = Vec::new();
+                    let params = &ShowValueParams {
+                        indent: 0,
+                        max_object_depth: 2,
+                    };
+                    show_value_ex(&mut buf, exc, self.realm, params);
+                    String::from_utf8(buf).unwrap()
+                };
+                let mut error = error!("unhandled exception: {}", head_message);
                 // the stack is maintained intact if the exception was unhandled.
                 // See `throw_exc`
                 for frame in self.data.frames() {
@@ -1300,6 +1309,7 @@ fn to_boolean(value: Value, realm: &Realm) -> bool {
     }
 }
 
+/// Implements JavaScript's implicit conversion to string.
 fn value_to_string(value: Value, heap: &heap::Heap) -> String {
     match value {
         Value::Number(num) => num.to_string(),
@@ -1311,6 +1321,65 @@ fn value_to_string(value: Value, heap: &heap::Heap) -> String {
         Value::SelfFunction => "<function>".into(),
         Value::Internal(_) => unreachable!(),
     }
+}
+
+/// Write into `wrt` a human-readable description of the value.
+///
+/// If the value is a string, it will appear in the output.
+///
+/// If the value is an object, a listing of its properties will appear in its output.
+fn show_value<W: std::io::Write>(out: &mut W, value: Value, realm: &mut Realm) {
+    show_value_ex(out, value, realm, &ShowValueParams::default())
+}
+
+fn show_value_ex<W: std::io::Write>(
+    out: &mut W,
+    value: Value,
+    realm: &mut Realm,
+    params: &ShowValueParams,
+) {
+    if let Value::Object(obj_id) = value {
+        let obj = realm.heap.get(obj_id).unwrap().borrow();
+        if let Some(s) = obj.as_str() {
+            writeln!(out, "{:?}", s).unwrap();
+        } else {
+            let mut props = Vec::new();
+            obj.own_properties(false, &mut props);
+            writeln!(out, "{:?} [{} properties]", obj_id, props.len()).unwrap();
+
+            drop(obj);
+            if params.max_object_depth > 0 {
+                for key in props {
+                    for _ in 0..params.indent {
+                        write!(out, "    ").unwrap();
+                    }
+
+                    let property = {
+                        let obj = realm.heap.get(obj_id).unwrap().borrow();
+                        obj.get_own(IndexOrKey::Key(&key)).unwrap()
+                    };
+                    write!(out, "  - {:?} = ", key).unwrap();
+                    show_value_ex(
+                        out,
+                        property.value,
+                        realm,
+                        &ShowValueParams {
+                            indent: params.indent + 1,
+                            max_object_depth: params.max_object_depth - 1,
+                        },
+                    );
+                }
+            }
+        }
+    } else {
+        writeln!(out, "{:?}", value).unwrap();
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct ShowValueParams {
+    indent: u8,
+    max_object_depth: u8,
 }
 
 fn str_append(
