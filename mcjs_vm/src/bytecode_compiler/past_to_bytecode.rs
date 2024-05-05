@@ -480,7 +480,7 @@ fn compile_expr(
             let mut cap_names = Vec::new();
             let mut cap_regs = Vec::new();
 
-            for name in func.unbound_names.iter() {
+            for name in func.as_ref().unbound_names.iter() {
                 let name = DeclName::Js(name.clone());
                 match fnb.resolve_name(&name) {
                     Loc::Reg(reg) => {

@@ -348,7 +348,7 @@ impl StmtID {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ExprID {
     Node(u16, #[cfg(debug_assertions)] BlockID),
     Undefined,
@@ -421,7 +421,7 @@ impl StmtOp {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Expr {
     Undefined,
     Null,
@@ -450,7 +450,7 @@ pub enum Expr {
     ObjectGetKeys(ExprID),
 
     CreateClosure {
-        func: Box<Function>,
+        func: PtrEq<Function, Box<Function>>,
     },
     Call {
         callee: ExprID,
@@ -472,6 +472,26 @@ pub enum Expr {
         flags: String,
     },
     Error,
+}
+
+#[derive(Debug)]
+pub(crate) struct PtrEq<T, P>(P, std::marker::PhantomData<T>);
+impl<T, P: AsRef<T>> PartialEq for PtrEq<T, P> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0.as_ref(), other.0.as_ref())
+    }
+}
+impl<T, P: AsRef<T>> AsRef<T> for PtrEq<T, P> {
+    fn as_ref(&self) -> &T {
+        self.0.as_ref()
+    }
+}
+impl<T, P: AsRef<T>> std::ops::Deref for PtrEq<T, P> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
 }
 
 const ZERO: Expr = Expr::NumberLiteral(0.0);
@@ -752,8 +772,18 @@ mod builder {
                 Expr::Error => ExprID::Error,
                 _ => {
                     let block = self.cur_block_mut();
-                    let expr_id_raw = block.exprs.len().try_into().unwrap();
-                    block.exprs.push(expr);
+                    let expr_id_raw = block
+                        .exprs
+                        .iter()
+                        .enumerate()
+                        .find(|(_, cur)| **cur == expr)
+                        .map(|(ndx, _)| ndx)
+                        .unwrap_or_else(|| {
+                            block.exprs.push(expr);
+                            block.exprs.len() - 1
+                        })
+                        .try_into()
+                        .unwrap();
                     ExprID::Node(
                         expr_id_raw,
                         #[cfg(debug_assertions)]
@@ -1727,7 +1757,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 let func = compile_function_from_parts(arrow_expr.span, &params, strict_mode, body);
 
                 let func_expr = fnb.add_expr(Expr::CreateClosure {
-                    func: Box::new(func),
+                    func: PtrEq(Box::new(func), std::marker::PhantomData),
                 });
 
                 // Unlike regular function declarations/expressions, arrow
@@ -1965,7 +1995,7 @@ fn compile_fn_as_expr(fnb: &mut FnBuilder<'_>, func_ast: &swc_ecma_ast::Function
         }
     };
     fnb.add_expr(Expr::CreateClosure {
-        func: Box::new(func),
+        func: PtrEq(Box::new(func), std::marker::PhantomData),
     })
 }
 
@@ -2217,7 +2247,7 @@ fn compile_function(
 
         let mut fnb = builder.new_function(initial_strict_mode);
         let next_fn = fnb.add_expr(Expr::CreateClosure {
-            func: Box::new(next_fn),
+            func: PtrEq(Box::new(next_fn), std::marker::PhantomData),
         });
         let iterator_wrapper = fnb.add_expr(Expr::ObjectCreate);
         let (_, iterator_wrapper) = create_tmp(&mut fnb, iterator_wrapper);
