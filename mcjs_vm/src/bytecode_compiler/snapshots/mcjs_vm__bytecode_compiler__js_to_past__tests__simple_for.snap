@@ -57,18 +57,6 @@ expression: function.dump_to_string()
             [66-95] Assign(None, e10)
             [52-104] IfNot { test: e10 }
             [52-104] Break(block2)
-            block6 {
-              decls:
-              fn asmts:
-              exprs:
-              stmts:
-                block7 {
-                  decls:
-                  fn asmts:
-                  exprs:
-                  stmts:
-                }
-            }
             [97-100] Assign(Some(i), e13)
             [52-104] Assign(None, e13)
             [52-104] Unshare(i)

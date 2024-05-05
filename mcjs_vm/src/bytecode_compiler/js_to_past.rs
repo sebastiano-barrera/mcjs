@@ -669,7 +669,9 @@ mod builder {
 
             hoist_declarations(&mut self.cur_block_mut().decls, &mut inner_block.decls);
 
-            self.add_stmt(StmtOp::Block(Box::new(inner_block)));
+            if !inner_block.stmts.is_empty() {
+                self.add_stmt(StmtOp::Block(Box::new(inner_block)));
+            }
 
             ret
         }
