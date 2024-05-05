@@ -91,7 +91,11 @@ impl Block {
         #[cfg(debug_assertions)]
         {
             let check_stmt_id = |stmt_id: &StmtID| debug_assert_eq!(stmt_id.1, self.id);
-            let check_expr_id = |expr_id: &ExprID| debug_assert_eq!(expr_id.1, self.id);
+            let check_expr_id = |expr_id: &ExprID| {
+                if let ExprID::Node(_, block_id) = expr_id {
+                    debug_assert_eq!(*block_id, self.id);
+                }
+            };
 
             for stmt in &self.stmts {
                 match &stmt.op {
@@ -172,7 +176,17 @@ impl Block {
     }
 
     pub fn get_expr(&self, expr_id: ExprID) -> &Expr {
-        &self.exprs[expr_id.0 as usize]
+        match expr_id {
+            ExprID::Node(nid, _) => &self.exprs[nid as usize],
+            ExprID::Undefined => &Expr::Undefined,
+            ExprID::Null => &Expr::Null,
+            ExprID::This => &Expr::This,
+            ExprID::ArrayCreate => &Expr::ArrayCreate,
+            ExprID::ObjectCreate => &Expr::ObjectCreate,
+            ExprID::StringCreate => &Expr::StringCreate,
+            ExprID::CurrentException => &Expr::CurrentException,
+            ExprID::Error => &Expr::Error,
+        }
     }
 
     pub fn decls(&self) -> impl ExactSizeIterator<Item = &Decl> {
@@ -195,7 +209,7 @@ impl util::Dump for Block {
         writeln!(f, "fn asmts:")?;
         f.indent();
         for fa in &self.fn_asmts {
-            writeln!(f, "{:?} <- e{}", fa.var_name, fa.expr.0)?;
+            writeln!(f, "{:?} <- {:?}", fa.var_name, fa.expr)?;
         }
         f.dedent();
 
@@ -335,11 +349,31 @@ impl StmtID {
 }
 
 #[derive(Clone, Copy)]
-pub struct ExprID(u16, #[cfg(debug_assertions)] BlockID);
+pub enum ExprID {
+    Node(u16, #[cfg(debug_assertions)] BlockID),
+    Undefined,
+    Null,
+    This,
+    ArrayCreate,
+    ObjectCreate,
+    StringCreate,
+    CurrentException,
+    Error,
+}
 
 impl std::fmt::Debug for ExprID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "e{}", self.0)
+        match self {
+            ExprID::Node(node_id, _) => write!(f, "e{}", node_id),
+            ExprID::Undefined => write!(f, "eUndefined"),
+            ExprID::Null => write!(f, "eNull"),
+            ExprID::This => write!(f, "eThis"),
+            ExprID::ArrayCreate => write!(f, "eArrayCreate"),
+            ExprID::ObjectCreate => write!(f, "eObjectCreate"),
+            ExprID::StringCreate => write!(f, "eStringCreate"),
+            ExprID::CurrentException => write!(f, "eCurrentException"),
+            ExprID::Error => write!(f, "eError"),
+        }
     }
 }
 
@@ -705,14 +739,26 @@ mod builder {
         }
 
         pub(super) fn add_expr(&mut self, expr: Expr) -> ExprID {
-            let block = self.cur_block_mut();
-            let expr_id_raw = block.exprs.len().try_into().unwrap();
-            block.exprs.push(expr);
-            ExprID(
-                expr_id_raw,
-                #[cfg(debug_assertions)]
-                self.cur_block_id(),
-            )
+            match expr {
+                Expr::Undefined => ExprID::Undefined,
+                Expr::Null => ExprID::Null,
+                Expr::This => ExprID::This,
+                Expr::ArrayCreate => ExprID::ArrayCreate,
+                Expr::ObjectCreate => ExprID::ObjectCreate,
+                Expr::StringCreate => ExprID::StringCreate,
+                Expr::CurrentException => ExprID::CurrentException,
+                Expr::Error => ExprID::Error,
+                _ => {
+                    let block = self.cur_block_mut();
+                    let expr_id_raw = block.exprs.len().try_into().unwrap();
+                    block.exprs.push(expr);
+                    ExprID::Node(
+                        expr_id_raw,
+                        #[cfg(debug_assertions)]
+                        self.cur_block_id(),
+                    )
+                }
+            }
         }
 
         pub(super) fn add_unshares_up_to(&mut self, block_id: BlockID) {
