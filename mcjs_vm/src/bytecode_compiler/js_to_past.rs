@@ -128,6 +128,7 @@ impl Block {
                     | Expr::This
                     | Expr::Read(_)
                     | Expr::StringLiteral(_)
+                    | Expr::SymbolLiteral(_)
                     | Expr::NumberLiteral(_)
                     | Expr::BoolLiteral(_)
                     | Expr::ArrayCreate
@@ -432,6 +433,7 @@ pub enum Expr {
     Binary(swc_ecma_ast::BinaryOp, ExprID, ExprID),
 
     StringLiteral(JsWord),
+    SymbolLiteral(&'static str),
     NumberLiteral(f64),
     BoolLiteral(bool),
 
@@ -1400,28 +1402,14 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
 
             swc_ecma_ast::Stmt::ForIn(forin_stmt) => {
-                use swc_ecma_ast::ForHead;
-
-                // let span = forin_stmt.span;
-
                 /* TODO
                 if is_strict_mode:
                     forbid (element var name == any JS keyword)
                         // use is_identifier_keyword
                 */
 
-                let item_var_decl: Decl = match &forin_stmt.left {
-                    ForHead::UsingDecl(_) => unsupported_node!(&forin_stmt.left),
-                    ForHead::VarDecl(var_decl) => {
-                        assert_eq!(var_decl.decls.len(), 1);
-                        let name = compile_name_pat(&var_decl.decls[0].name);
-                        Decl::from_js_var_decl(name, var_decl.kind)
-                    }
-                    ForHead::Pat(pat) => {
-                        let name = compile_name_pat(pat);
-                        Decl::from_js_var_decl(name, swc_ecma_ast::VarDeclKind::Let)
-                    }
-                };
+                let for_head = &forin_stmt.left;
+                let item_var_decl = compile_for_head(for_head);
 
                 fnb.block(|fnb| {
                     let outer_block_id = fnb.cur_block_id();
@@ -1474,7 +1462,71 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                     fnb.add_stmt(StmtOp::Jump(loop_start));
                 });
             }
-            swc_ecma_ast::Stmt::ForOf(_) => todo!(),
+            swc_ecma_ast::Stmt::ForOf(forof_stmt) => {
+                if forof_stmt.is_await {
+                    panic!("unsupported: for (... of await ...)");
+                }
+
+                let item_var_decl = compile_for_head(&forof_stmt.left);
+
+                fnb.block(|fnb| {
+                    fnb.break_exits_this_block(label.cloned());
+
+                    let value_var = item_var_decl.name.clone();
+                    fnb.add_decl(item_var_decl);
+
+                    let iteree = compile_expr(fnb, &forof_stmt.right);
+                    let (_, iteree) = create_tmp(fnb, iteree);
+
+                    // iterator = iteree[@@iterator]
+                    let sym = fnb.add_expr(Expr::SymbolLiteral("iterator"));
+                    let iterator = fnb.add_expr(Expr::ObjectGet {
+                        obj: iteree,
+                        key: sym,
+                    });
+                    let (_, iterator) = create_tmp(fnb, iterator);
+
+                    let loop_start_sid = fnb.peek_stmt_id();
+
+                    // item = iterator.next();
+                    let item = {
+                        let next_lit = fnb.add_expr(Expr::StringLiteral("next".into()));
+                        let method = fnb.add_expr(Expr::ObjectGet {
+                            obj: iterator,
+                            key: next_lit,
+                        });
+                        fnb.add_expr(Expr::Call {
+                            callee: method,
+                            args: Vec::new(),
+                        })
+                    };
+                    let (_, item) = create_tmp(fnb, item);
+
+                    // if ! (!done) { break; }
+                    let done_lit = fnb.add_expr(Expr::StringLiteral("done".into()));
+                    let done = fnb.add_expr(Expr::ObjectGet {
+                        obj: item,
+                        key: done_lit,
+                    });
+                    let keep_going = fnb.add_expr(Expr::Unary(swc_ecma_ast::UnaryOp::Bang, done));
+                    fnb.add_stmt(StmtOp::IfNot { test: keep_going });
+                    fnb.add_stmt(StmtOp::Break(fnb.cur_block_id()));
+
+                    let value_lit = fnb.add_expr(Expr::StringLiteral("value".into()));
+                    let value = fnb.add_expr(Expr::ObjectGet {
+                        obj: item,
+                        key: value_lit,
+                    });
+                    fnb.add_stmt(StmtOp::Assign(Some(value_var), value));
+
+                    fnb.block(|fnb| {
+                        fnb.continue_exits_this_block(label.cloned());
+                        compile_stmt(fnb, &forof_stmt.body);
+                    });
+
+                    fnb.add_stmt(StmtOp::Jump(loop_start_sid));
+                });
+            }
 
             swc_ecma_ast::Stmt::Decl(decl) => {
                 compile_decl(fnb, decl);
@@ -1513,6 +1565,23 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
         }
     })
+}
+
+fn compile_for_head(for_head: &swc_ecma_ast::ForHead) -> Decl {
+    use swc_ecma_ast::ForHead;
+
+    match for_head {
+        ForHead::UsingDecl(_) => unsupported_node!(for_head),
+        ForHead::VarDecl(var_decl) => {
+            assert_eq!(var_decl.decls.len(), 1);
+            let name = compile_name_pat(&var_decl.decls[0].name);
+            Decl::from_js_var_decl(name, var_decl.kind)
+        }
+        ForHead::Pat(pat) => {
+            let name = compile_name_pat(pat);
+            Decl::from_js_var_decl(name, swc_ecma_ast::VarDeclKind::Let)
+        }
+    }
 }
 
 define_flag!(YieldDone);
@@ -2202,7 +2271,7 @@ fn compile_function(
         // and this is what we want to translate it into:
         //
         //   function makeGenerator() {
-        //     return {
+        //     const iterator = {
         //       next() {
         //         for (let i=0; i < 5; ++i) {
         //           $resumeAfter {
@@ -2211,7 +2280,11 @@ fn compile_function(
         //         }
         //         return { value: undefined, done: true };
         //       }
-        //     }
+        //     };
+        //     // the wrapper object is itself an iterator, and can be 
+        //     // used directly by for(...of...)
+        //     iterator[@@iterator] = iterator;
+        //     return iterator;
         //   }
         //
         // $resumeAfter takes a snapshot of the current stack frame and writes it into the
@@ -2251,12 +2324,21 @@ fn compile_function(
         });
         let iterator_wrapper = fnb.add_expr(Expr::ObjectCreate);
         let (_, iterator_wrapper) = create_tmp(&mut fnb, iterator_wrapper);
+        
         let key = fnb.add_expr(Expr::StringLiteral("next".into()));
         fnb.add_stmt(StmtOp::ObjectSet {
             obj: iterator_wrapper,
             key,
             value: next_fn,
         });
+
+        let key = fnb.add_expr(Expr::SymbolLiteral("iterator"));
+        fnb.add_stmt(StmtOp::ObjectSet {
+            obj: iterator_wrapper,
+            key,
+            value: iterator_wrapper,
+        });
+
         fnb.add_stmt(StmtOp::Return(iterator_wrapper));
 
         let strict_mode = fnb.strict_mode();

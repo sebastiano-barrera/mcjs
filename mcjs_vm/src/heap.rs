@@ -48,6 +48,7 @@ pub enum Typeof {
 pub enum IndexOrKey<'a> {
     Index(usize),
     Key(&'a str),
+    Symbol(&'static str),
 }
 impl<'a> IndexOrKey<'a> {
     fn ensure_number_is_index(self) -> Self {
@@ -60,13 +61,7 @@ impl<'a> IndexOrKey<'a> {
                     self
                 }
             }
-        }
-    }
-
-    fn ensure_number_is_key(&self) -> Cow<'a, str> {
-        match self {
-            IndexOrKey::Index(num) => Cow::Owned(num.to_string()),
-            IndexOrKey::Key(key) => Cow::Borrowed(key),
+            IndexOrKey::Symbol(_) => self,
         }
     }
 }
@@ -85,12 +80,14 @@ impl<'a> From<usize> for IndexOrKey<'a> {
 pub enum IndexOrKeyOwned {
     Index(usize),
     Key(String),
+    Symbol(&'static str),
 }
 impl IndexOrKeyOwned {
     pub fn to_ref(&self) -> IndexOrKey {
         match self {
             IndexOrKeyOwned::Index(ndx) => IndexOrKey::Index(*ndx),
             IndexOrKeyOwned::Key(key) => IndexOrKey::Key(key),
+            IndexOrKeyOwned::Symbol(sym) => IndexOrKey::Symbol(sym),
         }
     }
 }
@@ -114,20 +111,13 @@ pub struct Heap {
 
 impl Heap {
     pub(crate) fn new() -> Heap {
-        let new_ordinary = || HeapObject {
-            proto_id: None,
-            properties: HashMap::new(),
-            order: Vec::new(),
-            exotic_part: Exotic::None,
-        };
-
         let mut objects = slotmap::SlotMap::with_key();
-        let object_proto = objects.insert(RefCell::new(new_ordinary()));
-        let number_proto = objects.insert(RefCell::new(new_ordinary()));
-        let string_proto = objects.insert(RefCell::new(new_ordinary()));
-        let func_proto = objects.insert(RefCell::new(new_ordinary()));
-        let bool_proto = objects.insert(RefCell::new(new_ordinary()));
-        let array_proto = objects.insert(RefCell::new(new_ordinary()));
+        let object_proto = objects.insert(RefCell::new(HeapObject::default()));
+        let number_proto = objects.insert(RefCell::new(HeapObject::default()));
+        let string_proto = objects.insert(RefCell::new(HeapObject::default()));
+        let func_proto = objects.insert(RefCell::new(HeapObject::default()));
+        let bool_proto = objects.insert(RefCell::new(HeapObject::default()));
+        let array_proto = objects.insert(RefCell::new(HeapObject::default()));
 
         Heap {
             objects,
@@ -163,6 +153,7 @@ impl Heap {
         self.objects.insert(RefCell::new(HeapObject {
             proto_id: Some(self.object_proto),
             properties: HashMap::new(),
+            sym_properties: HashMap::new(),
             order: Vec::new(),
             exotic_part: Exotic::None,
         }))
@@ -242,8 +233,17 @@ impl Heap {
         self.objects.get(oid)
     }
 
-    pub fn get_property_chained<O: ?Sized + Object>(&self, obj: &O, key: &str) -> Option<Property> {
-        let value = obj.get_own(IndexOrKey::Key(key));
+    pub fn get_property_chained<O: ?Sized + Object>(
+        &self,
+        obj: &O,
+        key: IndexOrKey,
+    ) -> Option<Property> {
+        let value = obj.get_own(key);
+
+        // No chained lookup for numeric keys
+        if let IndexOrKey::Index(_) = key {
+            return value;
+        }
 
         if value.is_some() {
             value
@@ -279,8 +279,20 @@ impl Heap {
 pub struct HeapObject {
     proto_id: Option<ObjectId>,
     properties: HashMap<String, Property>,
+    sym_properties: HashMap<&'static str, Property>,
     order: Vec<String>,
     exotic_part: Exotic,
+}
+impl Default for HeapObject {
+    fn default() -> HeapObject {
+        HeapObject {
+            proto_id: None,
+            properties: HashMap::new(),
+            sym_properties: HashMap::new(),
+            order: Vec::new(),
+            exotic_part: Exotic::None,
+        }
+    }
 }
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Property {
@@ -394,10 +406,11 @@ impl Object for HeapObject {
                 }
                 _ => None,
             },
-            Exotic::None | Exotic::Function { .. } => {
-                let key = index_or_key.ensure_number_is_key();
-                self.properties.get(key.as_ref()).copied()
-            }
+            Exotic::None | Exotic::Function { .. } => match &index_or_key {
+                IndexOrKey::Index(num) => self.properties.get(&num.to_string()).copied(),
+                IndexOrKey::Key(key) => self.properties.get(*key).copied(),
+                IndexOrKey::Symbol(sym) => self.sym_properties.get(sym).copied(),
+            },
         }
     }
     fn set_own(&mut self, index_or_key: IndexOrKey, property: Property) {
@@ -435,6 +448,10 @@ impl Object for HeapObject {
                 }
                 debug_assert_eq!(1, self.order.iter().filter(|x| *x == key).count());
             }
+            (_, IndexOrKey::Symbol(sym)) => {
+                // Properties associated to Symbol keys are not enumerable
+                self.sym_properties.insert(sym, property);
+            }
         }
     }
     fn delete_own(&mut self, index_or_key: IndexOrKey) {
@@ -462,6 +479,9 @@ impl Object for HeapObject {
             }
             (_, IndexOrKey::Key(key)) => {
                 self.properties.remove(key);
+            }
+            (_, IndexOrKey::Symbol(sym)) => {
+                self.sym_properties.remove(sym);
             }
         }
     }
@@ -601,11 +621,11 @@ mod tests {
         assert!(num.get_own("isNumber".into()).is_none());
         assert!(num.get_own("isCool".into()).is_none());
         assert_eq!(
-            heap.get_property_chained(&num, "isNumber"),
+            heap.get_property_chained(&num, IndexOrKey::Key("isNumber")),
             Some(Property::enumerable(Value::Bool(true)))
         );
         assert_eq!(
-            heap.get_property_chained(&num, "isCool"),
+            heap.get_property_chained(&num, IndexOrKey::Key("isCool")),
             Some(Property::enumerable(Value::Bool(true)))
         );
     }
@@ -624,11 +644,11 @@ mod tests {
         assert!(num.get_own("isNumber".into()).is_none());
         assert!(num.get_own("isCool".into()).is_none());
         assert_eq!(
-            heap.get_property_chained(&num, "isNumber"),
+            heap.get_property_chained(&num, IndexOrKey::Key("isNumber")),
             Some(Property::enumerable(Value::Bool(false)))
         );
         assert_eq!(
-            heap.get_property_chained(&num, "isCool"),
+            heap.get_property_chained(&num, IndexOrKey::Key("isCool")),
             Some(Property::enumerable(Value::Bool(true)))
         );
     }
@@ -653,9 +673,12 @@ mod tests {
         let arr = heap.get(arr).unwrap().borrow();
         assert!(arr.get_own("specialArrayProperty".into()).is_none());
         assert_eq!(
-            heap.get_property_chained(arr.deref(), "specialArrayProperty"),
+            heap.get_property_chained(arr.deref(), IndexOrKey::Key("specialArrayProperty")),
             Some(Property::enumerable(Value::Number(999.0)))
         );
-        assert_eq!(heap.get_property_chained(arr.deref(), "isCool"), None);
+        assert_eq!(
+            heap.get_property_chained(arr.deref(), IndexOrKey::Key("isCool")),
+            None
+        );
     }
 }

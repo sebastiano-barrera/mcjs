@@ -380,6 +380,7 @@ impl Instr {
 pub enum Literal {
     Number(f64),
     String(String),
+    Symbol(&'static str),
     JsWord(JsWord),
     Bool(bool),
     Null,

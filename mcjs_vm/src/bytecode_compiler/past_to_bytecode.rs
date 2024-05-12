@@ -428,6 +428,11 @@ fn compile_expr(
             compile_load_const(fnb, dest, bytecode::Literal::String(lit.to_string()));
             dest
         }
+        Expr::SymbolLiteral(lit) => {
+            let dest = get_dest(fnb);
+            compile_load_const(fnb, dest, bytecode::Literal::Symbol(lit));
+            dest
+        }
         Expr::NumberLiteral(lit) => {
             let dest = get_dest(fnb);
             compile_load_const(fnb, dest, bytecode::Literal::Number(*lit));
