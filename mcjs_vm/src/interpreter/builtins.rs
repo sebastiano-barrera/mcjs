@@ -189,9 +189,10 @@ fn nf_String(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Value> 
     let value = args.first().copied();
     let heap = &realm.heap;
 
-    let value_str = value
-        .map(|v| value_to_string(v, heap))
-        .unwrap_or_else(String::new);
+    let value_str = match value {
+        None => "".to_string(),
+        Some(v) => value_to_string(v, heap)?,
+    };
 
     Ok(literal_to_value(
         bytecode::Literal::String(value_str),

@@ -57,6 +57,7 @@ pub enum Value {
     Undefined,
     SelfFunction,
 
+    Symbol(&'static str),
     // TODO(small) remove this. society has evolved past the need for values that can't be created
     // from source code
     Internal(usize),
@@ -634,15 +635,10 @@ fn run_inner(
                     let key = get_operand(data, *key)?;
                     let key = value_to_index_or_key(&realm.heap, &key);
 
-                    let value = match key {
-                        Some(ik @ heap::IndexOrKeyOwned::Index(_)) => obj.get_own(ik.to_ref()),
-                        Some(heap::IndexOrKeyOwned::Key(key)) => {
-                            realm.heap.get_property_chained(&obj, &key)
-                        }
-                        None => None,
-                    }
-                    .map(|p| p.value)
-                    .unwrap_or(Value::Undefined);
+                    let value = key
+                        .and_then(|key| realm.heap.get_property_chained(&obj, key.to_ref()))
+                        .map(|p| p.value)
+                        .unwrap_or(Value::Undefined);
 
                     data.top_mut().set_result(*dest, value);
                 }
@@ -1184,6 +1180,7 @@ fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
             heap::Typeof::Number => "number",
             heap::Typeof::Boolean => "boolean",
         },
+        Value::Symbol(_) => "symbol",
         // TODO(cleanup) This is actually an error in our type system.  null is really a value
         // of the 'object' type
         Value::Null => "object",
@@ -1306,20 +1303,22 @@ fn to_boolean(value: Value, realm: &Realm) -> bool {
         Value::Internal(_) => {
             panic!("bytecode compiler bug: internal value should be unreachable")
         }
+        Value::Symbol(_) => true,
     }
 }
 
 /// Implements JavaScript's implicit conversion to string.
-fn value_to_string(value: Value, heap: &heap::Heap) -> String {
+fn value_to_string(value: Value, heap: &heap::Heap) -> Result<String> {
     match value {
-        Value::Number(num) => num.to_string(),
-        Value::Bool(true) => "true".into(),
-        Value::Bool(false) => "false".into(),
-        Value::Object(oid) => heap.get(oid).unwrap().borrow().js_to_string(),
-        Value::Null => "null".into(),
-        Value::Undefined => "undefined".into(),
-        Value::SelfFunction => "<function>".into(),
+        Value::Number(num) => Ok(num.to_string()),
+        Value::Bool(true) => Ok("true".into()),
+        Value::Bool(false) => Ok("false".into()),
+        Value::Object(oid) => Ok(heap.get(oid).unwrap().borrow().js_to_string()),
+        Value::Null => Ok("null".into()),
+        Value::Undefined => Ok("undefined".into()),
+        Value::SelfFunction => Ok("<function>".into()),
         Value::Internal(_) => unreachable!(),
+        Value::Symbol(_) => Err(error!("Cannot convert Symbol value into a String")),
     }
 }
 
@@ -1392,7 +1391,7 @@ fn str_append(
     let b = get_operand(data, b)?;
 
     let mut buf = get_operand_string(data, realm, a)?.to_owned();
-    let tail = value_to_string(b, &realm.heap);
+    let tail = value_to_string(b, &realm.heap)?;
     buf.push_str(&tail);
     let value = literal_to_value(bytecode::Literal::String(buf), &mut realm.heap);
     Ok(value)
@@ -1409,6 +1408,7 @@ fn literal_to_value(lit: bytecode::Literal, heap: &mut heap::Heap) -> Value {
             let oid = heap.new_string(st.clone());
             Value::Object(oid)
         }
+        bytecode::Literal::Symbol(sym) => Value::Symbol(sym),
         bytecode::Literal::JsWord(jsw) => {
             // TODO(performance) avoid this allocation
             let oid = heap.new_string(jsw.to_string());
@@ -1432,6 +1432,7 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
                 .as_str()
                 .map(|s| bytecode::Literal::String(s.to_owned()))
         }
+        Value::Symbol(sym) => Some(bytecode::Literal::Symbol(sym)),
         Value::Null => Some(bytecode::Literal::Null),
         Value::Undefined => Some(bytecode::Literal::Undefined),
         Value::SelfFunction => None,
@@ -1455,6 +1456,7 @@ fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::Index
             let string = obj.borrow().as_str()?.to_owned();
             Some(heap::IndexOrKeyOwned::Key(string))
         }
+        Value::Symbol(sym) => Some(heap::IndexOrKeyOwned::Symbol(sym)),
         _ => None,
     }
 }
@@ -2472,6 +2474,34 @@ do {
                 Some(Literal::Number(8.0)),
                 Some(Literal::Number(123.0)),
                 Some(Literal::Undefined),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_for_of_generator() {
+        let output = quick_run(
+            r#"
+                function* getSomeNumbers() {
+                    for (let i=0; i < 5; i++) {
+                        yield i * 3;
+                    }
+                }
+
+                for (const value of getSomeNumbers()) {
+                    sink(value);
+                }
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Number(0.0)),
+                Some(Literal::Number(3.0)),
+                Some(Literal::Number(6.0)),
+                Some(Literal::Number(9.0)),
+                Some(Literal::Number(12.0)),
             ]
         );
     }
