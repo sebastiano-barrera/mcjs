@@ -503,16 +503,20 @@ fn run_inner(
 
                 Instr::JmpIf { cond, dest } => {
                     let cond_value = get_operand(data, *cond)?;
-                    match cond_value {
-                        Value::Bool(true) => {
-                            next_ndx = dest.0;
-                        }
-                        Value::Bool(false) => {} // Just go to the next instruction
-                        other => {
-                            return Err(
-                                error!(" invalid if condition (not boolean): {:?}", other).into()
-                            )
-                        }
+                    let cond_value = to_boolean(cond_value, realm);
+                    if cond_value {
+                        next_ndx = dest.0;
+                    } else {
+                        // Just go to the next instruction
+                    }
+                }
+                Instr::JmpIfNot { cond, dest } => {
+                    let cond_value = get_operand(data, *cond)?;
+                    let cond_value = to_boolean(cond_value, realm);
+                    if !cond_value {
+                        next_ndx = dest.0;
+                    } else {
+                        // Just go to the next instruction
                     }
                 }
 
@@ -2502,6 +2506,44 @@ do {
                 Some(Literal::Number(6.0)),
                 Some(Literal::Number(9.0)),
                 Some(Literal::Number(12.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_short_circuiting_and() {
+        let output = quick_run(
+            r#"
+                function getSomethingElse() { sink(2); return 456; }
+                function getFalsy() { sink(1); return ""; }
+                sink(getFalsy() && getSomethingElse());
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Number(1.0)),
+                Some(Literal::String("".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_short_circuiting_or() {
+        let output = quick_run(
+            r#"
+                function getSomethingElse() { sink(2); return 456; }
+                function getTruthy() { sink(1); return 123; }
+                sink(getTruthy() || getSomethingElse());
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Number(1.0)),
+                Some(Literal::Number(123.0)),
             ]
         );
     }

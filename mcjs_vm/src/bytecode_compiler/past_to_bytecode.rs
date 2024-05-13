@@ -393,34 +393,67 @@ fn compile_expr(
         }
         Expr::Binary(op, left, right) => {
             let dest = get_dest(fnb);
-            let left = compile_expr(fnb, None, block, *left);
-            let right = compile_expr(fnb, None, block, *right);
 
-            let instr = match op {
-                swc_ecma_ast::BinaryOp::Add => Instr::OpAdd(dest, left, right),
-                swc_ecma_ast::BinaryOp::Sub => Instr::ArithSub(dest, left, right),
-                swc_ecma_ast::BinaryOp::Mul => Instr::ArithMul(dest, left, right),
-                swc_ecma_ast::BinaryOp::Div => Instr::ArithDiv(dest, left, right),
-                swc_ecma_ast::BinaryOp::Lt => Instr::CmpLT(dest, left, right),
-                swc_ecma_ast::BinaryOp::LtEq => Instr::CmpLE(dest, left, right),
-                swc_ecma_ast::BinaryOp::Gt => Instr::CmpGT(dest, left, right),
-                swc_ecma_ast::BinaryOp::GtEq => Instr::CmpGE(dest, left, right),
-                swc_ecma_ast::BinaryOp::EqEqEq => Instr::CmpEQ(dest, left, right),
-                swc_ecma_ast::BinaryOp::NotEqEq => Instr::CmpNE(dest, left, right),
+            match op {
+                swc_ecma_ast::BinaryOp::LogicalAnd => {
+                    // Short-circuiting &&: return left if left is false; otherwise return right
+                    compile_expr(fnb, Some(dest), block, *left);
+                    let jmpif_iid = fnb.reserve_instr();
+                    compile_expr(fnb, Some(dest), block, *right);
+                    let after_pos = fnb.peek_iid();
 
-                // TODO TODO TODO This does not implement any of the 'wat' semantics of JavaScript
-                // See https://www.destroyallsoftware.com/talks/wat
-                swc_ecma_ast::BinaryOp::EqEq => Instr::CmpEQ(dest, left, right),
-                swc_ecma_ast::BinaryOp::NotEq => Instr::CmpNE(dest, left, right),
+                    fnb.set_instr(
+                        jmpif_iid,
+                        Instr::JmpIfNot {
+                            cond: dest,
+                            dest: after_pos,
+                        },
+                    );
+                }
+                swc_ecma_ast::BinaryOp::LogicalOr => {
+                    // Short-circuiting ||: return right if left is true; otherwise return left
+                    compile_expr(fnb, Some(dest), block, *left);
+                    let jmpif_iid = fnb.reserve_instr();
+                    compile_expr(fnb, Some(dest), block, *right);
+                    let after_pos = fnb.peek_iid();
 
-                swc_ecma_ast::BinaryOp::LogicalAnd => Instr::BoolOpAnd(dest, left, right),
-                swc_ecma_ast::BinaryOp::LogicalOr => Instr::BoolOpOr(dest, left, right),
+                    fnb.set_instr(
+                        jmpif_iid,
+                        Instr::JmpIf {
+                            cond: dest,
+                            dest: after_pos,
+                        },
+                    );
+                }
+                _ => {
+                    let left = compile_expr(fnb, None, block, *left);
+                    let right = compile_expr(fnb, None, block, *right);
 
-                swc_ecma_ast::BinaryOp::InstanceOf => Instr::IsInstanceOf(dest, left, right),
-                _ => panic!("unsupported binary op: {:?}", op),
-            };
+                    let instr = match op {
+                        swc_ecma_ast::BinaryOp::Add => Instr::OpAdd(dest, left, right),
+                        swc_ecma_ast::BinaryOp::Sub => Instr::ArithSub(dest, left, right),
+                        swc_ecma_ast::BinaryOp::Mul => Instr::ArithMul(dest, left, right),
+                        swc_ecma_ast::BinaryOp::Div => Instr::ArithDiv(dest, left, right),
+                        swc_ecma_ast::BinaryOp::Lt => Instr::CmpLT(dest, left, right),
+                        swc_ecma_ast::BinaryOp::LtEq => Instr::CmpLE(dest, left, right),
+                        swc_ecma_ast::BinaryOp::Gt => Instr::CmpGT(dest, left, right),
+                        swc_ecma_ast::BinaryOp::GtEq => Instr::CmpGE(dest, left, right),
+                        swc_ecma_ast::BinaryOp::EqEqEq => Instr::CmpEQ(dest, left, right),
+                        swc_ecma_ast::BinaryOp::NotEqEq => Instr::CmpNE(dest, left, right),
 
-            fnb.emit(instr);
+                        // TODO TODO TODO This does not implement any of the 'wat' semantics of
+                        // JavaScript See https://www.destroyallsoftware.com/talks/wat
+                        swc_ecma_ast::BinaryOp::EqEq => Instr::CmpEQ(dest, left, right),
+                        swc_ecma_ast::BinaryOp::NotEq => Instr::CmpNE(dest, left, right),
+
+                        swc_ecma_ast::BinaryOp::InstanceOf => {
+                            Instr::IsInstanceOf(dest, left, right)
+                        }
+                        _ => panic!("unsupported binary op: {:?}", op),
+                    };
+                    fnb.emit(instr);
+                }
+            }
             dest
         }
         Expr::StringLiteral(lit) => {
