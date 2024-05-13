@@ -2541,10 +2541,7 @@ do {
 
         assert_eq!(
             &output.sink,
-            &[
-                Some(Literal::Number(1.0)),
-                Some(Literal::Number(123.0)),
-            ]
+            &[Some(Literal::Number(1.0)), Some(Literal::Number(123.0)),]
         );
     }
 

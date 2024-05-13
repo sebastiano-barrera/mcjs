@@ -1972,26 +1972,26 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
             swc_ecma_ast::Expr::Paren(paren_expr) => compile_expr(fnb, &paren_expr.expr),
 
             swc_ecma_ast::Expr::Yield(yield_expr) => {
-		if yield_expr.delegate {
-		    // `yield*` currently unsupported
-		    unsupported_node!(expr);
-		}
+                if yield_expr.delegate {
+                    // `yield*` currently unsupported
+                    unsupported_node!(expr);
+                }
 
-		let expr = match &yield_expr.arg {
-		    Some(arg) => compile_expr(fnb, &*arg),
-		    None => fnb.add_expr(Expr::Undefined),
-		};
+                let expr = match &yield_expr.arg {
+                    Some(arg) => compile_expr(fnb, &*arg),
+                    None => fnb.add_expr(Expr::Undefined),
+                };
 
 
-		let set_resume = fnb.add_stmt(StmtOp::Pending);
-		compile_yield(fnb, expr, YieldDone::No);
+                let set_resume = fnb.add_stmt(StmtOp::Pending);
+                compile_yield(fnb, expr, YieldDone::No);
 
-		let after_yield = fnb.peek_stmt_id();
-		fnb.set_stmt(set_resume, StmtOp::SetResumePoint(after_yield));
+                let after_yield = fnb.peek_stmt_id();
+                fnb.set_stmt(set_resume, StmtOp::SetResumePoint(after_yield));
 
-		// TODO Implement sending value
-		fnb.add_expr(Expr::Undefined)
-	    },
+                // TODO Implement sending value
+                fnb.add_expr(Expr::Undefined)
+            },
 
 
             swc_ecma_ast::Expr::SuperProp(_)
@@ -2288,7 +2288,7 @@ fn compile_function(
         //
         //   function* makeGenerator() {
         //       for (let i=0; i < 5; ++i) {
-        // 	  yield i * 2;
+        //           yield i * 2;
         //       }
         //   }
         //
