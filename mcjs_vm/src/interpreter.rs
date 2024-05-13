@@ -863,16 +863,14 @@ fn run_inner(
                     name: bytecode::ConstIndex(name_cndx),
                 } => {
                     let literal = func.consts()[*name_cndx as usize].clone();
-                    let key = {
-                        let str_literal = match &literal {
-                            bytecode::Literal::String(s) => s,
-                            bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
-                            _ => panic!(
-                                "malformed bytecode: GetGlobal argument `name` not a string literal"
-                            ),
-                        };
-                        heap::IndexOrKey::Key(str_literal)
+                    let str_literal = match &literal {
+                        bytecode::Literal::String(s) => s,
+                        bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
+                        _ => panic!(
+                            "malformed bytecode: GetGlobal argument `name` not a string literal"
+                        ),
                     };
+                    let key = heap::IndexOrKey::Key(str_literal);
 
                     let global_this = realm.heap.get(realm.global_obj).unwrap().borrow();
                     let lookup_result = global_this.get_own(key);
@@ -896,6 +894,9 @@ fn run_inner(
                                 let mut exc = realm.heap.get(exc_oid).unwrap().borrow_mut();
                                 exc.set_proto(Some(exc_proto));
                             }
+                            let message = realm.heap.new_string(format!("ReferenceError: {}", str_literal));
+                            let mut exc = realm.heap.get(exc_oid).unwrap().borrow_mut();
+                            exc.set_own(IndexOrKey::Key("message"), heap::Property::enumerable(Value::Object(message)));
 
                             // Duplicate with the Instr::Throw implementation. Not sure how to
                             // improve.
