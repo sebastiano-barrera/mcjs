@@ -1,6 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::{borrow::Cow, cell::RefCell};
 
 use crate::interpreter::{Closure, Value};
 
@@ -527,7 +527,9 @@ impl Object for HeapObject {
 // borrowed ref of a heap-allocated object, and release it correctly when it's
 // time.
 pub enum ValueObjectRef<'h> {
+    #[allow(dead_code)]
     Number(f64, &'h Heap),
+    #[allow(dead_code)]
     Bool(bool, &'h Heap),
     Heap(&'h RefCell<HeapObject>),
 }

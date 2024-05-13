@@ -242,7 +242,7 @@ impl eframe::App for AppData {
                 manager::State::Suspended {
                     script_ndx,
                     intrp_state,
-                    cause: _,
+                    _cause: _,
                 } => {
                     ui.horizontal(|ui| {
                         if ui.button("Continue").clicked() {
@@ -863,7 +863,7 @@ mod source_view {
             if res.secondary_clicked() {
                 let click_pos = res.interact_pointer_pos().unwrap() - res.rect.min;
                 let offset = cache.galley.cursor_from_pos(click_pos).ccursor.index;
-                todo!(" -- list the relevant break ranges");
+                eprintln!("Not yet implemented: list breakranges at offset {}", offset);
             }
         });
 
@@ -888,8 +888,8 @@ mod widgets {
 
     const COLOR_BLUE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
     const COLOR_LIGHT_BLUE: egui::Color32 = egui::Color32::from_rgb(156, 220, 254);
-    const COLOR_ROSE: egui::Color32 = egui::Color32::from_rgb(206, 145, 120);
-    const COLOR_MAGENTA: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
+    // const COLOR_ROSE: egui::Color32 = egui::Color32::from_rgb(206, 145, 120);
+    // const COLOR_MAGENTA: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
     const COLOR_GREEN: egui::Color32 = egui::Color32::from_rgb(78, 201, 176);
     const COLOR_YELLOW: egui::Color32 = egui::Color32::from_rgb(220, 220, 170);
     const COLOR_GREY: egui::Color32 = egui::Color32::GRAY;
@@ -900,9 +900,9 @@ mod widgets {
     const COLOR_NUMBER: egui::Color32 = COLOR_GREEN;
     const COLOR_SINGLETON: egui::Color32 = COLOR_BLUE;
     const COLOR_OBJECT: egui::Color32 = COLOR_LIGHT_BLUE;
-    const COLOR_STRING: egui::Color32 = COLOR_ROSE;
-    const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
-    const COLOR_IID: egui::Color32 = COLOR_GREY;
+    // const COLOR_STRING: egui::Color32 = COLOR_ROSE;
+    // const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
+    // const COLOR_IID: egui::Color32 = COLOR_GREY;
     const COLOR_INVALID: egui::Color32 = COLOR_GREY;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1125,7 +1125,7 @@ mod manager {
         Suspended {
             script_ndx: usize,
             intrp_state: stack::InterpreterData,
-            cause: interpreter::SuspendCause,
+            _cause: interpreter::SuspendCause,
         },
         Finished,
         Failed(InterpreterError),
@@ -1269,7 +1269,7 @@ mod manager {
                     Ok(Exit::Suspended { intrp_state, cause }) => State::Suspended {
                         script_ndx,
                         intrp_state,
-                        cause,
+                        _cause: cause,
                     },
                     Err(ierr) => {
                         let err = InterpreterError::from_vm_error(&*ierr, &self.loader);

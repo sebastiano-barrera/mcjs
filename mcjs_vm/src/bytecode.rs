@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::Serialize;
 use strum::IntoStaticStr;
@@ -425,8 +425,6 @@ pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
     n_regs: u8,
-    // TODO(performance) following elision of Operand, better data structures
-    loop_heads: HashMap<IID, LoopInfo>,
     ident_history: Vec<IdentAsmt>,
     trace_anchors: HashMap<IID, TraceAnchor>,
     is_strict_mode: bool,
@@ -435,13 +433,7 @@ pub struct Function {
 pub struct TraceAnchor {
     pub trace_id: String,
 }
-pub struct LoopInfo {
-    // Variables that change in value during each cycle, in such a way that
-    // each cycle sees the value in  the previous cycle.  Phi instructions are
-    // added based on this set.
-    #[cfg_attr(not(enable_jit), allow(dead_code))]
-    interloop_vars: HashSet<IID>,
-}
+
 
 #[derive(Debug)]
 pub struct IdentAsmt {
@@ -462,15 +454,10 @@ pub struct FunctionBuilder {
 
 impl FunctionBuilder {
     pub(crate) fn build(self) -> Function {
-        #[cfg(to_be_rewritten)]
-        let loop_heads = find_loop_heads(&instrs[..]);
-        #[cfg(not(to_be_rewritten))]
-        let loop_heads = HashMap::new();
         Function {
             instrs: self.instrs,
             consts: self.consts,
             n_regs: self.n_regs,
-            loop_heads,
             ident_history: self.ident_history,
             trace_anchors: self.trace_anchors,
             is_strict_mode: self.is_strict_mode,
@@ -494,10 +481,6 @@ impl Function {
 
     pub fn ident_history(&self) -> &[IdentAsmt] {
         &self.ident_history
-    }
-
-    pub fn is_loop_head(&self, iid: IID) -> bool {
-        self.loop_heads.contains_key(&iid)
     }
 
     pub fn get_trace_anchor(&self, iid: IID) -> Option<&TraceAnchor> {
@@ -541,41 +524,4 @@ impl Function {
         }
         Ok(())
     }
-}
-
-#[cfg(to_be_rewritten)]
-fn find_loop_heads(instrs: &[Instr]) -> HashMap<IID, LoopInfo> {
-    // The set of interloop variables is the set of variables where, within a
-    // loop, at least one read happens before a write.
-    let mut heads = HashMap::new();
-
-    // TODO(small feat) This CAN be linear, can't it?
-    // It ain't linear, but it does the job (plus I don't think
-    // there should be so many nesting levels for loops within the
-    // same function...)
-    for (end_ndx, inst) in instrs.iter().enumerate() {
-        match inst {
-            Instr::Jmp(dest) | Instr::JmpIf { dest, .. } if dest.0 as usize <= end_ndx => {
-                // Loop goes from end_ndx to dest
-                let dest_ndx = dest.0 as usize;
-                let mut interloop_vars = HashSet::new();
-                for ndx in dest_ndx..end_ndx {
-                    let inst = &instrs[ndx];
-                    if let Instr::SetVar { var, .. } = inst {
-                        let var_ndx = var.0 as usize;
-                        assert!(var_ndx < ndx);
-
-                        if var_ndx >= dest_ndx {
-                            interloop_vars.insert(*var);
-                        }
-                    }
-                }
-
-                heads.insert(*dest, LoopInfo { interloop_vars });
-            }
-            _ => {}
-        }
-    }
-
-    heads
 }

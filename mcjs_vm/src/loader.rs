@@ -58,6 +58,7 @@ pub enum FileID {
 
 #[derive(Clone, Copy)]
 pub enum FileIDRef<'a> {
+    #[allow(dead_code)]
     Anon(usize),
     File(&'a Path),
 }
@@ -327,7 +328,6 @@ impl Loader {
         let bytecode_compiler::CompiledChunk {
             root_fnid,
             functions,
-            source_map: _,
             breakable_ranges,
         } = bytecode_compiler::compile_file(file_id.as_fileidref(), content, source_map, flags)?;
         assert!(functions.keys().all(|lfnid| lfnid.0 >= min_fnid));
