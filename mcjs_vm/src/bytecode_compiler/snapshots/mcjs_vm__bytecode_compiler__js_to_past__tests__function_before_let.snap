@@ -19,11 +19,11 @@ expression: function.dump_to_string()
               decls:
               fn asmts:
               exprs:
-                e0: Read(x)
-                e1: NumberLiteral(3.0)
+                e0: NumberLiteral(3.0)
+                e1: Read(x)
               stmts:
-                [67-72] Assign(Some(x), e1)
-                [67-72] Assign(None, e0)
+                [67-72] Assign(Some(x), e0)
+                [67-72] Assign(None, e1)
             }
           e1: NumberLiteral(2.0)
         stmts:

@@ -1850,8 +1850,6 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 fnb.add_expr(Expr::Unary(unary_expr.op, arg))
             }
             swc_ecma_ast::Expr::Update(update_expr) => {
-                let loc = compile_name(swc_ecma_ast::PatOrExpr::Expr(update_expr.arg.clone()));
-
                 let value = compile_expr(fnb, &update_expr.arg);
                 let op = match update_expr.op {
                     swc_ecma_ast::UpdateOp::PlusPlus => swc_ecma_ast::BinaryOp::Add,
@@ -1859,7 +1857,8 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 };
                 let one = fnb.add_expr(ONE);
                 let new_value = fnb.add_expr(Expr::Binary(op, value, one));
-                fnb.add_stmt(StmtOp::Assign(Some(loc), new_value));
+
+                compile_assignment_to_expr(fnb, &update_expr.arg, swc_ecma_ast::AssignOp::Assign, new_value);
 
                 new_value
             }
@@ -1869,34 +1868,8 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
                 fnb.add_expr(Expr::Binary(bin_expr.op, left, right))
             }
             swc_ecma_ast::Expr::Assign(assign_expr) => {
-                if let Some(ident) = assign_expr.left.as_ident() {
-                    let loc = DeclName::Js(ident.sym.clone());
-                    let init_value = fnb.add_expr(Expr::Read(loc.clone()));
-                    let value = compile_assignment(fnb, assign_expr, init_value);
-                    fnb.add_stmt(StmtOp::Assign(Some(loc.clone()), value));
-                    // Important. If anybody wants to use the value of the expression,
-                    // they should read the varable we just assigned (an operation that
-                    // has no side effects) instead of evaluating the rhs expr again
-                    // (which may contain a call!)
-                    fnb.add_expr(Expr::Read(loc))
-                } else if let Some(target_expr) = assign_expr.left.as_expr() {
-                    match target_expr {
-                        swc_ecma_ast::Expr::Member(member_expr) => {
-                            compile_member_assignment(fnb, assign_expr, member_expr)
-                        }
-                        // We should have already handled this case in the `if let ... = asm.left.as_ident()`
-                        // case
-                        swc_ecma_ast::Expr::Ident(_) => panic!("assertion failed"),
-                        _ => {
-                            panic!("assignment to an expression is unsupported")
-                        }
-                    }
-                } else {
-                    panic!(
-                        "unsupported pattern as assignment target: {:?}",
-                        assign_expr.left
-                    )
-                }
+                let value = compile_expr(fnb, &assign_expr.right);
+                compile_assignment(fnb, &assign_expr.left, assign_expr.op, value)
             }
             swc_ecma_ast::Expr::Member(member_expr) => {
                 let obj = compile_expr(fnb, &member_expr.obj);
@@ -2046,6 +2019,101 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
     })
 }
 
+fn compile_assignment(
+    fnb: &mut FnBuilder<'_>,
+    left: &swc_ecma_ast::PatOrExpr,
+    op: swc_ecma_ast::AssignOp,
+    right: ExprID,
+) -> ExprID {
+    if let Some(ident) = left.as_ident() {
+        compile_assignment_to_ident(fnb, ident, op, right)
+    } else if let Some(target_expr) = left.as_expr() {
+        compile_assignment_to_expr(fnb, target_expr, op, right)
+    } else {
+        panic!("unsupported pattern as assignment target: {:?}", left)
+    }
+}
+
+fn compile_assignment_to_expr(
+    fnb: &mut FnBuilder<'_>,
+    target_expr: &swc_ecma_ast::Expr,
+    op: swc_ecma_ast::AssignOp,
+    value_expr: ExprID,
+) -> ExprID {
+    match target_expr {
+        swc_ecma_ast::Expr::Member(member_expr) => {
+            compile_member_assignment(fnb, member_expr, op, value_expr)
+        }
+        // We should have already handled this case in the `if let ... = asm.left.as_ident()`
+        // case
+        swc_ecma_ast::Expr::Ident(ident) => compile_assignment_to_ident(fnb, ident, op, value_expr),
+        _ => {
+            panic!("assignment to an expression is unsupported")
+        }
+    }
+}
+
+fn compile_assignment_to_ident(
+    fnb: &mut FnBuilder<'_>,
+    ident: &swc_ecma_ast::Ident,
+    op: swc_ecma_ast::AssignOp,
+    value_expr: ExprID,
+) -> ExprID {
+    let loc = DeclName::Js(ident.sym.clone());
+    let value = compile_update_to_asmt(
+        fnb,
+        |fnb| fnb.add_expr(Expr::Read(loc.clone())),
+        op,
+        value_expr,
+    );
+    fnb.add_stmt(StmtOp::Assign(Some(loc.clone()), value));
+    // Important. If anybody wants to use the value of the expression,
+    // they should read the varable we just assigned (an operation that
+    // has no side effects) instead of evaluating the rhs expr again
+    // (which may contain a call!)
+    fnb.add_expr(Expr::Read(loc))
+}
+
+fn compile_member_assignment(
+    fnb: &mut FnBuilder,
+    member_expr: &swc_ecma_ast::MemberExpr,
+    op: swc_ecma_ast::AssignOp,
+    value: ExprID,
+) -> ExprID {
+    let key = compile_object_key(fnb, &member_expr.prop);
+    let obj = compile_expr(fnb, &member_expr.obj);
+
+    let (_, key) = create_tmp(fnb, key);
+    let (_, obj) = create_tmp(fnb, obj);
+
+    let value = compile_update_to_asmt(
+        fnb,
+        |fnb| fnb.add_expr(Expr::ObjectGet { obj, key }),
+        op,
+        value,
+    );
+    fnb.add_stmt(StmtOp::ObjectSet { obj, key, value });
+
+    value
+}
+
+fn compile_update_to_asmt<F: FnOnce(&mut FnBuilder) -> ExprID>(
+    fnb: &mut FnBuilder,
+    get_left: F,
+    op: swc_ecma_ast::AssignOp,
+    right: ExprID,
+) -> ExprID {
+    match op.to_update() {
+        // regular assignment
+        None => right,
+        // updating assignment
+        Some(binop) => {
+            let left = get_left(fnb);
+            fnb.add_expr(Expr::Binary(binop, left, right))
+        }
+    }
+}
+
 fn compile_fn_expr(fnb: &mut FnBuilder, fn_expr: &swc_ecma_ast::FnExpr) -> ExprID {
     compile_fn_as_expr(fnb, &fn_expr.function)
 }
@@ -2068,38 +2136,6 @@ fn compile_fn_as_expr(fnb: &mut FnBuilder<'_>, func_ast: &swc_ecma_ast::Function
     })
 }
 
-fn compile_member_assignment(
-    fnb: &mut FnBuilder,
-    assign_expr: &swc_ecma_ast::AssignExpr,
-    member_expr: &swc_ecma_ast::MemberExpr,
-) -> ExprID {
-    let key = compile_object_key(fnb, &member_expr.prop);
-    let obj = compile_expr(fnb, &member_expr.obj);
-
-    let (_, key) = create_tmp(fnb, key);
-    let (_, obj) = create_tmp(fnb, obj);
-
-    let init_value = fnb.add_expr(Expr::ObjectGet { obj, key });
-    let value = compile_assignment(fnb, assign_expr, init_value);
-    fnb.add_stmt(StmtOp::ObjectSet { obj, key, value });
-
-    value
-}
-
-fn compile_assignment(
-    fnb: &mut FnBuilder,
-    assign_expr: &swc_ecma_ast::AssignExpr,
-    init_value: ExprID,
-) -> ExprID {
-    let rhs = compile_expr(fnb, &assign_expr.right);
-    match assign_expr.op.to_update() {
-        // regular assignment
-        None => rhs,
-        // updating assignment
-        Some(binop) => fnb.add_expr(Expr::Binary(binop, init_value, rhs)),
-    }
-}
-
 fn create_tmp(fnb: &mut FnBuilder, value: ExprID) -> (DeclName, ExprID) {
     let tmp = fnb.decl_tmp();
     fnb.add_stmt(StmtOp::Assign(Some(tmp.clone()), value));
@@ -2117,18 +2153,6 @@ fn compile_object_key(fnb: &mut FnBuilder, prop: &swc_ecma_ast::MemberProp) -> E
             unsupported_node!(prop)
         }
     }
-}
-
-fn compile_name(pat_or_expr: swc_ecma_ast::PatOrExpr) -> DeclName {
-    let pat = match pat_or_expr {
-        swc_ecma_ast::PatOrExpr::Expr(expr) => match *expr {
-            swc_ecma_ast::Expr::Ident(ident) => swc_ecma_ast::Pat::Ident(ident.into()),
-            other => panic!("invalid target for assignment: {:?}", other),
-        },
-        swc_ecma_ast::PatOrExpr::Pat(pat) => *pat,
-    };
-
-    compile_name_pat(&pat)
 }
 
 fn compile_name_pat(pat: &swc_ecma_ast::Pat) -> DeclName {
@@ -2281,7 +2305,7 @@ fn compile_function(
         //         return { value: undefined, done: true };
         //       }
         //     };
-        //     // the wrapper object is itself an iterator, and can be 
+        //     // the wrapper object is itself an iterator, and can be
         //     // used directly by for(...of...)
         //     iterator[@@iterator] = iterator;
         //     return iterator;
@@ -2324,7 +2348,7 @@ fn compile_function(
         });
         let iterator_wrapper = fnb.add_expr(Expr::ObjectCreate);
         let (_, iterator_wrapper) = create_tmp(&mut fnb, iterator_wrapper);
-        
+
         let key = fnb.add_expr(Expr::StringLiteral("next".into()));
         fnb.add_stmt(StmtOp::ObjectSet {
             obj: iterator_wrapper,
