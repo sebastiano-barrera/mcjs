@@ -16,7 +16,7 @@ use crate::{bytecode, error_item};
 ///
 /// It stores modules, associating them to unique IDs.
 pub struct Loader {
-    /// This is the "current directory" used the import resolution algoritm for
+    /// This is the "current directory" used the import resolution algorithm for
     /// import statements that appear in REPL fragments.
     ///
     /// Always absolute.
