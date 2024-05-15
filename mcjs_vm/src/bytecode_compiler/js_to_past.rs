@@ -71,7 +71,7 @@ pub struct Block {
     exprs: Vec<Expr>,
 
     is_function_decl_allowed: bool,
-    is_loop: bool,
+    is_trace_head: bool,
 }
 impl_debug_via_dump!(Block);
 
@@ -195,8 +195,8 @@ impl Block {
         self.decls.iter()
     }
 
-    pub fn is_loop(&self) -> bool {
-        self.is_loop
+    pub fn is_trace_head(&self) -> bool {
+        self.is_trace_head
     }
 }
 
@@ -205,8 +205,8 @@ impl util::Dump for Block {
         writeln!(f, "{:?} {{", self.id)?;
         f.indent();
 
-        if self.is_loop {
-            writeln!(f, "[loop]")?;
+        if self.is_trace_head {
+            writeln!(f, "[trace head]")?;
         }
 
         writeln!(f, "decls:")?;
@@ -651,8 +651,8 @@ mod builder {
             self.blocks.last_mut().unwrap()
         }
 
-        pub(super) fn set_block_is_loop(&mut self) {
-            self.cur_block_mut().is_loop = true;
+        pub(super) fn set_block_is_trace_head(&mut self) {
+            self.cur_block_mut().is_trace_head = true;
         }
 
         fn push_block(&mut self) {
@@ -667,7 +667,7 @@ mod builder {
                 stmts: Vec::new(),
                 exprs: Vec::new(),
                 is_function_decl_allowed: false,
-                is_loop: false,
+                is_trace_head: false,
             });
         }
         fn pop_block(&mut self) -> Block {
@@ -1329,7 +1329,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
             swc_ecma_ast::Stmt::While(while_stmt) => {
                 fnb.block(|fnb| {
-                    fnb.set_block_is_loop();
+                    fnb.set_block_is_trace_head();
                     fnb.break_exits_this_block(label.cloned());
                     let block_start = fnb.peek_stmt_id();
 
@@ -1350,7 +1350,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
             swc_ecma_ast::Stmt::DoWhile(dowhile_stmt) => {
                 fnb.block(|fnb| {
-                    fnb.set_block_is_loop();
+                    fnb.set_block_is_trace_head();
                     fnb.break_exits_this_block(label.cloned());
 
                     let block_start = fnb.peek_stmt_id();
@@ -1390,7 +1390,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                     }
 
                     fnb.block(|fnb| {
-                        fnb.set_block_is_loop();
+                        fnb.set_block_is_trace_head();
                         let loop_start = fnb.peek_stmt_id();
 
                         if let Some(test_expr) = &for_stmt.test {
@@ -1430,7 +1430,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
 
                 fnb.block(|fnb| {
                     let outer_block_id = fnb.cur_block_id();
-                    fnb.set_block_is_loop();
+                    fnb.set_block_is_trace_head();
                     fnb.break_exits_this_block(label.cloned());
 
                     let item_var = item_var_decl.name.clone();
@@ -1488,7 +1488,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                 let item_var_decl = compile_for_head(&forof_stmt.left);
 
                 fnb.block(|fnb| {
-                    fnb.set_block_is_loop();
+                    fnb.set_block_is_trace_head();
                     fnb.break_exits_this_block(label.cloned());
 
                     let value_var = item_var_decl.name.clone();

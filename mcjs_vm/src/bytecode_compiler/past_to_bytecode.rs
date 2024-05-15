@@ -741,7 +741,7 @@ fn compile_block(fnb: &mut FnBuilder, block: &Block) {
 }
 
 fn compile_block_internal(fnb: &mut FnBuilder, block: &Block) {
-    if block.is_loop() {
+    if block.is_trace_head() {
         fnb.emit(Instr::TraceEnter(None));
     }
 

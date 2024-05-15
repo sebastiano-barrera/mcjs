@@ -21,7 +21,7 @@ expression: function.dump_to_string()
       stmts:
         [52-104] Assign(Some(i), e0)
         block3 {
-          [loop]
+          [trace head]
           decls:
           fn asmts:
           exprs:
