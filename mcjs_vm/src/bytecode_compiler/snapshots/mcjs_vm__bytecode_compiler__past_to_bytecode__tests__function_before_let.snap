@@ -6,6 +6,7 @@ fn f0
   k0 String("prototype")
   k1 JsWord(Atom('Function' type=static))
   k2 String("constructor")
+  TraceEnter(None)
   ClosureNew { dest: v9, fnid: f1, forced_this: None }
   LoadConst(v10, const[0])
   ObjCreateEmpty(v11)
@@ -20,6 +21,7 @@ fn f1
   k1 JsWord(Atom('Function' type=static))
   k2 String("constructor")
   k3 Number(2.0)
+  TraceEnter(None)
   LoadUndefined(v8)
   ClosureNew { dest: v8, fnid: f2, forced_this: None }
   ClosureAddCapture(v9)
@@ -33,5 +35,5 @@ fn f1
 fn f2
   k0 Number(3.0)
   LoadCapture(v8, capture[0])
+  TraceEnter(None)
   LoadConst(v8, const[0])
-

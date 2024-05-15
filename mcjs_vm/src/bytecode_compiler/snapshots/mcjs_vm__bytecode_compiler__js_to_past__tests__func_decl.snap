@@ -3,12 +3,14 @@ source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function.dump_to_string()
 ---
 [1-35] func () unbound[myFunction] Sloppy block0 {
+  [trace head]
   decls:
   fn asmts:
     myFunction <- e0
   exprs:
     e0: CreateClosure:
       [1-35] func () unbound[] Sloppy block1 {
+        [trace head]
         decls:
         fn asmts:
         exprs:

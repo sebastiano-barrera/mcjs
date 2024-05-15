@@ -3,21 +3,25 @@ source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function.dump_to_string()
 ---
 [18-258] func () unbound[console, someGlobalVar] Sloppy block0 {
+  [trace head]
   decls:
   fn asmts:
   exprs:
     e0: CreateClosure:
       [19-255] func () unbound[console, someGlobalVar] Sloppy block1 {
+        [trace head]
         decls:
         fn asmts:
         exprs:
           e0: CreateClosure:
             [49-234] func () unbound[console, someGlobalVar] Sloppy block2 {
+              [trace head]
               decls:
               fn asmts:
               exprs:
                 e0: CreateClosure:
                   [79-213] func () unbound[console, someGlobalVar] Sloppy block3 {
+                    [trace head]
                     decls:
                       Decl: someLocalVar = TDZ [conflicting]
                     fn asmts:

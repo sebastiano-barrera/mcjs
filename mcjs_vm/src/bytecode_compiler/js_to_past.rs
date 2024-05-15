@@ -616,6 +616,7 @@ mod builder {
             // The function's outermost block. Will be retrieved via `pop_block` by `build`
             fnb.push_block();
             fnb.allow_fn_decl();
+            fnb.set_block_is_trace_head();
             fnb
         }
 

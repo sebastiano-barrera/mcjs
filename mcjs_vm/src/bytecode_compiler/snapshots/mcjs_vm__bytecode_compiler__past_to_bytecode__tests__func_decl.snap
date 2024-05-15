@@ -7,6 +7,7 @@ fn f0
   k1 String("prototype")
   k2 JsWord(Atom('Function' type=static))
   k3 String("constructor")
+  TraceEnter(None)
   GetGlobalThis(v8)
   LoadConst(v9, const[0])
   ClosureNew { dest: v10, fnid: f1, forced_this: None }
@@ -19,6 +20,6 @@ fn f0
   ObjSet { obj: v8, key: v9, value: v10 }
 fn f1
   k0 Number(3.0)
+  TraceEnter(None)
   LoadConst(v8, const[0])
   Return(v8)
-

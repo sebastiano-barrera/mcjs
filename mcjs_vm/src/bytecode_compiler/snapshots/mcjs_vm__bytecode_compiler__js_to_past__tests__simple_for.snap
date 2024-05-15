@@ -3,6 +3,7 @@ source: mcjs_vm/src/bytecode_compiler/js_to_past.rs
 expression: function.dump_to_string()
 ---
 [18-104] func () unbound[] Sloppy block0 {
+  [trace head]
   decls:
     Decl: closures = TDZ [conflicting]
     Decl: tmp1 = TDZ [conflicting]
@@ -30,6 +31,7 @@ expression: function.dump_to_string()
             e2: ObjectGet { obj: e0, key: e1 }
             e3: CreateClosure:
               [80-87] func () unbound[i] Sloppy block4 {
+                [trace head]
                 decls:
                 fn asmts:
                 exprs:
