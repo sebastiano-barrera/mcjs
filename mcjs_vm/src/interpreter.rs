@@ -790,7 +790,8 @@ fn run_inner(
                 Instr::ImportModule(dest, module_path) => {
                     use common::Context;
 
-                    let module_path = get_operand_string(data, realm, *module_path)?.to_string();
+                    let module_path_value = get_operand(data, *module_path)?;
+                    let module_path = value_to_string(module_path_value, &realm.heap)?;
                     let root_fnid = loader
                         .load_import_from_fn(&module_path, fnid)
                         .with_context(error_item!("while trying to import '{}'", module_path))?;
@@ -1165,18 +1166,6 @@ fn get_operand_object<'r>(
         .ok_or_else(|| error!("could not use as object: {:?}", vreg).into())
 }
 
-fn get_operand_string<'r>(
-    data: &stack::InterpreterData,
-    realm: &'r Realm,
-    vreg: bytecode::VReg,
-) -> RunResult<Ref<'r, str>> {
-    let ho = get_operand_object(data, realm, vreg)?
-        .into_heap_cell()
-        .ok_or_else(|| error!("not a heap object"))?
-        .borrow();
-    Ok(Ref::filter_map(ho, |ho| ho.as_str()).unwrap())
-}
-
 fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
     let ty_s = match value {
         Value::Number(_) => "number",
@@ -1396,9 +1385,10 @@ fn str_append(
     b: VReg,
 ) -> RunResult<Value> {
     // TODO Make this at least *decently* efficient!
+    let a = get_operand(data, a)?;
     let b = get_operand(data, b)?;
 
-    let mut buf = get_operand_string(data, realm, a)?.to_owned();
+    let mut buf = value_to_string(a, &realm.heap)?;
     let tail = value_to_string(b, &realm.heap)?;
     buf.push_str(&tail);
     let value = literal_to_value(bytecode::Literal::String(buf), &mut realm.heap);
