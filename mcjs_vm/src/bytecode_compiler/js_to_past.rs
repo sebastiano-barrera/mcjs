@@ -50,8 +50,6 @@ pub enum StrictMode {
 pub struct Block {
     pub id: BlockID,
 
-    is_function_decl_allowed: bool,
-
     // These are all Vec's, but they have somewhat different semantics. This is
     // reflected in Block's public API
     /// Set of declarations. No ordering.
@@ -71,6 +69,9 @@ pub struct Block {
 
     /// Mapping of ExprID -> Expr. No ordering.
     exprs: Vec<Expr>,
+
+    is_function_decl_allowed: bool,
+    is_loop: bool,
 }
 impl_debug_via_dump!(Block);
 
@@ -192,6 +193,10 @@ impl Block {
 
     pub fn decls(&self) -> impl ExactSizeIterator<Item = &Decl> {
         self.decls.iter()
+    }
+
+    pub fn is_loop(&self) -> bool {
+        self.is_loop
     }
 }
 
@@ -642,6 +647,10 @@ mod builder {
             self.blocks.last_mut().unwrap()
         }
 
+        pub(super) fn set_block_is_loop(&mut self) {
+            self.cur_block_mut().is_loop = true;
+        }
+
         fn push_block(&mut self) {
             let blkid = BlockID(self.builder.next_id);
             self.builder.next_id += 1;
@@ -649,11 +658,12 @@ mod builder {
             // TODO Reuse allocations and get new Block out of a pool
             self.blocks.push(Block {
                 id: blkid,
-                is_function_decl_allowed: false,
                 decls: Vec::new(),
                 fn_asmts: Vec::new(),
                 stmts: Vec::new(),
                 exprs: Vec::new(),
+                is_function_decl_allowed: false,
+                is_loop: false,
             });
         }
         fn pop_block(&mut self) -> Block {
@@ -1315,6 +1325,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
             swc_ecma_ast::Stmt::While(while_stmt) => {
                 fnb.block(|fnb| {
+                    fnb.set_block_is_loop();
                     fnb.break_exits_this_block(label.cloned());
                     let block_start = fnb.peek_stmt_id();
 
@@ -1335,6 +1346,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
             }
             swc_ecma_ast::Stmt::DoWhile(dowhile_stmt) => {
                 fnb.block(|fnb| {
+                    fnb.set_block_is_loop();
                     fnb.break_exits_this_block(label.cloned());
 
                     let block_start = fnb.peek_stmt_id();
@@ -1374,6 +1386,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                     }
 
                     fnb.block(|fnb| {
+                        fnb.set_block_is_loop();
                         let loop_start = fnb.peek_stmt_id();
 
                         if let Some(test_expr) = &for_stmt.test {
@@ -1413,6 +1426,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
 
                 fnb.block(|fnb| {
                     let outer_block_id = fnb.cur_block_id();
+                    fnb.set_block_is_loop();
                     fnb.break_exits_this_block(label.cloned());
 
                     let item_var = item_var_decl.name.clone();
@@ -1470,6 +1484,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                 let item_var_decl = compile_for_head(&forof_stmt.left);
 
                 fnb.block(|fnb| {
+                    fnb.set_block_is_loop();
                     fnb.break_exits_this_block(label.cloned());
 
                     let value_var = item_var_decl.name.clone();

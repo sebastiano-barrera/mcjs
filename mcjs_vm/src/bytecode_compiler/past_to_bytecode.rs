@@ -741,6 +741,10 @@ fn compile_block(fnb: &mut FnBuilder, block: &Block) {
 }
 
 fn compile_block_internal(fnb: &mut FnBuilder, block: &Block) {
+    if block.is_loop() {
+        fnb.emit(Instr::TraceEnter(None));
+    }
+
     for decl in block.decls() {
         let reg = fnb.gen_reg();
         fnb.define_name(decl.name.clone(), reg);
