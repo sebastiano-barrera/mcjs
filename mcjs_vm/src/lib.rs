@@ -2,7 +2,7 @@ pub mod bytecode;
 mod bytecode_compiler;
 mod common;
 mod loader;
-// mod jit;
+mod jit;
 mod heap;
 pub mod interpreter;
 
