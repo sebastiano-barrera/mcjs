@@ -205,6 +205,10 @@ impl util::Dump for Block {
         writeln!(f, "{:?} {{", self.id)?;
         f.indent();
 
+        if self.is_loop {
+            writeln!(f, "[loop]")?;
+        }
+
         writeln!(f, "decls:")?;
         f.indent();
         for decl in &self.decls {
