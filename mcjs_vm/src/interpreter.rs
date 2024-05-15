@@ -943,6 +943,7 @@ fn run_inner(
                         .ok_or_else(|| error!("compiler bug: no exception handler to pop!"))?;
                 }
                 Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
+                Instr::TraceEnter(_) => todo!("TraceEnter"),
             }
 
             // TODO Inefficient, but prevents a number of bugs

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU32};
 
 use serde::Serialize;
 use strum::IntoStaticStr;
@@ -100,6 +100,9 @@ impl std::fmt::Debug for VReg {
         write!(f, "v{}", self.0)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceID(NonZeroU32);
 
 #[derive(Debug, Clone, Copy, IntoStaticStr)]
 pub enum Instr {
@@ -270,6 +273,7 @@ pub enum Instr {
     GetCurrentException(VReg),
 
     Breakpoint,
+    TraceEnter(Option<TraceID>),
 }
 
 #[derive(Clone, Copy)]
@@ -376,6 +380,7 @@ impl Instr {
             Instr::PopExcHandler => {},
             Instr::PushExcHandler(iid) => { an(D::IID(*iid)); },
             Instr::GetCurrentException(dest) => { an(D::VRegWrite(*dest)); },
+            Instr::TraceEnter(_) => {},
         };
     }
 }
@@ -433,7 +438,6 @@ pub struct Function {
 pub struct TraceAnchor {
     pub trace_id: String,
 }
-
 
 #[derive(Debug)]
 pub struct IdentAsmt {
