@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     io::{BufRead, Write},
     path::PathBuf,
 };
@@ -14,7 +15,20 @@ fn main() {
 
     for path in config.paths {
         let path = PathBuf::from(&path).canonicalize().unwrap();
-        let main_fnid = loader.load_script_file(&path).expect("compile error");
+        let main_fnid = if path.extension() == Some(OsStr::new("mjs")) {
+            let dir = path.parent().expect("invalid path: '/'");
+            let filename = path
+                .file_name()
+                .expect("invalid path (it's a directory)")
+                .to_str()
+                .expect("path is not convertible to string");
+            let import_path = format!("./{}", filename);
+            loader
+                .load_import_from_dir(&import_path, &dir)
+                .expect("compile error")
+        } else {
+            loader.load_script_file(&path).expect("compile error")
+        };
 
         if config.dump_bytecode {
             for fnid in loader.functions() {
