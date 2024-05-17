@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::{borrow::Cow, cell::RefCell};
+use std::cell::RefCell;
 
 use crate::interpreter::{Closure, Value};
 

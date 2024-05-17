@@ -2557,15 +2557,15 @@ do {
         #[test]
         #[cfg(feature = "debugger")]
         fn test_inline_breakpoint() {
-            const SOURCE_CODE: &str = "
-function foo() {
-    sink(1);
-    debugger;
-    sink(2);
-}
+            const SOURCE_CODE: &str = r#"
+                function foo() {
+                    sink(1);
+                    debugger;
+                    sink(2);
+                }
 
-foo();
-";
+                foo();
+            "#;
 
             let mut loader = Loader::new_cwd();
             let main_fnid = loader.load_script_anon(SOURCE_CODE.to_string()).unwrap();
@@ -2599,15 +2599,17 @@ foo();
         #[test]
         #[cfg(feature = "debugger")]
         fn test_pos_breakpoint() {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let base_path = manifest_dir.join("test-resources/test-scripts/debugging/");
+            let mut loader = Loader::new_cwd();
 
-            // Simulate `import ... from 'test_pkg'` from a script
-            let mut loader = Loader::new(base_path.clone());
+            const SOURCE_CODE: &str = r#"
+                function foo() {
+                    sink(1);
+                    sink(2);
+                }
 
-            let main_fnid = loader
-                .load_import_from_dir("./breakme-0.js", &base_path)
-                .unwrap();
+                foo();
+            "#;
+            let main_fnid = loader.load_script_anon(SOURCE_CODE.to_string()).unwrap();
 
             // Hardcoded. Must be updated if breakme-0.js changes
             let pos = swc_common::BytePos(166);
