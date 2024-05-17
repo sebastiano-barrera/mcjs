@@ -1080,19 +1080,32 @@ pub fn compile_module(
                     compile_decl(&mut fnb, &export_decl.decl);
                 }
                 swc_ecma_ast::ModuleDecl::ExportDefaultDecl(export_default_decl) => {
-                    match &export_default_decl.decl {
-                        swc_ecma_ast::DefaultDecl::Class(_) => {
+                    let value = match &export_default_decl.decl {
+                        swc_ecma_ast::DefaultDecl::TsInterfaceDecl(_)
+                        | swc_ecma_ast::DefaultDecl::Class(_) => {
                             unsupported_node!(export_default_decl)
                         }
                         swc_ecma_ast::DefaultDecl::Fn(fn_expr) => {
-                            compile_fn_expr(&mut fnb, fn_expr);
+                            compile_fn_expr(&mut fnb, fn_expr)
                         }
-                        swc_ecma_ast::DefaultDecl::TsInterfaceDecl(_) => {}
-                    }
+                    };
+
+                    fnb.add_stmt(StmtOp::ObjectSet {
+                        obj: module_obj,
+                        key: lit_default,
+                        value,
+                    });
                 }
 
-                swc_ecma_ast::ModuleDecl::ExportDefaultExpr(_)
-                | swc_ecma_ast::ModuleDecl::ExportNamed(_)
+                swc_ecma_ast::ModuleDecl::ExportDefaultExpr(export_default_expr) => {
+                    let value = compile_expr(&mut fnb, &export_default_expr.expr);
+                    fnb.add_stmt(StmtOp::ObjectSet {
+                        obj: module_obj,
+                        key: lit_default,
+                        value,
+                    });
+                }
+                swc_ecma_ast::ModuleDecl::ExportNamed(_)
                 | swc_ecma_ast::ModuleDecl::ExportAll(_) => unsupported_node!(module_decl),
 
                 swc_ecma_ast::ModuleDecl::Import(_)
@@ -1102,6 +1115,8 @@ pub fn compile_module(
             },
         }
     }
+
+    fnb.add_stmt(StmtOp::Return(module_obj));
 
     let strict_mode = fnb.strict_mode();
     let block = fnb.build()?;

@@ -802,6 +802,10 @@ fn run_inner(
                         data.top_mut().set_result(*dest, module_value);
                     } else {
                         let root_fn = loader.get_function(root_fnid).unwrap();
+
+                        data.top_mut().set_return_target(*dest);
+                        data.top_mut().set_resume_iid(IID(iid.0 + 1));
+
                         data.push_direct(root_fnid, root_fn, Value::Undefined);
                         data.top_mut().set_is_module_root_fn();
                     }
@@ -1736,8 +1740,10 @@ pub mod debugger {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
-    use crate::bytecode::Literal;
+    use crate::{bytecode::Literal, bytecode_compiler};
 
     fn quick_run(code: &str) -> FinishedData {
         let res = std::panic::catch_unwind(|| {
@@ -2541,16 +2547,51 @@ do {
 
         assert_eq!(
             &output.sink,
-            &[
-                Some(Literal::Number(1.0)),
-                Some(Literal::Number(123.0)),
-            ]
+            &[Some(Literal::Number(1.0)), Some(Literal::Number(123.0)),]
         );
     }
 
-    mod debugging {
-        use std::path::PathBuf;
+    #[test]
+    fn test_module_default_export() {
+        let mut loader = loader::Loader::new_cwd();
+        let root_fnid = loader
+            .load_code_forced(
+                loader::FileID::File(PathBuf::from("/virtualtest/root.mjs")),
+                r#"
+                    import the_thing from "./somewhere/the_thing.mjs";
+                    sink(the_thing.the_content);
+                "#
+                .to_string(),
+                bytecode_compiler::SourceType::Module,
+            )
+            .unwrap();
 
+        loader
+            .load_code_forced(
+                loader::FileID::File(PathBuf::from("/virtualtest/somewhere/the_thing.mjs")),
+                r#"
+                    export default { the_content: 123 };
+                "#
+                .to_string(),
+                bytecode_compiler::SourceType::Module,
+            )
+            .unwrap();
+
+        let mut realm = Realm::new(&mut loader);
+        let intrp = Interpreter::new(&mut realm, &mut loader, root_fnid);
+        match intrp.run() {
+            Ok(exit) => {
+                let finished_data = exit.expect_finished();
+                assert_eq!(&finished_data.sink, &[Some(Literal::Number(123.0)),]);
+            }
+            Err(err_box) => {
+                let error = err_box.error.with_loader(&loader);
+                panic!("{:?}", error);
+            }
+        };
+    }
+
+    mod debugging {
         use super::*;
         use crate::Loader;
 

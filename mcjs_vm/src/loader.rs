@@ -301,6 +301,16 @@ impl Loader {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn load_code_forced(
+        &mut self,
+        file_id: FileID,
+        content: String,
+        source_type: bytecode_compiler::SourceType,
+    ) -> Result<bytecode::FnId> {
+        self.load_code(file_id, content, source_type)
+    }
+
     fn load_code(
         &mut self,
         file_id: FileID,
