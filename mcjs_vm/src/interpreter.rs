@@ -2559,6 +2559,43 @@ do {
         assert_eq!(&finished_data.sink, &[Some(Literal::Number(123.0)),]);
     }
 
+    #[test]
+    fn test_module_named_export() {
+        let mut loader = loader::Loader::new_cwd();
+        let root_fnid = loader
+            .load_code_forced(
+                loader::FileID::File(PathBuf::from("/virtualtest/root.mjs")),
+                r#"
+                    import * as the_thing from "./somewhere/the_thing.mjs";
+                    sink(the_thing.the_content);
+                    sink(the_thing.double_the_content());
+                "#
+                .to_string(),
+                bytecode_compiler::SourceType::Module,
+            )
+            .unwrap();
+
+        loader
+            .load_code_forced(
+                loader::FileID::File(PathBuf::from("/virtualtest/somewhere/the_thing.mjs")),
+                r#"
+                    export const the_content = 123;
+                    export function double_the_content() {
+                        return 2 * the_content;
+                    };
+                "#
+                .to_string(),
+                bytecode_compiler::SourceType::Module,
+            )
+            .unwrap();
+
+        let finished_data = complete_run(&mut loader, root_fnid);
+        assert_eq!(
+            &finished_data.sink,
+            &[Some(Literal::Number(123.0)), Some(Literal::Number(246.0))]
+        );
+    }
+
     mod debugging {
         use super::*;
         use crate::Loader;

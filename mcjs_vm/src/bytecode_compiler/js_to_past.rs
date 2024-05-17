@@ -985,6 +985,7 @@ pub fn compile_module(
         key: lit_named,
         value: named_exports_obj,
     });
+    let mut named_export_decls = Vec::new();
 
     // -- process imports
     for module_item in &script_ast.body {
@@ -1077,7 +1078,11 @@ pub fn compile_module(
             }
             ModuleItem::ModuleDecl(module_decl) => match module_decl {
                 swc_ecma_ast::ModuleDecl::ExportDecl(export_decl) => {
-                    compile_decl(&mut fnb, &export_decl.decl);
+                    compile_decl_use_names(
+                        &mut fnb,
+                        &export_decl.decl,
+                        Some(&mut named_export_decls),
+                    );
                 }
                 swc_ecma_ast::ModuleDecl::ExportDefaultDecl(export_default_decl) => {
                     let value = match &export_default_decl.decl {
@@ -1105,6 +1110,7 @@ pub fn compile_module(
                         value,
                     });
                 }
+                
                 swc_ecma_ast::ModuleDecl::ExportNamed(_)
                 | swc_ecma_ast::ModuleDecl::ExportAll(_) => unsupported_node!(module_decl),
 
@@ -1113,6 +1119,18 @@ pub fn compile_module(
                 | swc_ecma_ast::ModuleDecl::TsExportAssignment(_)
                 | swc_ecma_ast::ModuleDecl::TsNamespaceExport(_) => {}
             },
+        }
+    }
+
+    for decl in named_export_decls {
+        if let DeclName::Js(key) = decl {
+            let value = fnb.add_expr(Expr::Read(DeclName::Js(key.clone())));
+            let key = fnb.add_expr(Expr::StringLiteral(key));
+            fnb.add_stmt(StmtOp::ObjectSet {
+                obj: named_exports_obj,
+                key,
+                value,
+            });
         }
     }
 
@@ -1663,6 +1681,14 @@ fn find_exit(
 }
 
 fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
+    compile_decl_use_names(fnb, decl, None)
+}
+
+fn compile_decl_use_names(
+    fnb: &mut FnBuilder,
+    decl: &swc_ecma_ast::Decl,
+    mut out_names: Option<&mut Vec<DeclName>>,
+) {
     match decl {
         swc_ecma_ast::Decl::Fn(fn_decl) => {
             if !fnb.is_fn_decl_allowed() {
@@ -1696,9 +1722,13 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
             });
 
             let closure = compile_fn_as_expr(fnb, &fn_decl.function);
-            fnb.assign_fn(name, closure);
+            fnb.assign_fn(name.clone(), closure);
+
+            if let Some(out_names) = &mut out_names {
+                out_names.push(name);
+            }
         }
-        swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl(fnb, var_decl),
+        swc_ecma_ast::Decl::Var(var_decl) => compile_var_decl_use_names(fnb, var_decl, out_names),
         _ => {
             unsupported_node!(decl)
         }
@@ -1706,13 +1736,25 @@ fn compile_decl(fnb: &mut FnBuilder, decl: &swc_ecma_ast::Decl) {
 }
 
 fn compile_var_decl(fnb: &mut FnBuilder, var_decl: &swc_ecma_ast::VarDecl) {
+    compile_var_decl_use_names(fnb, var_decl, None)
+}
+fn compile_var_decl_use_names(
+    fnb: &mut FnBuilder,
+    var_decl: &swc_ecma_ast::VarDecl,
+    mut out_names: Option<&mut Vec<DeclName>>,
+) {
     for declarator in &var_decl.decls {
         let name = compile_name_pat(&declarator.name);
+
         fnb.add_decl(Decl::from_js_var_decl(name.clone(), var_decl.kind));
 
         if let Some(init) = &declarator.init {
             let value = compile_expr(fnb, init);
-            fnb.add_stmt(StmtOp::Assign(Some(name), value));
+            fnb.add_stmt(StmtOp::Assign(Some(name.clone()), value));
+        }
+
+        if let Some(out_names) = &mut out_names {
+            out_names.push(name);
         }
     }
 }
