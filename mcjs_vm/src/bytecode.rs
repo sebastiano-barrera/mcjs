@@ -431,7 +431,6 @@ pub struct Function {
     consts: Box<[Literal]>,
     n_regs: u8,
     ident_history: Vec<IdentAsmt>,
-    trace_anchors: HashMap<IID, TraceAnchor>,
     is_strict_mode: bool,
     span: Span,
 }
@@ -451,7 +450,6 @@ pub struct FunctionBuilder {
     pub consts: Box<[Literal]>,
     pub n_regs: u8,
     pub ident_history: Vec<IdentAsmt>,
-    pub trace_anchors: HashMap<IID, TraceAnchor>,
     pub is_strict_mode: bool,
     pub span: Span,
 }
@@ -463,7 +461,6 @@ impl FunctionBuilder {
             consts: self.consts,
             n_regs: self.n_regs,
             ident_history: self.ident_history,
-            trace_anchors: self.trace_anchors,
             is_strict_mode: self.is_strict_mode,
             span: self.span,
         }
@@ -485,16 +482,6 @@ impl Function {
 
     pub fn ident_history(&self) -> &[IdentAsmt] {
         &self.ident_history
-    }
-
-    pub fn get_trace_anchor(&self, iid: IID) -> Option<&TraceAnchor> {
-        self.trace_anchors.get(&iid)
-    }
-
-    pub fn trace_start_id(&self, iid: IID) -> Option<&str> {
-        self.trace_anchors
-            .get(&iid)
-            .map(|tanch| tanch.trace_id.as_str())
     }
 
     pub fn is_strict_mode(&self) -> bool {
