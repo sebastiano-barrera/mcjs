@@ -1745,58 +1745,36 @@ mod tests {
     use super::*;
     use crate::{bytecode::Literal, bytecode_compiler};
 
-    fn quick_run(code: &str) -> FinishedData {
-        let res = std::panic::catch_unwind(|| {
-            let mut prereq = prepare_vm(code);
-            let vm = prereq.make_vm();
-            match vm.run() {
-                Ok(exit) => exit.expect_finished(),
-                Err(err_box) => {
-                    let error = err_box.error.with_loader(&prereq.loader);
-                    panic!("{:?}", error);
-                }
-            }
-        });
-
-        if let Err(err) = &res {
-            println!("quick_run: error: {:?}", err);
-        }
-        res.unwrap()
-    }
-
-    fn prepare_vm(code: &str) -> VMPrereq {
+    fn quick_run_script(code: &str) -> FinishedData {
         let mut loader = loader::Loader::new_cwd();
         let chunk_fnid = loader
             .load_script_anon(code.to_string())
             .expect("couldn't compile test script");
-        let realm = Realm::new(&mut loader);
-        VMPrereq {
-            loader,
-            root_fnid: chunk_fnid,
-            realm,
-        }
+        complete_run(&mut loader, chunk_fnid)
     }
 
-    struct VMPrereq {
-        loader: loader::Loader,
-        root_fnid: FnId,
-        realm: Realm,
-    }
-    impl VMPrereq {
-        fn make_vm(&mut self) -> Interpreter {
-            Interpreter::new(&mut self.realm, &mut self.loader, self.root_fnid)
+    fn complete_run(loader: &mut crate::Loader, root_fnid: FnId) -> FinishedData {
+        let mut realm = Realm::new(loader);
+        let vm = Interpreter::new(&mut realm, loader, root_fnid);
+        match vm.run() {
+            Ok(exit) => exit.expect_finished(),
+            Err(err_box) => {
+                let error = err_box.error.with_loader(&loader);
+                panic!("{:?}", error);
+            }
         }
     }
 
     #[test]
     fn test_simple_call() {
-        let output = quick_run("/* Here is some simple code: */ sink(1 + 4 + 99); ");
+        let output = quick_run_script("/* Here is some simple code: */ sink(1 + 4 + 99); ");
         assert_eq!(&[Some(Literal::Number(104.0))], &output.sink[..]);
     }
 
     #[test]
     fn test_multiple_calls() {
-        let output = quick_run("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ");
+        let output =
+            quick_run_script("/* Here is some simple code: */ sink(12 * 5);  sink(99 - 15); ");
         assert_eq!(
             &[
                 Some(Literal::Number(12. * 5.)),
@@ -1808,7 +1786,7 @@ mod tests {
 
     #[test]
     fn test_if() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             const x = 123;
             let y = 'a';
@@ -1824,7 +1802,7 @@ mod tests {
 
     #[test]
     fn test_simple_fn() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             function foo(a, b) { return a + b; }
             sink(foo(1, 2));
@@ -1836,7 +1814,7 @@ mod tests {
 
     #[test]
     fn test_fn_with_branch() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             function foo(mode, a, b) {
                 if (mode === 'sum')
@@ -1856,7 +1834,7 @@ mod tests {
 
     #[test]
     fn test_while() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             function sum_range(n) {
                 let i = 0;
@@ -1876,7 +1854,7 @@ mod tests {
     }
 
     fn try_casting_bool(code: &str, expected_value: bool) {
-        let output = quick_run(code);
+        let output = quick_run_script(code);
         assert_eq!(&[Some(Literal::Bool(expected_value))], &output.sink[..]);
     }
     #[test]
@@ -1921,7 +1899,7 @@ mod tests {
 
     #[test]
     fn test_capture() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             // wrapping into iife makes sure that the shared variable is not a global
             (function() {
@@ -1958,7 +1936,7 @@ mod tests {
 
     #[test]
     fn test_object_init() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             const obj = {
                 aString: 'asdlol123',
@@ -1985,7 +1963,7 @@ mod tests {
 
     #[test]
     fn test_typeof() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             let anObj = {}
 
@@ -2038,7 +2016,7 @@ mod tests {
 
     #[test]
     fn test_object_member_set() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             const pt = { x: 123, y: 4 }
 
@@ -2059,7 +2037,7 @@ mod tests {
 
     #[test]
     fn test_object_prototype() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             const a = { count: 99, name: 'lol', pos: {x: 32, y: 99} }
             const b = { name: 'another name' }
@@ -2093,7 +2071,7 @@ mod tests {
     #[test]
     fn test_for_in() {
         // TODO(small feat) This syntax is not yet implemented
-        let output = quick_run(
+        let output = quick_run_script(
             "
             const obj = {
                 x: 12.0,
@@ -2119,7 +2097,7 @@ mod tests {
 
     #[test]
     fn test_builtin() {
-        let output = quick_run(
+        let output = quick_run_script(
             "
             sink(Array.isArray([1, 2, 3]));
             sink(Array.isArray('not an array'));
@@ -2134,7 +2112,7 @@ mod tests {
 
     #[test]
     fn test_this_basic_nonstrict() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             function getThis() { return this; }
             sink(getThis());
@@ -2146,7 +2124,7 @@ mod tests {
 
     #[test]
     fn test_this_basic_strict() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             "use strict";
             function getThis() { return this; }
@@ -2159,7 +2137,7 @@ mod tests {
 
     #[test]
     fn test_this() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             "use strict"
             
@@ -2208,7 +2186,7 @@ mod tests {
 
     #[test]
     fn test_methods_on_numbers() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             const num = 123.45;
 
@@ -2226,7 +2204,7 @@ mod tests {
 
     #[test]
     fn test_array_access() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             const xs = ['a', 'b', 'c'];
 
@@ -2254,7 +2232,7 @@ mod tests {
 
     #[test]
     fn test_script_global() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             var x = 55
             sink(globalThis.x)
@@ -2279,7 +2257,7 @@ mod tests {
 
     #[test]
     fn test_script_global_fn_nonstrict() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             function x() { return 55 }
             sink(globalThis.x())
@@ -2295,7 +2273,7 @@ mod tests {
 
     #[test]
     fn test_script_global_fn_strict() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             "use strict";
             function x() { return 55 }
@@ -2312,7 +2290,7 @@ mod tests {
 
     #[test]
     fn test_constructor_prototype() {
-        quick_run(
+        quick_run_script(
             r#"
                 function Test262Error(message) {
                   this.message = message || "";
@@ -2331,7 +2309,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
                 function MyConstructor(inner) {
                     this.inner = inner
@@ -2357,7 +2335,7 @@ mod tests {
 
     #[test]
     fn test_temporal_dead_zone_none() {
-        let _ = quick_run(
+        let _ = quick_run_script(
             r#"
                 "use strict"
                 let x = 12
@@ -2370,7 +2348,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_temporal_dead_zone() {
-        let _ = quick_run(
+        let _ = quick_run_script(
             r#"
                 "use strict"
                 sink(foo())
@@ -2382,7 +2360,7 @@ mod tests {
 
     #[test]
     fn test_reference_error() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
                 try {
                     aVariableThatDoesNotExist;
@@ -2397,7 +2375,7 @@ mod tests {
 
     #[test]
     fn test_unwinding_on_exception() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
                 try {
                     (function() {
@@ -2414,7 +2392,7 @@ mod tests {
 
     #[test]
     fn test_void_operator() {
-        let output = quick_run("sink(123); sink(void 123);");
+        let output = quick_run_script("sink(123); sink(void 123);");
         assert_eq!(
             &output.sink,
             &[Some(Literal::Number(123.0)), Some(Literal::Undefined)]
@@ -2423,13 +2401,13 @@ mod tests {
 
     #[test]
     fn test_eval_completion_value() {
-        let output = quick_run("sink(eval('11'))");
+        let output = quick_run_script("sink(eval('11'))");
         assert_eq!(&output.sink, &[Some(Literal::Number(11.0))]);
     }
 
     #[test]
     fn test_array_properties() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
             const arr = ['a', 123, false]
             for (const name in arr) {
@@ -2454,7 +2432,7 @@ mod tests {
 
     #[test]
     fn test_generator_basic() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
 function* makeGenerator() {
   yield 'first';
@@ -2490,7 +2468,7 @@ do {
 
     #[test]
     fn test_for_of_generator() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
                 function* getSomeNumbers() {
                     for (let i=0; i < 5; i++) {
@@ -2518,7 +2496,7 @@ do {
 
     #[test]
     fn test_short_circuiting_and() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
                 function getSomethingElse() { sink(2); return 456; }
                 function getFalsy() { sink(1); return ""; }
@@ -2537,7 +2515,7 @@ do {
 
     #[test]
     fn test_short_circuiting_or() {
-        let output = quick_run(
+        let output = quick_run_script(
             r#"
                 function getSomethingElse() { sink(2); return 456; }
                 function getTruthy() { sink(1); return 123; }
@@ -2577,18 +2555,8 @@ do {
             )
             .unwrap();
 
-        let mut realm = Realm::new(&mut loader);
-        let intrp = Interpreter::new(&mut realm, &mut loader, root_fnid);
-        match intrp.run() {
-            Ok(exit) => {
-                let finished_data = exit.expect_finished();
-                assert_eq!(&finished_data.sink, &[Some(Literal::Number(123.0)),]);
-            }
-            Err(err_box) => {
-                let error = err_box.error.with_loader(&loader);
-                panic!("{:?}", error);
-            }
-        };
+        let finished_data = complete_run(&mut loader, root_fnid);
+        assert_eq!(&finished_data.sink, &[Some(Literal::Number(123.0)),]);
     }
 
     mod debugging {
