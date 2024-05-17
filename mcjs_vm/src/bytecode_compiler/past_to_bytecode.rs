@@ -1025,7 +1025,6 @@ mod builder {
                 n_regs: self.n_regs,
                 // TODO TODO This is all yet to be implemented:
                 ident_history: Vec::new(),
-                trace_anchors: HashMap::new(),
                 is_strict_mode: self.strict_mode == StrictMode::Strict,
                 span,
             }

@@ -19,7 +19,6 @@ mod past_to_bytecode;
 pub struct CompiledChunk {
     pub root_fnid: FnId,
     pub functions: HashMap<FnId, bytecode::Function>,
-    pub source_map: Rc<SourceMap>,
     pub breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
@@ -112,7 +111,6 @@ pub fn compile_file(
         root_fnid: compiled_mod.root_fnid,
         functions: compiled_mod.functions,
         breakable_ranges: compiled_mod.breakable_ranges,
-        source_map,
     })
 }
 

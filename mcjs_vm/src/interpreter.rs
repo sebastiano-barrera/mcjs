@@ -1065,7 +1065,7 @@ fn obj_get_keys(
 /// prepared for a subsequent resume.
 fn throw_exc(
     exc: Value,
-    iid: bytecode::IID,
+    _iid: bytecode::IID,
     data: &mut stack::InterpreterData,
     #[cfg(feature = "debugger")] dbg: &Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
@@ -1086,7 +1086,7 @@ fn throw_exc(
             || (dbg.should_break_on_unhandled_throw() && handler_depth.is_some())
         {
             // Save the IID so that execution can resume correctly afterwards
-            data.top_mut().set_resume_iid(iid);
+            data.top_mut().set_resume_iid(_iid);
             return Err(RunError::Suspended(SuspendCause::Exception(exc)));
         }
     }
@@ -1425,7 +1425,6 @@ fn literal_to_value(lit: bytecode::Literal, heap: &mut heap::Heap) -> Value {
         bytecode::Literal::Bool(bo) => Value::Bool(bo),
         bytecode::Literal::Null => Value::Null,
         bytecode::Literal::Undefined => Value::Undefined,
-        bytecode::Literal::SelfFunction => todo!(),
     }
 }
 
