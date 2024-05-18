@@ -86,8 +86,25 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         );
     }
 
-    let ReferenceError = heap.new_ordinary_object();
-    let TypeError = heap.new_ordinary_object();
+    let Error = heap.new_function(Closure::Native(nf_do_nothing));
+    {
+        let Error_toString = heap.new_function(Closure::Native(nf_Error_toString));
+        let mut Error_obj = heap.get(Error).unwrap().borrow_mut();
+        Error_obj.set_own(
+            heap::IndexOrKey::Key("toString"),
+            heap::Property::enumerable(Value::Object(Error_toString)),
+        );
+    }
+    let ReferenceError = heap.new_function(Closure::Native(nf_do_nothing));
+    {
+        let mut ReferenceError_obj = heap.get(ReferenceError).unwrap().borrow_mut();
+        ReferenceError_obj.set_own(heap::IndexOrKey::Key("prototype"), heap::Property::non_enumerable(Value::Object(Error)));
+    }
+    let TypeError = heap.new_function(Closure::Native(nf_do_nothing));
+    {
+        let mut TypeError_obj = heap.get(TypeError).unwrap().borrow_mut();
+        TypeError_obj.set_own(heap::IndexOrKey::Key("prototype"), heap::Property::non_enumerable(Value::Object(Error)));
+    }
 
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
@@ -122,6 +139,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         heap::Property::enumerable(Value::Object(cash_print)),
     );
     global_obj.set_own(
+        "Error".into(),
+        heap::Property::enumerable(Value::Object(Error)),
+    );
+    global_obj.set_own(
         "ReferenceError".into(),
         heap::Property::enumerable(Value::Object(ReferenceError)),
     );
@@ -131,6 +152,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     );
 
     global
+}
+
+fn nf_do_nothing(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> Result<Value> {
+    Ok(Value::Undefined)
 }
 
 fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Value> {
@@ -246,4 +271,26 @@ fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<V
 
     let new_obj_id = realm.heap.new_function(Closure::JS(Rc::new(new_closure)));
     Ok(Value::Object(new_obj_id))
+}
+
+fn nf_Error_toString(realm: &mut Realm, this: &Value, _args: &[Value]) -> Result<Value> {
+    let obj_id = this.expect_obj()?;
+    let obj = realm.heap.get(obj_id).unwrap().borrow();
+
+    let message = realm
+        .heap
+        .get_property_chained(&*obj, heap::IndexOrKey::Key("message"))
+        .map(|prop| value_to_string(prop.value, &realm.heap))
+        .unwrap_or(Ok("(no message)".to_string()))?;
+    let name = realm
+        .heap
+        .get_property_chained(&*obj, heap::IndexOrKey::Key("name"))
+        .map(|prop| value_to_string(prop.value, &realm.heap))
+        .unwrap_or(Ok("(no message)".to_string()))?;
+
+    let message = format!("{}: {}", name, message);
+    drop(obj);
+
+    let oid = realm.heap.new_string(message);
+    Ok(Value::Object(oid))
 }
