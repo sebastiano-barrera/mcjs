@@ -670,19 +670,35 @@ fn run_inner(
                     OnlyEnumerable::No,
                     IncludeInherited::No,
                 )?,
-                Instr::ObjDelete { dest, obj, key } => {
-                    // TODO Adjust return value: true for all cases except when the property is an
-                    // own non-configurable property, in which case false is returned in non-strict
-                    // mode. (Source: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/delete)
-                    {
-                        let mut obj = get_operand_object(data, realm, *obj)?;
+                Instr::ObjDelete { obj, key } => {
+                    let vreg = *obj;
+                    let value = get_operand(data, vreg)?;
+                    if let Some(mut obj) = as_object_ref(value, &realm.heap) {
                         let key = get_operand(data, *key)?;
                         let key = value_to_index_or_key(&realm.heap, &key)
                             .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                         obj.delete_own(key.to_ref());
+                    } else {
+                        let exc_proto = get_builtin(realm, "TypeError").unwrap();
+                        let exc_oid = realm.heap.new_ordinary_object();
+                        let message = realm.heap.new_string(format!("not an object: {:?}", value));
+                        {
+                            let mut exc = realm.heap.get(exc_oid).unwrap().borrow_mut();
+                            exc.set_proto(Some(exc_proto));
+                            exc.set_own(
+                                IndexOrKey::Key("message"),
+                                heap::Property::enumerable(Value::Object(message)),
+                            )
+                        }
+                        let exc = Value::Object(exc_oid);
+                        throw_exc(
+                            exc,
+                            iid,
+                            data,
+                            #[cfg(feature = "debugger")]
+                            dbg,
+                        )?;
                     }
-
-                    data.top_mut().set_result(*dest, Value::Bool(true));
                 }
 
                 Instr::ArrayPush { arr, value } => {
@@ -887,14 +903,10 @@ fn run_inner(
                             value: Value::Undefined,
                             ..
                         }) => {
-                            let exc_proto = global_this
-                                .get_own(IndexOrKey::Key("ReferenceError"))
-                                .map(|p| p.value)
-                                .expect("missing required builtin: ReferenceError")
-                                .expect_obj()
-                                .expect("bug: ReferenceError is not an object?!");
                             // sadly, the borrowck needs some hand-holding here
                             drop(global_this);
+
+                            let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
                             let exc_oid = realm.heap.new_ordinary_object();
                             {
                                 let mut exc = realm.heap.get(exc_oid).unwrap().borrow_mut();
@@ -957,6 +969,16 @@ fn run_inner(
             }
         }
     }
+}
+
+fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectId> {
+    let global_this = realm.heap.get(realm.global_obj).unwrap().borrow();
+    global_this
+        .get_own(IndexOrKey::Key(builtin_name))
+        .map(|p| p.value)
+        .ok_or_else(|| error!("missing required builtin: {}", builtin_name))?
+        .expect_obj()
+        .map_err(|_| RunError::Internal(error!("bug: ReferenceError is not an object?!")))
 }
 
 type RunResult<T> = std::result::Result<T, RunError>;
@@ -2592,6 +2614,22 @@ do {
         assert_eq!(
             &finished_data.sink,
             &[Some(Literal::Number(123.0)), Some(Literal::Number(246.0))]
+        );
+    }
+
+    #[test]
+    fn test_delete_basic() {
+        let output = quick_run_script(
+            "
+            const obj = {a: 123};
+            sink(obj.a);
+            delete obj.a;
+            sink(obj.a);
+        ",
+        );
+        assert_eq!(
+            &output.sink,
+            &[Some(Literal::Number(123.0)), Some(Literal::Undefined)]
         );
     }
 

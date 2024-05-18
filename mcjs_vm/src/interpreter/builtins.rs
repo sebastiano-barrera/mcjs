@@ -87,6 +87,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     }
 
     let ReferenceError = heap.new_ordinary_object();
+    let TypeError = heap.new_ordinary_object();
 
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
@@ -123,6 +124,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     global_obj.set_own(
         "ReferenceError".into(),
         heap::Property::enumerable(Value::Object(ReferenceError)),
+    );
+    global_obj.set_own(
+        "TypeError".into(),
+        heap::Property::enumerable(Value::Object(TypeError)),
     );
 
     global

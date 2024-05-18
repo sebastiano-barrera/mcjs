@@ -1,6 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::cell::RefCell;
 
 use crate::interpreter::{Closure, Value};
 
@@ -478,6 +478,10 @@ impl Object for HeapObject {
                 // do nothing
             }
             (_, IndexOrKey::Key(key)) => {
+                // Deletion of properties are rare and only involve a small
+                // minority of properties, so no space to be saved by removing
+                // the key from `self.order`. Instead, only delete from the
+                // hashmap, then the iteration procedure will skip it.
                 self.properties.remove(key);
             }
             (_, IndexOrKey::Symbol(sym)) => {
@@ -505,9 +509,10 @@ impl Object for HeapObject {
         }
 
         for key in &self.order {
-            let prop = self.properties.get(key).unwrap();
-            if !only_enumerable || prop.is_enumerable {
-                out.push(key.clone());
+            if let Some(prop) = self.properties.get(key) {
+                if !only_enumerable || prop.is_enumerable {
+                    out.push(key.clone());
+                }
             }
         }
     }
