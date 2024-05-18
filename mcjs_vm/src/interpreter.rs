@@ -883,16 +883,14 @@ fn run_inner(
                     name: bytecode::ConstIndex(name_cndx),
                 } => {
                     let literal = func.consts()[*name_cndx as usize].clone();
-                    let key = {
-                        let str_literal = match &literal {
-                            bytecode::Literal::String(s) => s,
-                            bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
-                            _ => panic!(
-                                "malformed bytecode: GetGlobal argument `name` not a string literal"
-                            ),
-                        };
-                        heap::IndexOrKey::Key(str_literal)
+                    let key_str = match &literal {
+                        bytecode::Literal::String(s) => s,
+                        bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
+                        _ => panic!(
+                            "malformed bytecode: GetGlobal argument `name` not a string literal"
+                        ),
                     };
+                    let key = heap::IndexOrKey::Key(key_str);
 
                     let global_this = realm.heap.get(realm.global_obj).unwrap().borrow();
                     let lookup_result = global_this.get_own(key);
@@ -906,11 +904,18 @@ fn run_inner(
                             // sadly, the borrowck needs some hand-holding here
                             drop(global_this);
 
+                            let msg = realm.heap.new_string(format!("{} is not defined", key_str));
+
                             let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
                             let exc_oid = realm.heap.new_ordinary_object();
                             {
                                 let mut exc = realm.heap.get(exc_oid).unwrap().borrow_mut();
                                 exc.set_proto(Some(exc_proto));
+
+                                exc.set_own(
+                                    IndexOrKey::Key("message"),
+                                    heap::Property::enumerable(Value::Object(msg)),
+                                );
                             }
 
                             // Duplicate with the Instr::Throw implementation. Not sure how to
