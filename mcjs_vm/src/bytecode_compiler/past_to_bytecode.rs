@@ -369,49 +369,52 @@ fn compile_expr(
                 src
             }
         }
-        Expr::Unary(op, arg_eid) => match op {
-            swc_ecma_ast::UnaryOp::Minus => {
-                let dest = compile_expr(fnb, forced_dest, block, *arg_eid);
-                fnb.emit(Instr::UnaryMinus { dest, arg: dest });
-                dest
-            }
-            swc_ecma_ast::UnaryOp::Bang => {
-                let dest = compile_expr(fnb, forced_dest, block, *arg_eid);
-                fnb.emit(Instr::BoolNot { dest, arg: dest });
-                dest
-            }
-            swc_ecma_ast::UnaryOp::TypeOf => {
-                let dest = compile_expr(fnb, forced_dest, block, *arg_eid);
-                fnb.emit(Instr::TypeOf { dest, arg: dest });
-                dest
-            }
-            swc_ecma_ast::UnaryOp::Void => {
-                let dest = compile_expr(fnb, forced_dest, block, *arg_eid);
-                fnb.emit(Instr::LoadUndefined(dest));
-                dest
-            }
-            swc_ecma_ast::UnaryOp::Delete => {
-                // TODO Adjust return value: true for all cases except when the property is an
-                // own non-configurable property, in which case false is returned in non-strict
-                // mode. (Source: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/delete)
+        Expr::Unary(op, arg_eid) => {
+            let dest = get_dest(fnb);
 
-                match block.get_expr(*arg_eid) {
-                    Expr::ObjectGet { obj, key } => {
-                        let obj = compile_expr(fnb, None, block, *obj);
-                        let key = compile_expr(fnb, None, block, *key);
-                        fnb.emit(Instr::ObjDelete { obj, key });
-                    }
-                    _ => {}
+            match op {
+                // TODO Ensuring that "dest" is always a fresh vreg is probably just
+                // a "dumb" stop gap. A better solution would be to perform register
+                // allocation on the bytecode, but I need to evaluate pros/cons.
+                swc_ecma_ast::UnaryOp::Minus => {
+                    let arg = compile_expr(fnb, forced_dest, block, *arg_eid);
+                    fnb.emit(Instr::UnaryMinus { dest, arg });
                 }
-                let true_ = fnb.add_const(Literal::Bool(true));
-                let dest = get_dest(fnb);
-                fnb.emit(Instr::LoadConst(dest, true_));
-                dest
+                swc_ecma_ast::UnaryOp::Bang => {
+                    let arg = compile_expr(fnb, forced_dest, block, *arg_eid);
+                    fnb.emit(Instr::BoolNot { dest, arg });
+                }
+                swc_ecma_ast::UnaryOp::TypeOf => {
+                    let arg = compile_expr(fnb, forced_dest, block, *arg_eid);
+                    fnb.emit(Instr::TypeOf { dest, arg });
+                }
+                swc_ecma_ast::UnaryOp::Void => {
+                    let _ = compile_expr(fnb, forced_dest, block, *arg_eid);
+                    fnb.emit(Instr::LoadUndefined(dest));
+                }
+                swc_ecma_ast::UnaryOp::Delete => {
+                    // TODO Adjust return value: true for all cases except when the property is an
+                    // own non-configurable property, in which case false is returned in non-strict
+                    // mode. (Source: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/delete)
+
+                    match block.get_expr(*arg_eid) {
+                        Expr::ObjectGet { obj, key } => {
+                            let obj = compile_expr(fnb, None, block, *obj);
+                            let key = compile_expr(fnb, None, block, *key);
+                            fnb.emit(Instr::ObjDelete { obj, key });
+                        }
+                        _ => {}
+                    }
+                    let true_ = fnb.add_const(Literal::Bool(true));
+                    fnb.emit(Instr::LoadConst(dest, true_));
+                }
+                swc_ecma_ast::UnaryOp::Plus | swc_ecma_ast::UnaryOp::Tilde => {
+                    panic!("unsupported unary op: {:?}", op)
+                }
             }
-            swc_ecma_ast::UnaryOp::Plus | swc_ecma_ast::UnaryOp::Tilde => {
-                panic!("unsupported unary op: {:?}", op)
-            }
-        },
+
+            dest
+        }
         Expr::Binary(op, left, right) => {
             let dest = get_dest(fnb);
 
