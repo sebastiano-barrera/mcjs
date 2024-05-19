@@ -99,9 +99,9 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
             heap::Property::enumerable(Value::Object(Error_toString)),
         );
     }
-    let ReferenceError = make_empty_cons(heap, Error);
-    let TypeError = make_empty_cons(heap, Error);
-    let SyntaxError = make_empty_cons(heap, Error);
+    let ReferenceError = make_exception_cons(heap, Error);
+    let TypeError = make_exception_cons(heap, Error);
+    let SyntaxError = make_exception_cons(heap, Error);
 
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
@@ -159,14 +159,22 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     global
 }
 
-fn make_empty_cons(heap: &mut heap::Heap, prototype: heap::ObjectId) -> heap::ObjectId {
-    let cons = heap.new_function(Closure::Native(nf_do_nothing));
+fn make_exception_cons(heap: &mut heap::Heap, prototype: heap::ObjectId) -> heap::ObjectId {
+    let cons = heap.new_function(Closure::Native(nf_set_message));
     let mut cons_obj = heap.get_mut(cons).unwrap();
     cons_obj.set_own(
         heap::IndexOrKey::Key("prototype"),
         heap::Property::non_enumerable(Value::Object(prototype)),
     );
     cons
+}
+
+fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
+    let message = *args.get(0).unwrap_or(&Value::Undefined);
+    let oid = realm.heap.object_of_value(*this).expect("bug: not an object!?");
+    let mut obj = realm.heap.get_mut(oid).unwrap();
+    obj.set_own("message".into(), heap::Property::enumerable(message));
+    Ok(Value::Undefined)
 }
 
 fn nf_do_nothing(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> Result<Value> {
