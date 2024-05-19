@@ -70,13 +70,13 @@ pub struct ArgIndex(pub u8);
 /// NOTE: The interpreter currently won't allow calls with more than this number
 /// of arguments.  In the future (hopefully not too far later) extra arguments
 /// will be passed via an array on the heap.
-pub const ARGS_COUNT_MAX: u8 = 8;
+pub const ARGS_COUNT_MAX: u16 = 8;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 pub struct CaptureIndex(pub u16);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct VReg(pub u8);
+pub struct VReg(pub u16);
 
 impl std::fmt::Debug for ArgIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -424,7 +424,7 @@ pub struct BreakRange {
 pub struct Function {
     instrs: Box<[Instr]>,
     consts: Box<[Literal]>,
-    n_regs: u8,
+    n_regs: u16,
     ident_history: Vec<IdentAsmt>,
     is_strict_mode: bool,
     span: Span,
@@ -441,7 +441,7 @@ pub struct IdentAsmt {
 pub struct FunctionBuilder {
     pub instrs: Box<[Instr]>,
     pub consts: Box<[Literal]>,
-    pub n_regs: u8,
+    pub n_regs: u16,
     pub ident_history: Vec<IdentAsmt>,
     pub is_strict_mode: bool,
     pub span: Span,
@@ -469,7 +469,7 @@ impl Function {
         self.consts.as_ref()
     }
 
-    pub fn n_regs(&self) -> u8 {
+    pub fn n_regs(&self) -> u16 {
         self.n_regs
     }
 

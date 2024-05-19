@@ -389,14 +389,14 @@ impl<'a> Frame<'a> {
         // have an external array of 'extra arguments', managed as part of the
         // FrameHeader
         assert!(
-            argndx.0 < ARGS_COUNT_MAX,
+            (argndx.0 as u16) < ARGS_COUNT_MAX,
             "not yet implemented: call with >= {} arguments",
             ARGS_COUNT_MAX
         );
-        self.get_result(bytecode::VReg(argndx.0))
+        self.get_result(bytecode::VReg(argndx.0 as u16))
     }
     pub fn args(&self) -> impl '_ + ExactSizeIterator<Item = Option<Value>> {
-        (0..ARGS_COUNT_MAX).map(|i| self.get_arg(bytecode::ArgIndex(i)))
+        (0..ARGS_COUNT_MAX).map(|i| self.get_arg(bytecode::ArgIndex(i.try_into().unwrap())))
     }
 
     pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
@@ -448,11 +448,11 @@ impl<'a> FrameMut<'a> {
     pub(crate) fn set_arg(&mut self, argndx: bytecode::ArgIndex, value: Value) {
         // Check comment in `Frame::get_arg`
         assert!(
-            argndx.0 < ARGS_COUNT_MAX,
+            (argndx.0 as u16) < ARGS_COUNT_MAX,
             "not yet implemented: call with >= {}",
             ARGS_COUNT_MAX
         );
-        self.set_result(bytecode::VReg(argndx.0), value)
+        self.set_result(bytecode::VReg(argndx.0 as u16), value)
     }
 
     pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {

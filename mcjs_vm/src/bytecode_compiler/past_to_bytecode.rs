@@ -843,7 +843,7 @@ mod builder {
     pub(super) struct FnBuilder<'a> {
         instrs: Vec<bytecode::Instr>,
         consts: Vec<bytecode::Literal>,
-        n_regs: u8,
+        n_regs: u16,
         blocks: Vec<Block>,
         block_boundaries: HashMap<BlockID, (IID, IID)>,
         deferred_actions: Vec<BoxedAction>,
