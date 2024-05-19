@@ -3,7 +3,7 @@ mod bytecode_compiler;
 mod common;
 mod loader;
 // mod jit;
-mod heap;
+pub mod heap;
 pub mod interpreter;
 
 mod tracing;
@@ -14,7 +14,4 @@ pub use bytecode::{FnId, GlobalIID, Literal, IID};
 pub use common::Error;
 pub use interpreter::{Interpreter, Realm, Value as InterpreterValue};
 pub use loader::{BreakRangeID, FunctionLookup, Loader};
-
-#[cfg(feature = "debugger")]
-pub use interpreter::SlotDebug;
 

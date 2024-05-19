@@ -154,6 +154,11 @@ impl Realm {
 
         realm
     }
+
+    #[cfg(feature = "debugger")]
+    pub fn heap(&self) -> &heap::Heap {
+        &self.heap
+    }
 }
 
 pub struct Interpreter<'a> {
@@ -1560,12 +1565,11 @@ pub mod debugger {
     use std::collections::HashMap;
 
     use super::stack;
+    use crate::GlobalIID;
     use crate::{bytecode, loader};
-    use crate::{heap, GlobalIID};
 
     pub use super::SuspendCause;
     pub use crate::loader::BreakRangeID;
-    pub use heap::{IndexOrKey, ObjectId};
 
     #[derive(Debug)]
     pub enum BreakpointError {
@@ -2693,14 +2697,7 @@ do {
         ",
         );
 
-        let expected = &[
-            123.0,
-            f64::NAN,
-            0.0,
-            f64::NAN,
-            1.0,
-            0.0,
-        ];
+        let expected = &[123.0, f64::NAN, 0.0, f64::NAN, 1.0, 0.0];
 
         assert_eq!(output.sink.len(), expected.len());
         for (out, &exp) in output.sink.iter().zip(expected) {
