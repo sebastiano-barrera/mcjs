@@ -10,7 +10,7 @@ use crate::error;
 use crate::heap::{self, Object};
 
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
-    let array_ctor = {
+    let Array = {
         let Array_push = heap.new_function(Closure::Native(nf_Array_push));
         let Array_pop = heap.new_function(Closure::Native(nf_Array_pop));
         let array_proto = heap.array_proto();
@@ -75,6 +75,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         );
     }
 
+    // Not completely correct. See the rules in
+    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
+    let Object = heap.new_function(Closure::Native(nf_do_nothing));
+
     let cash_print = heap.new_function(Closure::Native(nf_cash_print));
 
     let func_bind = heap.new_function(Closure::Native(nf_Function_bind));
@@ -98,12 +102,18 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let ReferenceError = heap.new_function(Closure::Native(nf_do_nothing));
     {
         let mut ReferenceError_obj = heap.get(ReferenceError).unwrap().borrow_mut();
-        ReferenceError_obj.set_own(heap::IndexOrKey::Key("prototype"), heap::Property::non_enumerable(Value::Object(Error)));
+        ReferenceError_obj.set_own(
+            heap::IndexOrKey::Key("prototype"),
+            heap::Property::non_enumerable(Value::Object(Error)),
+        );
     }
     let TypeError = heap.new_function(Closure::Native(nf_do_nothing));
     {
         let mut TypeError_obj = heap.get(TypeError).unwrap().borrow_mut();
-        TypeError_obj.set_own(heap::IndexOrKey::Key("prototype"), heap::Property::non_enumerable(Value::Object(Error)));
+        TypeError_obj.set_own(
+            heap::IndexOrKey::Key("prototype"),
+            heap::Property::non_enumerable(Value::Object(Error)),
+        );
     }
 
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
@@ -111,8 +121,12 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let global = heap.new_ordinary_object();
     let mut global_obj = heap.get(global).unwrap().borrow_mut();
     global_obj.set_own(
+        "Object".into(),
+        heap::Property::enumerable(Value::Object(Object)),
+    );
+    global_obj.set_own(
         "Array".into(),
-        heap::Property::enumerable(Value::Object(array_ctor)),
+        heap::Property::enumerable(Value::Object(Array)),
     );
     global_obj.set_own(
         "RegExp".into(),
