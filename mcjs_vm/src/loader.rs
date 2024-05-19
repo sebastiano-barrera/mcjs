@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
@@ -413,11 +414,13 @@ impl Loader {
             ))
         })?;
 
-        self.load_code(
-            FileID::File(filename),
-            content,
-            bytecode_compiler::SourceType::Script,
-        )
+        let source_type = if filename.extension() == Some(OsStr::new("mjs")) {
+            bytecode_compiler::SourceType::Module
+        } else {
+            bytecode_compiler::SourceType::Script
+        };
+
+        self.load_code(FileID::File(filename), content, source_type)
     }
 
     pub fn resolve_break_loc(
