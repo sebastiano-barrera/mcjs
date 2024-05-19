@@ -392,6 +392,10 @@ fn compile_expr(
                     let _ = compile_expr(fnb, forced_dest, block, *arg_eid);
                     fnb.emit(Instr::LoadUndefined(dest));
                 }
+                swc_ecma_ast::UnaryOp::Plus => {
+                    let arg = compile_expr(fnb, forced_dest, block, *arg_eid);
+                    fnb.emit(Instr::ToNumber { dest, arg });
+                }
                 swc_ecma_ast::UnaryOp::Delete => {
                     // TODO Adjust return value: true for all cases except when the property is an
                     // own non-configurable property, in which case false is returned in non-strict
@@ -408,7 +412,7 @@ fn compile_expr(
                     let true_ = fnb.add_const(Literal::Bool(true));
                     fnb.emit(Instr::LoadConst(dest, true_));
                 }
-                swc_ecma_ast::UnaryOp::Plus | swc_ecma_ast::UnaryOp::Tilde => {
+                swc_ecma_ast::UnaryOp::Tilde => {
                     panic!("unsupported unary op: {:?}", op)
                 }
             }

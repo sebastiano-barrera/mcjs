@@ -534,6 +534,19 @@ fn run_inner(
                     let value = Value::Bool(!to_boolean(value, realm));
                     data.top_mut().set_result(*dest, value);
                 }
+                Instr::ToNumber { dest, arg } => {
+                    let value = get_operand(data, *arg)?;
+                    let value = to_number(value).ok_or_else(|| {
+                        let exc = make_exception(
+                            realm,
+                            "TypeError",
+                            format!("cannot convert to a number: {:?}", *arg),
+                        );
+                        RunError::Exception(exc)
+                    })?;
+                    data.top_mut().set_result(*dest, value);
+                }
+
                 Instr::Jmp(IID(dest_ndx)) => {
                     next_ndx = *dest_ndx;
                 }
@@ -680,18 +693,11 @@ fn run_inner(
                             .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                         obj.delete_own(key.to_ref());
                     } else {
-                        let exc_proto = get_builtin(realm, "TypeError").unwrap();
-                        let exc_oid = realm.heap.new_ordinary_object();
-                        let message = realm.heap.new_string(format!("not an object: {:?}", value));
-                        {
-                            let mut exc = realm.heap.get_mut(exc_oid).unwrap();
-                            exc.set_proto(Some(exc_proto));
-                            exc.set_own(
-                                IndexOrKey::Key("message"),
-                                heap::Property::enumerable(Value::Object(message)),
-                            )
-                        }
-                        let exc = Value::Object(exc_oid);
+                        let exc = make_exception(
+                            realm,
+                            "TypeError",
+                            format!("not an object: {:?}", value),
+                        );
                         throw_exc(
                             exc,
                             iid,
@@ -968,6 +974,26 @@ fn run_inner(
             }
         }
     }
+}
+
+fn make_exception(realm: &mut Realm, constructor_name: &str, message: String) -> Value {
+    let exc_cons = get_builtin(realm, constructor_name).unwrap();
+    let exc_proto = {
+        let exc_cons = realm.heap.get(exc_cons).unwrap();
+        exc_cons.proto().unwrap()
+    };
+    let exc_oid = realm.heap.new_ordinary_object();
+    let message = realm.heap.new_string(message);
+    {
+        let mut exc = realm.heap.get_mut(exc_oid).unwrap();
+        exc.set_proto(Some(exc_proto));
+        exc.set_own(
+            IndexOrKey::Key("message"),
+            heap::Property::enumerable(Value::Object(message)),
+        )
+    }
+    let exc = Value::Object(exc_oid);
+    exc
 }
 
 fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectId> {
@@ -1334,6 +1360,29 @@ fn to_boolean(value: Value, realm: &Realm) -> bool {
         }
         Value::Symbol(_) => true,
     }
+}
+
+/// Converts the given value to a number, in the way that is typically invoked
+/// by the unary plus operator (e.g. `+{}`, `+123.0`)
+///
+/// A `Some` is returned for a successful conversion. On failure (e.g. for
+/// Symbol), a `None` is returned.
+fn to_number(value: Value) -> Option<Value> {
+    let num = match value {
+        Value::Null => 0.0,
+        Value::Bool(true) => 1.0,
+        Value::Bool(false) => 0.0,
+        Value::Number(num) => num,
+        Value::Object(_) => f64::NAN,
+        Value::Undefined => f64::NAN,
+        Value::SelfFunction => panic!(),
+        Value::Internal(_) => {
+            panic!("bytecode compiler bug: internal value should be unreachable")
+        }
+        Value::Symbol(_) => return None,
+    };
+
+    Some(Value::Number(num))
 }
 
 /// Implements JavaScript's implicit conversion to string.
@@ -2629,6 +2678,41 @@ do {
             &output.sink,
             &[Some(Literal::Number(123.0)), Some(Literal::Undefined)]
         );
+    }
+
+    #[test]
+    fn test_to_number() {
+        let output = quick_run_script(
+            "
+            sink(+123.0);
+            sink(+{});
+            sink(+null);
+            sink(+undefined);
+            sink(+true);
+            sink(+false);
+        ",
+        );
+
+        let expected = &[
+            123.0,
+            f64::NAN,
+            0.0,
+            f64::NAN,
+            1.0,
+            0.0,
+        ];
+
+        assert_eq!(output.sink.len(), expected.len());
+        for (out, &exp) in output.sink.iter().zip(expected) {
+            let out = if let Some(Literal::Number(n)) = out {
+                *n
+            } else {
+                panic!("expected Literal::Number, got {:?}", out);
+            };
+
+            // Check for equality, including NaN
+            assert_eq!(f64::to_bits(out), f64::to_bits(exp));
+        }
     }
 
     mod debugging {

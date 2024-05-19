@@ -127,6 +127,10 @@ pub enum Instr {
         dest: VReg,
         arg: VReg,
     },
+    ToNumber {
+        dest: VReg,
+        arg: VReg,
+    },
 
     // either numeric addition or string concatentation (chosen at runtime)
     OpAdd(VReg, VReg, VReg),
@@ -306,7 +310,8 @@ impl Instr {
             Instr::GetGlobal { dest, name } => { an(D::VRegWrite(*dest)); an(D::Const(*name)); }
             Instr::Copy { dst: dest, src: arg }
             | Instr::BoolNot { dest, arg }
-            | Instr::UnaryMinus { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
+            | Instr::UnaryMinus { dest, arg }
+            | Instr::ToNumber { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
             Instr::ArithInc(dest, arg) => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
             Instr::ArithDec(dest, arg) => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
             Instr::OpAdd(dst, a, b)
