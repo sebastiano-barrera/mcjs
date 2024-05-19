@@ -99,22 +99,9 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
             heap::Property::enumerable(Value::Object(Error_toString)),
         );
     }
-    let ReferenceError = heap.new_function(Closure::Native(nf_do_nothing));
-    {
-        let mut ReferenceError_obj = heap.get_mut(ReferenceError).unwrap();
-        ReferenceError_obj.set_own(
-            heap::IndexOrKey::Key("prototype"),
-            heap::Property::non_enumerable(Value::Object(Error)),
-        );
-    }
-    let TypeError = heap.new_function(Closure::Native(nf_do_nothing));
-    {
-        let mut TypeError_obj = heap.get_mut(TypeError).unwrap();
-        TypeError_obj.set_own(
-            heap::IndexOrKey::Key("prototype"),
-            heap::Property::non_enumerable(Value::Object(Error)),
-        );
-    }
+    let ReferenceError = make_empty_cons(heap, Error);
+    let TypeError = make_empty_cons(heap, Error);
+    let SyntaxError = make_empty_cons(heap, Error);
 
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
@@ -164,8 +151,22 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         "TypeError".into(),
         heap::Property::enumerable(Value::Object(TypeError)),
     );
+    global_obj.set_own(
+        "SyntaxError".into(),
+        heap::Property::enumerable(Value::Object(SyntaxError)),
+    );
 
     global
+}
+
+fn make_empty_cons(heap: &mut heap::Heap, prototype: heap::ObjectId) -> heap::ObjectId {
+    let cons = heap.new_function(Closure::Native(nf_do_nothing));
+    let mut cons_obj = heap.get_mut(cons).unwrap();
+    cons_obj.set_own(
+        heap::IndexOrKey::Key("prototype"),
+        heap::Property::non_enumerable(Value::Object(prototype)),
+    );
+    cons
 }
 
 fn nf_do_nothing(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> Result<Value> {
