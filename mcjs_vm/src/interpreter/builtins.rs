@@ -7,7 +7,7 @@ use super::{literal_to_value, show_value, value_to_string, Closure, JSClosure, R
 use crate::bytecode;
 use crate::common::Result;
 use crate::error;
-use crate::heap::{self, Object};
+use crate::heap;
 
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let Array = {
@@ -15,7 +15,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         let Array_pop = heap.new_function(Closure::Native(nf_Array_pop));
         let array_proto = heap.array_proto();
         {
-            let mut array_proto_obj = heap.get(array_proto).unwrap().borrow_mut();
+            let mut array_proto_obj = heap.get_mut(array_proto).unwrap();
             array_proto_obj.set_own(
                 "push".into(),
                 heap::Property::non_enumerable(Value::Object(Array_push)),
@@ -29,7 +29,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
         let Array_isArray = heap.new_function(Closure::Native(nf_Array_isArray));
         let array_ctor = heap.new_function(Closure::Native(nf_Array));
         {
-            let mut array_ctor_obj = heap.get(array_ctor).unwrap().borrow_mut();
+            let mut array_ctor_obj = heap.get_mut(array_ctor).unwrap();
             array_ctor_obj.set_own(
                 "isArray".into(),
                 heap::Property::non_enumerable(Value::Object(Array_isArray)),
@@ -49,13 +49,13 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     {
         let toString = heap.new_function(Closure::Native(nf_Number_prototype_toString));
 
-        let mut Number_obj = heap.get(Number).unwrap().borrow_mut();
+        let mut Number_obj = heap.get_mut(Number).unwrap();
         Number_obj.set_own(
             "prototype".into(),
             heap::Property::non_enumerable(Value::Object(heap.number_proto())),
         );
 
-        let mut number_proto_obj = heap.get(heap.number_proto()).unwrap().borrow_mut();
+        let mut number_proto_obj = heap.get_mut(heap.number_proto()).unwrap();
         number_proto_obj.set_own(
             "toString".into(),
             heap::Property::non_enumerable(Value::Object(toString)),
@@ -68,7 +68,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
 
     let Function = heap.new_function(Closure::Native(nf_Function));
     {
-        let mut Function_obj = heap.get(Function).unwrap().borrow_mut();
+        let mut Function_obj = heap.get_mut(Function).unwrap();
         Function_obj.set_own(
             "prototype".into(),
             heap::Property::non_enumerable(Value::Object(heap.func_proto())),
@@ -83,7 +83,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
 
     let func_bind = heap.new_function(Closure::Native(nf_Function_bind));
     {
-        let mut func_proto = heap.get(heap.func_proto()).unwrap().borrow_mut();
+        let mut func_proto = heap.get_mut(heap.func_proto()).unwrap();
         func_proto.set_own(
             "bind".into(),
             heap::Property::non_enumerable(Value::Object(func_bind)),
@@ -93,7 +93,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     let Error = heap.new_function(Closure::Native(nf_do_nothing));
     {
         let Error_toString = heap.new_function(Closure::Native(nf_Error_toString));
-        let mut Error_obj = heap.get(Error).unwrap().borrow_mut();
+        let mut Error_obj = heap.get_mut(Error).unwrap();
         Error_obj.set_own(
             heap::IndexOrKey::Key("toString"),
             heap::Property::enumerable(Value::Object(Error_toString)),
@@ -101,7 +101,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     }
     let ReferenceError = heap.new_function(Closure::Native(nf_do_nothing));
     {
-        let mut ReferenceError_obj = heap.get(ReferenceError).unwrap().borrow_mut();
+        let mut ReferenceError_obj = heap.get_mut(ReferenceError).unwrap();
         ReferenceError_obj.set_own(
             heap::IndexOrKey::Key("prototype"),
             heap::Property::non_enumerable(Value::Object(Error)),
@@ -109,7 +109,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     }
     let TypeError = heap.new_function(Closure::Native(nf_do_nothing));
     {
-        let mut TypeError_obj = heap.get(TypeError).unwrap().borrow_mut();
+        let mut TypeError_obj = heap.get_mut(TypeError).unwrap();
         TypeError_obj.set_own(
             heap::IndexOrKey::Key("prototype"),
             heap::Property::non_enumerable(Value::Object(Error)),
@@ -119,7 +119,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
     let global = heap.new_ordinary_object();
-    let mut global_obj = heap.get(global).unwrap().borrow_mut();
+    let mut global_obj = heap.get_mut(global).unwrap();
     global_obj.set_own(
         "Object".into(),
         heap::Property::enumerable(Value::Object(Object)),
@@ -178,7 +178,7 @@ fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<
             .heap
             .get(*oid)
             .ok_or_else(|| error!("no such object!"))?;
-        obj.borrow().array_elements().is_some()
+        obj.array_elements().is_some()
     } else {
         false
     };
@@ -189,7 +189,7 @@ fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<
 fn nf_Array_push(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
     // TODO Proper error handling, instead of these unwrap
     let oid = this.expect_obj().unwrap();
-    let mut arr = realm.heap.get(oid).unwrap().borrow_mut();
+    let mut arr = realm.heap.get_mut(oid).unwrap();
     let value = *args.first().unwrap();
     arr.array_push(value);
     Ok(Value::Undefined)
@@ -265,8 +265,7 @@ fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<V
     let obj = realm
         .heap
         .get(obj_id)
-        .ok_or_else(|| error!("no such object"))?
-        .borrow();
+        .ok_or_else(|| error!("no such object"))?;
     let closure = obj.as_closure().ok_or_else(|| error!("not a function"))?;
     let js_closure = match closure {
         Closure::Native(_) => return Err(error!("can't bind a native function (yet)")),
@@ -289,16 +288,14 @@ fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<V
 
 fn nf_Error_toString(realm: &mut Realm, this: &Value, _args: &[Value]) -> Result<Value> {
     let obj_id = this.expect_obj()?;
-    let obj = realm.heap.get(obj_id).unwrap().borrow();
+    let obj = realm.heap.get(obj_id).unwrap();
 
-    let message = realm
-        .heap
-        .get_property_chained(&*obj, heap::IndexOrKey::Key("message"))
+    let message = obj
+        .get_chained(heap::IndexOrKey::Key("message"))
         .map(|prop| value_to_string(prop.value, &realm.heap))
         .unwrap_or(Ok("(no message)".to_string()))?;
-    let name = realm
-        .heap
-        .get_property_chained(&*obj, heap::IndexOrKey::Key("name"))
+    let name = obj
+        .get_chained(heap::IndexOrKey::Key("name"))
         .map(|prop| value_to_string(prop.value, &realm.heap))
         .unwrap_or(Ok("(no message)".to_string()))?;
 
