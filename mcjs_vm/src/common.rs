@@ -61,7 +61,7 @@ impl ErrorItem {
                 let hi = source_map.lookup_char_pos(src_span.hi);
                 write!(
                     out,
-                    "{}: {},{} - {},{}: ",
+                    "{}:{}:{} to {}:{}: ",
                     lo.file.name, lo.line, lo.col_display, hi.line, hi.col_display,
                 )
                 .unwrap();
