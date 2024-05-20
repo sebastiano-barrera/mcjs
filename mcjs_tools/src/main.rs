@@ -1,10 +1,9 @@
 use std::{io::Write, path::PathBuf};
 
 use anyhow::Result;
-use mcjs_vm::interpreter::{
-    self,
-    debugger::{self, InstrBreakpoint},
-    stack,
+use mcjs_vm::{
+    heap,
+    interpreter::{self, debugger::InstrBreakpoint, stack},
 };
 
 fn main() {
@@ -209,7 +208,7 @@ enum Action {
     Next,
     Into,
     SetHighlight(widgets::Highlight),
-    OpenObject(debugger::ObjectId),
+    OpenObject(heap::ObjectId),
     SaveLayout,
     LoadLayout,
     SetInstrBreakpoint(mcjs_vm::GlobalIID),
@@ -882,8 +881,8 @@ mod widgets {
 
     use super::Action;
     use mcjs_vm::{
-        bytecode,
-        interpreter::{debugger, stack, Value},
+        bytecode, heap,
+        interpreter::{debugger, stack, SlotDebug, Value},
     };
 
     const COLOR_BLUE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
@@ -910,7 +909,7 @@ mod widgets {
         #[default]
         None,
         VReg((bytecode::FnId, bytecode::VReg)),
-        Object(debugger::ObjectId),
+        Object(heap::ObjectId),
     }
 
     impl Highlight {
@@ -918,7 +917,7 @@ mod widgets {
             matches!(self, Highlight::VReg(h) if *h == (fnid, vreg))
         }
 
-        fn match_obj_id(&self, obj_id: debugger::ObjectId) -> bool {
+        fn match_obj_id(&self, obj_id: heap::ObjectId) -> bool {
             *self == Highlight::Object(obj_id)
         }
     }
@@ -969,7 +968,7 @@ mod widgets {
 
                 ui.label(richtext_for_vreg(vreg, mode));
 
-                if let mcjs_vm::SlotDebug::Upvalue(upv_id) = slot {
+                if let SlotDebug::Upvalue(upv_id) = slot {
                     let upv_id = format!("{:?}", upv_id);
                     let upv_id = peel_parens(&upv_id);
                     ui.label(format!("upv{} »", upv_id));
@@ -1099,10 +1098,7 @@ mod manager {
     use thiserror::Error;
 
     use mcjs_vm::{
-        bytecode,
-        interpreter::debugger::{Fuel, InstrBreakpoint},
-        interpreter::{self, stack, Exit, Interpreter},
-        Loader, Realm,
+        bytecode, interpreter::{self, debugger::{Fuel, InstrBreakpoint}, stack, Exit, Interpreter}, Loader, Realm
     };
 
     #[derive(Debug)]
