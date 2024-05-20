@@ -171,7 +171,10 @@ fn make_exception_cons(heap: &mut heap::Heap, prototype: heap::ObjectId) -> heap
 
 fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
     let message = *args.get(0).unwrap_or(&Value::Undefined);
-    let oid = realm.heap.object_of_value(*this).expect("bug: not an object!?");
+    let oid = realm
+        .heap
+        .object_of_value(*this)
+        .expect("bug: not an object!?");
     let mut obj = realm.heap.get_mut(oid).unwrap();
     obj.set_own("message".into(), heap::Property::enumerable(message));
     Ok(Value::Undefined)
@@ -238,19 +241,30 @@ fn nf_Number_prototype_toString(realm: &mut Realm, this: &Value, _: &[Value]) ->
     Ok(Value::Object(oid))
 }
 
-fn nf_String(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Value> {
+fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
     let value = args.first().copied();
-    let heap = &realm.heap;
 
     let value_str = match value {
         None => "".to_string(),
-        Some(v) => value_to_string(v, heap)?,
+        Some(v) => value_to_string(v, &realm.heap)?,
     };
 
-    Ok(literal_to_value(
-        bytecode::Literal::String(value_str),
-        &mut realm.heap,
-    ))
+    let this_oid = match this {
+        Value::Object(oid) => *oid,
+        Value::Undefined => {
+            // called as function, not constructor
+            realm.heap.new_ordinary_object()
+        }
+        _ => panic!("bug: 'this' not an object: {:?}", this),
+    };
+
+    realm.heap.init_string(this_oid, value_str);
+
+    // TODO This is not strictly compliant with ECMAScript. Calling String as a
+    // constructor (`new String`) should return a String object, whereas calling
+    // String as a function (`String(...)`) should return a "string" primitive.
+    // But we don't have those! So, String objects for everybody
+    Ok(Value::Object(this_oid))
 }
 
 fn nf_Boolean(_realm: &mut Realm, _this: &Value, _: &[Value]) -> Result<Value> {
