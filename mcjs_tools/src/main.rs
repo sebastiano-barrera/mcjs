@@ -497,7 +497,13 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
             (Pane::Heap, _) => "Heap",
             (Pane::Stack, _) => {
                 use stack_view::Action;
-                let action = stack_view::show(self.stack_view, ui, self.intrp_state, self.loader);
+                let action = stack_view::show(
+                    self.stack_view,
+                    ui,
+                    self.intrp_state,
+                    self.loader,
+                    *self.frame_focus_ndx,
+                );
                 return match action {
                     Action::SetFrameIndex(ndx) => {
                         *self.frame_focus_ndx = ndx;
@@ -541,6 +547,7 @@ mod stack_view {
         ui: &mut egui::Ui,
         intrp_state: &stack::InterpreterData,
         loader: &mcjs_vm::Loader,
+        focus_frame_ndx: usize,
     ) -> Action {
         let mut action = Action::None;
 
@@ -558,7 +565,8 @@ mod stack_view {
                     let filename = lookup.source_file.name.to_string();
 
                     let point_str = format!("{:?}:{:?} - {:?}", header.fnid, header.iid, filename);
-                    if ui.selectable_label(false, point_str).clicked() {
+                    let is_checked = frame_ndx == focus_frame_ndx;
+                    if ui.selectable_label(is_checked, point_str).clicked() {
                         action = Action::SetFrameIndex(frame_ndx);
                     }
                 }
