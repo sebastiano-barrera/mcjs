@@ -171,9 +171,6 @@ type AppResult<T> = std::result::Result<T, AppError>;
 #[derive(Debug, thiserror::Error)]
 enum AppError {
     #[error("environment error: {0}")]
-    Config(String),
-
-    #[error("environment error: {0}")]
     Env(String),
 
     #[error("I/O error: {0}")]
@@ -250,7 +247,7 @@ impl eframe::App for AppData {
                 manager::State::Suspended {
                     script_ndx,
                     intrp_state,
-                    cause: _,
+                    cause,
                 } => {
                     ui.horizontal(|ui| {
                         if ui.button("Continue").clicked() {
@@ -277,6 +274,12 @@ impl eframe::App for AppData {
                                 action = Action::SetBreakOnUnhandledThrow(on);
                             }
                         });
+
+                        match cause {
+                            interpreter::SuspendCause::Breakpoint => ui.label("On breakpoint"),
+                            // TODO Allow "Open object" here as well
+                            interpreter::SuspendCause::Exception(_) => ui.label("On exception"),
+                        };
 
                         ui.label(format!(
                             "{}/{}  {}",
@@ -871,7 +874,7 @@ mod source_view {
             if res.secondary_clicked() {
                 let click_pos = res.interact_pointer_pos().unwrap() - res.rect.min;
                 let offset = cache.galley.cursor_from_pos(click_pos).ccursor.index;
-                todo!(" -- list the relevant break ranges");
+                eprintln!("TODO! Listing the relevant break ranges (at offset {})", offset);
             }
         });
 
@@ -896,8 +899,8 @@ mod widgets {
 
     const COLOR_BLUE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
     const COLOR_LIGHT_BLUE: egui::Color32 = egui::Color32::from_rgb(156, 220, 254);
-    const COLOR_ROSE: egui::Color32 = egui::Color32::from_rgb(206, 145, 120);
-    const COLOR_MAGENTA: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
+    const _COLOR_ROSE: egui::Color32 = egui::Color32::from_rgb(206, 145, 120);
+    const _COLOR_MAGENTA: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
     const COLOR_GREEN: egui::Color32 = egui::Color32::from_rgb(78, 201, 176);
     const COLOR_YELLOW: egui::Color32 = egui::Color32::from_rgb(220, 220, 170);
     const COLOR_GREY: egui::Color32 = egui::Color32::GRAY;
@@ -908,9 +911,9 @@ mod widgets {
     const COLOR_NUMBER: egui::Color32 = COLOR_GREEN;
     const COLOR_SINGLETON: egui::Color32 = COLOR_BLUE;
     const COLOR_OBJECT: egui::Color32 = COLOR_LIGHT_BLUE;
-    const COLOR_STRING: egui::Color32 = COLOR_ROSE;
-    const COLOR_KEYWORD: egui::Color32 = COLOR_MAGENTA;
-    const COLOR_IID: egui::Color32 = COLOR_GREY;
+    const _COLOR_STRING: egui::Color32 = _COLOR_ROSE;
+    const _COLOR_KEYWORD: egui::Color32 = _COLOR_MAGENTA;
+    const _COLOR_IID: egui::Color32 = COLOR_GREY;
     const COLOR_INVALID: egui::Color32 = COLOR_GREY;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

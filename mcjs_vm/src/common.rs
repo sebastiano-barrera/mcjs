@@ -202,15 +202,20 @@ impl std::fmt::Debug for MultiError {
     }
 }
 
+#[cfg(test)]
 pub struct ErrorWithLoader<'a> {
     err: Error,
     loader: &'a Loader,
 }
+
+#[cfg(test)]
 impl Error {
     pub(crate) fn with_loader<'a>(self, loader: &'a Loader) -> ErrorWithLoader<'a> {
         ErrorWithLoader { err: self, loader }
     }
 }
+
+#[cfg(test)]
 impl<'a> std::fmt::Debug for ErrorWithLoader<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.err.write_to(f, Some(self.loader))
