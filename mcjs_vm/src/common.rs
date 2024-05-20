@@ -202,3 +202,25 @@ impl std::fmt::Debug for MultiError {
     }
 }
 
+#[cfg(test)]
+pub struct ErrorWithLoader<'a> {
+    err: Error,
+    loader: &'a Loader,
+}
+
+#[cfg(test)]
+impl Error {
+    pub(crate) fn with_loader<'a>(self, loader: &'a Loader) -> ErrorWithLoader<'a> {
+        ErrorWithLoader { err: self, loader }
+    }
+}
+
+#[cfg(test)]
+impl<'a> std::fmt::Debug for ErrorWithLoader<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.err.write_to(f, Some(self.loader))
+    }
+}
+
+// TODO: It would be cool to allow make a 'with_context_fn' that takes a closure and
+// allows makign the Error object only in case of a Result::Err
