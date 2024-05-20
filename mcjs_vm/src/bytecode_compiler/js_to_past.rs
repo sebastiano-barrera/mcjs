@@ -178,7 +178,7 @@ impl Block {
 
     pub fn get_expr(&self, expr_id: ExprID) -> &Expr {
         match expr_id {
-            ExprID::Node(nid, _) => &self.exprs[nid as usize],
+            ExprID::Node(nid, ..) => &self.exprs[nid as usize],
             ExprID::Undefined => &Expr::Undefined,
             ExprID::Null => &Expr::Null,
             ExprID::This => &Expr::This,
@@ -365,7 +365,7 @@ pub enum ExprID {
 impl std::fmt::Debug for ExprID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExprID::Node(node_id, _) => write!(f, "e{}", node_id),
+            ExprID::Node(node_id, ..) => write!(f, "e{}", node_id),
             ExprID::Undefined => write!(f, "eUndefined"),
             ExprID::Null => write!(f, "eNull"),
             ExprID::This => write!(f, "eThis"),
@@ -1110,7 +1110,7 @@ pub fn compile_module(
                         value,
                     });
                 }
-                
+
                 swc_ecma_ast::ModuleDecl::ExportNamed(_)
                 | swc_ecma_ast::ModuleDecl::ExportAll(_) => unsupported_node!(module_decl),
 
