@@ -2,9 +2,8 @@
 
 use std::rc::Rc;
 
-use super::{literal_to_value, show_value, value_to_string, Closure, JSClosure, Realm, Value};
+use super::{show_value, value_to_string, Closure, JSClosure, Realm, Value};
 
-use crate::bytecode;
 use crate::common::Result;
 use crate::error;
 use crate::heap;
