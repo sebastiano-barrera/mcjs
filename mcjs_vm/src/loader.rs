@@ -404,15 +404,16 @@ impl Loader {
     }
 
     pub fn load_script_file(&mut self, filename: &Path) -> Result<bytecode::FnId> {
-        // Make path absolute without accessing the filesystem (like Path::canonicalize
-        // would do).
-        let filename = filename.canonicalize().unwrap();
-        let content = std::fs::read_to_string(&filename).map_err(|err| {
+        let content = std::fs::read_to_string(filename).map_err(|err| {
             Error::from_err(err).with_context(error_item!(
                 "while loading script `{}`",
                 filename.to_string_lossy()
             ))
         })?;
+
+        // Now that the file has been read successfully, we can reasonably
+        // assume that "canonicalize" will also succeed.
+        let filename = filename.canonicalize().unwrap();
 
         let source_type = if filename.extension() == Some(OsStr::new("mjs")) {
             bytecode_compiler::SourceType::Module

@@ -10,14 +10,18 @@ fn main() {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
     let params = parse_args().expect("cli error");
-    eprintln!("params = {:?}", params);
-
     if params.filenames.is_empty() {
-        eprintln!("No script files in input params!");
+        eprintln!("params error: No script files in input params!");
         return;
     }
 
-    let app = AppData::new(params);
+    let app = match AppData::new(params) {
+        Ok(app) => app,
+        Err(err) => {
+            eprintln!("could not init application: {}", err);
+            return;
+        }
+    };
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = native_options
@@ -72,7 +76,7 @@ struct AppData {
 }
 
 impl AppData {
-    fn new(params: manager::Params) -> Self {
+    fn new(params: manager::Params) -> AppResult<Self> {
         let tree = egui_tiles::Tree::new_tabs(
             "main_tree",
             vec![
@@ -84,7 +88,7 @@ impl AppData {
             ],
         );
 
-        let intrp = init_interpreter(&params);
+        let intrp = init_interpreter(&params)?;
 
         let mut app = AppData {
             params,
@@ -103,7 +107,7 @@ impl AppData {
         // Purposefully ignore the error, not a time to show it
         let _ = app.load_tree_layout();
 
-        app
+        Ok(app)
     }
 
     fn restart(&mut self) {
@@ -167,13 +171,19 @@ type AppResult<T> = std::result::Result<T, AppError>;
 #[derive(Debug, thiserror::Error)]
 enum AppError {
     #[error("environment error: {0}")]
+    Config(String),
+
+    #[error("environment error: {0}")]
     Env(String),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("fomat error: {0}")]
+    #[error("format error: {0}")]
     Format(String),
+
+    #[error("VM error: {0}")]
+    VmManager(manager::Error),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -181,13 +191,12 @@ struct StateFileData {
     tree_layout: Option<egui_tiles::Tree<Pane>>,
 }
 
-fn init_interpreter(params: &manager::Params) -> manager::ManagedInterpreter {
-    let mut intrp =
-        manager::ManagedInterpreter::new(params).expect("could not initialize interpreter");
+fn init_interpreter(params: &manager::Params) -> AppResult<manager::ManagedInterpreter> {
+    let mut intrp = manager::ManagedInterpreter::new(params).map_err(AppError::VmManager)?;
     // skip the initial Ready state
     debug_assert!(matches!(intrp.state(), manager::State::Ready(_)));
     intrp.resume();
-    intrp
+    Ok(intrp)
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -882,7 +891,7 @@ mod widgets {
     use super::Action;
     use mcjs_vm::{
         bytecode, heap,
-        interpreter::{debugger, stack, SlotDebug, Value},
+        interpreter::{stack, SlotDebug, Value},
     };
 
     const COLOR_BLUE: egui::Color32 = egui::Color32::from_rgb(86, 156, 214);
@@ -1098,7 +1107,13 @@ mod manager {
     use thiserror::Error;
 
     use mcjs_vm::{
-        bytecode, interpreter::{self, debugger::{Fuel, InstrBreakpoint}, stack, Exit, Interpreter}, Loader, Realm
+        bytecode,
+        interpreter::{
+            self,
+            debugger::{Fuel, InstrBreakpoint},
+            stack, Exit, Interpreter,
+        },
+        Loader, Realm,
     };
 
     #[derive(Debug)]
