@@ -874,7 +874,10 @@ mod source_view {
             if res.secondary_clicked() {
                 let click_pos = res.interact_pointer_pos().unwrap() - res.rect.min;
                 let offset = cache.galley.cursor_from_pos(click_pos).ccursor.index;
-                eprintln!("TODO! Listing the relevant break ranges (at offset {})", offset);
+                eprintln!(
+                    "TODO! Listing the relevant break ranges (at offset {})",
+                    offset
+                );
             }
         });
 
