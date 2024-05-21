@@ -67,6 +67,8 @@ struct AppData {
     focus_frame_ndx: usize,
     stack_view: stack_view::State,
     source_view: source_view::State,
+    heap_view: heap_view::State,
+    open_oids: Vec<heap::ObjectId>,
     highlight: widgets::Highlight,
 
     save_error_dialog: Option<String>,
@@ -97,6 +99,8 @@ impl AppData {
             focus_frame_ndx: 0,
             stack_view: stack_view::State::default(),
             source_view: source_view::State::default(),
+            heap_view: heap_view::State::default(),
+            open_oids: Vec::new(),
             highlight: widgets::Highlight::None,
             save_error_dialog: None,
             bkpt_error_dialog: None,
@@ -310,11 +314,14 @@ impl eframe::App for AppData {
                         intrp_state,
                         frame_focus_ndx: &mut self.focus_frame_ndx,
                         loader: self.intrp.loader(),
+                        heap: self.intrp.heap(),
                         stack_view: &mut self.stack_view,
                         source_view: &mut self.source_view,
                         action: &mut action,
                         highlight: self.highlight,
                         dbg: self.intrp.debugging_state(),
+                        heap_view: &mut self.heap_view,
+                        open_object_ids: &self.open_oids,
                     };
                     self.tree.ui(&mut behavior, ui);
                 }
@@ -394,8 +401,8 @@ impl eframe::App for AppData {
             Action::SetHighlight(highlight) => {
                 self.highlight = highlight;
             }
-            Action::OpenObject(_) => {
-                eprintln!("TODO: {:?}", action);
+            Action::OpenObject(oid) => {
+                self.open_oids.push(oid);
             }
             Action::SaveLayout => {
                 self.save_error_dialog = self.save_tree_layout().err().map(|err| err.to_string());
@@ -448,6 +455,7 @@ fn simple_dialog(ctx: &egui::Context, title: &str, message: &mut Option<String>)
 struct TreeBehavior<'a> {
     intrp_state: &'a stack::InterpreterData,
     loader: &'a mcjs_vm::Loader,
+    heap: &'a heap::Heap,
     dbg: &'a interpreter::debugger::DebuggingState,
 
     /// The currently focused frame index.
@@ -457,6 +465,8 @@ struct TreeBehavior<'a> {
 
     stack_view: &'a mut stack_view::State,
     source_view: &'a mut source_view::State,
+    heap_view: &'a mut heap_view::State,
+    open_object_ids: &'a [heap::ObjectId],
 
     action: &'a mut Action,
     highlight: widgets::Highlight,
@@ -499,7 +509,11 @@ impl<'a> egui_tiles::Behavior<Pane> for TreeBehavior<'a> {
                 return res.tiles;
             }
             (Pane::PAST, _) => "PAST",
-            (Pane::Heap, _) => "Heap",
+            (Pane::Heap, _) => {
+                let res =
+                    heap_view::show(ui, &mut self.heap_view, &self.open_object_ids, &self.heap);
+                return res.tiles;
+            }
             (Pane::Stack, _) => {
                 use stack_view::Action;
                 let action = stack_view::show(
@@ -924,6 +938,138 @@ mod source_view {
 
         Response {
             tiles: if button_drag_started {
+                egui_tiles::UiResponse::DragStarted
+            } else {
+                egui_tiles::UiResponse::None
+            },
+        }
+    }
+}
+
+mod heap_view {
+    use mcjs_vm::heap;
+    use mcjs_vm::InterpreterValue;
+
+    #[derive(Default)]
+    pub struct State {
+        oids: Vec<heap::ObjectId>,
+        tree: Vec<TreeNode>,
+    }
+
+    #[derive(Default)]
+    struct TreeNode {
+        key: String,
+        value: String,
+        expanded: bool,
+        children: Vec<TreeNode>,
+    }
+
+    fn read_object(heap: &heap::Heap, oid: heap::ObjectId, depth: usize) -> TreeNode {
+        if depth >= 5 {
+            return TreeNode {
+                value: "too deep!".to_string(),
+                ..Default::default()
+            };
+        }
+
+        let obj = match heap.get(oid) {
+            Some(obj) => obj,
+            None => {
+                return TreeNode {
+                    value: format!("{:?} = MISSING!", oid),
+                    ..Default::default()
+                }
+            }
+        };
+
+        let mut props = Vec::new();
+        obj.own_properties(false, &mut props);
+
+        let mut node = TreeNode {
+            key: "".to_string(),
+            value: format!("{:?} [{} properties]", oid, props.len()),
+            expanded: false,
+            children: Vec::new(),
+        };
+
+        for prop in props {
+            let mut child = match obj.get_own(heap::IndexOrKey::Key(&prop)) {
+                Some(heap::Property {
+                    value: InterpreterValue::Object(child_oid),
+                    ..
+                }) => read_object(heap, child_oid, depth + 1),
+                Some(heap::Property { value, .. }) => TreeNode {
+                    value: format!("{:?}", value),
+                    ..Default::default()
+                },
+                None => TreeNode {
+                    value: "MISSING!".to_string(),
+                    ..Default::default()
+                },
+            };
+
+            child.key = prop.clone();
+            node.children.push(child);
+        }
+
+        node
+    }
+
+    fn show_tree_node(ui: &mut egui::Ui, node: &mut TreeNode, depth: usize) {
+        if depth >= 5 {
+            ui.label("too deep!");
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut node.expanded, &node.key);
+            ui.label(" = ");
+            ui.label(&node.value);
+        });
+
+        if node.expanded {
+            let indent_id = (node as *const TreeNode) as usize;
+            ui.indent(indent_id, |ui| {
+                for child in &mut node.children {
+                    show_tree_node(ui, child, depth + 1);
+                }
+            });
+        }
+    }
+
+    #[derive(Default)]
+    pub struct Response {
+        pub tiles: egui_tiles::UiResponse,
+    }
+
+    pub fn show(
+        ui: &mut egui::Ui,
+        state: &mut State,
+        objects: &[heap::ObjectId],
+        heap: &heap::Heap,
+    ) -> Response {
+        let drag_started = ui
+            .add(egui::Button::new("Heap").sense(egui::Sense::drag()))
+            .drag_started();
+
+        if &state.oids != objects {
+            eprintln!("objects set changed");
+            state.oids.clear();
+            state.oids.extend_from_slice(objects);
+            state.tree = objects
+                .iter()
+                .map(|oid| read_object(heap, *oid, 0))
+                .collect();
+        }
+
+        debug_assert_eq!(&state.oids, objects);
+
+        for root in &mut state.tree {
+            show_tree_node(ui, root, 0);
+        }
+
+        Response {
+            tiles: if drag_started {
                 egui_tiles::UiResponse::DragStarted
             } else {
                 egui_tiles::UiResponse::None
@@ -1376,6 +1522,10 @@ mod manager {
         }
         pub fn debugging_state_mut(&mut self) -> &mut interpreter::debugger::DebuggingState {
             &mut self.dbg
+        }
+
+        pub fn heap(&self) -> &mcjs_vm::heap::Heap {
+            &self.realm.heap()
         }
     }
 }
