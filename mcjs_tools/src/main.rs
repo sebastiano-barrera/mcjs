@@ -374,17 +374,22 @@ impl eframe::App for AppData {
             Action::None => {}
             Action::Resume => {
                 self.resume();
+                self.source_view.request_scroll();
             }
             Action::Restart => {
                 self.restart();
+                self.source_view.request_scroll();
             }
             Action::Next => {
                 if let Err(err) = self.intrp.next() {
                     self.bkpt_error_dialog = Some(err.to_string());
+                } else {
+                    self.source_view.request_scroll();
                 }
             }
             Action::Into => {
                 self.intrp.next_into();
+                self.source_view.request_scroll();
             }
             Action::SetHighlight(highlight) => {
                 self.highlight = highlight;
@@ -740,6 +745,7 @@ mod source_view {
     #[derive(Default)]
     pub struct State {
         cache: Option<Cache>,
+        requested_scroll: bool,
     }
     impl State {
         fn update(&mut self, giid: bytecode::GlobalIID, loader: &Loader, ctx: &egui::Context) {
@@ -750,11 +756,16 @@ mod source_view {
             }
             self.cache = Cache::build(giid, loader, ctx);
         }
+
+        pub fn request_scroll(&mut self) {
+            self.requested_scroll = true;
+        }
     }
 
     struct Cache {
         giid: bytecode::GlobalIID,
         galley: Arc<egui::Galley>,
+        first_hl_line_ndx: usize,
     }
     impl Cache {
         fn is_valid(&self, giid: bytecode::GlobalIID) -> bool {
@@ -790,7 +801,16 @@ mod source_view {
             }
             .into_galley();
 
-            Some(Cache { giid, galley })
+            let first_hl_line_ndx = func_lookup.source_file.src[0..hl_start]
+                .chars()
+                .filter(|c| *c == '\n')
+                .count();
+
+            Some(Cache {
+                giid,
+                galley,
+                first_hl_line_ndx,
+            })
         }
     }
 
@@ -852,9 +872,16 @@ mod source_view {
         frame: &stack::Frame,
         loader: &Loader,
     ) -> Response {
-        let button_drag_started = ui
-            .add(egui::Button::new("Source code").sense(egui::Sense::drag()))
-            .drag_started();
+        let mut button_drag_started = false;
+        ui.horizontal(|ui| {
+            button_drag_started = ui
+                .add(egui::Button::new("Source code").sense(egui::Sense::drag()))
+                .drag_started();
+
+            if ui.button("Focus current").clicked() {
+                state.requested_scroll = true;
+            }
+        });
 
         let fnid = frame.header().fnid;
         let iid = frame.header().iid;
@@ -875,9 +902,15 @@ mod source_view {
         };
         assert_eq!(cache.giid, giid);
 
-        egui::ScrollArea::both().show(ui, |ui| {
+        let mut scrollarea = egui::ScrollArea::both();
+        if std::mem::take(&mut state.requested_scroll) {
+            let offset = 11.1 * cache.first_hl_line_ndx as f32;
+            scrollarea = scrollarea.vertical_scroll_offset(offset);
+        }
+        scrollarea.show(ui, |ui| {
             let text = egui::WidgetText::Galley(Arc::clone(&cache.galley));
             let label = egui::Label::new(text).sense(egui::Sense::click());
+
             let res = ui.add(label);
             if res.secondary_clicked() {
                 let click_pos = res.interact_pointer_pos().unwrap() - res.rect.min;
