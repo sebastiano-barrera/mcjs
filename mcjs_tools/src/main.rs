@@ -6,6 +6,11 @@ use mcjs_vm::{
     interpreter::{self, debugger::InstrBreakpoint, stack},
 };
 
+use jemallocator::Jemalloc;
+
+#[global_allocator]
+static MY_ALLOC: Jemalloc = Jemalloc;
+
 fn main() {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
