@@ -992,7 +992,7 @@ mod heap_view {
 
         let mut node = TreeNode {
             key: "".to_string(),
-            value: format!("{:?} [{} properties]", oid, props.len()),
+            value: obj.show_debug(),
             expanded: false,
             children: Vec::new(),
         };

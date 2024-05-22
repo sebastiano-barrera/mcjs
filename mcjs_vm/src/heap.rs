@@ -185,6 +185,19 @@ where
             Exotic::Bool(b) => b.to_string(),
         }
     }
+
+    pub fn show_debug(&self) -> String {
+        match &self.obj.exotic_part {
+            Exotic::None => format!("object ({} properties)", self.obj.properties.len()),
+            Exotic::Array { elements } => {
+                format!("array ({} elements)", elements.len())
+            }
+            Exotic::String { string } => format!("{:?}", string),
+            Exotic::Function { .. } => "<closure>".to_owned(),
+            Exotic::Number(n) => format!("object number {}", n),
+            Exotic::Bool(b) => format!("object boolean {}", b),
+        }
+    }
 }
 
 impl<'a, R> ObjectRefW<'a, R>
