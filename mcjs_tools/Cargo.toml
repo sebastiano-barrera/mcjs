@@ -19,5 +19,4 @@ thiserror = "1.0.57"
 dirs = "5.0.1"
 rmp-serde = "1.1.2"
 
-
-
+jemallocator = "0.5"
