@@ -11,9 +11,9 @@ mcjs_vm = { path = "../mcjs_vm", features = ["debugger", "tracing"] }
 anyhow = "1.0.75"
 swc_common = "~0.31.0"
 env_logger = "0.10.1"
-egui = { version = "0.26", default-features = false }
-eframe = { version = "0.26", default-features = false, features = ["default_fonts", "glow", "wayland", "puffin"] } 
-egui_tiles = "0.7.2"
+egui = "0.27"
+eframe = "0.27"
+egui_tiles = "0.8"
 serde = "1.0.197"
 thiserror = "1.0.57"
 dirs = "5.0.1"
@@ -21,8 +21,8 @@ rmp-serde = "1.1.2"
 
 jemallocator = "0.5"
  
-[patch.crates-io]
-egui = { git = "https://github.com/emilk/egui", branch = "master" }
-eframe = { git = "https://github.com/emilk/egui", branch = "master" }
 
+[patch.crates-io]
+egui = { git = "https://github.com/mwcampbell/egui", branch = "accesskit-0.14-winit-0.29" }
+eframe = { git = "https://github.com/mwcampbell/egui", branch = "accesskit-0.14-winit-0.29" }
 
