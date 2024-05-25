@@ -499,8 +499,6 @@ impl Heap {
             // TODO!
             Value::Symbol(_) => None,
             Value::Undefined => None,
-            Value::SelfFunction => panic!(),
-            Value::Internal(_) => panic!(),
         }
     }
 

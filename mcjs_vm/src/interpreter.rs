@@ -55,12 +55,8 @@ pub enum Value {
     Object(heap::ObjectId),
     Null,
     Undefined,
-    SelfFunction,
 
     Symbol(&'static str),
-    // TODO(small) remove this. society has evolved past the need for values that can't be created
-    // from source code
-    Internal(usize),
 }
 
 macro_rules! gen_value_expect {
@@ -1253,8 +1249,6 @@ fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
         // of the 'object' type
         Value::Null => "object",
         Value::Undefined => "undefined",
-        Value::SelfFunction => "function",
-        Value::Internal(_) => panic!("internal value has no typeof!"),
     };
 
     literal_to_value(bytecode::Literal::String(ty_s.to_string()), &mut realm.heap)
@@ -1359,10 +1353,6 @@ fn to_boolean(value: Value, realm: &Realm) -> bool {
         Value::Number(num) => num != 0.0,
         Value::Object(oid) => realm.heap.get(oid).unwrap().to_boolean(),
         Value::Undefined => false,
-        Value::SelfFunction => true,
-        Value::Internal(_) => {
-            panic!("bytecode compiler bug: internal value should be unreachable")
-        }
         Value::Symbol(_) => true,
     }
 }
@@ -1380,10 +1370,6 @@ fn to_number(value: Value) -> Option<Value> {
         Value::Number(num) => num,
         Value::Object(_) => f64::NAN,
         Value::Undefined => f64::NAN,
-        Value::SelfFunction => panic!(),
-        Value::Internal(_) => {
-            panic!("bytecode compiler bug: internal value should be unreachable")
-        }
         Value::Symbol(_) => return None,
     };
 
@@ -1399,8 +1385,6 @@ fn value_to_string(value: Value, heap: &heap::Heap) -> Result<String> {
         Value::Object(oid) => Ok(heap.get(oid).unwrap().js_to_string()),
         Value::Null => Ok("null".into()),
         Value::Undefined => Ok("undefined".into()),
-        Value::SelfFunction => Ok("<function>".into()),
-        Value::Internal(_) => unreachable!(),
         Value::Symbol(_) => Err(error!("Cannot convert Symbol value into a String")),
     }
 }
@@ -1516,8 +1500,6 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
         Value::Symbol(sym) => Some(bytecode::Literal::Symbol(sym)),
         Value::Null => Some(bytecode::Literal::Null),
         Value::Undefined => Some(bytecode::Literal::Undefined),
-        Value::SelfFunction => None,
-        Value::Internal(_) => None,
     }
 }
 

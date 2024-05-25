@@ -1239,8 +1239,6 @@ mod widgets {
             }
             Value::Null => egui::RichText::new("null").color(COLOR_SINGLETON),
             Value::Undefined => egui::RichText::new("undefined").color(COLOR_SINGLETON),
-            Value::SelfFunction => panic!(),
-            Value::Internal(_) => panic!(),
             Value::Symbol(sym) => egui::RichText::new(sym).italics().color(COLOR_SINGLETON),
         }
     }
