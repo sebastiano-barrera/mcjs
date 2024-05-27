@@ -129,7 +129,7 @@ pub struct Realm {
     heap: heap::Heap,
     // Key is the root fnid of each module
     module_objs: HashMap<bytecode::FnId, Value>,
-    global_obj: heap::ObjectId,
+    global_obj: Value,
 }
 
 impl Realm {
@@ -209,7 +209,7 @@ impl<'a> Interpreter<'a> {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters, then put it into an Interpreter
         let mut data = init_stack(loader, realm, fnid);
-        data.set_default_this(Value::Object(realm.global_obj));
+        data.set_default_this(realm.global_obj);
         Interpreter {
             realm,
             data,
@@ -330,8 +330,7 @@ pub fn init_stack(
 ) -> stack::InterpreterData {
     let mut data = stack::InterpreterData::new();
     let root_fn = loader.get_function(fnid).unwrap();
-    let global_this = Value::Object(realm.global_obj);
-    data.push_direct(fnid, root_fn, global_this);
+    data.push_direct(fnid, root_fn, realm.global_obj);
     data
 }
 
@@ -564,10 +563,10 @@ fn run_inner(
                     this,
                     return_value: return_value_reg,
                 } => {
-                    let oid = get_operand(data, *callee)?.expect_obj()?;
+                    let callee = get_operand(data, *callee)?;
                     let callee_obj = realm
                         .heap
-                        .get(oid)
+                        .get(callee)
                         .ok_or_else(|| error!("invalid function (object is not callable)"))?;
                     let closure: &Closure = callee_obj
                         .as_closure()
@@ -648,7 +647,7 @@ fn run_inner(
                     obj_set(data, realm, obj, key, value, false)?;
                 }
                 Instr::ObjGet { dest, obj, key } => {
-                    let obj = get_operand_object(data, realm, *obj)?;
+                    let obj = get_operand(data, *obj)?;
                     let obj = realm.heap.get(obj).unwrap();
                     let key = get_operand(data, *key)?;
                     let key = value_to_index_or_key(&realm.heap, &key);
@@ -687,13 +686,22 @@ fn run_inner(
                 Instr::ObjDelete { obj, key } => {
                     let vreg = *obj;
                     let value = get_operand(data, vreg)?;
-                    if let Some(oid) = realm.heap.object_of_value(value) {
-                        let mut obj = realm.heap.get_mut(oid).unwrap();
-                        let key = get_operand(data, *key)?;
-                        let key = value_to_index_or_key(&realm.heap, &key)
-                            .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                        obj.delete_own(key.to_ref());
-                    } else {
+                    // the boolean is necessary instead of a normal match on
+                    // Option, because borrowck can't prove that the destructor
+                    // won't run.
+                    // TODO Change this if the heap switches to something other
+                    // than RefCells (qcell?)
+                    let is_err = match realm.heap.get_mut(value) {
+                        Some(mut obj) => {
+                            let key = get_operand(data, *key)?;
+                            let key = value_to_index_or_key(&realm.heap, &key)
+                                .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+                            obj.delete_own(key.to_ref());
+                            false
+                        }
+                        None => true,
+                    };
+                    if is_err {
                         let exc = make_exception(
                             realm,
                             "TypeError",
@@ -710,15 +718,15 @@ fn run_inner(
                 }
 
                 Instr::ArrayPush { arr, value } => {
-                    let value = get_operand(data, *value)?;
-                    let arr = get_operand_object(data, realm, *arr)?;
+                    let arr = get_operand(data, *arr)?;
                     let mut arr = realm.heap.get_mut(arr).unwrap();
+                    let value = get_operand(data, *value)?;
                     let was_array = arr.array_push(value);
                     assert!(was_array);
                 }
                 Instr::ArrayNth { dest, arr, index } => {
                     let value = {
-                        let arr = get_operand_object(data, realm, *arr)?;
+                        let arr = get_operand(data, *arr)?;
                         let arr = realm.heap.get(arr).unwrap();
                         let elements = arr.array_elements().unwrap();
 
@@ -735,7 +743,7 @@ fn run_inner(
                 }
                 Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
                 Instr::ArrayLen { dest, arr } => {
-                    let arr = get_operand_object(data, realm, *arr)?;
+                    let arr = get_operand(data, *arr)?;
                     let arr = realm.heap.get(arr).unwrap();
                     let len = arr
                         .array_elements()
@@ -877,8 +885,7 @@ fn run_inner(
                 }
 
                 Instr::GetGlobalThis(dest) => {
-                    let value = Value::Object(realm.global_obj);
-                    data.top_mut().set_result(*dest, value);
+                    data.top_mut().set_result(*dest, realm.global_obj);
                 }
                 Instr::GetGlobal {
                     dest,
@@ -909,9 +916,9 @@ fn run_inner(
                             let msg = realm.heap.new_string(format!("{} is not defined", key_str));
 
                             let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
-                            let exc_oid = realm.heap.new_ordinary_object();
+                            let exc = Value::Object(realm.heap.new_ordinary_object());
                             {
-                                let mut exc = realm.heap.get_mut(exc_oid).unwrap();
+                                let mut exc = realm.heap.get_mut(exc).unwrap();
                                 exc.set_proto(Some(exc_proto));
                                 exc.set_own(
                                     IndexOrKey::Key("message"),
@@ -919,9 +926,6 @@ fn run_inner(
                                 );
                             }
 
-                            // Duplicate with the Instr::Throw implementation. Not sure how to
-                            // improve.
-                            let exc = Value::Object(exc_oid);
                             throw_exc(
                                 exc,
                                 iid,
@@ -980,20 +984,19 @@ fn run_inner(
 fn make_exception(realm: &mut Realm, constructor_name: &str, message: String) -> Value {
     let exc_cons = get_builtin(realm, constructor_name).unwrap();
     let exc_proto = {
-        let exc_cons = realm.heap.get(exc_cons).unwrap();
+        let exc_cons = realm.heap.get(Value::Object(exc_cons)).unwrap();
         exc_cons.proto().unwrap()
     };
-    let exc_oid = realm.heap.new_ordinary_object();
+    let exc = Value::Object(realm.heap.new_ordinary_object());
     let message = realm.heap.new_string(message);
     {
-        let mut exc = realm.heap.get_mut(exc_oid).unwrap();
+        let mut exc = realm.heap.get_mut(exc).unwrap();
         exc.set_proto(Some(exc_proto));
         exc.set_own(
             IndexOrKey::Key("message"),
             heap::Property::enumerable(Value::Object(message)),
         )
     }
-    let exc = Value::Object(exc_oid);
     exc
 }
 
@@ -1052,7 +1055,7 @@ fn obj_set(
     value: &VReg,
     is_enumerable: bool,
 ) -> RunResult<()> {
-    let obj = get_operand_object(data, realm, *obj)?;
+    let obj = get_operand(data, *obj)?;
     let mut obj = realm.heap.get_mut(obj).unwrap();
     let key = get_operand(data, *key)?;
     let key = value_to_index_or_key(&realm.heap, &key)
@@ -1080,7 +1083,7 @@ fn obj_get_keys(
     include_inherited: IncludeInherited,
 ) -> RunResult<()> {
     let keys = {
-        let obj = get_operand_object(data, realm, *obj)?;
+        let obj = get_operand(data, *obj)?;
         let obj = realm.heap.get(obj).unwrap();
         let mut keys = Vec::new();
 
@@ -1207,27 +1210,13 @@ fn get_operand(data: &stack::InterpreterData, vreg: bytecode::VReg) -> RunResult
         .ok_or_else(|| error!("variable read before initialization").into())
 }
 
-fn get_operand_object<'r>(
-    data: &stack::InterpreterData,
-    realm: &'r mut Realm,
-    vreg: bytecode::VReg,
-) -> RunResult<heap::ObjectId> {
-    let value = get_operand(data, vreg)?;
-    realm.heap.object_of_value(value).ok_or_else(|| {
-        let exc = realm
-            .heap
-            .new_string(format!("can't convert {:?} to object!", value));
-        RunError::Exception(Value::Object(exc))
-    })
-}
-
 fn clone_string_operand<'r>(
     data: &stack::InterpreterData,
     realm: &'r mut Realm,
     vreg: bytecode::VReg,
 ) -> RunResult<String> {
-    let oid = get_operand_object(data, realm, vreg)?;
-    let obj = realm.heap.get(oid).unwrap();
+    let obj = get_operand(data, vreg)?;
+    let obj = realm.heap.get(obj).unwrap();
     obj.as_str()
         .map(|s| s.to_owned())
         .ok_or_else(|| error!("not a string!").into())
@@ -1235,20 +1224,16 @@ fn clone_string_operand<'r>(
 
 fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
     let ty_s = match value {
-        Value::Number(_) => "number",
-        Value::Bool(_) => "boolean",
-        Value::Object(oid) => match realm.heap.get(*oid).unwrap().type_of() {
+        Value::Null => "object",
+        Value::Undefined => "undefined",
+        _ => match realm.heap.get(*value).unwrap().type_of() {
             heap::Typeof::Object => "object",
             heap::Typeof::Function => "function",
             heap::Typeof::String => "string",
             heap::Typeof::Number => "number",
             heap::Typeof::Boolean => "boolean",
+            heap::Typeof::Symbol => "symbol",
         },
-        Value::Symbol(_) => "symbol",
-        // TODO(cleanup) This is actually an error in our type system.  null is really a value
-        // of the 'object' type
-        Value::Null => "object",
-        Value::Undefined => "undefined",
     };
 
     literal_to_value(bytecode::Literal::String(ty_s.to_string()), &mut realm.heap)
@@ -1265,12 +1250,8 @@ fn is_instance_of(
         _ => return Ok(false),
     };
 
-    let obj = match get_operand_object(data, realm, obj) {
-        Ok(obj) => obj,
-        Err(_) => return Ok(false),
-    };
+    let obj = get_operand(data, obj)?;
     let obj = realm.heap.get(obj).unwrap();
-
     Ok(obj.is_instance_of(sup_oid))
 }
 
@@ -1321,12 +1302,13 @@ fn compare(
         (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
         #[rustfmt::skip]
         (Value::Object(a_oid), Value::Object(b_oid)) => {
-            let a_obj = realm.heap.get(*a_oid);
-            let b_obj = realm.heap.get(*b_oid);
+            let a_obj = realm.heap.get(a);
+            let b_obj = realm.heap.get(b);
 
             let a_str = a_obj.as_ref().and_then(|ho| ho.as_str());
             let b_str = b_obj.as_ref().and_then(|ho| ho.as_str());
 
+            // TODO Remove this special case when strings become primitives (i.e. Value::String)
             if let (Some(a_str), Some(b_str)) = (a_str, b_str) {
                 a_str.cmp(b_str).into()
             } else if a_oid == b_oid {
@@ -1349,11 +1331,8 @@ fn compare(
 fn to_boolean(value: Value, realm: &Realm) -> bool {
     match value {
         Value::Null => false,
-        Value::Bool(bool_val) => bool_val,
-        Value::Number(num) => num != 0.0,
-        Value::Object(oid) => realm.heap.get(oid).unwrap().to_boolean(),
         Value::Undefined => false,
-        Value::Symbol(_) => true,
+        _ => realm.heap.get(value).unwrap().to_boolean(),
     }
 }
 
@@ -1379,13 +1358,10 @@ fn to_number(value: Value) -> Option<Value> {
 /// Implements JavaScript's implicit conversion to string.
 fn value_to_string(value: Value, heap: &heap::Heap) -> Result<String> {
     match value {
-        Value::Number(num) => Ok(num.to_string()),
-        Value::Bool(true) => Ok("true".into()),
-        Value::Bool(false) => Ok("false".into()),
-        Value::Object(oid) => Ok(heap.get(oid).unwrap().js_to_string()),
         Value::Null => Ok("null".into()),
         Value::Undefined => Ok("undefined".into()),
         Value::Symbol(_) => Err(error!("Cannot convert Symbol value into a String")),
+        _ => Ok(heap.get(value).unwrap().js_to_string()),
     }
 }
 
@@ -1405,7 +1381,7 @@ fn show_value_ex<W: std::io::Write>(
     params: &ShowValueParams,
 ) {
     if let Value::Object(obj_id) = value {
-        let obj = realm.heap.get(obj_id).unwrap();
+        let obj = realm.heap.get(value).unwrap();
         if let Some(s) = obj.as_str() {
             writeln!(out, "{:?}", s).unwrap();
         } else {
@@ -1421,7 +1397,7 @@ fn show_value_ex<W: std::io::Write>(
                     }
 
                     let property = {
-                        let obj = realm.heap.get(obj_id).unwrap();
+                        let obj = realm.heap.get(value).unwrap();
                         obj.get_own(IndexOrKey::Key(&key)).unwrap()
                     };
                     write!(out, "  - {:?} = ", key).unwrap();
@@ -1492,8 +1468,8 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
     match value {
         Value::Number(num) => Some(bytecode::Literal::Number(num)),
         Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
-        Value::Object(oid) => {
-            let hobj = heap.get(oid)?;
+        Value::Object(_) => {
+            let hobj = heap.get(value)?;
             hobj.as_str()
                 .map(|s| bytecode::Literal::String(s.to_owned()))
         }
@@ -1514,8 +1490,8 @@ fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::Index
                 None
             }
         }
-        Value::Object(oid) => {
-            let obj = heap.get(*oid)?;
+        Value::Object(_) => {
+            let obj = heap.get(*value)?;
             let string = obj.as_str()?.to_owned();
             Some(heap::IndexOrKeyOwned::Key(string))
         }

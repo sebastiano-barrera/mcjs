@@ -8,45 +8,40 @@ use crate::common::Result;
 use crate::error;
 use crate::heap;
 
-pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
+pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     let Array = {
-        let Array_push = heap.new_function(Closure::Native(nf_Array_push));
-        let Array_pop = heap.new_function(Closure::Native(nf_Array_pop));
-        let array_proto = heap.array_proto();
+        let Array_push = Value::Object(heap.new_function(Closure::Native(nf_Array_push)));
+        let Array_pop = Value::Object(heap.new_function(Closure::Native(nf_Array_pop)));
+        let array_proto = Value::Object(heap.array_proto());
         {
             let mut array_proto_obj = heap.get_mut(array_proto).unwrap();
-            array_proto_obj.set_own(
-                "push".into(),
-                heap::Property::non_enumerable(Value::Object(Array_push)),
-            );
-            array_proto_obj.set_own(
-                "pop".into(),
-                heap::Property::non_enumerable(Value::Object(Array_pop)),
-            );
+            array_proto_obj.set_own("push".into(), heap::Property::non_enumerable(Array_push));
+            array_proto_obj.set_own("pop".into(), heap::Property::non_enumerable(Array_pop));
         }
 
-        let Array_isArray = heap.new_function(Closure::Native(nf_Array_isArray));
-        let array_ctor = heap.new_function(Closure::Native(nf_Array));
+        let Array_isArray = Value::Object(heap.new_function(Closure::Native(nf_Array_isArray)));
+        let array_ctor = Value::Object(heap.new_function(Closure::Native(nf_Array)));
         {
             let mut array_ctor_obj = heap.get_mut(array_ctor).unwrap();
             array_ctor_obj.set_own(
                 "isArray".into(),
-                heap::Property::non_enumerable(Value::Object(Array_isArray)),
+                heap::Property::non_enumerable(Array_isArray),
             );
             array_ctor_obj.set_own(
                 "prototype".into(),
-                heap::Property::non_enumerable(Value::Object(array_proto)),
+                heap::Property::non_enumerable(array_proto),
             );
         }
 
         array_ctor
     };
 
-    let RegExp = heap.new_function(Closure::Native(nf_RegExp));
+    let RegExp = Value::Object(heap.new_function(Closure::Native(nf_RegExp)));
 
-    let Number = heap.new_function(Closure::Native(nf_Number));
+    let Number = Value::Object(heap.new_function(Closure::Native(nf_Number)));
     {
-        let toString = heap.new_function(Closure::Native(nf_Number_prototype_toString));
+        let toString =
+            Value::Object(heap.new_function(Closure::Native(nf_Number_prototype_toString)));
 
         let mut Number_obj = heap.get_mut(Number).unwrap();
         Number_obj.set_own(
@@ -54,18 +49,15 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
             heap::Property::non_enumerable(Value::Object(heap.number_proto())),
         );
 
-        let mut number_proto_obj = heap.get_mut(heap.number_proto()).unwrap();
-        number_proto_obj.set_own(
-            "toString".into(),
-            heap::Property::non_enumerable(Value::Object(toString)),
-        )
+        let mut number_proto_obj = heap.get_mut(Value::Object(heap.number_proto())).unwrap();
+        number_proto_obj.set_own("toString".into(), heap::Property::non_enumerable(toString))
     }
 
-    let String = heap.new_function(Closure::Native(nf_String));
+    let String = Value::Object(heap.new_function(Closure::Native(nf_String)));
 
-    let Boolean = heap.new_function(Closure::Native(nf_Boolean));
+    let Boolean = Value::Object(heap.new_function(Closure::Native(nf_Boolean)));
 
-    let Function = heap.new_function(Closure::Native(nf_Function));
+    let Function = Value::Object(heap.new_function(Closure::Native(nf_Function)));
     {
         let mut Function_obj = heap.get_mut(Function).unwrap();
         Function_obj.set_own(
@@ -76,26 +68,26 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
 
     // Not completely correct. See the rules in
     // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
-    let Object = heap.new_function(Closure::Native(nf_do_nothing));
+    let Object = Value::Object(heap.new_function(Closure::Native(nf_do_nothing)));
 
-    let cash_print = heap.new_function(Closure::Native(nf_cash_print));
+    let cash_print = Value::Object(heap.new_function(Closure::Native(nf_cash_print)));
 
-    let func_bind = heap.new_function(Closure::Native(nf_Function_bind));
+    let func_bind = Value::Object(heap.new_function(Closure::Native(nf_Function_bind)));
     {
-        let mut func_proto = heap.get_mut(heap.func_proto()).unwrap();
+        let mut func_proto = heap.get_mut(Value::Object(heap.func_proto())).unwrap();
         func_proto.set_own(
             "bind".into(),
-            heap::Property::non_enumerable(Value::Object(func_bind)),
+            heap::Property::non_enumerable(func_bind),
         );
     }
 
-    let Error = heap.new_function(Closure::Native(nf_do_nothing));
+    let Error = Value::Object(heap.new_function(Closure::Native(nf_do_nothing)));
     {
-        let Error_toString = heap.new_function(Closure::Native(nf_Error_toString));
+        let Error_toString = Value::Object(heap.new_function(Closure::Native(nf_Error_toString)));
         let mut Error_obj = heap.get_mut(Error).unwrap();
         Error_obj.set_own(
             heap::IndexOrKey::Key("toString"),
-            heap::Property::enumerable(Value::Object(Error_toString)),
+            heap::Property::enumerable(Error_toString),
         );
     }
     let ReferenceError = make_exception_cons(heap, Error);
@@ -104,77 +96,73 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> heap::ObjectId {
 
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
-    let global = heap.new_ordinary_object();
+    let global = Value::Object(heap.new_ordinary_object());
     let mut global_obj = heap.get_mut(global).unwrap();
     global_obj.set_own(
         "Object".into(),
-        heap::Property::enumerable(Value::Object(Object)),
+        heap::Property::enumerable(Object),
     );
     global_obj.set_own(
         "Array".into(),
-        heap::Property::enumerable(Value::Object(Array)),
+        heap::Property::enumerable(Array),
     );
     global_obj.set_own(
         "RegExp".into(),
-        heap::Property::enumerable(Value::Object(RegExp)),
+        heap::Property::enumerable(RegExp),
     );
     global_obj.set_own(
         "Number".into(),
-        heap::Property::enumerable(Value::Object(Number)),
+        heap::Property::enumerable(Number),
     );
     global_obj.set_own(
         "String".into(),
-        heap::Property::enumerable(Value::Object(String)),
+        heap::Property::enumerable(String),
     );
     global_obj.set_own(
         "Boolean".into(),
-        heap::Property::enumerable(Value::Object(Boolean)),
+        heap::Property::enumerable(Boolean),
     );
     global_obj.set_own(
         "Function".into(),
-        heap::Property::enumerable(Value::Object(Function)),
+        heap::Property::enumerable(Function),
     );
     global_obj.set_own(
         "$print".into(),
-        heap::Property::enumerable(Value::Object(cash_print)),
+        heap::Property::enumerable(cash_print),
     );
     global_obj.set_own(
         "Error".into(),
-        heap::Property::enumerable(Value::Object(Error)),
+        heap::Property::enumerable(Error),
     );
     global_obj.set_own(
         "ReferenceError".into(),
-        heap::Property::enumerable(Value::Object(ReferenceError)),
+        heap::Property::enumerable(ReferenceError),
     );
     global_obj.set_own(
         "TypeError".into(),
-        heap::Property::enumerable(Value::Object(TypeError)),
+        heap::Property::enumerable(TypeError),
     );
     global_obj.set_own(
         "SyntaxError".into(),
-        heap::Property::enumerable(Value::Object(SyntaxError)),
+        heap::Property::enumerable(SyntaxError),
     );
 
     global
 }
 
-fn make_exception_cons(heap: &mut heap::Heap, prototype: heap::ObjectId) -> heap::ObjectId {
-    let cons = heap.new_function(Closure::Native(nf_set_message));
+fn make_exception_cons(heap: &mut heap::Heap, prototype: Value) -> Value {
+    let cons = Value::Object(heap.new_function(Closure::Native(nf_set_message)));
     let mut cons_obj = heap.get_mut(cons).unwrap();
     cons_obj.set_own(
         heap::IndexOrKey::Key("prototype"),
-        heap::Property::non_enumerable(Value::Object(prototype)),
+        heap::Property::non_enumerable(prototype),
     );
     cons
 }
 
 fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
     let message = *args.get(0).unwrap_or(&Value::Undefined);
-    let oid = realm
-        .heap
-        .object_of_value(*this)
-        .expect("bug: not an object!?");
-    let mut obj = realm.heap.get_mut(oid).unwrap();
+    let mut obj = realm.heap.get_mut(*this).expect("bug: not an object!?");
     obj.set_own("message".into(), heap::Property::enumerable(message));
     Ok(Value::Undefined)
 }
@@ -184,10 +172,10 @@ fn nf_do_nothing(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> Result<V
 }
 
 fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Value> {
-    let value = if let Some(Value::Object(oid)) = args.first() {
+    let value = if let Some(obj) = args.first() {
         let obj = realm
             .heap
-            .get(*oid)
+            .get(*obj)
             .ok_or_else(|| error!("no such object!"))?;
         obj.array_elements().is_some()
     } else {
@@ -199,8 +187,7 @@ fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<
 
 fn nf_Array_push(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
     // TODO Proper error handling, instead of these unwrap
-    let oid = this.expect_obj().unwrap();
-    let mut arr = realm.heap.get_mut(oid).unwrap();
+    let mut arr = realm.heap.get_mut(*this).unwrap();
     let value = *args.first().unwrap();
     arr.array_push(value);
     Ok(Value::Undefined)
@@ -283,10 +270,9 @@ fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> Result<Val
 }
 
 fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
-    let obj_id = this.expect_obj()?;
     let obj = realm
         .heap
-        .get(obj_id)
+        .get(*this)
         .ok_or_else(|| error!("no such object"))?;
     let closure = obj.as_closure().ok_or_else(|| error!("not a function"))?;
     let js_closure = match closure {
@@ -309,8 +295,7 @@ fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<V
 }
 
 fn nf_Error_toString(realm: &mut Realm, this: &Value, _args: &[Value]) -> Result<Value> {
-    let obj_id = this.expect_obj()?;
-    let obj = realm.heap.get(obj_id).unwrap();
+    let obj = realm.heap.get(*this).unwrap();
 
     let message = obj
         .get_chained(heap::IndexOrKey::Key("message"))
