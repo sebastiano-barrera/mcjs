@@ -1081,7 +1081,7 @@ fn obj_get_keys(
 ) -> RunResult<()> {
     let keys = {
         let obj = get_operand_object(data, realm, *obj)?;
-        let obj = realm.heap.get_mut(obj).unwrap();
+        let obj = realm.heap.get(obj).unwrap();
         let mut keys = Vec::new();
 
         obj.own_properties(only_enumerable.into(), &mut keys);
