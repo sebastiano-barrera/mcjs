@@ -6,4 +6,7 @@ members = [
 ]
 resolver = "2"
 
+[patch.crates-io]
+egui = { git = "https://github.com/mwcampbell/egui", branch = "accesskit-0.14-winit-0.29" }
+eframe = { git = "https://github.com/mwcampbell/egui", branch = "accesskit-0.14-winit-0.29" }
 
