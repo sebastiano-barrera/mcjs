@@ -53,6 +53,7 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Object(heap::ObjectId),
+    // String(JSString),
     Null,
     Undefined,
 
@@ -76,6 +77,118 @@ macro_rules! gen_value_expect {
 
 gen_value_expect!(expect_num, Number, f64);
 gen_value_expect!(expect_obj, Object, heap::ObjectId);
+
+/// A JavaScript string.
+///
+/// Immutable.
+///
+/// Actually, following JavaScript semantics, this type represents a slice view
+/// into a buffer of characters that may be shared between other views (instances
+/// of JSString).
+#[derive(Clone)]
+struct JSString {
+    // The string is internally represented as UTF-16.
+    full: Rc<Vec<u16>>,
+    start: usize,
+    end: usize,
+}
+
+impl JSString {
+    fn new_from_str(s: &str) -> Self {
+        let full: Rc<Vec<u16>> = Rc::new(s.encode_utf16().collect());
+        let start = 0;
+        let end = full.len();
+        JSString { full, start, end }
+    }
+
+    fn view(&self) -> &[u16] {
+        &self.full[self.start..self.end]
+    }
+
+    fn substring(&self, ofs_start: usize, ofs_end: usize) -> Self {
+        let start = self.start + ofs_start;
+        let end = self.start + ofs_end;
+        assert!(end <= self.end);
+        assert!(end >= start);
+
+        JSString {
+            full: Rc::clone(&self.full),
+            start,
+            end,
+        }
+    }
+}
+
+impl std::fmt::Debug for JSString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if (self.start, self.end) != (0, self.full.len()) {
+            write!(f, "(partial) ")?;
+        }
+
+        let view = self.view();
+        if view.len() > 100 {
+            let as_str = String::from_utf16_lossy(&view[0..100]);
+            write!(f, "{:?} ... (total {} chars)", as_str, view.len())
+        } else {
+            let as_str = String::from_utf16_lossy(view);
+            write!(f, "{:?}", as_str)
+        }
+    }
+}
+impl PartialEq for JSString {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other) || self.view() == other.view()
+    }
+}
+impl Eq for JSString {}
+
+#[cfg(test)]
+mod tests_js_string {
+    use super::JSString;
+
+    #[test]
+    fn test_basic_sanity() {
+        let my_str = "asdlol123";
+        let jss = JSString::new_from_str(&my_str);
+        let check: Vec<_> = my_str.encode_utf16().collect();
+        assert_eq!(jss.view(), check);
+    }
+
+    #[test]
+    fn test_substring() {
+        let my_str = "asdlol123";
+        let jss = JSString::new_from_str(&my_str);
+        let check: Vec<_> = "lol123".encode_utf16().collect();
+        assert_eq!(jss.substring(3, 9).view(), check);
+    }
+
+    #[test]
+    fn test_double_substring() {
+        let my_str = "asdlol123";
+        let jss0 = JSString::new_from_str(&my_str);
+        let jss1 = jss0.substring(3, 9); // "lol123"
+        let jss2 = jss1.substring(2, 5); // "l12"
+
+        let check: Vec<_> = "l12".encode_utf16().collect();
+        assert_eq!(jss2.view(), check);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_substring_out_of_range_end() {
+        let my_str = "asdlol123";
+        let jss = JSString::new_from_str(&my_str);
+        let _ = jss.substring(3, 10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_substring_out_of_range_inv() {
+        let my_str = "asdlol123";
+        let jss = JSString::new_from_str(&my_str);
+        let _ = jss.substring(7, 5);
+    }
+}
 
 /// A *reference* to a closure.
 ///
