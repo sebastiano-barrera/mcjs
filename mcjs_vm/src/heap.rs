@@ -48,9 +48,9 @@ where
                     elements.get(index).copied().map(Property::enumerable)
                 }
 
-                (Exotic::String { string }, IndexOrKey::Key("length"), _) => {
-                    Some(Property::non_enumerable(Value::Number(string.len() as f64)))
-                }
+                (Exotic::String { string }, IndexOrKey::Key("length"), _) => Some(
+                    Property::non_enumerable(Value::Number(string.view().len() as f64)),
+                ),
 
                 (_, iok, _) => match iok {
                     IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).copied(),
@@ -157,7 +157,8 @@ where
             ObjectValue::Number(_) => Typeof::Number,
             ObjectValue::Bool(_) => Typeof::Boolean,
             ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::None | Exotic::Array { .. } | Exotic::String { .. } => Typeof::Object,
+                Exotic::None | Exotic::Array { .. } => Typeof::Object,
+                Exotic::String { .. } => Typeof::String,
                 Exotic::Function { .. } => Typeof::Function,
             },
             ObjectValue::Symbol(_) => Typeof::Symbol,
@@ -173,10 +174,10 @@ where
         Some(proto_oid)
     }
 
-    pub fn as_str(&self) -> Option<&str> {
+    pub fn as_str(&self) -> Option<JSString> {
         match &self.value {
             ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::String { string } => Some(string.as_str()),
+                Exotic::String { string } => Some(string.clone()),
                 _ => None,
             },
             _ => None,
@@ -209,20 +210,20 @@ where
             ObjectValue::Bool(b) => *b,
             ObjectValue::Object { obj, .. } => match &obj.exotic_part {
                 Exotic::None | Exotic::Array { .. } | Exotic::Function { .. } => true,
-                Exotic::String { string } => !string.is_empty(),
+                Exotic::String { string } => !string.view().is_empty(),
             },
             ObjectValue::Symbol(_) => true,
         }
     }
 
-    pub fn js_to_string(&self) -> String {
+    pub fn js_to_string(&self) -> JSString {
         match &self.value {
-            ObjectValue::Number(n) => n.to_string(),
-            ObjectValue::Bool(b) => b.to_string(),
+            ObjectValue::Number(n) => JSString::new_from_str(&n.to_string()),
+            ObjectValue::Bool(b) => JSString::new_from_str(&b.to_string()),
             ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::Array { .. } | Exotic::None => "<object>".to_owned(),
+                Exotic::Array { .. } | Exotic::None => JSString::new_from_str("<object>"),
                 Exotic::String { string } => string.clone(),
-                Exotic::Function { .. } => "<closure>".to_owned(),
+                Exotic::Function { .. } => JSString::new_from_str("<closure>"),
             },
             ObjectValue::Symbol(_) => todo!(),
         }
@@ -409,6 +410,7 @@ impl<'a> From<usize> for IndexOrKey<'a> {
 #[derive(PartialEq, Eq)]
 pub enum IndexOrKeyOwned {
     Index(usize),
+    // TODO Change this! Better if keys are JSString
     Key(String),
     Symbol(&'static str),
 }
@@ -507,9 +509,6 @@ impl Heap {
     pub(crate) fn init_function(&mut self, oid: ObjectId, closure: Closure) {
         self.init_exotic(oid, self.func_proto, Exotic::Function { closure });
     }
-    pub(crate) fn init_string(&mut self, oid: ObjectId, string: String) {
-        self.init_exotic(oid, self.string_proto, Exotic::String { string });
-    }
 
     pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectId {
         let oid = self.new_ordinary_object();
@@ -521,9 +520,9 @@ impl Heap {
         self.init_function(oid, closure);
         oid
     }
-    pub(crate) fn new_string(&mut self, string: String) -> ObjectId {
+    pub(crate) fn new_string(&mut self, string: JSString) -> ObjectId {
         let oid = self.new_ordinary_object();
-        self.init_string(oid, string);
+        self.init_exotic(oid, self.string_proto, Exotic::String { string: string });
         oid
     }
 
@@ -617,7 +616,7 @@ enum Exotic {
         elements: Vec<Value>,
     },
     String {
-        string: String,
+        string: JSString,
     },
     Function {
         closure: Closure,
@@ -698,14 +697,14 @@ mod tests {
     }
 }
 
-
 /// A JavaScript string.
 ///
 /// Immutable.
 ///
 /// Actually, following JavaScript semantics, this type represents a slice view
-/// into a buffer of characters that may be shared between other views (instances
-/// of JSString).
+/// into a buffer of characters that may be shared between other views
+/// (instances of JSString). Cloning a JSString cheaply produces a second
+/// equivalent instance of JSString without copying the underlying buffer.
 #[derive(Clone)]
 pub struct JSString {
     // The string is internally represented as UTF-16.
@@ -720,6 +719,15 @@ impl JSString {
             full: Rc::new(Vec::new()),
             start: 0,
             end: 0,
+        }
+    }
+
+    pub(crate) fn new(buf: Vec<u16>) -> Self {
+        let end = buf.len().try_into().unwrap();
+        Self {
+            full: Rc::new(buf),
+            start: 0,
+            end,
         }
     }
 
@@ -745,6 +753,10 @@ impl JSString {
             start,
             end,
         }
+    }
+
+    pub(crate) fn to_string(&self) -> String {
+        String::from_utf16_lossy(self.view())
     }
 }
 
@@ -820,4 +832,3 @@ mod tests_js_string {
         let _ = jss.substring(7, 5);
     }
 }
-

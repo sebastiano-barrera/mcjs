@@ -7,6 +7,7 @@ use super::{show_value, value_to_string, Closure, JSClosure, Realm, Value};
 use crate::common::Result;
 use crate::error;
 use crate::heap;
+use crate::heap::JSString;
 
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     let Array = {
@@ -75,10 +76,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     let func_bind = Value::Object(heap.new_function(Closure::Native(nf_Function_bind)));
     {
         let mut func_proto = heap.get_mut(Value::Object(heap.func_proto())).unwrap();
-        func_proto.set_own(
-            "bind".into(),
-            heap::Property::non_enumerable(func_bind),
-        );
+        func_proto.set_own("bind".into(), heap::Property::non_enumerable(func_bind));
     }
 
     let Error = Value::Object(heap.new_function(Closure::Native(nf_do_nothing)));
@@ -98,50 +96,20 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
 
     let global = Value::Object(heap.new_ordinary_object());
     let mut global_obj = heap.get_mut(global).unwrap();
-    global_obj.set_own(
-        "Object".into(),
-        heap::Property::enumerable(Object),
-    );
-    global_obj.set_own(
-        "Array".into(),
-        heap::Property::enumerable(Array),
-    );
-    global_obj.set_own(
-        "RegExp".into(),
-        heap::Property::enumerable(RegExp),
-    );
-    global_obj.set_own(
-        "Number".into(),
-        heap::Property::enumerable(Number),
-    );
-    global_obj.set_own(
-        "String".into(),
-        heap::Property::enumerable(String),
-    );
-    global_obj.set_own(
-        "Boolean".into(),
-        heap::Property::enumerable(Boolean),
-    );
-    global_obj.set_own(
-        "Function".into(),
-        heap::Property::enumerable(Function),
-    );
-    global_obj.set_own(
-        "$print".into(),
-        heap::Property::enumerable(cash_print),
-    );
-    global_obj.set_own(
-        "Error".into(),
-        heap::Property::enumerable(Error),
-    );
+    global_obj.set_own("Object".into(), heap::Property::enumerable(Object));
+    global_obj.set_own("Array".into(), heap::Property::enumerable(Array));
+    global_obj.set_own("RegExp".into(), heap::Property::enumerable(RegExp));
+    global_obj.set_own("Number".into(), heap::Property::enumerable(Number));
+    global_obj.set_own("String".into(), heap::Property::enumerable(String));
+    global_obj.set_own("Boolean".into(), heap::Property::enumerable(Boolean));
+    global_obj.set_own("Function".into(), heap::Property::enumerable(Function));
+    global_obj.set_own("$print".into(), heap::Property::enumerable(cash_print));
+    global_obj.set_own("Error".into(), heap::Property::enumerable(Error));
     global_obj.set_own(
         "ReferenceError".into(),
         heap::Property::enumerable(ReferenceError),
     );
-    global_obj.set_own(
-        "TypeError".into(),
-        heap::Property::enumerable(TypeError),
-    );
+    global_obj.set_own("TypeError".into(), heap::Property::enumerable(TypeError));
     global_obj.set_own(
         "SyntaxError".into(),
         heap::Property::enumerable(SyntaxError),
@@ -222,7 +190,7 @@ fn nf_Number_prototype_toString(realm: &mut Realm, this: &Value, _: &[Value]) ->
         _ => return Err(error!("Not a number value!")),
     };
 
-    let num_str = num_value.to_string();
+    let num_str = JSString::new_from_str(&num_value.to_string());
     let oid = realm.heap.new_string(num_str);
     Ok(Value::Object(oid))
 }
@@ -231,26 +199,24 @@ fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Value> {
     let value = args.first().copied();
 
     let value_str = match value {
-        None => "".to_string(),
+        None => JSString::empty(),
         Some(v) => value_to_string(v, &realm.heap)?,
     };
+    let value_str = realm.heap.new_string(value_str);
 
-    let this_oid = match this {
-        Value::Object(oid) => *oid,
+    match this {
+        Value::Object(oid) => {
+            // called as a constructor: string primitive as prototype of new ordinary object
+            let obj = realm.heap.get_mut(Value::Object(*oid));
+            obj.unwrap().set_proto(Some(value_str));
+            Ok(Value::Object(*oid))
+        }
         Value::Undefined => {
-            // called as function, not constructor
-            realm.heap.new_ordinary_object()
+            // called as function, not constructor -> return string primitive
+            Ok(Value::Object(value_str))
         }
         _ => panic!("bug: 'this' not an object: {:?}", this),
-    };
-
-    realm.heap.init_string(this_oid, value_str);
-
-    // TODO This is not strictly compliant with ECMAScript. Calling String as a
-    // constructor (`new String`) should return a String object, whereas calling
-    // String as a function (`String(...)`) should return a "string" primitive.
-    // But we don't have those! So, String objects for everybody
-    Ok(Value::Object(this_oid))
+    }
 }
 
 fn nf_Boolean(_realm: &mut Realm, _this: &Value, _: &[Value]) -> Result<Value> {
@@ -300,15 +266,20 @@ fn nf_Error_toString(realm: &mut Realm, this: &Value, _args: &[Value]) -> Result
     let message = obj
         .get_chained(heap::IndexOrKey::Key("message"))
         .map(|prop| value_to_string(prop.value, &realm.heap))
-        .unwrap_or(Ok("(no message)".to_string()))?;
+        .unwrap_or(Ok(JSString::new_from_str("(no message)")))?;
     let name = obj
         .get_chained(heap::IndexOrKey::Key("name"))
         .map(|prop| value_to_string(prop.value, &realm.heap))
-        .unwrap_or(Ok("(no message)".to_string()))?;
+        .unwrap_or(Ok(JSString::new_from_str("(no message)")))?;
 
-    let message = format!("{}: {}", name, message);
+    let mut full_message = Vec::new();
+    full_message.extend_from_slice(name.view());
+    full_message.extend(": ".encode_utf16());
+    full_message.extend_from_slice(message.view());
+
+    let full_message = JSString::new(full_message);
     drop(obj);
 
-    let oid = realm.heap.new_string(message);
+    let oid = realm.heap.new_string(full_message);
     Ok(Value::Object(oid))
 }
