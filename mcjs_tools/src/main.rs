@@ -977,7 +977,7 @@ mod heap_view {
             };
         }
 
-        let obj = match heap.get(oid) {
+        let obj = match heap.get(InterpreterValue::Object(oid)) {
             Some(obj) => obj,
             None => {
                 return TreeNode {

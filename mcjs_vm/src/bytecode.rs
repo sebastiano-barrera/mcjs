@@ -386,6 +386,9 @@ impl Instr {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Literal {
     Number(f64),
+    // String and not JSString because `Literal` values are intended as self-contained
+    // values that ared, mutually intelligible to both the "Rust" world and the JavaScript
+    // world, and Rust assumes that all text be UTF-8 String's
     String(String),
     Symbol(&'static str),
     JsWord(JsWord),
@@ -429,7 +432,6 @@ pub struct Function {
     is_strict_mode: bool,
     span: Span,
 }
-
 
 #[derive(Debug)]
 pub struct IdentAsmt {

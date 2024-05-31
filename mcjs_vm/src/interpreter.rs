@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error_item;
+use crate::heap::JSString;
 use crate::{
     bytecode::{self, FnId, Instr, VReg, IID},
     common::{self, Result},
@@ -53,6 +54,7 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Object(heap::ObjectId),
+    // String(JSString),
     Null,
     Undefined,
 
@@ -537,11 +539,11 @@ fn run_inner(
                 Instr::ToNumber { dest, arg } => {
                     let value = get_operand(data, *arg)?;
                     let value = to_number(value).ok_or_else(|| {
-                        let exc = make_exception(
-                            realm,
-                            "TypeError",
-                            format!("cannot convert to a number: {:?}", *arg),
-                        );
+                        let message = JSString::new_from_str(&format!(
+                            "cannot convert to a number: {:?}",
+                            *arg
+                        ));
+                        let exc = make_exception(realm, "TypeError", message);
                         RunError::Exception(exc)
                     })?;
                     data.top_mut().set_result(*dest, value);
@@ -702,11 +704,9 @@ fn run_inner(
                         None => true,
                     };
                     if is_err {
-                        let exc = make_exception(
-                            realm,
-                            "TypeError",
-                            format!("not an object: {:?}", value),
-                        );
+                        let message =
+                            JSString::new_from_str(&format!("not an object: {:?}", value));
+                        let exc = make_exception(realm, "TypeError", message);
                         throw_exc(
                             exc,
                             iid,
@@ -816,7 +816,7 @@ fn run_inner(
                 Instr::ImportModule(dest, module_path) => {
                     use common::Context;
 
-                    let module_path = clone_string_operand(data, realm, *module_path)?;
+                    let module_path = get_operand_string(data, realm, *module_path)?.to_string();
                     let root_fnid = loader
                         .load_import_from_fn(&module_path, fnid)
                         .with_context(error_item!("while trying to import '{}'", module_path))?;
@@ -876,7 +876,7 @@ fn run_inner(
                 Instr::JmpIfIteratorFinished { iter: _, dest: _ } => todo!(),
 
                 Instr::StrCreateEmpty(dest) => {
-                    let oid = realm.heap.new_string(String::new());
+                    let oid = realm.heap.new_string(JSString::empty());
                     data.top_mut().set_result(*dest, Value::Object(oid));
                 }
                 Instr::StrAppend(buf_reg, tail) => {
@@ -913,7 +913,9 @@ fn run_inner(
                             // sadly, the borrowck needs some hand-holding here
                             drop(global_this);
 
-                            let msg = realm.heap.new_string(format!("{} is not defined", key_str));
+                            let msg =
+                                JSString::new_from_str(&format!("{} is not defined", key_str));
+                            let msg = realm.heap.new_string(msg);
 
                             let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
                             let exc = Value::Object(realm.heap.new_ordinary_object());
@@ -981,7 +983,7 @@ fn run_inner(
     }
 }
 
-fn make_exception(realm: &mut Realm, constructor_name: &str, message: String) -> Value {
+fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) -> Value {
     let exc_cons = get_builtin(realm, constructor_name).unwrap();
     let exc_proto = {
         let exc_cons = realm.heap.get(Value::Object(exc_cons)).unwrap();
@@ -1097,7 +1099,11 @@ fn obj_get_keys(
 
     let keys = keys
         .into_iter()
-        .map(|name| Value::Object(realm.heap.new_string(name)))
+        .map(|name| {
+            let name = JSString::new_from_str(&name);
+            let new_string = realm.heap.new_string(name);
+            Value::Object(new_string)
+        })
         .collect();
     let keys_oid = realm.heap.new_array(keys);
     data.top_mut().set_result(*dest, Value::Object(keys_oid));
@@ -1210,16 +1216,14 @@ fn get_operand(data: &stack::InterpreterData, vreg: bytecode::VReg) -> RunResult
         .ok_or_else(|| error!("variable read before initialization").into())
 }
 
-fn clone_string_operand<'r>(
+fn get_operand_string<'r>(
     data: &stack::InterpreterData,
     realm: &'r mut Realm,
     vreg: bytecode::VReg,
-) -> RunResult<String> {
+) -> RunResult<JSString> {
     let obj = get_operand(data, vreg)?;
     let obj = realm.heap.get(obj).unwrap();
-    obj.as_str()
-        .map(|s| s.to_owned())
-        .ok_or_else(|| error!("not a string!").into())
+    obj.as_str().ok_or_else(|| error!("not a string!").into())
 }
 
 fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
@@ -1310,7 +1314,7 @@ fn compare(
 
             // TODO Remove this special case when strings become primitives (i.e. Value::String)
             if let (Some(a_str), Some(b_str)) = (a_str, b_str) {
-                a_str.cmp(b_str).into()
+                a_str.view().cmp(b_str.view()).into()
             } else if a_oid == b_oid {
                 ValueOrdering::Equal
             } else {
@@ -1356,10 +1360,10 @@ fn to_number(value: Value) -> Option<Value> {
 }
 
 /// Implements JavaScript's implicit conversion to string.
-fn value_to_string(value: Value, heap: &heap::Heap) -> Result<String> {
+fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
     match value {
-        Value::Null => Ok("null".into()),
-        Value::Undefined => Ok("undefined".into()),
+        Value::Null => Ok(JSString::new_from_str("null")),
+        Value::Undefined => Ok(JSString::new_from_str("undefined")),
         Value::Symbol(_) => Err(error!("Cannot convert Symbol value into a String")),
         _ => Ok(heap.get(value).unwrap().js_to_string()),
     }
@@ -1431,13 +1435,15 @@ fn str_append(
     b: VReg,
 ) -> RunResult<Value> {
     // TODO Make this at least *decently* efficient!
+    let a = get_operand_string(data, realm, a)?;
     let b = get_operand(data, b)?;
 
-    let mut buf = clone_string_operand(data, realm, a)?;
+    let mut buf = a.view().to_vec();
     let tail = value_to_string(b, &realm.heap)?;
-    buf.push_str(&tail);
-    let value = literal_to_value(bytecode::Literal::String(buf), &mut realm.heap);
-    Ok(value)
+    buf.extend_from_slice(tail.view());
+    let jss: JSString = JSString::new(buf);
+    let sid = realm.heap.new_string(jss);
+    Ok(Value::Object(sid))
 }
 
 /// Create a Value based on the given Literal.
@@ -1448,13 +1454,15 @@ fn literal_to_value(lit: bytecode::Literal, heap: &mut heap::Heap) -> Value {
         bytecode::Literal::Number(nu) => Value::Number(nu),
         bytecode::Literal::String(st) => {
             // TODO(performance) avoid this allocation
-            let oid = heap.new_string(st.clone());
+            let jss = JSString::new_from_str(&st);
+            let oid = heap.new_string(jss);
             Value::Object(oid)
         }
         bytecode::Literal::Symbol(sym) => Value::Symbol(sym),
         bytecode::Literal::JsWord(jsw) => {
             // TODO(performance) avoid this allocation
-            let oid = heap.new_string(jsw.to_string());
+            let jss = JSString::new_from_str(&jsw.to_string());
+            let oid = heap.new_string(jss);
             Value::Object(oid)
         }
         bytecode::Literal::Bool(bo) => Value::Bool(bo),
@@ -1471,7 +1479,7 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
         Value::Object(_) => {
             let hobj = heap.get(value)?;
             hobj.as_str()
-                .map(|s| bytecode::Literal::String(s.to_owned()))
+                .map(|s| bytecode::Literal::String(s.to_string()))
         }
         Value::Symbol(sym) => Some(bytecode::Literal::Symbol(sym)),
         Value::Null => Some(bytecode::Literal::Null),
@@ -1492,7 +1500,7 @@ fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::Index
         }
         Value::Object(_) => {
             let obj = heap.get(*value)?;
-            let string = obj.as_str()?.to_owned();
+            let string = obj.as_str()?.to_string();
             Some(heap::IndexOrKeyOwned::Key(string))
         }
         Value::Symbol(sym) => Some(heap::IndexOrKeyOwned::Symbol(sym)),
