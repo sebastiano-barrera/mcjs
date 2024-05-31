@@ -2678,6 +2678,27 @@ do {
         }
     }
 
+    #[test]
+    fn test_string_index() {
+        let output = quick_run_script(
+            "const s = 'asdlol123';
+            sink(s[0]);
+            sink(s[4]);
+            sink(s[8]);
+            sink(s[9]);",
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::String("a".to_string())),
+                Some(Literal::String("o".to_string())),
+                Some(Literal::String("3".to_string())),
+                Some(Literal::Undefined),
+            ]
+        );
+    }
+
     mod debugging {
         use super::*;
         use crate::Loader;
