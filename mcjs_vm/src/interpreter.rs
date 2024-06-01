@@ -89,7 +89,7 @@ pub enum Closure {
     JS(Rc<JSClosure>),
 }
 
-type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> Result<Value>;
+type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
@@ -538,7 +538,7 @@ fn run_inner(
                 }
                 Instr::ToNumber { dest, arg } => {
                     let value = get_operand(data, *arg)?;
-                    let value = to_number(value).ok_or_else(|| {
+                    let value = to_number_value(value).ok_or_else(|| {
                         let message = JSString::new_from_str(&format!(
                             "cannot convert to a number: {:?}",
                             *arg
@@ -566,10 +566,10 @@ fn run_inner(
                     return_value: return_value_reg,
                 } => {
                     let callee = get_operand(data, *callee)?;
-                    let closure: &Closure = realm
-                        .heap
-                        .as_closure(callee)
-                        .ok_or_else(|| error!("can't call non-closure"))?;
+                    let closure: &Closure = realm.heap.as_closure(callee).ok_or_else(|| {
+                        let val_s = realm.heap.show_debug(callee);
+                        error!("can't call non-closure: {}", val_s)
+                    })?;
 
                     // NOTE The arguments have to be "read" before adding the stack frame;
                     // they will no longer be accessible
@@ -616,9 +616,23 @@ fn run_inner(
                         Closure::Native(nf) => {
                             let nf = *nf;
                             let this = get_operand(data, *this)?;
-                            let ret_val = nf(realm, &this, &arg_vals)?;
-                            data.top_mut().set_result(*return_value_reg, ret_val);
-                            next_ndx = return_to_iid.0;
+                            match nf(realm, &this, &arg_vals) {
+                                Ok(ret_val) => {
+                                    data.top_mut().set_result(*return_value_reg, ret_val);
+                                    next_ndx = return_to_iid.0;
+                                }
+                                Err(RunError::Exception(exc)) => {
+                                    throw_exc(
+                                        exc,
+                                        iid,
+                                        data,
+                                        #[cfg(feature = "debugger")]
+                                        dbg,
+                                    )?;
+                                    continue 'reborrow;
+                                }
+                                Err(other_err) => return Err(other_err),
+                            };
                         }
                     }
                 }
@@ -700,6 +714,7 @@ fn run_inner(
                             #[cfg(feature = "debugger")]
                             dbg,
                         )?;
+                        // FIX No continue 'reborrow?
                     }
                 }
 
@@ -963,10 +978,18 @@ fn run_inner(
 }
 
 fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) -> Value {
-    let exc_cons = get_builtin(realm, constructor_name).unwrap();
-    let exc_proto = realm.heap.proto(Value::Object(exc_cons)).unwrap();
-    let exc = Value::Object(realm.heap.new_ordinary_object());
     let message = realm.heap.new_string(message);
+
+    let exc_cons = get_builtin(realm, constructor_name).unwrap();
+    let exc_proto = realm
+        .heap
+        .get_own(Value::Object(exc_cons), IndexOrKey::Key("prototype"))
+        .unwrap()
+        .value()
+        .unwrap()
+        .expect_obj()
+        .unwrap();
+    let exc = Value::Object(realm.heap.new_ordinary_object());
 
     realm.heap.set_proto(exc, Some(exc_proto));
     realm.heap.set_own(exc, IndexOrKey::Key("message"), {
@@ -1104,7 +1127,7 @@ fn obj_get_keys(
 /// prepared for a subsequent resume.
 fn throw_exc(
     exc: Value,
-    _iid: bytecode::IID,
+    iid: bytecode::IID,
     data: &mut stack::InterpreterData,
     #[cfg(feature = "debugger")] dbg: &Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
@@ -1125,7 +1148,7 @@ fn throw_exc(
             || (dbg.should_break_on_unhandled_throw() && handler_depth.is_some())
         {
             // Save the IID so that execution can resume correctly afterwards
-            data.top_mut().set_resume_iid(_iid);
+            data.top_mut().set_resume_iid(iid);
             return Err(RunError::Suspended(SuspendCause::Exception(exc)));
         }
     }
@@ -1313,27 +1336,27 @@ fn compare(
 ///
 /// A `Some` is returned for a successful conversion. On failure (e.g. for
 /// Symbol), a `None` is returned.
-fn to_number(value: Value) -> Option<Value> {
-    let num = match value {
-        Value::Null => 0.0,
-        Value::Bool(true) => 1.0,
-        Value::Bool(false) => 0.0,
-        Value::Number(num) => num,
-        Value::Object(_) => f64::NAN,
-        Value::Undefined => f64::NAN,
-        Value::Symbol(_) => return None,
-    };
-
-    Some(Value::Number(num))
+fn to_number_value(value: Value) -> Option<Value> {
+    to_number(value).map(Value::Number)
 }
-
+fn to_number(value: Value) -> Option<f64> {
+    match value {
+        Value::Null => Some(0.0),
+        Value::Bool(true) => Some(1.0),
+        Value::Bool(false) => Some(0.0),
+        Value::Number(num) => Some(num),
+        Value::Object(_) => Some(f64::NAN),
+        Value::Undefined => Some(f64::NAN),
+        Value::Symbol(_) => None,
+    }
+}
 /// Implements JavaScript's implicit conversion to string.
 fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
     // TODO Sink the error mgmt that was here into js_to_string
     Ok(heap.js_to_string(value))
 }
 
-fn property_to_string(prop: &heap::Property, heap: & heap::Heap) -> Result<JSString> {
+fn property_to_string(prop: &heap::Property, heap: &heap::Heap) -> Result<JSString> {
     match prop {
         heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => {
             value_to_string(*value, heap)
@@ -1344,12 +1367,8 @@ fn property_to_string(prop: &heap::Property, heap: & heap::Heap) -> Result<JSStr
 
 fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
     match prop {
-        heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => {
-            Ok(*value)
-        }
-        heap::Property::Substring(jss) => {
-            Ok(Value::Object(heap.new_string(jss.clone())))
-        }
+        heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => Ok(*value),
+        heap::Property::Substring(jss) => Ok(Value::Object(heap.new_string(jss.clone()))),
     }
 }
 
@@ -2673,6 +2692,59 @@ do {
                 Some(Literal::String("3".to_string())),
                 Some(Literal::Undefined),
             ]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_string_codePointAt() {
+        let output = quick_run_script(
+            "const s = 'asdlol123';
+            for (let i=0; i < s.length; ++i) {
+                sink(s.codePointAt(i));
+            }
+            sink(s.codePointAt(s.length));
+            ",
+        );
+
+        let ref_string = "asdlol123";
+        let ref_string_u16: Vec<_> = ref_string.encode_utf16().collect();
+
+        assert_eq!(output.sink.len(), ref_string.len() + 1);
+
+        for (i, &code_point) in ref_string_u16.iter().enumerate() {
+            assert_eq!(output.sink[i], Some(Literal::Number(code_point as f64)));
+        }
+        assert_eq!(output.sink[ref_string.len()], Some(Literal::Undefined));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_string_fromCodePoint() {
+        let output = quick_run_script(
+            "const s = 'asdlol123';
+            for (let i=0; i < s.length; ++i) {
+                sink(String.fromCodePoint(s.codePointAt(i)));
+            }
+
+            try {
+                String.fromCodePoint(undefined);
+            } catch (err) {
+                sink(err.name)
+            }
+            ",
+        );
+
+        let ref_string = "asdlol123";
+
+        assert_eq!(output.sink.len(), ref_string.len() + 1);
+
+        for (i, ch) in ref_string.chars().enumerate() {
+            assert_eq!(output.sink[i], Some(Literal::String(ch.into())));
+        }
+        assert_eq!(
+            output.sink[ref_string.len()],
+            Some(Literal::String("RangeError".into()))
         );
     }
 
