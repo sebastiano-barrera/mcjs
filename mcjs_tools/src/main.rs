@@ -977,28 +977,20 @@ mod heap_view {
             };
         }
 
-        let obj = match heap.get(InterpreterValue::Object(oid)) {
-            Some(obj) => obj,
-            None => {
-                return TreeNode {
-                    value: format!("{:?} = MISSING!", oid),
-                    ..Default::default()
-                }
-            }
-        };
+        let obj = InterpreterValue::Object(oid);
 
         let mut props = Vec::new();
-        obj.own_properties(false, &mut props);
+        heap.own_properties(obj, false, &mut props);
 
         let mut node = TreeNode {
             key: "".to_string(),
-            value: obj.show_debug(),
+            value: heap.show_debug(obj),
             expanded: false,
             children: Vec::new(),
         };
 
         for prop in props {
-            let mut child = match obj.get_own(heap::IndexOrKey::Key(&prop)) {
+            let mut child = match heap.get_own(obj, heap::IndexOrKey::Key(&prop)) {
                 Some(heap::Property {
                     value: InterpreterValue::Object(child_oid),
                     ..

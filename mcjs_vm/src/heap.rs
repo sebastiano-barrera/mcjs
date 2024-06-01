@@ -1,69 +1,58 @@
-use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 use crate::interpreter::{Closure, Value};
 
-/// Reference to a JavaScript object.
-///
-/// This covers all objects: ordinary and exotic, immediate (wrappers of
-/// primitive values) and stored on the heap.
-pub struct ObjectRefW<'a, R> {
-    heap: &'a Heap,
-    value: ObjectValue<R>,
-}
-pub type ObjectRef<'a> = ObjectRefW<'a, Ref<'a, HeapObject>>;
-pub type ObjectRefMut<'a> = ObjectRefW<'a, RefMut<'a, HeapObject>>;
-
-enum ObjectValue<O> {
-    Number(f64),
-    Bool(bool),
-    Object { obj: O, oid: ObjectId },
-    Symbol(&'static str),
-}
-
-impl<'a, R> ObjectRefW<'a, R>
-where
-    R: Deref<Target = HeapObject>,
-{
+//
+// Object access API
+//
+impl Heap {
     /// Get an owned property (or array element) of this object.
     ///
     /// If you want to include inherited properties in the lookup, use
     /// `get_chained` instead.
-    pub fn get_own(&self, iok: IndexOrKey) -> Option<Property> {
+    pub fn get_own(&self, obj: Value, iok: IndexOrKey) -> Option<Property> {
         if iok == IndexOrKey::Key("__proto__") {
-            let proto_oid = self.proto()?;
+            let proto_oid = self.proto(obj)?;
             return Some(Property::non_enumerable(Value::Object(proto_oid)));
         }
 
         let iok_index = iok.ensure_number_is_index();
 
-        match &self.value {
-            ObjectValue::Object { obj, .. } => match (&obj.exotic_part, iok, iok_index) {
-                (Exotic::Array { elements }, _, IndexOrKey::Key("length")) => Some(
-                    Property::non_enumerable(Value::Number(elements.len() as f64)),
-                ),
-                (Exotic::Array { elements }, _, IndexOrKey::Index(index)) => {
-                    elements.get(index).copied().map(Property::enumerable)
-                }
+        let obj = match obj {
+            Value::Object(obj) => obj,
+            Value::Number(_)
+            | Value::Bool(_)
+            | Value::Symbol(_)
+            | Value::Null
+            | Value::Undefined => return None,
+        };
 
-                (Exotic::String { string }, IndexOrKey::Key("length"), _) => Some(
-                    Property::non_enumerable(Value::Number(string.view().len() as f64)),
-                ),
+        // TODO Separate the failure case where the object doesn't exist
+        // from the one where the property does not exist
+        let obj = self.get(obj).unwrap();
+        match (&obj.exotic_part, iok, iok_index) {
+            (Exotic::Array { elements }, _, IndexOrKey::Key("length")) => Some(
+                Property::non_enumerable(Value::Number(elements.len() as f64)),
+            ),
+            (Exotic::Array { elements }, _, IndexOrKey::Index(index)) => {
+                elements.get(index).copied().map(Property::enumerable)
+            }
 
-                (_, iok, _) => match iok {
-                    IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).copied(),
-                    IndexOrKey::Key(key) => obj.properties.get(key).copied(),
-                    IndexOrKey::Symbol(sym) => obj.sym_properties.get(sym).copied(),
-                },
+            (Exotic::String { string }, IndexOrKey::Key("length"), _) => Some(
+                Property::non_enumerable(Value::Number(string.view().len() as f64)),
+            ),
+
+            (_, iok, _) => match iok {
+                IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).copied(),
+                IndexOrKey::Key(key) => obj.properties.get(key).copied(),
+                IndexOrKey::Symbol(sym) => obj.sym_properties.get(sym).copied(),
             },
-            ObjectValue::Number(_) | ObjectValue::Bool(_) | ObjectValue::Symbol(_) => None,
         }
     }
 
-    pub fn get_chained(&self, index_or_key: IndexOrKey) -> Option<Property> {
-        let value = self.get_own(index_or_key);
+    pub fn get_chained(&self, obj: Value, index_or_key: IndexOrKey) -> Option<Property> {
+        let value = self.get_own(obj, index_or_key);
 
         // No chained lookup for numeric keys
         if let IndexOrKey::Index(_) = index_or_key {
@@ -72,30 +61,33 @@ where
 
         if value.is_some() {
             value
-        } else if let Some(proto_id) = self.proto() {
-            let proto = self.heap.get(Value::Object(proto_id))?;
-            proto.get_chained(index_or_key)
+        } else if let Some(proto_id) = self.proto(obj) {
+            self.get_chained(Value::Object(proto_id), index_or_key)
         } else {
             None
         }
     }
 
-    pub fn list_properties_prototypes(&self, only_enumerable: bool, out: &mut Vec<String>) {
-        if let Some(proto_oid) = self.proto() {
-            let proto = self.heap.get(Value::Object(proto_oid)).unwrap();
-            proto.own_properties(only_enumerable, out);
-            proto.list_properties_prototypes(only_enumerable, out);
+    pub fn list_properties_prototypes(
+        &self,
+        obj: Value,
+        only_enumerable: bool,
+        out: &mut Vec<String>,
+    ) {
+        if let Some(proto_oid) = self.proto(obj) {
+            self.own_properties(Value::Object(proto_oid), only_enumerable, out);
+            self.list_properties_prototypes(Value::Object(proto_oid), only_enumerable, out);
         }
     }
 
-    pub fn is_instance_of(&self, sup_oid: ObjectId) -> bool {
-        if let ObjectValue::Object { oid, .. } = &self.value {
-            if sup_oid == *oid {
+    pub fn is_instance_of(&self, obj: Value, sup_oid: ObjectId) -> bool {
+        if let Value::Object(oid) = obj {
+            if sup_oid == oid {
                 return true;
             }
         }
 
-        let mut cur_proto_oid = self.proto();
+        let mut cur_proto_oid = self.proto(obj);
 
         #[cfg(test)]
         let mut trace = vec![];
@@ -113,18 +105,20 @@ where
                         trace.push(oid);
                     }
 
-                    cur_proto_oid = self.heap.get(Value::Object(oid)).unwrap().proto();
+                    cur_proto_oid = self.proto(Value::Object(oid));
                 }
             }
         }
     }
 
     // I know, inefficient, but so, *so* simple
-    pub fn own_properties(&self, only_enumerable: bool, out: &mut Vec<String>) {
-        let obj = match &self.value {
-            ObjectValue::Object { obj, .. } => obj,
+    pub fn own_properties(&self, obj: Value, only_enumerable: bool, out: &mut Vec<String>) {
+        let obj = match obj {
+            Value::Object(obj) => obj,
             _ => return,
         };
+        // TODO Handle specific failure?
+        let obj = self.get(obj).unwrap();
 
         match &obj.exotic_part {
             Exotic::None | Exotic::Function { .. } => {}
@@ -152,129 +146,165 @@ where
         }
     }
 
-    pub fn type_of(&self) -> Typeof {
-        match &self.value {
-            ObjectValue::Number(_) => Typeof::Number,
-            ObjectValue::Bool(_) => Typeof::Boolean,
-            ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::None | Exotic::Array { .. } => Typeof::Object,
-                Exotic::String { .. } => Typeof::String,
-                Exotic::Function { .. } => Typeof::Function,
-            },
-            ObjectValue::Symbol(_) => Typeof::Symbol,
-        }
-    }
-    pub fn proto(&self) -> Option<ObjectId> {
-        let proto_oid = match &self.value {
-            ObjectValue::Number(_) => self.heap.number_proto,
-            ObjectValue::Bool(_) => self.heap.bool_proto,
-            ObjectValue::Object { obj, .. } => obj.proto_id?,
-            ObjectValue::Symbol(_) => todo!("symbol prototype"),
-        };
-        Some(proto_oid)
-    }
-
-    pub fn as_str(&self) -> Option<JSString> {
-        match &self.value {
-            ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::String { string } => Some(string.clone()),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    pub fn as_closure(&self) -> Option<&Closure> {
-        match &self.value {
-            ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::Function { closure } => Some(closure),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    pub fn array_elements(&self) -> Option<&[Value]> {
-        match &self.value {
-            ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::Array { elements } => Some(elements),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    pub fn to_boolean(&self) -> bool {
-        match &self.value {
-            ObjectValue::Number(n) => *n != 0.0,
-            ObjectValue::Bool(b) => *b,
-            ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::None | Exotic::Array { .. } | Exotic::Function { .. } => true,
-                Exotic::String { string } => !string.view().is_empty(),
-            },
-            ObjectValue::Symbol(_) => true,
-        }
-    }
-
-    pub fn js_to_string(&self) -> JSString {
-        match &self.value {
-            ObjectValue::Number(n) => JSString::new_from_str(&n.to_string()),
-            ObjectValue::Bool(b) => JSString::new_from_str(&b.to_string()),
-            ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::Array { .. } | Exotic::None => JSString::new_from_str("<object>"),
-                Exotic::String { string } => string.clone(),
-                Exotic::Function { .. } => JSString::new_from_str("<closure>"),
-            },
-            ObjectValue::Symbol(_) => todo!(),
-        }
-    }
-
-    pub fn show_debug(&self) -> String {
-        match &self.value {
-            ObjectValue::Number(n) => format!("object number {}", n),
-            ObjectValue::Bool(b) => format!("object boolean {}", b),
-            ObjectValue::Object { obj, .. } => match &obj.exotic_part {
-                Exotic::None => format!("object ({} properties)", obj.properties.len()),
-                Exotic::Array { elements } => {
-                    format!("array ({} elements)", elements.len())
+    pub fn type_of(&self, obj: Value) -> Typeof {
+        match obj {
+            Value::Number(_) => Typeof::Number,
+            Value::Bool(_) => Typeof::Boolean,
+            Value::Object(obj) => {
+                // TODO Handle specific failure
+                let obj = self.get(obj).unwrap();
+                match &obj.exotic_part {
+                    Exotic::None | Exotic::Array { .. } => Typeof::Object,
+                    Exotic::String { .. } => Typeof::String,
+                    Exotic::Function { .. } => Typeof::Function,
                 }
-                Exotic::String { string } => format!("{:?}", string),
-                Exotic::Function { .. } => "<closure>".to_owned(),
-            },
-            ObjectValue::Symbol(_) => todo!(),
+            }
+            Value::Symbol(_) => Typeof::Symbol,
+            Value::Null => Typeof::Symbol,
+            Value::Undefined => Typeof::Undefined,
+        }
+    }
+    pub fn proto(&self, obj: Value) -> Option<ObjectId> {
+        match obj {
+            Value::Number(_) => Some(self.number_proto),
+            Value::Bool(_) => Some(self.bool_proto),
+            Value::Object(obj) => self.get(obj).unwrap().proto_id,
+            Value::Symbol(_) => todo!("symbol prototype"),
+            Value::Null | Value::Undefined => None,
+        }
+    }
+
+    pub fn as_str(&self, obj: Value) -> Option<JSString> {
+        match obj {
+            Value::Object(obj) => {
+                let obj = self.get(obj).unwrap();
+                match &obj.exotic_part {
+                    Exotic::String { string } => Some(string.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_closure(&self, obj: Value) -> Option<&Closure> {
+        match obj {
+            Value::Object(obj) => {
+                let obj = self.get(obj).unwrap();
+                match &obj.exotic_part {
+                    Exotic::Function { ref closure } => Some(closure),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn array_elements(&self, obj: Value) -> Option<&[Value]> {
+        match obj {
+            Value::Object(obj) => {
+                let obj = self.get(obj).unwrap();
+                match &obj.exotic_part {
+                    Exotic::Array { ref elements } => Some(elements),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Converts the given value to a boolean (e.g. for use by `if`,
+/// or operators `&&` and `||`)
+///
+/// See: https://262.ecma-international.org/14.0/#sec-toboolean
+    pub fn to_boolean(&self, obj: Value) -> bool {
+        match obj {
+            Value::Number(n) => n != 0.0,
+            Value::Bool(b) => b,
+            Value::Object(obj) => {
+                let obj = self.get(obj).unwrap();
+                match &obj.exotic_part {
+                    Exotic::None | Exotic::Array { .. } | Exotic::Function { .. } => true,
+                    Exotic::String { string } => !string.view().is_empty(),
+                }
+            }
+            Value::Symbol(_) => true,
+            Value::Null | Value::Undefined => false,
+        }
+    }
+
+    pub fn js_to_string(&self, obj: Value) -> JSString {
+        match obj {
+            Value::Number(n) => JSString::new_from_str(&n.to_string()),
+            Value::Bool(b) => JSString::new_from_str(&b.to_string()),
+            Value::Object(obj) => {
+                let obj = self.get(obj).unwrap();
+                match &obj.exotic_part {
+                    Exotic::Array { .. } | Exotic::None => JSString::new_from_str("<object>"),
+                    Exotic::String { string } => string.clone(),
+                    Exotic::Function { .. } => JSString::new_from_str("<closure>"),
+                }
+            }
+            Value::Symbol(_) => todo!(),
+            Value::Null => JSString::new_from_str("null"),
+            Value::Undefined => JSString::new_from_str("undefined"),
+        }
+    }
+
+    pub fn show_debug(&self, obj: Value) -> String {
+        match obj {
+            Value::Number(n) => format!("object number {}", n),
+            Value::Bool(b) => format!("object boolean {}", b),
+            Value::Object(obj) => {
+                let obj = self.get(obj).unwrap();
+                match &obj.exotic_part {
+                    Exotic::None => format!("object ({} properties)", obj.properties.len()),
+                    Exotic::Array { elements } => {
+                        format!("array ({} elements)", elements.len())
+                    }
+                    Exotic::String { string } => format!("{:?}", string),
+                    Exotic::Function { .. } => "<closure>".to_owned(),
+                }
+            }
+            Value::Symbol(_) => todo!(),
+            Value::Null => "null".to_owned(),
+            Value::Undefined => "undefined".to_owned(),
         }
     }
 }
 
-impl<'a, R> ObjectRefW<'a, R>
-where
-    R: DerefMut<Target = HeapObject>,
-{
+//
+// Object mutation API
+//
+impl Heap {
     /// Set the value of an owned property (or an array element).
-    pub fn set_own(&mut self, index_or_key: IndexOrKey, property: Property) {
+    pub fn set_own(&mut self, obj: Value, index_or_key: IndexOrKey, property: Property) {
         if index_or_key == IndexOrKey::Key("__proto__") {
-            if let Value::Object(new_proto_id) = property.value {
-                if let ObjectValue::Object { obj, .. } = &mut self.value {
-                    // property.is_enumerable is discarded. It's implicitly non-enumerable (see
-                    // `get_own`)
-                    obj.proto_id = Some(new_proto_id);
-                }
+            if let (Value::Object(obj), Value::Object(new_proto_id)) = (obj, property.value) {
+                let obj = self.get_mut(obj).unwrap();
+                // property.is_enumerable is discarded. It's implicitly non-enumerable (see
+                // `get_own`)
+                obj.proto_id = Some(new_proto_id);
             } else {
                 // Apparently this is simply a nop in V8?
             }
             return;
         }
 
-        let obj = match &mut self.value {
-            ObjectValue::Object { obj, .. } => obj,
-            ObjectValue::Number(_) | ObjectValue::Bool(_) | ObjectValue::Symbol(_) => return,
+        let hobj = match obj {
+            Value::Object(oid) => self.get_mut(oid).unwrap(),
+            Value::Null
+            | Value::Undefined
+            | Value::Number(_)
+            | Value::Bool(_)
+            | Value::Symbol(_) => return,
         };
 
-        match (&mut obj.exotic_part, index_or_key) {
+        match (&mut hobj.exotic_part, index_or_key) {
             (Exotic::None, IndexOrKey::Index(ndx)) => {
                 let new_key = ndx.to_string();
                 let new_key = IndexOrKey::Key(&new_key);
-                self.set_own(new_key, property)
+                self.set_own(obj, new_key, property)
             }
             (Exotic::Array { elements }, IndexOrKey::Index(ndx)) => {
                 if elements.len() < ndx + 1 {
@@ -287,34 +317,43 @@ where
                 // do nothing
             }
             (_, IndexOrKey::Key(key)) => {
-                let prev = obj.properties.insert(key.to_owned(), property);
+                let prev = hobj.properties.insert(key.to_owned(), property);
                 if prev.is_none() {
-                    obj.order.push(key.to_string());
+                    hobj.order.push(key.to_string());
                 }
-                debug_assert_eq!(1, obj.order.iter().filter(|x| *x == key).count());
+                debug_assert_eq!(1, hobj.order.iter().filter(|x| *x == key).count());
             }
             (_, IndexOrKey::Symbol(sym)) => {
                 // Properties associated to Symbol keys are not enumerable
-                obj.sym_properties.insert(sym, property);
+                hobj.sym_properties.insert(sym, property);
             }
         }
     }
 
     /// Remove an owned property (or array element) of this object.
     ///
-    /// This does NOT affect inherited properties and does NOT access
-    /// the prototype chain in any way.
-    pub fn delete_own(&mut self, index_or_key: IndexOrKey) {
+    /// This does NOT affect inherited properties and does NOT access the
+    /// prototype chain in any way.
+    /// 
+    /// Returns `true` iff `obj` was a non-exotic object. This does not depend
+    /// on whether the property actually existed or not, or anything else.
+    // TODO change this stinky return value type
+    pub fn delete_own(&mut self, obj: Value, index_or_key: IndexOrKey) -> bool {
         if index_or_key == IndexOrKey::Key("__proto__") {
-            return;
+            return true;
         }
 
-        let obj = match &mut self.value {
-            ObjectValue::Object { obj, .. } => obj,
-            ObjectValue::Number(_) | ObjectValue::Bool(_) | ObjectValue::Symbol(_) => return,
+        let hobj = match obj {
+            // TODO Handle specific failure case
+            Value::Object(oid) => self.get_mut(oid).unwrap(),
+            Value::Number(_)
+            | Value::Bool(_)
+            | Value::Symbol(_)
+            | Value::Null
+            | Value::Undefined => return false,
         };
 
-        match (&mut obj.exotic_part, index_or_key) {
+        match (&mut hobj.exotic_part, index_or_key) {
             (Exotic::Array { .. } | Exotic::String { .. }, IndexOrKey::Key("length")) => {
                 // do nothing
             }
@@ -337,29 +376,34 @@ where
                 // minority of properties, so no space to be saved by removing
                 // the key from `self.order`. Instead, only delete from the
                 // hashmap, then the iteration procedure will skip it.
-                obj.properties.remove(key);
+                hobj.properties.remove(key);
             }
             (_, IndexOrKey::Symbol(sym)) => {
-                obj.sym_properties.remove(sym);
+                hobj.sym_properties.remove(sym);
             }
         }
+
+        true
     }
 
-    pub fn set_proto(&mut self, proto_id: Option<ObjectId>) {
-        if let ObjectValue::Object { obj, .. } = &mut self.value {
-            obj.proto_id = proto_id;
+    pub fn set_proto(&mut self, obj: Value, proto_id: Option<ObjectId>) {
+        if let Value::Object(oid) = obj {
+            self.get_mut(oid).unwrap().proto_id = proto_id;
         }
     }
 
-    pub fn array_push(&mut self, value: Value) -> bool {
-        match &mut self.value {
-            ObjectValue::Object { obj, .. } => match &mut obj.exotic_part {
-                Exotic::Array { elements } => {
-                    elements.push(value);
-                    true
+    pub fn array_push(&mut self, obj: Value, value: Value) -> bool {
+        match obj {
+            Value::Object(oid) => {
+                let obj = self.get_mut(oid).unwrap();
+                match &mut obj.exotic_part {
+                    Exotic::Array { elements } => {
+                        elements.push(value);
+                        true
+                    }
+                    _ => false,
                 }
-                _ => false,
-            },
+            }
             _ => false,
         }
     }
@@ -373,6 +417,7 @@ pub enum Typeof {
     Number,
     Boolean,
     Symbol,
+    Undefined,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -431,7 +476,7 @@ impl IndexOrKeyOwned {
 slotmap::new_key_type! { pub struct ObjectId; }
 
 pub struct Heap {
-    objects: slotmap::SlotMap<ObjectId, RefCell<HeapObject>>,
+    objects: slotmap::SlotMap<ObjectId, HeapObject>,
 
     object_proto: ObjectId,
     number_proto: ObjectId,
@@ -444,12 +489,12 @@ pub struct Heap {
 impl Heap {
     pub(crate) fn new() -> Heap {
         let mut objects = slotmap::SlotMap::with_key();
-        let object_proto = objects.insert(RefCell::new(HeapObject::default()));
-        let number_proto = objects.insert(RefCell::new(HeapObject::default()));
-        let string_proto = objects.insert(RefCell::new(HeapObject::default()));
-        let func_proto = objects.insert(RefCell::new(HeapObject::default()));
-        let bool_proto = objects.insert(RefCell::new(HeapObject::default()));
-        let array_proto = objects.insert(RefCell::new(HeapObject::default()));
+        let object_proto = objects.insert(HeapObject::default());
+        let number_proto = objects.insert(HeapObject::default());
+        let string_proto = objects.insert(HeapObject::default());
+        let func_proto = objects.insert(HeapObject::default());
+        let bool_proto = objects.insert(HeapObject::default());
+        let array_proto = objects.insert(HeapObject::default());
 
         Heap {
             objects,
@@ -482,13 +527,13 @@ impl Heap {
     }
 
     pub(crate) fn new_ordinary_object(&mut self) -> ObjectId {
-        self.objects.insert(RefCell::new(HeapObject {
+        self.objects.insert(HeapObject {
             proto_id: Some(self.object_proto),
             properties: HashMap::new(),
             sym_properties: HashMap::new(),
             order: Vec::new(),
             exotic_part: Exotic::None,
-        }))
+        })
     }
 
     // Weird property of these functions: their purpose is to *create* an exotic
@@ -497,7 +542,7 @@ impl Heap {
     // pre-created (ordinary) object passed as `this`.
 
     fn init_exotic(&mut self, oid: ObjectId, proto_oid: ObjectId, exotic_part: Exotic) {
-        let mut obj = self.objects.get(oid).unwrap().borrow_mut();
+        let obj = self.objects.get_mut(oid).unwrap();
         assert!(matches!(obj.exotic_part, Exotic::None));
         obj.proto_id = Some(proto_oid);
         obj.exotic_part = exotic_part;
@@ -526,40 +571,12 @@ impl Heap {
         oid
     }
 
-    /// Access the JavaScript object represented by the given value.
-    ///
-    /// If the value is an object reference, the returned interface allows
-    /// access to the referenced object. Otherwise, the value is a primitive;
-    /// then an object-like interface to  the primitive is returned that allows
-    /// access to its prototype and any intrinsic properties..
-    ///
-    /// The conversion fails (None is returned) for `null` and `undefined`.
-    pub fn get(&self, value: Value) -> Option<ObjectRef> {
-        let value = match value {
-            Value::Number(n) => ObjectValue::Number(n),
-            Value::Bool(b) => ObjectValue::Bool(b),
-            Value::Object(oid) => {
-                let obj = self.objects.get(oid)?.borrow();
-                ObjectValue::Object { obj, oid }
-            }
-            Value::Symbol(s) => ObjectValue::Symbol(s),
-            Value::Null | Value::Undefined => return None,
-        };
-        Some(ObjectRef { heap: self, value })
+    fn get(&self, oid: ObjectId) -> Option<&HeapObject> {
+        self.objects.get(oid)
     }
 
-    pub fn get_mut(&self, value: Value) -> Option<ObjectRefMut> {
-        let value = match value {
-            Value::Number(n) => ObjectValue::Number(n),
-            Value::Bool(b) => ObjectValue::Bool(b),
-            Value::Object(oid) => {
-                let obj = self.objects.get(oid)?.borrow_mut();
-                ObjectValue::Object { obj, oid }
-            }
-            Value::Symbol(s) => ObjectValue::Symbol(s),
-            Value::Null | Value::Undefined => return None,
-        };
-        Some(ObjectRefMut { heap: self, value })
+    fn get_mut(&mut self, oid: ObjectId) -> Option<&mut HeapObject> {
+        self.objects.get_mut(oid)
     }
 }
 
@@ -629,44 +646,60 @@ mod tests {
 
     #[test]
     fn test_number_properties() {
-        let heap = Heap::new();
+        let mut heap = Heap::new();
         {
-            let mut number_proto = heap.get_mut(Value::Object(heap.number_proto())).unwrap();
-            number_proto.set_own("isNumber".into(), Property::enumerable(Value::Bool(true)));
-            number_proto.set_own("isCool".into(), Property::enumerable(Value::Bool(true)));
+            let number_proto = Value::Object(heap.number_proto());
+            heap.set_own(
+                number_proto,
+                "isNumber".into(),
+                Property::enumerable(Value::Bool(true)),
+            );
+            heap.set_own(
+                number_proto,
+                "isCool".into(),
+                Property::enumerable(Value::Bool(true)),
+            );
         }
 
-        let num = heap.get(Value::Number(123.0)).unwrap();
-        assert!(num.get_own("isNumber".into()).is_none());
-        assert!(num.get_own("isCool".into()).is_none());
+        let num = Value::Number(123.0);
+        assert!(heap.get_own(num, "isNumber".into()).is_none());
+        assert!(heap.get_own(num, "isCool".into()).is_none());
         assert_eq!(
-            num.get_chained(IndexOrKey::Key("isNumber")),
+            heap.get_chained(num, IndexOrKey::Key("isNumber")),
             Some(Property::enumerable(Value::Bool(true)))
         );
         assert_eq!(
-            num.get_chained(IndexOrKey::Key("isCool")),
+            heap.get_chained(num, IndexOrKey::Key("isCool")),
             Some(Property::enumerable(Value::Bool(true)))
         );
     }
 
     #[test]
     fn test_bool_properties() {
-        let heap = Heap::new();
+        let mut heap = Heap::new();
         {
-            let mut bool_proto = heap.get_mut(Value::Object(heap.bool_proto())).unwrap();
-            bool_proto.set_own("isNumber".into(), Property::enumerable(Value::Bool(false)));
-            bool_proto.set_own("isCool".into(), Property::enumerable(Value::Bool(true)));
+            let bool_proto = Value::Object(heap.bool_proto());
+            heap.set_own(
+                bool_proto,
+                "isNumber".into(),
+                Property::enumerable(Value::Bool(false)),
+            );
+            heap.set_own(
+                bool_proto,
+                "isCool".into(),
+                Property::enumerable(Value::Bool(true)),
+            );
         }
 
-        let bool_ = heap.get(Value::Bool(true)).unwrap();
-        assert!(bool_.get_own("isNumber".into()).is_none());
-        assert!(bool_.get_own("isCool".into()).is_none());
+        let bool_ = Value::Bool(true);
+        assert!(heap.get_own(bool_, "isNumber".into()).is_none());
+        assert!(heap.get_own(bool_, "isCool".into()).is_none());
         assert_eq!(
-            bool_.get_chained(IndexOrKey::Key("isNumber")),
+            heap.get_chained(bool_, IndexOrKey::Key("isNumber")),
             Some(Property::enumerable(Value::Bool(false)))
         );
         assert_eq!(
-            bool_.get_chained(IndexOrKey::Key("isCool")),
+            heap.get_chained(bool_, IndexOrKey::Key("isCool")),
             Some(Property::enumerable(Value::Bool(true)))
         );
     }
@@ -675,8 +708,9 @@ mod tests {
     fn test_array() {
         let mut heap = Heap::new();
         {
-            let mut array_proto = heap.get_mut(Value::Object(heap.array_proto())).unwrap();
-            array_proto.set_own(
+            let array_proto = Value::Object(heap.array_proto());
+            heap.set_own(
+                array_proto,
                 "specialArrayProperty".into(),
                 Property::enumerable(Value::Number(999.0)),
             );
@@ -687,13 +721,13 @@ mod tests {
             Value::Number(6.0),
             Value::Number(3.0),
         ]);
-        let arr = heap.get(Value::Object(arr)).unwrap();
-        assert!(arr.get_own("specialArrayProperty".into()).is_none());
+        let arr = Value::Object(arr);
+        assert!(heap.get_own(arr, "specialArrayProperty".into()).is_none());
         assert_eq!(
-            arr.get_chained(IndexOrKey::Key("specialArrayProperty")),
+            heap.get_chained(arr, IndexOrKey::Key("specialArrayProperty")),
             Some(Property::enumerable(Value::Number(999.0)))
         );
-        assert_eq!(arr.get_chained(IndexOrKey::Key("isCool")), None);
+        assert_eq!(heap.get_chained(arr, IndexOrKey::Key("isCool")), None);
     }
 }
 
