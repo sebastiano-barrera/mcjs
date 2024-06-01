@@ -648,10 +648,10 @@ fn run_inner(
                     let key = get_operand(data, *key)?;
                     let key = value_to_index_or_key(&realm.heap, &key);
 
-                    let value = key
+                    let property = key
                         .and_then(|key| realm.heap.get_chained(obj, key.to_ref()))
-                        .map(|p| p.value)
-                        .unwrap_or(Value::Undefined);
+                        .unwrap_or(heap::Property::NonEnumerable(Value::Undefined));
+                    let value = property_to_value(&property, &mut realm.heap)?;
 
                     data.top_mut().set_result(*dest, value);
                 }
@@ -887,12 +887,14 @@ fn run_inner(
 
                     let lookup_result = realm.heap.get_own(realm.global_obj, key);
 
-                    match lookup_result {
-                        None
-                        | Some(heap::Property {
-                            value: Value::Undefined,
-                            ..
-                        }) => {
+                    let prop = match lookup_result {
+                        None => None,
+                        Some(prop) if prop.value() == Some(Value::Undefined) => None,
+                        Some(prop) => Some(prop),
+                    };
+
+                    match prop {
+                        None => {
                             let msg =
                                 JSString::new_from_str(&format!("{} is not defined", key_str));
                             let msg = realm.heap.new_string(msg);
@@ -900,11 +902,10 @@ fn run_inner(
                             let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
                             let exc = Value::Object(realm.heap.new_ordinary_object());
                             realm.heap.set_proto(exc, Some(exc_proto));
-                            realm.heap.set_own(
-                                exc,
-                                IndexOrKey::Key("message"),
-                                heap::Property::enumerable(Value::Object(msg)),
-                            );
+                            realm.heap.set_own(exc, IndexOrKey::Key("message"), {
+                                let value = Value::Object(msg);
+                                heap::Property::Enumerable(value)
+                            });
 
                             throw_exc(
                                 exc,
@@ -916,7 +917,7 @@ fn run_inner(
                             continue 'reborrow;
                         }
                         Some(prop) => {
-                            data.top_mut().set_result(*dest, prop.value);
+                            data.top_mut().set_result(*dest, prop.value().unwrap());
                         }
                     }
                 }
@@ -968,11 +969,10 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) 
     let message = realm.heap.new_string(message);
 
     realm.heap.set_proto(exc, Some(exc_proto));
-    realm.heap.set_own(
-        exc,
-        IndexOrKey::Key("message"),
-        heap::Property::enumerable(Value::Object(message)),
-    );
+    realm.heap.set_own(exc, IndexOrKey::Key("message"), {
+        let value = Value::Object(message);
+        heap::Property::Enumerable(value)
+    });
 
     exc
 }
@@ -981,7 +981,7 @@ fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectI
     realm
         .heap
         .get_own(realm.global_obj, IndexOrKey::Key(builtin_name))
-        .map(|p| p.value)
+        .map(|p| p.value().unwrap())
         .ok_or_else(|| error!("missing required builtin: {}", builtin_name))?
         .expect_obj()
         .map_err(|_| RunError::Internal(error!("bug: ReferenceError is not an object?!")))
@@ -1040,9 +1040,9 @@ fn obj_set(
     realm.heap.set_own(
         obj,
         key.to_ref(),
-        heap::Property {
-            value,
-            is_enumerable,
+        match is_enumerable {
+            true => heap::Property::Enumerable(value),
+            false => heap::Property::NonEnumerable(value),
         },
     );
     Ok(())
@@ -1204,6 +1204,7 @@ fn get_operand_string<'r>(
         .heap
         .as_str(obj)
         .ok_or_else(|| error!("not a string!").into())
+        .cloned()
 }
 
 fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
@@ -1332,6 +1333,26 @@ fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
     Ok(heap.js_to_string(value))
 }
 
+fn property_to_string(prop: &heap::Property, heap: & heap::Heap) -> Result<JSString> {
+    match prop {
+        heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => {
+            value_to_string(*value, heap)
+        }
+        heap::Property::Substring(jss) => Ok(jss.clone()),
+    }
+}
+
+fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
+    match prop {
+        heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => {
+            Ok(*value)
+        }
+        heap::Property::Substring(jss) => {
+            Ok(Value::Object(heap.new_string(jss.clone())))
+        }
+    }
+}
+
 /// Write into `wrt` a human-readable description of the value.
 ///
 /// If the value is a string, it will appear in the output.
@@ -1368,7 +1389,9 @@ fn show_value_ex<W: std::io::Write>(
             write!(out, "  - {:?} = ", key).unwrap();
             show_value_ex(
                 out,
-                property.value,
+                // get_own is not allowed to return a Property without a value
+                // (such as Property::String)
+                property.value().unwrap(),
                 realm,
                 &ShowValueParams {
                     indent: params.indent + 1,
@@ -1447,7 +1470,7 @@ fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::Index
         Value::Number(n) if *n >= 0.0 => {
             let n_trunc = n.trunc();
             if *n == n_trunc {
-                let ndx = n_trunc as usize;
+                let ndx = n_trunc as u32;
                 Some(heap::IndexOrKeyOwned::Index(ndx))
             } else {
                 None

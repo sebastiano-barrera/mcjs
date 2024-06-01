@@ -2,12 +2,14 @@
 
 use std::rc::Rc;
 
+use super::property_to_string;
 use super::{show_value, value_to_string, Closure, JSClosure, Realm, Value};
 
 use crate::common::Result;
 use crate::error;
 use crate::heap;
 use crate::heap::JSString;
+use crate::heap::Property;
 
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     let Array = {
@@ -18,12 +20,12 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
             heap.set_own(
                 array_proto,
                 "push".into(),
-                heap::Property::non_enumerable(Array_push),
+                Property::NonEnumerable(Array_push),
             );
             heap.set_own(
                 array_proto,
                 "pop".into(),
-                heap::Property::non_enumerable(Array_pop),
+                Property::NonEnumerable(Array_pop),
             );
         }
 
@@ -33,12 +35,12 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
             heap.set_own(
                 array_ctor,
                 "isArray".into(),
-                heap::Property::non_enumerable(Array_isArray),
+                Property::NonEnumerable(Array_isArray),
             );
             heap.set_own(
                 array_ctor,
                 "prototype".into(),
-                heap::Property::non_enumerable(array_proto),
+                Property::NonEnumerable(array_proto),
             );
         }
 
@@ -55,13 +57,16 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         heap.set_own(
             Number,
             "prototype".into(),
-            heap::Property::non_enumerable(Value::Object(heap.number_proto())),
+            {
+                let value = Value::Object(heap.number_proto());
+                Property::NonEnumerable(value)
+            },
         );
 
         heap.set_own(
             Value::Object(heap.number_proto()),
             "toString".into(),
-            heap::Property::non_enumerable(toString),
+            Property::NonEnumerable(toString),
         )
     }
 
@@ -74,7 +79,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         heap.set_own(
             Function,
             "prototype".into(),
-            heap::Property::non_enumerable(Value::Object(heap.func_proto())),
+            {
+                let value = Value::Object(heap.func_proto());
+                Property::NonEnumerable(value)
+            },
         );
     }
 
@@ -89,7 +97,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         heap.set_own(
             Value::Object(heap.func_proto()),
             "bind".into(),
-            heap::Property::non_enumerable(func_bind),
+            Property::NonEnumerable(func_bind),
         );
     }
 
@@ -99,7 +107,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         heap.set_own(
             Error,
             heap::IndexOrKey::Key("toString"),
-            heap::Property::enumerable(Error_toString),
+            Property::Enumerable(Error_toString),
         );
     }
     let ReferenceError = make_exception_cons(heap, Error);
@@ -109,41 +117,41 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
     let global = Value::Object(heap.new_ordinary_object());
-    heap.set_own(global, "Object".into(), heap::Property::enumerable(Object));
-    heap.set_own(global, "Array".into(), heap::Property::enumerable(Array));
-    heap.set_own(global, "RegExp".into(), heap::Property::enumerable(RegExp));
-    heap.set_own(global, "Number".into(), heap::Property::enumerable(Number));
-    heap.set_own(global, "String".into(), heap::Property::enumerable(String));
+    heap.set_own(global, "Object".into(), Property::Enumerable(Object));
+    heap.set_own(global, "Array".into(), Property::Enumerable(Array));
+    heap.set_own(global, "RegExp".into(), Property::Enumerable(RegExp));
+    heap.set_own(global, "Number".into(), Property::Enumerable(Number));
+    heap.set_own(global, "String".into(), Property::Enumerable(String));
     heap.set_own(
         global,
         "Boolean".into(),
-        heap::Property::enumerable(Boolean),
+        Property::Enumerable(Boolean),
     );
     heap.set_own(
         global,
         "Function".into(),
-        heap::Property::enumerable(Function),
+        Property::Enumerable(Function),
     );
     heap.set_own(
         global,
         "$print".into(),
-        heap::Property::enumerable(cash_print),
+        Property::Enumerable(cash_print),
     );
-    heap.set_own(global, "Error".into(), heap::Property::enumerable(Error));
+    heap.set_own(global, "Error".into(), Property::Enumerable(Error));
     heap.set_own(
         global,
         "ReferenceError".into(),
-        heap::Property::enumerable(ReferenceError),
+        Property::Enumerable(ReferenceError),
     );
     heap.set_own(
         global,
         "TypeError".into(),
-        heap::Property::enumerable(TypeError),
+        Property::Enumerable(TypeError),
     );
     heap.set_own(
         global,
         "SyntaxError".into(),
-        heap::Property::enumerable(SyntaxError),
+        Property::Enumerable(SyntaxError),
     );
 
     global
@@ -154,7 +162,7 @@ fn make_exception_cons(heap: &mut heap::Heap, prototype: Value) -> Value {
     heap.set_own(
         cons,
         heap::IndexOrKey::Key("prototype"),
-        heap::Property::non_enumerable(prototype),
+        Property::NonEnumerable(prototype),
     );
     cons
 }
@@ -163,7 +171,7 @@ fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<Val
     let message = *args.get(0).unwrap_or(&Value::Undefined);
     realm
         .heap
-        .set_own(*this, "message".into(), heap::Property::enumerable(message));
+        .set_own(*this, "message".into(), Property::Enumerable(message));
     Ok(Value::Undefined)
 }
 
@@ -286,11 +294,11 @@ fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> Result<V
 fn nf_Error_toString(realm: &mut Realm, this: &Value, _args: &[Value]) -> Result<Value> {
     let message = realm.heap
         .get_chained(*this, heap::IndexOrKey::Key("message"))
-        .map(|prop| value_to_string(prop.value, &realm.heap))
+        .map(|prop| property_to_string(&prop, &mut realm.heap))
         .unwrap_or(Ok(JSString::new_from_str("(no message)")))?;
     let name = realm.heap
         .get_chained(*this, heap::IndexOrKey::Key("name"))
-        .map(|prop| value_to_string(prop.value, &realm.heap))
+        .map(|prop| property_to_string(&prop, &mut realm.heap))
         .unwrap_or(Ok(JSString::new_from_str("(no message)")))?;
 
     let mut full_message = Vec::new();

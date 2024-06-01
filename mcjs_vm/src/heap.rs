@@ -14,7 +14,7 @@ impl Heap {
     pub fn get_own(&self, obj: Value, iok: IndexOrKey) -> Option<Property> {
         if iok == IndexOrKey::Key("__proto__") {
             let proto_oid = self.proto(obj)?;
-            return Some(Property::non_enumerable(Value::Object(proto_oid)));
+            return Some(Property::NonEnumerable(Value::Object(proto_oid)));
         }
 
         let iok_index = iok.ensure_number_is_index();
@@ -32,21 +32,32 @@ impl Heap {
         // from the one where the property does not exist
         let obj = self.get(obj).unwrap();
         match (&obj.exotic_part, iok, iok_index) {
-            (Exotic::Array { elements }, _, IndexOrKey::Key("length")) => Some(
-                Property::non_enumerable(Value::Number(elements.len() as f64)),
-            ),
-            (Exotic::Array { elements }, _, IndexOrKey::Index(index)) => {
-                elements.get(index).copied().map(Property::enumerable)
+            (Exotic::Array { elements }, _, IndexOrKey::Key("length")) => {
+                let value = Value::Number(elements.len() as f64);
+                Some(Property::NonEnumerable(value))
+            }
+            (Exotic::Array { elements }, _, IndexOrKey::Index(index)) => elements
+                .get(index as usize)
+                .copied()
+                .map(Property::Enumerable),
+
+            (Exotic::String { string }, IndexOrKey::Key("length"), _) => {
+                let value = Value::Number(string.view().len() as f64);
+                Some(Property::NonEnumerable(value))
+            }
+            (Exotic::String { string }, _, IndexOrKey::Index(index)) => {
+                let substr = string.substring(index, index + 1);
+                if substr.view().len() == 0 {
+                    Some(Property::NonEnumerable(Value::Undefined))
+                } else {
+                    Some(Property::Substring(substr))
+                }
             }
 
-            (Exotic::String { string }, IndexOrKey::Key("length"), _) => Some(
-                Property::non_enumerable(Value::Number(string.view().len() as f64)),
-            ),
-
             (_, iok, _) => match iok {
-                IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).copied(),
-                IndexOrKey::Key(key) => obj.properties.get(key).copied(),
-                IndexOrKey::Symbol(sym) => obj.sym_properties.get(sym).copied(),
+                IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).cloned(),
+                IndexOrKey::Key(key) => obj.properties.get(key).cloned(),
+                IndexOrKey::Symbol(sym) => obj.sym_properties.get(sym).cloned(),
             },
         }
     }
@@ -139,7 +150,7 @@ impl Heap {
 
         for key in &obj.order {
             if let Some(prop) = obj.properties.get(key) {
-                if !only_enumerable || prop.is_enumerable {
+                if !only_enumerable || prop.is_enumerable() {
                     out.push(key.clone());
                 }
             }
@@ -174,12 +185,12 @@ impl Heap {
         }
     }
 
-    pub fn as_str(&self, obj: Value) -> Option<JSString> {
+    pub fn as_str(&self, obj: Value) -> Option<&JSString> {
         match obj {
             Value::Object(obj) => {
                 let obj = self.get(obj).unwrap();
                 match &obj.exotic_part {
-                    Exotic::String { string } => Some(string.clone()),
+                    Exotic::String { string } => Some(string),
                     _ => None,
                 }
             }
@@ -214,9 +225,9 @@ impl Heap {
     }
 
     /// Converts the given value to a boolean (e.g. for use by `if`,
-/// or operators `&&` and `||`)
-///
-/// See: https://262.ecma-international.org/14.0/#sec-toboolean
+    /// or operators `&&` and `||`)
+    ///
+    /// See: https://262.ecma-international.org/14.0/#sec-toboolean
     pub fn to_boolean(&self, obj: Value) -> bool {
         match obj {
             Value::Number(n) => n != 0.0,
@@ -280,7 +291,8 @@ impl Heap {
     /// Set the value of an owned property (or an array element).
     pub fn set_own(&mut self, obj: Value, index_or_key: IndexOrKey, property: Property) {
         if index_or_key == IndexOrKey::Key("__proto__") {
-            if let (Value::Object(obj), Value::Object(new_proto_id)) = (obj, property.value) {
+            if let (Value::Object(obj), Some(Value::Object(new_proto_id))) = (obj, property.value())
+            {
                 let obj = self.get_mut(obj).unwrap();
                 // property.is_enumerable is discarded. It's implicitly non-enumerable (see
                 // `get_own`)
@@ -307,11 +319,12 @@ impl Heap {
                 self.set_own(obj, new_key, property)
             }
             (Exotic::Array { elements }, IndexOrKey::Index(ndx)) => {
+                let ndx = ndx as usize;
                 if elements.len() < ndx + 1 {
                     elements.resize(ndx + 1, Value::Undefined);
                 }
                 // implicitly enumerable
-                elements[ndx] = property.value;
+                elements[ndx] = property.value().unwrap();
             }
             (_, IndexOrKey::Index(_)) => {
                 // do nothing
@@ -334,7 +347,7 @@ impl Heap {
     ///
     /// This does NOT affect inherited properties and does NOT access the
     /// prototype chain in any way.
-    /// 
+    ///
     /// Returns `true` iff `obj` was a non-exotic object. This does not depend
     /// on whether the property actually existed or not, or anything else.
     // TODO change this stinky return value type
@@ -358,6 +371,7 @@ impl Heap {
                 // do nothing
             }
             (Exotic::Array { elements }, IndexOrKey::Index(index)) => {
+                let index = index as usize;
                 if index < elements.len() {
                     elements[index] = Value::Undefined;
 
@@ -422,7 +436,7 @@ pub enum Typeof {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IndexOrKey<'a> {
-    Index(usize),
+    Index(u32),
     Key(&'a str),
     Symbol(&'static str),
 }
@@ -448,13 +462,13 @@ impl<'a> From<&'a str> for IndexOrKey<'a> {
 }
 impl<'a> From<usize> for IndexOrKey<'a> {
     fn from(value: usize) -> Self {
-        IndexOrKey::Index(value)
+        IndexOrKey::Index(value.try_into().unwrap())
     }
 }
 
 #[derive(PartialEq, Eq)]
 pub enum IndexOrKeyOwned {
-    Index(usize),
+    Index(u32),
     // TODO Change this! Better if keys are JSString
     Key(String),
     Symbol(&'static str),
@@ -605,22 +619,28 @@ impl Default for HeapObject {
         }
     }
 }
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct Property {
-    pub value: Value,
-    pub is_enumerable: bool,
+#[derive(Debug, PartialEq, Clone)]
+pub enum Property {
+    Enumerable(Value),
+    NonEnumerable(Value),
+    // implicitly non-enumerable
+    Substring(JSString),
 }
 impl Property {
-    pub fn non_enumerable(value: Value) -> Property {
-        Property {
-            value,
-            is_enumerable: false,
+    #[inline]
+    pub fn is_enumerable(&self) -> bool {
+        match self {
+            Property::Enumerable(_) => true,
+            Property::NonEnumerable(_) => false,
+            Property::Substring(_) => false,
         }
     }
-    pub fn enumerable(value: Value) -> Property {
-        Property {
-            value,
-            is_enumerable: true,
+
+    #[inline]
+    pub fn value(&self) -> Option<Value> {
+        match self {
+            Property::Enumerable(value) | Property::NonEnumerable(value) => Some(*value),
+            Property::Substring(_) => None,
         }
     }
 }
@@ -649,16 +669,14 @@ mod tests {
         let mut heap = Heap::new();
         {
             let number_proto = Value::Object(heap.number_proto());
-            heap.set_own(
-                number_proto,
-                "isNumber".into(),
-                Property::enumerable(Value::Bool(true)),
-            );
-            heap.set_own(
-                number_proto,
-                "isCool".into(),
-                Property::enumerable(Value::Bool(true)),
-            );
+            heap.set_own(number_proto, "isNumber".into(), {
+                let value = Value::Bool(true);
+                Property::Enumerable(value)
+            });
+            heap.set_own(number_proto, "isCool".into(), {
+                let value = Value::Bool(true);
+                Property::Enumerable(value)
+            });
         }
 
         let num = Value::Number(123.0);
@@ -666,11 +684,11 @@ mod tests {
         assert!(heap.get_own(num, "isCool".into()).is_none());
         assert_eq!(
             heap.get_chained(num, IndexOrKey::Key("isNumber")),
-            Some(Property::enumerable(Value::Bool(true)))
+            Some(Property::Enumerable(Value::Bool(true)))
         );
         assert_eq!(
             heap.get_chained(num, IndexOrKey::Key("isCool")),
-            Some(Property::enumerable(Value::Bool(true)))
+            Some(Property::Enumerable(Value::Bool(true)))
         );
     }
 
@@ -679,16 +697,14 @@ mod tests {
         let mut heap = Heap::new();
         {
             let bool_proto = Value::Object(heap.bool_proto());
-            heap.set_own(
-                bool_proto,
-                "isNumber".into(),
-                Property::enumerable(Value::Bool(false)),
-            );
-            heap.set_own(
-                bool_proto,
-                "isCool".into(),
-                Property::enumerable(Value::Bool(true)),
-            );
+            heap.set_own(bool_proto, "isNumber".into(), {
+                let value = Value::Bool(false);
+                Property::Enumerable(value)
+            });
+            heap.set_own(bool_proto, "isCool".into(), {
+                let value = Value::Bool(true);
+                Property::Enumerable(value)
+            });
         }
 
         let bool_ = Value::Bool(true);
@@ -696,11 +712,11 @@ mod tests {
         assert!(heap.get_own(bool_, "isCool".into()).is_none());
         assert_eq!(
             heap.get_chained(bool_, IndexOrKey::Key("isNumber")),
-            Some(Property::enumerable(Value::Bool(false)))
+            Some(Property::Enumerable(Value::Bool(false)))
         );
         assert_eq!(
             heap.get_chained(bool_, IndexOrKey::Key("isCool")),
-            Some(Property::enumerable(Value::Bool(true)))
+            Some(Property::Enumerable(Value::Bool(true)))
         );
     }
 
@@ -709,11 +725,10 @@ mod tests {
         let mut heap = Heap::new();
         {
             let array_proto = Value::Object(heap.array_proto());
-            heap.set_own(
-                array_proto,
-                "specialArrayProperty".into(),
-                Property::enumerable(Value::Number(999.0)),
-            );
+            heap.set_own(array_proto, "specialArrayProperty".into(), {
+                let value = Value::Number(999.0);
+                Property::Enumerable(value)
+            });
         }
 
         let arr = heap.new_array(vec![
@@ -725,7 +740,7 @@ mod tests {
         assert!(heap.get_own(arr, "specialArrayProperty".into()).is_none());
         assert_eq!(
             heap.get_chained(arr, IndexOrKey::Key("specialArrayProperty")),
-            Some(Property::enumerable(Value::Number(999.0)))
+            Some(Property::Enumerable(Value::Number(999.0)))
         );
         assert_eq!(heap.get_chained(arr, IndexOrKey::Key("isCool")), None);
     }
@@ -776,11 +791,22 @@ impl JSString {
         &self.full[self.start as usize..self.end as usize]
     }
 
+    /// Returns a new JSString that offers a narrower view into the same string
+    /// buffer than what `self` offers.
+    ///
+    /// The returned window covers the [ofs_start, ofs_end) interval (right-open
+    /// interval!), where 0 is the start of `self` (regardless of the buffer).
+    /// The interval is implicitly truncated if it's "too far on the right".
+    /// This implies that invalid indices can return a shorter substring than
+    /// expected, or even the empty string.
     pub fn substring(&self, ofs_start: u32, ofs_end: u32) -> Self {
+        let len_u32 = self.end - self.start;
+        let ofs_start = ofs_start.min(len_u32);
+        let ofs_end = ofs_end.min(len_u32).max(ofs_start);
+
         let start = self.start + ofs_start;
         let end = self.start + ofs_end;
-        assert!(end <= self.end);
-        assert!(end >= start);
+        debug_assert!(end <= self.full.len().try_into().unwrap());
 
         JSString {
             full: Rc::clone(&self.full),
@@ -843,26 +869,29 @@ mod tests_js_string {
     fn test_double_substring() {
         let my_str = "asdlol123";
         let jss0 = JSString::new_from_str(&my_str);
+        assert_eq!(jss0.view().len(), 9);
         let jss1 = jss0.substring(3, 9); // "lol123"
+        assert_eq!(jss1.view().len(), 6);
         let jss2 = jss1.substring(2, 5); // "l12"
+        assert_eq!(jss2.view().len(), 3);
 
         let check: Vec<_> = "l12".encode_utf16().collect();
         assert_eq!(jss2.view(), check);
     }
 
     #[test]
-    #[should_panic]
     fn test_substring_out_of_range_end() {
         let my_str = "asdlol123";
         let jss = JSString::new_from_str(&my_str);
-        let _ = jss.substring(3, 10);
+        let jss1 = jss.substring(3, 10);
+        assert_eq!(jss1.to_string(), "lol123");
     }
 
     #[test]
-    #[should_panic]
     fn test_substring_out_of_range_inv() {
         let my_str = "asdlol123";
         let jss = JSString::new_from_str(&my_str);
-        let _ = jss.substring(7, 5);
+        let jss1 = jss.substring(7, 5);
+        assert_eq!(jss1.view().len(), 0);
     }
 }

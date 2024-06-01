@@ -991,13 +991,12 @@ mod heap_view {
 
         for prop in props {
             let mut child = match heap.get_own(obj, heap::IndexOrKey::Key(&prop)) {
-                Some(heap::Property {
-                    value: InterpreterValue::Object(child_oid),
-                    ..
-                }) => read_object(heap, child_oid, depth + 1),
-                Some(heap::Property { value, .. }) => TreeNode {
-                    value: format!("{:?}", value),
-                    ..Default::default()
+                Some(prop) => match prop.value().unwrap() {
+                    InterpreterValue::Object(child_oid) => read_object(heap, child_oid, depth + 1),
+                    value => TreeNode {
+                        value: format!("{:?}", value),
+                        ..Default::default()
+                    },
                 },
                 None => TreeNode {
                     value: "MISSING!".to_string(),
