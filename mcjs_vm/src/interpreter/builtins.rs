@@ -46,7 +46,21 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         array_ctor
     };
 
+    let RegExp_proto = Value::Object(heap.new_function(Closure::Native(nf_RegExp)));
+    {
+        let test = Value::Object(heap.new_function(Closure::Native(nf_RegExp_test)));
+        heap.set_own(
+            RegExp_proto,
+            heap::IndexOrKey::Key("test"),
+            Property::NonEnumerable(test),
+        );
+    }
     let RegExp = Value::Object(heap.new_function(Closure::Native(nf_RegExp)));
+    heap.set_own(
+        RegExp,
+        heap::IndexOrKey::Key("prototype"),
+        Property::NonEnumerable(RegExp_proto),
+    );
 
     let Number = Value::Object(heap.new_function(Closure::Native(nf_Number)));
     {
@@ -213,10 +227,54 @@ fn nf_Array_pop(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> RunResult
     todo!("nf_Array_pop")
 }
 
-fn nf_RegExp(realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Value> {
-    // TODO
-    let oid = realm.heap.new_ordinary_object();
-    Ok(Value::Object(oid))
+fn nf_RegExp(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+    let source = match args.first() {
+        Some(val) => value_to_string(*val, &mut realm.heap)?,
+        None => JSString::new_from_str("(?:)"),
+    };
+
+    let source = Value::Object(realm.heap.new_string(source));
+    realm.heap.set_own(
+        *this,
+        heap::IndexOrKey::Key("source"),
+        Property::NonEnumerable(source),
+    );
+    Ok(*this)
+}
+
+fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+    // TODO Insanely slow! Cache the Regex object
+
+    let source = realm
+        .heap
+        .get_chained(*this, heap::IndexOrKey::Key("source"));
+    let source = match source {
+        Some(property) => property.value().unwrap(),
+        None => return Ok(Value::Undefined),
+    };
+    let source = realm.heap.as_str(source).cloned().ok_or_else(|| {
+        let msg = JSString::new_from_str("property `source` is not a string");
+        let exc = super::make_exception(realm, "Error", msg);
+        RunError::Exception(exc)
+    })?;
+
+    let source = source.to_string();
+
+    let regex = regex::Regex::new(&source).map_err(|re_err| {
+        let msg = JSString::new_from_str(&format!("Regex error: {}", re_err));
+        let exc = super::make_exception(realm, "Error", msg);
+        RunError::Exception(exc)
+    })?;
+
+    let haystack = *args.first().unwrap_or(&Value::Undefined);
+    let haystack = match realm.heap.as_str(haystack) {
+        Some(s) => s,
+        None => return Ok(Value::Bool(false)),
+    };
+    // Terrible waste, but I don't have a regex library that matches UTF-16
+    let haystack = haystack.to_string();
+
+    Ok(Value::Bool(regex.is_match(&haystack)))
 }
 
 fn nf_Array(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {

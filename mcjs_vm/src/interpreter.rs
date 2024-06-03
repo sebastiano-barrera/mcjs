@@ -2796,6 +2796,33 @@ do {
         );
     }
 
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_RegExp_test() {
+        let output = quick_run_script(
+            r#"const re = /^\d{2,5}$/;
+            sink(re.test('12'));
+            sink(re.test('123'));
+            sink(re.test('1234'));
+            sink(re.test('12345'));
+            sink(re.test('x12345'));
+            sink(re.test('123456'));
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(false)),
+                Some(Literal::Bool(false)),
+            ]
+        );
+    }
+
     mod debugging {
         use super::*;
         use crate::Loader;
