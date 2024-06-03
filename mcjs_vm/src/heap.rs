@@ -407,18 +407,20 @@ impl Heap {
     }
 
     pub fn array_push(&mut self, obj: Value, value: Value) -> bool {
-        match obj {
-            Value::Object(oid) => {
-                let obj = self.get_mut(oid).unwrap();
-                match &mut obj.exotic_part {
-                    Exotic::Array { elements } => {
-                        elements.push(value);
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            _ => false,
+        if let Some(elements) = self.as_array_mut(obj) {
+            elements.push(value);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn as_array_mut(&mut self, obj: Value) -> Option<&mut Vec<Value>> {
+        let obj = obj.expect_obj().ok()?;
+        let obj = self.get_mut(obj)?;
+        match &mut obj.exotic_part {
+            Exotic::Array { elements } => Some(elements),
+            _ => None,
         }
     }
 }

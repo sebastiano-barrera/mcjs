@@ -223,8 +223,15 @@ fn nf_Array_push(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<V
     Ok(Value::Undefined)
 }
 
-fn nf_Array_pop(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> RunResult<Value> {
-    todo!("nf_Array_pop")
+fn nf_Array_pop(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<Value> {
+    match realm.heap.as_array_mut(*this) {
+        Some(elements) => Ok(elements.pop().unwrap_or(Value::Undefined)),
+        None => {
+            let message = JSString::new_from_str("not an array");
+            let exc = super::make_exception(realm, "Error", message);
+            Err(RunError::Exception(exc))
+        }
+    }
 }
 
 fn nf_RegExp(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
