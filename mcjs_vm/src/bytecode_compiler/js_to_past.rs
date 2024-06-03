@@ -1268,14 +1268,7 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                         }
                     }
 
-                    let mut default_case = if has_default_case {
-                        // at this point in the code we've failed all the other case tests, so
-                        // we just emit a jump (to be resolved later)
-                        let stmt_id = fnb.add_stmt(StmtOp::Pending);
-                        Some(stmt_id)
-                    } else {
-                        None
-                    };
+                    let default_case = fnb.add_stmt(StmtOp::Pending);
 
                     let mut non_default_cases = non_default_cases.into_iter();
                     for case in &switch_stmt.cases {
@@ -1284,7 +1277,8 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                         let jmpif_sid = if case.test.is_some() {
                             non_default_cases.next().unwrap()
                         } else {
-                            default_case.take().unwrap()
+                            assert!(has_default_case);
+                            default_case
                         };
                         assert_ne!(jmpif_sid, jmp_target);
                         fnb.set_stmt(jmpif_sid, StmtOp::Jump(jmp_target));
@@ -1294,8 +1288,13 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                         }
                     }
 
+                    if !has_default_case {
+                        // create a fake "default:" clause at the end of the switch body
+                        let jmp_target = fnb.peek_stmt_id();
+                        fnb.set_stmt(default_case, StmtOp::Jump(jmp_target));
+                    }
+
                     assert!(non_default_cases.next().is_none());
-                    assert!(default_case.is_none());
                 });
             }
 

@@ -1887,6 +1887,54 @@ mod tests {
         assert_eq!(&[Some(Literal::Number(10.0))], &output.sink[..]);
     }
 
+    #[test]
+    fn test_switch() {
+        let output = quick_run_script(
+            "
+            function trySwitch(x) {
+                switch(x) {
+                case 'a':
+                case 'b':
+                    sink(1);
+                case 'c':
+                    sink(2);
+                    break;
+
+                case 'd':
+                    sink(3);
+                }
+                sink(99);
+            }
+
+            trySwitch('b');
+            trySwitch('d');
+            trySwitch('c');
+            trySwitch('y');
+            trySwitch('a');
+            ",
+        );
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Number(1.0)),
+                Some(Literal::Number(2.0)),
+                Some(Literal::Number(99.0)),
+                //
+                Some(Literal::Number(3.0)),
+                Some(Literal::Number(99.0)),
+                //
+                Some(Literal::Number(2.0)),
+                Some(Literal::Number(99.0)),
+                //
+                Some(Literal::Number(99.0)),
+                //
+                Some(Literal::Number(1.0)),
+                Some(Literal::Number(2.0)),
+                Some(Literal::Number(99.0)),
+            ]
+        );
+    }
+
     fn try_casting_bool(code: &str, expected_value: bool) {
         let output = quick_run_script(code);
         assert_eq!(&[Some(Literal::Bool(expected_value))], &output.sink[..]);
