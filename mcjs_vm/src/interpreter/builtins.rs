@@ -379,8 +379,11 @@ fn nf_String_codePointAt(realm: &mut Realm, this: &Value, args: &[Value]) -> Run
         .unwrap_or(Value::Undefined))
 }
 
-fn nf_Boolean(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Value> {
-    Ok(Value::Bool(false))
+fn nf_Boolean(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+    // TODO Provide correct implementation for `new Boolean(...)` in addition to `Boolean(...)`
+    let arg = args.first().copied().unwrap_or(Value::Undefined);
+    let bool_val = realm.heap.to_boolean(arg);
+    Ok(Value::Bool(bool_val))
 }
 
 fn nf_Function(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Value> {
