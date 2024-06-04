@@ -564,7 +564,7 @@ fn parse_package(pkg_path: &Path) -> Result<Package> {
     };
 
     let main_filename_orig = pkg_spec
-        .get("module")
+        .get("main")
         .and_then(|val| val.as_str())
         .unwrap_or("index.js");
     let main_filename = pkg_path.join(main_filename_orig).canonicalize().unwrap();
