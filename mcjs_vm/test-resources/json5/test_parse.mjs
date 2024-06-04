@@ -19,24 +19,26 @@ const t = {
 	},
 
 	strictSame(found, expected, errorMessage) {
-		if (found === expected) { return true; }
-    if (typeof found !== typeof expected) { return false; }
+        if (found === expected) { return true; }
+        if (typeof found !== typeof expected) { return false; }
 
-    // NaN
-    if (found !== found) { return expected !== expected; }
+        // NaN
+        if (found !== found) { return expected !== expected; }
 
-    if (typeof found === 'object') {
-      for (const k in expected) {
-        if (!this.strictSame(found[k], expected[k])) {
-          return false;
+        if (typeof found === 'object') {
+            for (const k in expected) {
+                if (!this.strictSame(found[k], expected[k])) {
+                  return false;
+                }
+            }
+
+            // extra keys in `found` are OK
+            return true;
         }
-      }
 
-      // extra keys in `found` are OK
-      return true;
-    }
-
-    throw `assert failed: ${found} !== ${expected}: ${errorMessage}`;
+        if (found !== expected) {
+            throw `assert failed: ${found} !== ${expected}: ${errorMessage}`;
+        }
 	},
 	equal(found, expected, errorMessage) { 
 		// TODO Fix this when `==` is implemented differently from `===`
