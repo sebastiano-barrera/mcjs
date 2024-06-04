@@ -1747,10 +1747,11 @@ fn compile_var_decl_use_names(
 
         fnb.add_decl(Decl::from_js_var_decl(name.clone(), var_decl.kind));
 
-        if let Some(init) = &declarator.init {
-            let value = compile_expr(fnb, init);
-            fnb.add_stmt(StmtOp::Assign(Some(name.clone()), value));
-        }
+        let value = match &declarator.init {
+            Some(init) => compile_expr(fnb, init),
+            None => ExprID::Undefined,
+        };
+        fnb.add_stmt(StmtOp::Assign(Some(name.clone()), value));
 
         if let Some(out_names) = &mut out_names {
             out_names.push(name);
