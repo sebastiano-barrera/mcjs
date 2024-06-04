@@ -1308,8 +1308,8 @@ fn compare(
             .partial_cmp(b)
             .map(|x| x.into())
             .unwrap_or(ValueOrdering::Incomparable),
-        (Value::Null, Value::Null) => ValueOrdering::Equal,
-        (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
+        // null and undefined are mutually ==
+        (Value::Null | Value::Undefined, Value::Null | Value::Undefined) => ValueOrdering::Equal,
         #[rustfmt::skip]
         (Value::Object(a_oid), Value::Object(b_oid)) => {
             let a_str = realm.heap.as_str(Value::Object(*a_oid));
@@ -1979,6 +1979,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_number_cast() {
+        let output = quick_run_script(
+            "
+            sink(Number(123.0));
+            sink(Number('-123.45e9'));
+            sink(Number(true));
+            sink(Number(false));
+            sink(Number(null));
+            sink(Number({a: 3}));
+            sink(Number());
+            ",
+        );
+
+        assert!(matches!(
+            &output.sink[..],
+            &[
+                Some(Literal::Number(123.0)),
+                Some(Literal::Number(-123450000000.0)),
+                Some(Literal::Number(1.0)),
+                Some(Literal::Number(0.0)),
+                Some(Literal::Number(0.0)),
+                Some(Literal::Number(a)),
+                Some(Literal::Number(b)),
+            ]
+            if a.is_nan() && b.is_nan()
+        ))
+    }
+
+    // Un-ignore when Symbol.for is implemented
+    #[test]
+    #[ignore]
+    fn test_number_cast_symbol() {
+        let output = quick_run_script(
+            "
+            try { Number(Symbol.for('asd')) }
+            catch (err) { sink(err.name) }
+            ",
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[Some(Literal::String("TypeError".to_string())),]
+        )
+    }
     #[test]
     fn test_capture() {
         let output = quick_run_script(

@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use super::{property_to_string, to_number, RunError, RunResult};
+use super::{make_exception, property_to_string, to_number, RunError, RunResult};
 use super::{show_value, value_to_string, Closure, JSClosure, Realm, Value};
 
 use crate::error;
@@ -293,8 +293,30 @@ fn nf_Array(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value>
     Ok(Value::Undefined)
 }
 
-fn nf_Number(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Value> {
-    Ok(Value::Number(0.0))
+fn nf_Number(_realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+    let value = args.first().copied().unwrap_or(Value::Undefined);
+
+    match value {
+        Value::Number(_) => Ok(value),
+        Value::Bool(true) => Ok(Value::Number(1.)),
+        Value::Bool(false) => Ok(Value::Number(0.)),
+        Value::Object(_) => {
+            let value: f64 = _realm
+                .heap
+                .as_str(value)
+                .and_then(|jss| jss.to_string().parse::<f64>().ok())
+                .unwrap_or(f64::NAN);
+
+            Ok(Value::Number(value))
+        }
+        Value::Null => Ok(Value::Number(0.)),
+        Value::Undefined => Ok(Value::Number(f64::NAN)),
+        Value::Symbol(_) => {
+            let message = JSString::new_from_str("Cannot convert a Symbol value to a number");
+            let exc = make_exception(_realm, "TypeError", message);
+            Err(RunError::Exception(exc))
+        }
+    }
 }
 
 fn nf_Number_prototype_toString(realm: &mut Realm, this: &Value, _: &[Value]) -> RunResult<Value> {
@@ -380,7 +402,8 @@ fn nf_String_codePointAt(realm: &mut Realm, this: &Value, args: &[Value]) -> Run
 }
 
 fn nf_Boolean(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
-    // TODO Provide correct implementation for `new Boolean(...)` in addition to `Boolean(...)`
+    // TODO Provide correct implementation for `new Boolean(...)` in addition to
+    // `Boolean(...)`
     let arg = args.first().copied().unwrap_or(Value::Undefined);
     let bool_val = realm.heap.to_boolean(arg);
     Ok(Value::Bool(bool_val))
