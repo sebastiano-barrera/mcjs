@@ -1372,15 +1372,13 @@ fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Val
     }
 }
 
-/// Write into `wrt` a human-readable description of the value.
+/// Write a human-readable description of the value.
 ///
-/// If the value is a string, it will appear in the output.
+/// If the value is a string, it will appear in the output (possibly truncated,
+/// with a note about the total length).
 ///
-/// If the value is an object, a listing of its properties will appear in its output.
-fn show_value<W: std::io::Write>(out: &mut W, value: Value, realm: &mut Realm) {
-    show_value_ex(out, value, realm, &ShowValueParams::default())
-}
-
+/// If the value is an object, a listing of its properties will appear in its
+/// output.
 fn show_value_ex<W: std::io::Write>(
     out: &mut W,
     value: Value,

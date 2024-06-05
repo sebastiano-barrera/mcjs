@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use super::{make_exception, property_to_string, to_number, RunError, RunResult};
-use super::{show_value, value_to_string, Closure, JSClosure, Realm, Value};
+use super::{value_to_string, Closure, JSClosure, Realm, Value};
 
 use crate::error;
 use crate::heap;
@@ -411,9 +411,10 @@ fn nf_Function(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Valu
 }
 
 fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
-    let mut out = std::io::stdout().lock();
     for arg in args {
-        show_value(&mut out, *arg, realm);
+        let jss = realm.heap.js_to_string(*arg);
+        let str = jss.to_string();
+        println!("{}", str);
     }
     Ok(Value::Undefined)
 }
