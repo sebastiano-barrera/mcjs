@@ -128,16 +128,6 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         );
     }
 
-    let Error = Value::Object(heap.new_function(Closure::Native(nf_do_nothing)));
-    {
-        let Error_toString = Value::Object(heap.new_function(Closure::Native(nf_Error_toString)));
-        heap.set_own(
-            Error,
-            heap::IndexOrKey::Key("toString"),
-            Property::Enumerable(Error_toString),
-        );
-    }
-
     // TODO(big feat) pls impl all Node.js API, ok? thxbye
 
     let global = Value::Object(heap.new_ordinary_object());
@@ -149,8 +139,8 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     heap.set_own(global, "Boolean".into(), Property::Enumerable(Boolean));
     heap.set_own(global, "Function".into(), Property::Enumerable(Function));
     heap.set_own(global, "$print".into(), Property::Enumerable(cash_print));
-    heap.set_own(global, "Error".into(), Property::Enumerable(Error));
 
+    let Error = add_exception_type(heap, "Error", Value::Object(heap.object_proto()), global);
     add_exception_type(heap, "ReferenceError", Error, global);
     add_exception_type(heap, "TypeError", Error, global);
     add_exception_type(heap, "SyntaxError", Error, global);
@@ -159,12 +149,17 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     global
 }
 
+/// Create a new exception type.
+///
+/// The constructor will be named like `name`, and the new prototype will have
+/// `parent_prototype` as its own prototype. The constructor will also be
+/// assigned as a property into `container`.
 fn add_exception_type(
     heap: &mut heap::Heap,
     name: &str,
     parent_prototype: Value,
     container: Value,
-) {
+) -> Value {
     let parent_prototype = match parent_prototype {
         Value::Object(oid) => oid,
         _ => panic!("bug: add_exception_type: parent prototype must be object"),
@@ -192,6 +187,8 @@ fn add_exception_type(
         heap::IndexOrKey::Key(name),
         Property::Enumerable(cons),
     );
+
+    prototype
 }
 
 fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {

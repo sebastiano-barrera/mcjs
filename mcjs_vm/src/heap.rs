@@ -523,6 +523,9 @@ impl Heap {
         }
     }
 
+    pub fn object_proto(&self) -> ObjectId {
+        self.object_proto
+    }
     pub fn number_proto(&self) -> ObjectId {
         self.number_proto
     }
