@@ -21,7 +21,7 @@ pub use stack::SlotDebug;
 use stack::UpvalueId;
 
 // Public versions of the private `Result` and `Error` above
-pub type InterpreterResult<T> = std::result::Result<T, Box<InterpreterError>>;
+pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
 pub struct InterpreterError {
     pub error: crate::common::Error,
 
@@ -54,7 +54,6 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Object(heap::ObjectId),
-    // String(JSString),
     Null,
     Undefined,
 
@@ -303,17 +302,17 @@ impl<'a> Interpreter<'a> {
                         .with_giid(bytecode::GlobalIID(hdr.fnid, hdr.iid));
                     error.push_context(context);
                 }
-                Err(Box::new(InterpreterError {
+                Err(InterpreterError {
                     error,
                     #[cfg(feature = "debugger")]
                     intrp_state: self.data,
-                }))
+                })
             }
-            Err(RunError::Internal(common_err)) => Err(Box::new(InterpreterError {
+            Err(RunError::Internal(common_err)) => Err(InterpreterError {
                 error: common_err,
                 #[cfg(feature = "debugger")]
                 intrp_state: self.data,
-            })),
+            }),
 
             #[cfg(feature = "debugger")]
             Err(RunError::Suspended(cause)) => Ok(Exit::Suspended {
