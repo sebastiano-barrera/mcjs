@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use super::{make_exception, property_to_string, to_number, RunError, RunResult};
+use super::{make_exception, to_number, RunError, RunResult};
 use super::{value_to_string, Closure, JSClosure, Realm, Value};
 
 use crate::error;
@@ -441,24 +441,3 @@ fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResul
     Ok(Value::Object(new_obj_id))
 }
 
-fn nf_Error_toString(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<Value> {
-    let message = realm
-        .heap
-        .get_chained(*this, heap::IndexOrKey::Key("message"))
-        .map(|prop| property_to_string(&prop, &mut realm.heap))
-        .unwrap_or(Ok(JSString::new_from_str("(no message)")))?;
-    let name = realm
-        .heap
-        .get_chained(*this, heap::IndexOrKey::Key("name"))
-        .map(|prop| property_to_string(&prop, &mut realm.heap))
-        .unwrap_or(Ok(JSString::new_from_str("(no message)")))?;
-
-    let mut full_message = Vec::new();
-    full_message.extend_from_slice(name.view());
-    full_message.extend(": ".encode_utf16());
-    full_message.extend_from_slice(message.view());
-
-    let full_message = JSString::new(full_message);
-    let oid = realm.heap.new_string(full_message);
-    Ok(Value::Object(oid))
-}

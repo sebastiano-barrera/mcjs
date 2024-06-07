@@ -84,12 +84,12 @@ gen_value_expect!(expect_obj, Object, heap::ObjectId);
 /// It can be cloned, and the resulting value will "point" to the same closure as the
 /// first one. (These semantics are also in `Value`, and `Closure` inherits them from it).
 #[derive(Clone)]
-pub enum Closure {
+pub(crate) enum Closure {
     Native(NativeFunction),
     JS(Rc<JSClosure>),
 }
 
-type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+pub(crate) type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
@@ -1010,10 +1010,10 @@ fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectI
         .map_err(|_| RunError::Internal(error!("bug: ReferenceError is not an object?!")))
 }
 
-type RunResult<T> = std::result::Result<T, RunError>;
+pub(crate) type RunResult<T> = std::result::Result<T, RunError>;
 /// The error type only used internally by `run_frame` and `run_internal`.
 #[derive(Debug)]
-enum RunError {
+pub(crate) enum RunError {
     Exception(Value),
     #[cfg(feature = "debugger")]
     Suspended(SuspendCause),
@@ -1354,15 +1354,6 @@ fn to_number(value: Value) -> Option<f64> {
 fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
     // TODO Sink the error mgmt that was here into js_to_string
     Ok(heap.js_to_string(value))
-}
-
-fn property_to_string(prop: &heap::Property, heap: &heap::Heap) -> Result<JSString> {
-    match prop {
-        heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => {
-            value_to_string(*value, heap)
-        }
-        heap::Property::Substring(jss) => Ok(jss.clone()),
-    }
 }
 
 fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
