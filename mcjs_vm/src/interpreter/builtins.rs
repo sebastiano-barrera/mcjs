@@ -262,9 +262,10 @@ fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
         RunError::Exception(exc)
     })?;
 
+    // TODO Avoid conversion of pattern from UTF-16
     let source = source.to_string();
 
-    let regex = regex::Regex::new(&source).map_err(|re_err| {
+    let regex = regress::Regex::new(&source).map_err(|re_err| {
         let msg = JSString::new_from_str(&format!("Regex error: {}", re_err));
         let exc = super::make_exception(realm, "Error", msg);
         RunError::Exception(exc)
@@ -275,10 +276,9 @@ fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
         Some(s) => s,
         None => return Ok(Value::Bool(false)),
     };
-    // Terrible waste, but I don't have a regex library that matches UTF-16
-    let haystack = haystack.to_string();
-
-    Ok(Value::Bool(regex.is_match(&haystack)))
+    
+    let found = regex.find_from_utf16(haystack.view(), 0).next().is_some();
+    Ok(Value::Bool(found))
 }
 
 fn nf_Array(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
