@@ -20,7 +20,7 @@ pub mod stack;
 pub use stack::SlotDebug;
 use stack::UpvalueId;
 
-// Public versions of the private `Result` and `Error` above
+// Public versions of the private `RunResult` and `RunError`
 pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
 pub struct InterpreterError {
     pub error: crate::common::Error,
@@ -84,11 +84,13 @@ gen_value_expect!(expect_obj, Object, heap::ObjectId);
 /// first one. (These semantics are also in `Value`, and `Closure` inherits them from it).
 #[derive(Clone)]
 pub(crate) enum Closure {
-    Native(NativeFunction),
+    Native(NativeClosure),
     JS(Rc<JSClosure>),
 }
 
-pub(crate) type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+#[derive(Clone, Copy)]
+pub(crate) struct NativeClosure(NativeFn);
+type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
@@ -613,7 +615,7 @@ fn run_inner(
                             continue 'reborrow;
                         }
                         Closure::Native(nf) => {
-                            let nf = *nf;
+                            let NativeClosure(nf) = *nf;
                             let this = get_operand(data, *this)?;
                             match nf(realm, &this, &arg_vals) {
                                 Ok(ret_val) => {
@@ -1009,10 +1011,10 @@ fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectI
         .map_err(|_| RunError::Internal(error!("bug: ReferenceError is not an object?!")))
 }
 
-pub(crate) type RunResult<T> = std::result::Result<T, RunError>;
+type RunResult<T> = std::result::Result<T, RunError>;
 /// The error type only used internally by `run_frame` and `run_internal`.
 #[derive(Debug)]
-pub(crate) enum RunError {
+enum RunError {
     Exception(Value),
     #[cfg(feature = "debugger")]
     Suspended(SuspendCause),
