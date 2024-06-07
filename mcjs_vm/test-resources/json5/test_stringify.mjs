@@ -1,8 +1,8 @@
 import JSON5 from 'json5';
 
-sink(JSON5.stringify(null));
-sink(JSON5.stringify(123));
-sink(JSON5.stringify(456.78));
-sink(JSON5.stringify(true));
-sink(JSON5.stringify(false));
+$print('JSON5 encoded: ' + JSON5.stringify(null));
+$print('JSON5 encoded: ' + JSON5.stringify(123));
+$print('JSON5 encoded: ' + JSON5.stringify(456.78));
+$print('JSON5 encoded: ' + JSON5.stringify(true));
+$print('JSON5 encoded: ' + JSON5.stringify(false));
 

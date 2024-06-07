@@ -89,7 +89,7 @@ pub enum Closure {
     JS(Rc<JSClosure>),
 }
 
-type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> Result<Value>;
+type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
@@ -538,7 +538,7 @@ fn run_inner(
                 }
                 Instr::ToNumber { dest, arg } => {
                     let value = get_operand(data, *arg)?;
-                    let value = to_number(value).ok_or_else(|| {
+                    let value = to_number_value(value).ok_or_else(|| {
                         let message = JSString::new_from_str(&format!(
                             "cannot convert to a number: {:?}",
                             *arg
@@ -566,10 +566,10 @@ fn run_inner(
                     return_value: return_value_reg,
                 } => {
                     let callee = get_operand(data, *callee)?;
-                    let closure: &Closure = realm
-                        .heap
-                        .as_closure(callee)
-                        .ok_or_else(|| error!("can't call non-closure"))?;
+                    let closure: &Closure = realm.heap.as_closure(callee).ok_or_else(|| {
+                        let val_s = realm.heap.show_debug(callee);
+                        error!("can't call non-closure: {}", val_s)
+                    })?;
 
                     // NOTE The arguments have to be "read" before adding the stack frame;
                     // they will no longer be accessible
@@ -616,9 +616,23 @@ fn run_inner(
                         Closure::Native(nf) => {
                             let nf = *nf;
                             let this = get_operand(data, *this)?;
-                            let ret_val = nf(realm, &this, &arg_vals)?;
-                            data.top_mut().set_result(*return_value_reg, ret_val);
-                            next_ndx = return_to_iid.0;
+                            match nf(realm, &this, &arg_vals) {
+                                Ok(ret_val) => {
+                                    data.top_mut().set_result(*return_value_reg, ret_val);
+                                    next_ndx = return_to_iid.0;
+                                }
+                                Err(RunError::Exception(exc)) => {
+                                    throw_exc(
+                                        exc,
+                                        iid,
+                                        data,
+                                        #[cfg(feature = "debugger")]
+                                        dbg,
+                                    )?;
+                                    continue 'reborrow;
+                                }
+                                Err(other_err) => return Err(other_err),
+                            };
                         }
                     }
                 }
@@ -648,10 +662,10 @@ fn run_inner(
                     let key = get_operand(data, *key)?;
                     let key = value_to_index_or_key(&realm.heap, &key);
 
-                    let value = key
+                    let property = key
                         .and_then(|key| realm.heap.get_chained(obj, key.to_ref()))
-                        .map(|p| p.value)
-                        .unwrap_or(Value::Undefined);
+                        .unwrap_or(heap::Property::NonEnumerable(Value::Undefined));
+                    let value = property_to_value(&property, &mut realm.heap)?;
 
                     data.top_mut().set_result(*dest, value);
                 }
@@ -700,6 +714,7 @@ fn run_inner(
                             #[cfg(feature = "debugger")]
                             dbg,
                         )?;
+                        // FIX No continue 'reborrow?
                     }
                 }
 
@@ -887,12 +902,14 @@ fn run_inner(
 
                     let lookup_result = realm.heap.get_own(realm.global_obj, key);
 
-                    match lookup_result {
-                        None
-                        | Some(heap::Property {
-                            value: Value::Undefined,
-                            ..
-                        }) => {
+                    let prop = match lookup_result {
+                        None => None,
+                        Some(prop) if prop.value() == Some(Value::Undefined) => None,
+                        Some(prop) => Some(prop),
+                    };
+
+                    match prop {
+                        None => {
                             let msg =
                                 JSString::new_from_str(&format!("{} is not defined", key_str));
                             let msg = realm.heap.new_string(msg);
@@ -900,11 +917,10 @@ fn run_inner(
                             let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
                             let exc = Value::Object(realm.heap.new_ordinary_object());
                             realm.heap.set_proto(exc, Some(exc_proto));
-                            realm.heap.set_own(
-                                exc,
-                                IndexOrKey::Key("message"),
-                                heap::Property::enumerable(Value::Object(msg)),
-                            );
+                            realm.heap.set_own(exc, IndexOrKey::Key("message"), {
+                                let value = Value::Object(msg);
+                                heap::Property::Enumerable(value)
+                            });
 
                             throw_exc(
                                 exc,
@@ -916,7 +932,7 @@ fn run_inner(
                             continue 'reborrow;
                         }
                         Some(prop) => {
-                            data.top_mut().set_result(*dest, prop.value);
+                            data.top_mut().set_result(*dest, prop.value().unwrap());
                         }
                     }
                 }
@@ -962,17 +978,24 @@ fn run_inner(
 }
 
 fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) -> Value {
-    let exc_cons = get_builtin(realm, constructor_name).unwrap();
-    let exc_proto = realm.heap.proto(Value::Object(exc_cons)).unwrap();
-    let exc = Value::Object(realm.heap.new_ordinary_object());
     let message = realm.heap.new_string(message);
 
+    let exc_cons = get_builtin(realm, constructor_name).unwrap();
+    let exc_proto = realm
+        .heap
+        .get_own(Value::Object(exc_cons), IndexOrKey::Key("prototype"))
+        .unwrap()
+        .value()
+        .unwrap()
+        .expect_obj()
+        .unwrap();
+    let exc = Value::Object(realm.heap.new_ordinary_object());
+
     realm.heap.set_proto(exc, Some(exc_proto));
-    realm.heap.set_own(
-        exc,
-        IndexOrKey::Key("message"),
-        heap::Property::enumerable(Value::Object(message)),
-    );
+    realm.heap.set_own(exc, IndexOrKey::Key("message"), {
+        let value = Value::Object(message);
+        heap::Property::Enumerable(value)
+    });
 
     exc
 }
@@ -981,7 +1004,7 @@ fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectI
     realm
         .heap
         .get_own(realm.global_obj, IndexOrKey::Key(builtin_name))
-        .map(|p| p.value)
+        .map(|p| p.value().unwrap())
         .ok_or_else(|| error!("missing required builtin: {}", builtin_name))?
         .expect_obj()
         .map_err(|_| RunError::Internal(error!("bug: ReferenceError is not an object?!")))
@@ -1040,9 +1063,9 @@ fn obj_set(
     realm.heap.set_own(
         obj,
         key.to_ref(),
-        heap::Property {
-            value,
-            is_enumerable,
+        match is_enumerable {
+            true => heap::Property::Enumerable(value),
+            false => heap::Property::NonEnumerable(value),
         },
     );
     Ok(())
@@ -1104,7 +1127,7 @@ fn obj_get_keys(
 /// prepared for a subsequent resume.
 fn throw_exc(
     exc: Value,
-    _iid: bytecode::IID,
+    iid: bytecode::IID,
     data: &mut stack::InterpreterData,
     #[cfg(feature = "debugger")] dbg: &Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
@@ -1125,7 +1148,7 @@ fn throw_exc(
             || (dbg.should_break_on_unhandled_throw() && handler_depth.is_some())
         {
             // Save the IID so that execution can resume correctly afterwards
-            data.top_mut().set_resume_iid(_iid);
+            data.top_mut().set_resume_iid(iid);
             return Err(RunError::Suspended(SuspendCause::Exception(exc)));
         }
     }
@@ -1204,6 +1227,7 @@ fn get_operand_string<'r>(
         .heap
         .as_str(obj)
         .ok_or_else(|| error!("not a string!").into())
+        .cloned()
 }
 
 fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
@@ -1284,8 +1308,8 @@ fn compare(
             .partial_cmp(b)
             .map(|x| x.into())
             .unwrap_or(ValueOrdering::Incomparable),
-        (Value::Null, Value::Null) => ValueOrdering::Equal,
-        (Value::Undefined, Value::Undefined) => ValueOrdering::Equal,
+        // null and undefined are mutually ==
+        (Value::Null | Value::Undefined, Value::Null | Value::Undefined) => ValueOrdering::Equal,
         #[rustfmt::skip]
         (Value::Object(a_oid), Value::Object(b_oid)) => {
             let a_str = realm.heap.as_str(Value::Object(*a_oid));
@@ -1312,35 +1336,49 @@ fn compare(
 ///
 /// A `Some` is returned for a successful conversion. On failure (e.g. for
 /// Symbol), a `None` is returned.
-fn to_number(value: Value) -> Option<Value> {
-    let num = match value {
-        Value::Null => 0.0,
-        Value::Bool(true) => 1.0,
-        Value::Bool(false) => 0.0,
-        Value::Number(num) => num,
-        Value::Object(_) => f64::NAN,
-        Value::Undefined => f64::NAN,
-        Value::Symbol(_) => return None,
-    };
-
-    Some(Value::Number(num))
+fn to_number_value(value: Value) -> Option<Value> {
+    to_number(value).map(Value::Number)
 }
-
+fn to_number(value: Value) -> Option<f64> {
+    match value {
+        Value::Null => Some(0.0),
+        Value::Bool(true) => Some(1.0),
+        Value::Bool(false) => Some(0.0),
+        Value::Number(num) => Some(num),
+        Value::Object(_) => Some(f64::NAN),
+        Value::Undefined => Some(f64::NAN),
+        Value::Symbol(_) => None,
+    }
+}
 /// Implements JavaScript's implicit conversion to string.
 fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
     // TODO Sink the error mgmt that was here into js_to_string
     Ok(heap.js_to_string(value))
 }
 
-/// Write into `wrt` a human-readable description of the value.
-///
-/// If the value is a string, it will appear in the output.
-///
-/// If the value is an object, a listing of its properties will appear in its output.
-fn show_value<W: std::io::Write>(out: &mut W, value: Value, realm: &mut Realm) {
-    show_value_ex(out, value, realm, &ShowValueParams::default())
+fn property_to_string(prop: &heap::Property, heap: &heap::Heap) -> Result<JSString> {
+    match prop {
+        heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => {
+            value_to_string(*value, heap)
+        }
+        heap::Property::Substring(jss) => Ok(jss.clone()),
+    }
 }
 
+fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
+    match prop {
+        heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => Ok(*value),
+        heap::Property::Substring(jss) => Ok(Value::Object(heap.new_string(jss.clone()))),
+    }
+}
+
+/// Write a human-readable description of the value.
+///
+/// If the value is a string, it will appear in the output (possibly truncated,
+/// with a note about the total length).
+///
+/// If the value is an object, a listing of its properties will appear in its
+/// output.
 fn show_value_ex<W: std::io::Write>(
     out: &mut W,
     value: Value,
@@ -1368,7 +1406,9 @@ fn show_value_ex<W: std::io::Write>(
             write!(out, "  - {:?} = ", key).unwrap();
             show_value_ex(
                 out,
-                property.value,
+                // get_own is not allowed to return a Property without a value
+                // (such as Property::String)
+                property.value().unwrap(),
                 realm,
                 &ShowValueParams {
                     indent: params.indent + 1,
@@ -1447,7 +1487,7 @@ fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::Index
         Value::Number(n) if *n >= 0.0 => {
             let n_trunc = n.trunc();
             if *n == n_trunc {
-                let ndx = n_trunc as usize;
+                let ndx = n_trunc as u32;
                 Some(heap::IndexOrKeyOwned::Index(ndx))
             } else {
                 None
@@ -1845,6 +1885,54 @@ mod tests {
         assert_eq!(&[Some(Literal::Number(10.0))], &output.sink[..]);
     }
 
+    #[test]
+    fn test_switch() {
+        let output = quick_run_script(
+            "
+            function trySwitch(x) {
+                switch(x) {
+                case 'a':
+                case 'b':
+                    sink(1);
+                case 'c':
+                    sink(2);
+                    break;
+
+                case 'd':
+                    sink(3);
+                }
+                sink(99);
+            }
+
+            trySwitch('b');
+            trySwitch('d');
+            trySwitch('c');
+            trySwitch('y');
+            trySwitch('a');
+            ",
+        );
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Number(1.0)),
+                Some(Literal::Number(2.0)),
+                Some(Literal::Number(99.0)),
+                //
+                Some(Literal::Number(3.0)),
+                Some(Literal::Number(99.0)),
+                //
+                Some(Literal::Number(2.0)),
+                Some(Literal::Number(99.0)),
+                //
+                Some(Literal::Number(99.0)),
+                //
+                Some(Literal::Number(1.0)),
+                Some(Literal::Number(2.0)),
+                Some(Literal::Number(99.0)),
+            ]
+        );
+    }
+
     fn try_casting_bool(code: &str, expected_value: bool) {
         let output = quick_run_script(code);
         assert_eq!(&[Some(Literal::Bool(expected_value))], &output.sink[..]);
@@ -1889,6 +1977,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_number_cast() {
+        let output = quick_run_script(
+            "
+            sink(Number(123.0));
+            sink(Number('-123.45e9'));
+            sink(Number(true));
+            sink(Number(false));
+            sink(Number(null));
+            sink(Number({a: 3}));
+            sink(Number());
+            ",
+        );
+
+        assert!(matches!(
+            &output.sink[..],
+            &[
+                Some(Literal::Number(123.0)),
+                Some(Literal::Number(-123450000000.0)),
+                Some(Literal::Number(1.0)),
+                Some(Literal::Number(0.0)),
+                Some(Literal::Number(0.0)),
+                Some(Literal::Number(a)),
+                Some(Literal::Number(b)),
+            ]
+            if a.is_nan() && b.is_nan()
+        ))
+    }
+
+    // Un-ignore when Symbol.for is implemented
+    #[test]
+    #[ignore]
+    fn test_number_cast_symbol() {
+        let output = quick_run_script(
+            "
+            try { Number(Symbol.for('asd')) }
+            catch (err) { sink(err.name) }
+            ",
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[Some(Literal::String("TypeError".to_string())),]
+        )
+    }
     #[test]
     fn test_capture() {
         let output = quick_run_script(
@@ -2649,6 +2782,86 @@ do {
                 Some(Literal::String("o".to_string())),
                 Some(Literal::String("3".to_string())),
                 Some(Literal::Undefined),
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_string_codePointAt() {
+        let output = quick_run_script(
+            "const s = 'asdlol123';
+            for (let i=0; i < s.length; ++i) {
+                sink(s.codePointAt(i));
+            }
+            sink(s.codePointAt(s.length));
+            ",
+        );
+
+        let ref_string = "asdlol123";
+        let ref_string_u16: Vec<_> = ref_string.encode_utf16().collect();
+
+        assert_eq!(output.sink.len(), ref_string.len() + 1);
+
+        for (i, &code_point) in ref_string_u16.iter().enumerate() {
+            assert_eq!(output.sink[i], Some(Literal::Number(code_point as f64)));
+        }
+        assert_eq!(output.sink[ref_string.len()], Some(Literal::Undefined));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_string_fromCodePoint() {
+        let output = quick_run_script(
+            "const s = 'asdlol123';
+            for (let i=0; i < s.length; ++i) {
+                sink(String.fromCodePoint(s.codePointAt(i)));
+            }
+
+            try {
+                String.fromCodePoint(undefined);
+            } catch (err) {
+                sink(err.name)
+            }
+            ",
+        );
+
+        let ref_string = "asdlol123";
+
+        assert_eq!(output.sink.len(), ref_string.len() + 1);
+
+        for (i, ch) in ref_string.chars().enumerate() {
+            assert_eq!(output.sink[i], Some(Literal::String(ch.into())));
+        }
+        assert_eq!(
+            output.sink[ref_string.len()],
+            Some(Literal::String("RangeError".into()))
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_RegExp_test() {
+        let output = quick_run_script(
+            r#"const re = /^\d{2,5}$/;
+            sink(re.test('12'));
+            sink(re.test('123'));
+            sink(re.test('1234'));
+            sink(re.test('12345'));
+            sink(re.test('x12345'));
+            sink(re.test('123456'));
+            "#,
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(false)),
+                Some(Literal::Bool(false)),
             ]
         );
     }

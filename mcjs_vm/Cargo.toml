@@ -20,6 +20,7 @@ serde = "1.0"
 rmp-serde = "1.1"
 strum = { version = "0.25.0", features = ["derive"] }
 json = "0.12.4"
+regress = { version = "0.10", features = ["utf16"] }
 
 [dev-dependencies]
 iced-x86 = "~1.18.0"
