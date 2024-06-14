@@ -1470,7 +1470,7 @@ mod manager {
                         cause,
                     },
                     Err(ierr) => {
-                        let err = InterpreterError::from_vm_error(&*ierr, &self.loader);
+                        let err = InterpreterError::from_vm_error(&ierr, &self.loader);
                         State::Failed(err)
                     }
                 };

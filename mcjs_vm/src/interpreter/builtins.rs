@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use super::{make_exception, property_to_string, to_number, RunError, RunResult};
+use super::{make_exception, to_number, NativeClosure, NativeFn, RunError, RunResult};
 use super::{value_to_string, Closure, JSClosure, Realm, Value};
 
 use crate::error;
@@ -10,10 +10,15 @@ use crate::heap;
 use crate::heap::JSString;
 use crate::heap::Property;
 
+#[inline]
+fn native_closure(nfn: NativeFn) -> Closure {
+    Closure::Native(NativeClosure(nfn))
+}
+
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     let Array = {
-        let Array_push = Value::Object(heap.new_function(Closure::Native(nf_Array_push)));
-        let Array_pop = Value::Object(heap.new_function(Closure::Native(nf_Array_pop)));
+        let Array_push = Value::Object(heap.new_function(native_closure(nf_Array_push)));
+        let Array_pop = Value::Object(heap.new_function(native_closure(nf_Array_pop)));
         let array_proto = Value::Object(heap.array_proto());
         {
             heap.set_own(
@@ -28,8 +33,8 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
             );
         }
 
-        let Array_isArray = Value::Object(heap.new_function(Closure::Native(nf_Array_isArray)));
-        let array_ctor = Value::Object(heap.new_function(Closure::Native(nf_Array)));
+        let Array_isArray = Value::Object(heap.new_function(native_closure(nf_Array_isArray)));
+        let array_ctor = Value::Object(heap.new_function(native_closure(nf_Array)));
         {
             heap.set_own(
                 array_ctor,
@@ -46,26 +51,26 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         array_ctor
     };
 
-    let RegExp_proto = Value::Object(heap.new_function(Closure::Native(nf_RegExp)));
+    let RegExp_proto = Value::Object(heap.new_function(native_closure(nf_RegExp)));
     {
-        let test = Value::Object(heap.new_function(Closure::Native(nf_RegExp_test)));
+        let test = Value::Object(heap.new_function(native_closure(nf_RegExp_test)));
         heap.set_own(
             RegExp_proto,
             heap::IndexOrKey::Key("test"),
             Property::NonEnumerable(test),
         );
     }
-    let RegExp = Value::Object(heap.new_function(Closure::Native(nf_RegExp)));
+    let RegExp = Value::Object(heap.new_function(native_closure(nf_RegExp)));
     heap.set_own(
         RegExp,
         heap::IndexOrKey::Key("prototype"),
         Property::NonEnumerable(RegExp_proto),
     );
 
-    let Number = Value::Object(heap.new_function(Closure::Native(nf_Number)));
+    let Number = Value::Object(heap.new_function(native_closure(nf_Number)));
     {
         let toString =
-            Value::Object(heap.new_function(Closure::Native(nf_Number_prototype_toString)));
+            Value::Object(heap.new_function(native_closure(nf_Number_prototype_toString)));
 
         heap.set_own(Number, "prototype".into(), {
             let value = Value::Object(heap.number_proto());
@@ -79,10 +84,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         )
     }
 
-    let String = Value::Object(heap.new_function(Closure::Native(nf_String)));
+    let String = Value::Object(heap.new_function(native_closure(nf_String)));
     {
         let fromCodePoint = Property::NonEnumerable(Value::Object(
-            heap.new_function(Closure::Native(nf_String_fromCodePoint)),
+            heap.new_function(native_closure(nf_String_fromCodePoint)),
         ));
         heap.set_own(
             String,
@@ -94,7 +99,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     let string_proto = Value::Object(heap.string_proto());
     {
         let codePointAt = Property::NonEnumerable(Value::Object(
-            heap.new_function(Closure::Native(nf_String_codePointAt)),
+            heap.new_function(native_closure(nf_String_codePointAt)),
         ));
         heap.set_own(
             string_proto,
@@ -103,9 +108,9 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         );
     }
 
-    let Boolean = Value::Object(heap.new_function(Closure::Native(nf_Boolean)));
+    let Boolean = Value::Object(heap.new_function(native_closure(nf_Boolean)));
 
-    let Function = Value::Object(heap.new_function(Closure::Native(nf_Function)));
+    let Function = Value::Object(heap.new_function(native_closure(nf_Function)));
     {
         heap.set_own(Function, "prototype".into(), {
             let value = Value::Object(heap.func_proto());
@@ -115,11 +120,11 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
 
     // Not completely correct. See the rules in
     // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
-    let Object = Value::Object(heap.new_function(Closure::Native(nf_do_nothing)));
+    let Object = Value::Object(heap.new_function(native_closure(nf_do_nothing)));
 
-    let cash_print = Value::Object(heap.new_function(Closure::Native(nf_cash_print)));
+    let cash_print = Value::Object(heap.new_function(native_closure(nf_cash_print)));
 
-    let func_bind = Value::Object(heap.new_function(Closure::Native(nf_Function_bind)));
+    let func_bind = Value::Object(heap.new_function(native_closure(nf_Function_bind)));
     {
         heap.set_own(
             Value::Object(heap.func_proto()),
@@ -175,7 +180,7 @@ fn add_exception_type(
         Property::Enumerable(name_obj),
     );
 
-    let cons = Value::Object(heap.new_function(Closure::Native(nf_set_message)));
+    let cons = Value::Object(heap.new_function(native_closure(nf_set_message)));
     heap.set_own(
         cons,
         heap::IndexOrKey::Key("prototype"),
@@ -276,7 +281,7 @@ fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
         Some(s) => s,
         None => return Ok(Value::Bool(false)),
     };
-    
+
     let found = regex.find_from_utf16(haystack.view(), 0).next().is_some();
     Ok(Value::Bool(found))
 }
@@ -439,26 +444,4 @@ fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResul
 
     let new_obj_id = realm.heap.new_function(Closure::JS(Rc::new(new_closure)));
     Ok(Value::Object(new_obj_id))
-}
-
-fn nf_Error_toString(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<Value> {
-    let message = realm
-        .heap
-        .get_chained(*this, heap::IndexOrKey::Key("message"))
-        .map(|prop| property_to_string(&prop, &mut realm.heap))
-        .unwrap_or(Ok(JSString::new_from_str("(no message)")))?;
-    let name = realm
-        .heap
-        .get_chained(*this, heap::IndexOrKey::Key("name"))
-        .map(|prop| property_to_string(&prop, &mut realm.heap))
-        .unwrap_or(Ok(JSString::new_from_str("(no message)")))?;
-
-    let mut full_message = Vec::new();
-    full_message.extend_from_slice(name.view());
-    full_message.extend(": ".encode_utf16());
-    full_message.extend_from_slice(message.view());
-
-    let full_message = JSString::new(full_message);
-    let oid = realm.heap.new_string(full_message);
-    Ok(Value::Object(oid))
 }

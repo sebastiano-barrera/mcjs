@@ -198,7 +198,7 @@ impl Heap {
         }
     }
 
-    pub fn as_closure(&self, obj: Value) -> Option<&Closure> {
+    pub(crate) fn as_closure(&self, obj: Value) -> Option<&Closure> {
         match obj {
             Value::Object(obj) => {
                 let obj = self.get(obj).unwrap();

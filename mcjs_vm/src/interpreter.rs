@@ -20,8 +20,8 @@ pub mod stack;
 pub use stack::SlotDebug;
 use stack::UpvalueId;
 
-// Public versions of the private `Result` and `Error` above
-pub type InterpreterResult<T> = std::result::Result<T, Box<InterpreterError>>;
+// Public versions of the private `RunResult` and `RunError`
+pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
 pub struct InterpreterError {
     pub error: crate::common::Error,
 
@@ -54,7 +54,6 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Object(heap::ObjectId),
-    // String(JSString),
     Null,
     Undefined,
 
@@ -84,12 +83,14 @@ gen_value_expect!(expect_obj, Object, heap::ObjectId);
 /// It can be cloned, and the resulting value will "point" to the same closure as the
 /// first one. (These semantics are also in `Value`, and `Closure` inherits them from it).
 #[derive(Clone)]
-pub enum Closure {
-    Native(NativeFunction),
+pub(crate) enum Closure {
+    Native(NativeClosure),
     JS(Rc<JSClosure>),
 }
 
-type NativeFunction = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+#[derive(Clone, Copy)]
+pub(crate) struct NativeClosure(NativeFn);
+type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
@@ -303,17 +304,17 @@ impl<'a> Interpreter<'a> {
                         .with_giid(bytecode::GlobalIID(hdr.fnid, hdr.iid));
                     error.push_context(context);
                 }
-                Err(Box::new(InterpreterError {
+                Err(InterpreterError {
                     error,
                     #[cfg(feature = "debugger")]
                     intrp_state: self.data,
-                }))
+                })
             }
-            Err(RunError::Internal(common_err)) => Err(Box::new(InterpreterError {
+            Err(RunError::Internal(common_err)) => Err(InterpreterError {
                 error: common_err,
                 #[cfg(feature = "debugger")]
                 intrp_state: self.data,
-            })),
+            }),
 
             #[cfg(feature = "debugger")]
             Err(RunError::Suspended(cause)) => Ok(Exit::Suspended {
@@ -614,7 +615,7 @@ fn run_inner(
                             continue 'reborrow;
                         }
                         Closure::Native(nf) => {
-                            let nf = *nf;
+                            let NativeClosure(nf) = *nf;
                             let this = get_operand(data, *this)?;
                             match nf(realm, &this, &arg_vals) {
                                 Ok(ret_val) => {
@@ -1354,15 +1355,6 @@ fn to_number(value: Value) -> Option<f64> {
 fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
     // TODO Sink the error mgmt that was here into js_to_string
     Ok(heap.js_to_string(value))
-}
-
-fn property_to_string(prop: &heap::Property, heap: &heap::Heap) -> Result<JSString> {
-    match prop {
-        heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => {
-            value_to_string(*value, heap)
-        }
-        heap::Property::Substring(jss) => Ok(jss.clone()),
-    }
 }
 
 fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
