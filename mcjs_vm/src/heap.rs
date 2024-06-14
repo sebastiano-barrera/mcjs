@@ -91,7 +91,7 @@ impl Heap {
         }
     }
 
-    pub fn is_instance_of(&self, obj: Value, sup_oid: ObjectId) -> bool {
+    pub fn is_instance_of(&self, obj: Value, sup_oid: ObjectID) -> bool {
         if let Value::Object(oid) = obj {
             if sup_oid == oid {
                 return true;
@@ -175,7 +175,7 @@ impl Heap {
             Value::Undefined => Typeof::Undefined,
         }
     }
-    pub fn proto(&self, obj: Value) -> Option<ObjectId> {
+    pub fn proto(&self, obj: Value) -> Option<ObjectID> {
         match obj {
             Value::Number(_) => Some(self.number_proto),
             Value::Bool(_) => Some(self.bool_proto),
@@ -400,7 +400,7 @@ impl Heap {
         true
     }
 
-    pub fn set_proto(&mut self, obj: Value, proto_id: Option<ObjectId>) {
+    pub fn set_proto(&mut self, obj: Value, proto_id: Option<ObjectID>) {
         if let Value::Object(oid) = obj {
             self.get_mut(oid).unwrap().proto_id = proto_id;
         }
@@ -489,17 +489,17 @@ impl IndexOrKeyOwned {
 // Ordinary objects
 //
 
-slotmap::new_key_type! { pub struct ObjectId; }
+slotmap::new_key_type! { pub struct ObjectID; }
 
 pub struct Heap {
-    objects: slotmap::SlotMap<ObjectId, HeapObject>,
+    objects: slotmap::SlotMap<ObjectID, HeapObject>,
 
-    object_proto: ObjectId,
-    number_proto: ObjectId,
-    string_proto: ObjectId,
-    func_proto: ObjectId,
-    array_proto: ObjectId,
-    bool_proto: ObjectId,
+    object_proto: ObjectID,
+    number_proto: ObjectID,
+    string_proto: ObjectID,
+    func_proto: ObjectID,
+    array_proto: ObjectID,
+    bool_proto: ObjectID,
 }
 
 impl Heap {
@@ -523,29 +523,29 @@ impl Heap {
         }
     }
 
-    pub fn object_proto(&self) -> ObjectId {
+    pub fn object_proto(&self) -> ObjectID {
         self.object_proto
     }
-    pub fn number_proto(&self) -> ObjectId {
+    pub fn number_proto(&self) -> ObjectID {
         self.number_proto
     }
-    pub fn func_proto(&self) -> ObjectId {
+    pub fn func_proto(&self) -> ObjectID {
         self.func_proto
     }
-    pub fn array_proto(&self) -> ObjectId {
+    pub fn array_proto(&self) -> ObjectID {
         self.array_proto
     }
     // These are going to be used at some point. No use in delaying their writing
     #[allow(dead_code)]
-    pub fn string_proto(&self) -> ObjectId {
+    pub fn string_proto(&self) -> ObjectID {
         self.string_proto
     }
     #[allow(dead_code)]
-    pub fn bool_proto(&self) -> ObjectId {
+    pub fn bool_proto(&self) -> ObjectID {
         self.bool_proto
     }
 
-    pub(crate) fn new_ordinary_object(&mut self) -> ObjectId {
+    pub(crate) fn new_ordinary_object(&mut self) -> ObjectID {
         self.objects.insert(HeapObject {
             proto_id: Some(self.object_proto),
             properties: HashMap::new(),
@@ -560,41 +560,41 @@ impl Heap {
     // them to the property of JavaScript constructors, which act on a
     // pre-created (ordinary) object passed as `this`.
 
-    fn init_exotic(&mut self, oid: ObjectId, proto_oid: ObjectId, exotic_part: Exotic) {
+    fn init_exotic(&mut self, oid: ObjectID, proto_oid: ObjectID, exotic_part: Exotic) {
         let obj = self.objects.get_mut(oid).unwrap();
         assert!(matches!(obj.exotic_part, Exotic::None));
         obj.proto_id = Some(proto_oid);
         obj.exotic_part = exotic_part;
     }
 
-    pub(crate) fn init_array(&mut self, oid: ObjectId, elements: Vec<Value>) {
+    pub(crate) fn init_array(&mut self, oid: ObjectID, elements: Vec<Value>) {
         self.init_exotic(oid, self.array_proto, Exotic::Array { elements });
     }
-    pub(crate) fn init_function(&mut self, oid: ObjectId, closure: Closure) {
+    pub(crate) fn init_function(&mut self, oid: ObjectID, closure: Closure) {
         self.init_exotic(oid, self.func_proto, Exotic::Function { closure });
     }
 
-    pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectId {
+    pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_array(oid, elements);
         oid
     }
-    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectId {
+    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_function(oid, closure);
         oid
     }
-    pub(crate) fn new_string(&mut self, string: JSString) -> ObjectId {
+    pub(crate) fn new_string(&mut self, string: JSString) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_exotic(oid, self.string_proto, Exotic::String { string: string });
         oid
     }
 
-    fn get(&self, oid: ObjectId) -> Option<&HeapObject> {
+    fn get(&self, oid: ObjectID) -> Option<&HeapObject> {
         self.objects.get(oid)
     }
 
-    fn get_mut(&mut self, oid: ObjectId) -> Option<&mut HeapObject> {
+    fn get_mut(&mut self, oid: ObjectID) -> Option<&mut HeapObject> {
         self.objects.get_mut(oid)
     }
 }
@@ -607,7 +607,7 @@ impl Heap {
 /// are visited in the same order on iteration.
 #[derive(Debug, Clone)]
 pub struct HeapObject {
-    proto_id: Option<ObjectId>,
+    proto_id: Option<ObjectID>,
     properties: HashMap<String, Property>,
     sym_properties: HashMap<&'static str, Property>,
     order: Vec<String>,

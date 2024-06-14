@@ -102,7 +102,7 @@ fn test_integration_script(filename: &str) {
 
 struct VMPrereq {
     loader: mcjs_vm::Loader,
-    root_fnid: mcjs_vm::FnId,
+    root_fnid: mcjs_vm::FnID,
     realm: mcjs_vm::Realm,
     dbg: debugger::DebuggingState,
 }

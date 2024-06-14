@@ -41,14 +41,14 @@ pub struct InterpreterData {
 //
 // [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/let#temporal_dead_zone_tdz
 
-slotmap::new_key_type! { pub struct UpvalueId; }
+slotmap::new_key_type! { pub struct UpvalueID; }
 
-type Upvalues = slotmap::SlotMap<UpvalueId, Option<Value>>;
+type Upvalues = slotmap::SlotMap<UpvalueID, Option<Value>>;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Slot {
     Inline(Option<Value>),
-    Upvalue(UpvalueId),
+    Upvalue(UpvalueID),
 }
 
 #[cfg(feature = "debugger")]
@@ -58,7 +58,7 @@ pub enum SlotDebug {
     // "Inline(None)"
     Uninitialized,
     Inline(Value),
-    Upvalue(UpvalueId),
+    Upvalue(UpvalueID),
 }
 #[cfg(feature = "debugger")]
 impl From<Slot> for SlotDebug {
@@ -74,7 +74,7 @@ impl From<Slot> for SlotDebug {
 pub struct FrameHeader {
     regs_offset: u32,
     regs_count: u32,
-    pub fnid: bytecode::FnId,
+    pub fnid: bytecode::FnID,
     pub iid: bytecode::IID,
     pub this: Value,
 
@@ -138,7 +138,7 @@ impl InterpreterData {
     /// nor any "this" substitution kicking in).
     pub(crate) fn push_direct(
         &mut self,
-        fnid: bytecode::FnId,
+        fnid: bytecode::FnID,
         func: &bytecode::Function,
         this: Value,
     ) {
@@ -399,7 +399,7 @@ impl<'a> Frame<'a> {
         (0..ARGS_COUNT_MAX).map(|i| self.get_arg(bytecode::ArgIndex(i.try_into().unwrap())))
     }
 
-    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueId {
+    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueID {
         // another/better approach: add N slots to the header and use them as cache for the
         // closure's captures.
         self.header
@@ -409,7 +409,7 @@ impl<'a> Frame<'a> {
             .copied()
             .expect("capture index is out of range")
     }
-    pub fn captures(&self) -> impl '_ + ExactSizeIterator<Item = UpvalueId> {
+    pub fn captures(&self) -> impl '_ + ExactSizeIterator<Item = UpvalueID> {
         self.header.closure.upvalues.iter().copied()
     }
 
@@ -419,7 +419,7 @@ impl<'a> Frame<'a> {
     /// - the outer Option is None iff the given `upv_id` is invalid.
     /// - the inner Option is None iff the upvalue exists but contains an uninitialized
     ///   value (i.e. in the temporal dead zone).
-    pub fn deref_upvalue(&self, upv_id: UpvalueId) -> Option<Option<Value>> {
+    pub fn deref_upvalue(&self, upv_id: UpvalueID) -> Option<Option<Value>> {
         self.upv_alloc.get(upv_id).copied()
     }
 
@@ -455,7 +455,7 @@ impl<'a> FrameMut<'a> {
         self.set_result(bytecode::VReg(argndx.0 as u16), value)
     }
 
-    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueId {
+    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueID {
         let slot = &mut self.values[var.0 as usize];
         match slot {
             Slot::Inline(value) => {

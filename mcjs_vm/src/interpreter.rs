@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::error_item;
 use crate::heap::JSString;
 use crate::{
-    bytecode::{self, FnId, Instr, VReg, IID},
+    bytecode::{self, FnID, Instr, VReg, IID},
     common::{self, Result},
     define_flag, error,
     heap::{self, IndexOrKey},
@@ -18,7 +18,7 @@ pub mod stack;
 
 #[cfg(feature = "debugger")]
 pub use stack::SlotDebug;
-use stack::UpvalueId;
+use stack::UpvalueID;
 
 // Public versions of the private `RunResult` and `RunError`
 pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
@@ -53,7 +53,7 @@ impl std::fmt::Debug for InterpreterError {
 pub enum Value {
     Number(f64),
     Bool(bool),
-    Object(heap::ObjectId),
+    Object(heap::ObjectID),
     Null,
     Undefined,
 
@@ -76,7 +76,7 @@ macro_rules! gen_value_expect {
 }
 
 gen_value_expect!(expect_num, Number, f64);
-gen_value_expect!(expect_obj, Object, heap::ObjectId);
+gen_value_expect!(expect_obj, Object, heap::ObjectID);
 
 /// A *reference* to a closure.
 ///
@@ -94,19 +94,19 @@ type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
-    fnid: FnId,
+    fnid: FnID,
     /// TODO There oughta be a better data structure for this
-    upvalues: Vec<UpvalueId>,
+    upvalues: Vec<UpvalueID>,
     forced_this: Option<Value>,
     generator_snapshot: RefCell<Option<stack::FrameSnapshot>>,
 }
 impl JSClosure {
     #[cfg(feature = "debugger")]
-    pub fn fnid(&self) -> FnId {
+    pub fn fnid(&self) -> FnID {
         self.fnid
     }
 
-    pub fn upvalues(&self) -> &[UpvalueId] {
+    pub fn upvalues(&self) -> &[UpvalueID] {
         &self.upvalues
     }
 }
@@ -131,7 +131,7 @@ impl std::fmt::Debug for Closure {
 pub struct Realm {
     heap: heap::Heap,
     // Key is the root fnid of each module
-    module_objs: HashMap<bytecode::FnId, Value>,
+    module_objs: HashMap<bytecode::FnID, Value>,
     global_obj: Value,
 }
 
@@ -208,7 +208,7 @@ impl Exit {
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
+    pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnID) -> Self {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters, then put it into an Interpreter
         let mut data = init_stack(loader, realm, fnid);
@@ -329,7 +329,7 @@ impl<'a> Interpreter<'a> {
 pub fn init_stack(
     loader: &mut loader::Loader,
     realm: &mut Realm,
-    fnid: FnId,
+    fnid: FnID,
 ) -> stack::InterpreterData {
     let mut data = stack::InterpreterData::new();
     let root_fn = loader.get_function(fnid).unwrap();
@@ -1001,7 +1001,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) 
     exc
 }
 
-fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectId> {
+fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectID> {
     realm
         .heap
         .get_own(realm.global_obj, IndexOrKey::Key(builtin_name))
@@ -1777,7 +1777,7 @@ mod tests {
         complete_run(&mut loader, chunk_fnid)
     }
 
-    fn complete_run(loader: &mut crate::Loader, root_fnid: FnId) -> FinishedData {
+    fn complete_run(loader: &mut crate::Loader, root_fnid: FnID) -> FinishedData {
         let mut realm = Realm::new(loader);
         let vm = Interpreter::new(&mut realm, loader, root_fnid);
         match vm.run() {
@@ -2947,7 +2947,7 @@ do {
 
                 let giid = debugger::giid(&intrp_state);
                 eprintln!("we are at: {:?}; sink = {:?}", giid, intrp_state.sink);
-                if giid.0 == bytecode::FnId(2) {
+                if giid.0 == bytecode::FnID(2) {
                     assert_eq!(&intrp_state.sink, &[Value::Number(1.0)]);
                 } else {
                     assert_eq!(&intrp_state.sink, &[]);

@@ -112,7 +112,7 @@ fn compile_function<'a>(
     module_builder: &'a mut ModuleBuilder,
     captures: Vec<DeclName>,
     func: &js_to_past::Function,
-) -> bytecode::FnId {
+) -> bytecode::FnID {
     let mut fnb = builder::FnBuilder::new(globals, module_builder);
     fnb.set_strict_mode(func.strict_mode);
 
@@ -808,7 +808,7 @@ mod builder {
     use js_to_past::BlockID;
 
     pub(super) struct ModuleBuilder {
-        fns: HashMap<bytecode::FnId, bytecode::Function>,
+        fns: HashMap<bytecode::FnID, bytecode::Function>,
         next_fnid: u32,
         breakable_ranges: Vec<bytecode::BreakRange>,
     }
@@ -821,17 +821,17 @@ mod builder {
             }
         }
 
-        pub(super) fn gen_id(&mut self) -> bytecode::FnId {
-            let lfnid = bytecode::FnId(self.next_fnid);
+        pub(super) fn gen_id(&mut self) -> bytecode::FnID {
+            let lfnid = bytecode::FnID(self.next_fnid);
             self.next_fnid += 1;
             lfnid
         }
 
-        pub(super) fn put_fn(&mut self, lfnid: bytecode::FnId, function: bytecode::Function) {
+        pub(super) fn put_fn(&mut self, lfnid: bytecode::FnID, function: bytecode::Function) {
             self.fns.insert(lfnid, function);
         }
 
-        pub(super) fn build(self, root_fnid: bytecode::FnId) -> CompiledModule {
+        pub(super) fn build(self, root_fnid: bytecode::FnID) -> CompiledModule {
             CompiledModule {
                 root_fnid,
                 functions: self.fns,
@@ -852,7 +852,7 @@ mod builder {
 
         globals: &'a HashSet<JsWord>,
         module_builder: &'a mut ModuleBuilder,
-        fnid: bytecode::FnId,
+        fnid: bytecode::FnID,
     }
 
     type BoxedAction = Box<dyn FnOnce(&mut FnBuilder)>;
@@ -1039,7 +1039,7 @@ mod builder {
             self.deferred_actions.push(Box::new(action));
         }
 
-        pub(super) fn build(mut self, span: swc_common::Span) -> bytecode::FnId {
+        pub(super) fn build(mut self, span: swc_common::Span) -> bytecode::FnID {
             assert!(self.blocks.is_empty());
 
             let deferred_actions = std::mem::take(&mut self.deferred_actions);
@@ -1152,7 +1152,7 @@ mod tests {
         insta::assert_snapshot!(dump_functions(&compiled_module.functions));
     }
 
-    fn dump_functions(functions: &HashMap<bytecode::FnId, bytecode::Function>) -> String {
+    fn dump_functions(functions: &HashMap<bytecode::FnID, bytecode::Function>) -> String {
         let mut ids: Vec<_> = functions.keys().copied().collect();
         ids.sort();
 

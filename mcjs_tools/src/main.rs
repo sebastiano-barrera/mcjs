@@ -73,7 +73,7 @@ struct AppData {
     stack_view: stack_view::State,
     source_view: source_view::State,
     heap_view: heap_view::State,
-    open_oids: Vec<heap::ObjectId>,
+    open_oids: Vec<heap::ObjectID>,
     highlight: widgets::Highlight,
 
     save_error_dialog: Option<String>,
@@ -223,7 +223,7 @@ enum Action {
     Next,
     Into,
     SetHighlight(widgets::Highlight),
-    OpenObject(heap::ObjectId),
+    OpenObject(heap::ObjectID),
     SaveLayout,
     LoadLayout,
     SetInstrBreakpoint(mcjs_vm::GlobalIID),
@@ -471,7 +471,7 @@ struct TreeBehavior<'a> {
     stack_view: &'a mut stack_view::State,
     source_view: &'a mut source_view::State,
     heap_view: &'a mut heap_view::State,
-    open_object_ids: &'a [heap::ObjectId],
+    open_object_ids: &'a [heap::ObjectID],
 
     action: &'a mut Action,
     highlight: widgets::Highlight,
@@ -957,7 +957,7 @@ mod heap_view {
 
     #[derive(Default)]
     pub struct State {
-        oids: Vec<heap::ObjectId>,
+        oids: Vec<heap::ObjectID>,
         tree: Vec<TreeNode>,
     }
 
@@ -969,7 +969,7 @@ mod heap_view {
         children: Vec<TreeNode>,
     }
 
-    fn read_object(heap: &heap::Heap, oid: heap::ObjectId, depth: usize) -> TreeNode {
+    fn read_object(heap: &heap::Heap, oid: heap::ObjectID, depth: usize) -> TreeNode {
         if depth >= 5 {
             return TreeNode {
                 value: "too deep!".to_string(),
@@ -1041,7 +1041,7 @@ mod heap_view {
     pub fn show(
         ui: &mut egui::Ui,
         state: &mut State,
-        objects: &[heap::ObjectId],
+        objects: &[heap::ObjectID],
         heap: &heap::Heap,
     ) -> Response {
         let drag_started = ui
@@ -1106,16 +1106,16 @@ mod widgets {
     pub enum Highlight {
         #[default]
         None,
-        VReg((bytecode::FnId, bytecode::VReg)),
-        Object(heap::ObjectId),
+        VReg((bytecode::FnID, bytecode::VReg)),
+        Object(heap::ObjectID),
     }
 
     impl Highlight {
-        fn match_vreg(&self, fnid: bytecode::FnId, vreg: bytecode::VReg) -> bool {
+        fn match_vreg(&self, fnid: bytecode::FnID, vreg: bytecode::VReg) -> bool {
             matches!(self, Highlight::VReg(h) if *h == (fnid, vreg))
         }
 
-        fn match_obj_id(&self, obj_id: heap::ObjectId) -> bool {
+        fn match_obj_id(&self, obj_id: heap::ObjectID) -> bool {
             *self == Highlight::Object(obj_id)
         }
     }
@@ -1310,7 +1310,7 @@ mod manager {
     }
 
     pub struct ManagedInterpreter {
-        script_fnids: Vec<bytecode::FnId>,
+        script_fnids: Vec<bytecode::FnID>,
         realm: Realm,
         loader: Loader,
         state: State,

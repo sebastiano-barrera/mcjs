@@ -26,8 +26,8 @@ pub struct Loader {
     next_anon_id: usize,
 
     max_fnid: u32,
-    functions: HashMap<bytecode::FnId, bytecode::Function>,
-    func_extra: HashMap<bytecode::FnId, FuncInfo>,
+    functions: HashMap<bytecode::FnID, bytecode::Function>,
+    func_extra: HashMap<bytecode::FnID, FuncInfo>,
 
     // This is just a cache of previously parsed package.json.
     // The key is the package's root path (Package::root_path).
@@ -40,7 +40,7 @@ pub struct Loader {
     // loaded through this Loader.
     source_map: Rc<swc_common::SourceMap>,
 
-    boot_script_fnid: Option<bytecode::FnId>,
+    boot_script_fnid: Option<bytecode::FnID>,
 }
 
 struct FuncInfo {
@@ -83,7 +83,7 @@ impl FileID {
 ///
 /// All 3 can be 'run' by accessing the root function (via `root_fnid`).
 struct FileInfo {
-    root_fnid: bytecode::FnId,
+    root_fnid: bytecode::FnID,
 
     /// Used in the lookups for import statements. Always absolute.
     directory: PathBuf,
@@ -99,7 +99,7 @@ struct Package {
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
-pub struct BreakRangeID(bytecode::FnId, usize);
+pub struct BreakRangeID(bytecode::FnID, usize);
 
 impl std::fmt::Display for BreakRangeID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,7 +114,7 @@ impl BreakRangeID {
         let (fnid_s, ndx_s) = s.split_once(',')?;
         let fnid = fnid_s.parse().ok()?;
         let ndx = ndx_s.parse().ok()?;
-        Some(BreakRangeID(bytecode::FnId(fnid), ndx))
+        Some(BreakRangeID(bytecode::FnID(fnid), ndx))
     }
 }
 
@@ -169,15 +169,15 @@ impl Loader {
         loader
     }
 
-    pub fn boot_script_fnid(&self) -> bytecode::FnId {
+    pub fn boot_script_fnid(&self) -> bytecode::FnID {
         self.boot_script_fnid.unwrap()
     }
 
-    pub fn get_function(&self, fnid: bytecode::FnId) -> Option<&bytecode::Function> {
+    pub fn get_function(&self, fnid: bytecode::FnID) -> Option<&bytecode::Function> {
         self.functions.get(&fnid)
     }
 
-    pub fn functions(&self) -> impl Iterator<Item = &bytecode::FnId> {
+    pub fn functions(&self) -> impl Iterator<Item = &bytecode::FnID> {
         self.functions.keys()
     }
 
@@ -202,8 +202,8 @@ impl Loader {
     pub fn load_import_from_fn(
         &mut self,
         import_path: &str,
-        importing_fnid: bytecode::FnId,
-    ) -> Result<bytecode::FnId> {
+        importing_fnid: bytecode::FnID,
+    ) -> Result<bytecode::FnID> {
         let directory = &self
             .func_extra
             .get(&importing_fnid)
@@ -219,7 +219,7 @@ impl Loader {
         &mut self,
         import_path: &str,
         directory: &Path,
-    ) -> Result<bytecode::FnId> {
+    ) -> Result<bytecode::FnID> {
         if import_path.starts_with("./") {
             // relative paths (.e.g './asd/lol.js')
             assert!(directory.is_absolute());
@@ -282,7 +282,7 @@ impl Loader {
         }
     }
 
-    fn load_module(&mut self, module_path: &Path) -> Result<bytecode::FnId> {
+    fn load_module(&mut self, module_path: &Path) -> Result<bytecode::FnID> {
         assert!(module_path.is_absolute());
 
         if let Some(file_info) = self.files.get(module_path) {
@@ -309,7 +309,7 @@ impl Loader {
         file_id: FileID,
         content: String,
         source_type: bytecode_compiler::SourceType,
-    ) -> Result<bytecode::FnId> {
+    ) -> Result<bytecode::FnID> {
         self.load_code(file_id, content, source_type)
     }
 
@@ -318,7 +318,7 @@ impl Loader {
         file_id: FileID,
         content: String,
         source_type: bytecode_compiler::SourceType,
-    ) -> Result<bytecode::FnId> {
+    ) -> Result<bytecode::FnID> {
         let directory = match &file_id {
             FileID::Anon(_) => self.base_path.to_owned(),
             FileID::File(path) => path.parent().expect("invalid file ID!").to_owned(),
@@ -375,7 +375,7 @@ impl Loader {
 
     fn add_functions(
         &mut self,
-        functions: impl Iterator<Item = (bytecode::FnId, bytecode::Function)>,
+        functions: impl Iterator<Item = (bytecode::FnID, bytecode::Function)>,
         file: &Rc<FileInfo>,
     ) {
         for (fnid, func) in functions {
@@ -395,7 +395,7 @@ impl Loader {
     ///
     /// "Anonymous" here means that the code is not linked to any file. This is the case,
     /// for example, for a piece of code coming from a REPL or similar tool.
-    pub fn load_script_anon(&mut self, content: String) -> Result<bytecode::FnId> {
+    pub fn load_script_anon(&mut self, content: String) -> Result<bytecode::FnID> {
         let file_id = {
             self.next_anon_id += 1;
             FileID::Anon(self.next_anon_id)
@@ -403,7 +403,7 @@ impl Loader {
         self.load_code(file_id, content, bytecode_compiler::SourceType::Script)
     }
 
-    pub fn load_script_file(&mut self, filename: &Path) -> Result<bytecode::FnId> {
+    pub fn load_script_file(&mut self, filename: &Path) -> Result<bytecode::FnID> {
         let content = std::fs::read_to_string(filename).map_err(|err| {
             Error::from_err(err).with_context(error_item!(
                 "while loading script `{}`",
@@ -426,7 +426,7 @@ impl Loader {
 
     pub fn resolve_break_loc(
         &self,
-        fnid: bytecode::FnId,
+        fnid: bytecode::FnID,
         byte_pos: swc_common::BytePos,
     ) -> Result<Vec<(BreakRangeID, &bytecode::BreakRange)>> {
         // TODO Scanning the whole set every time resolve_loc is called may not be ideal. Interval
@@ -456,7 +456,7 @@ impl Loader {
 
     pub fn function_breakranges(
         &self,
-        fnid: bytecode::FnId,
+        fnid: bytecode::FnID,
     ) -> Option<impl Iterator<Item = (BreakRangeID, &bytecode::BreakRange)>> {
         let brs = &self.func_extra.get(&fnid)?.breakranges;
         Some(
@@ -477,7 +477,7 @@ impl Loader {
         Rc::as_ref(&self.source_map)
     }
 
-    pub fn lookup_function(&self, fnid: bytecode::FnId) -> Option<FunctionLookup> {
+    pub fn lookup_function(&self, fnid: bytecode::FnID) -> Option<FunctionLookup> {
         let func = self.get_function(fnid)?;
         let span = *func.span();
         let swc_common::SourceFileAndBytePos {

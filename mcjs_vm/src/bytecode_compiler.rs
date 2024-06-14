@@ -4,7 +4,7 @@ use swc_common::sync::Lrc;
 use swc_ecma_ast::EsVersion;
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 
-use crate::bytecode::{self, FnId};
+use crate::bytecode::{self, FnID};
 use crate::common::{MultiError, Result};
 use crate::loader::FileIDRef;
 use crate::{error, error_item, tracing};
@@ -17,8 +17,8 @@ mod js_to_past;
 mod past_to_bytecode;
 
 pub struct CompiledChunk {
-    pub root_fnid: FnId,
-    pub functions: HashMap<FnId, bytecode::Function>,
+    pub root_fnid: FnID,
+    pub functions: HashMap<FnID, bytecode::Function>,
     pub breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
@@ -158,8 +158,8 @@ pub(crate) fn quick_parse_script(src: String) -> (swc_ecma_ast::Script, Rc<Sourc
 }
 
 struct CompiledModule {
-    root_fnid: FnId,
-    functions: HashMap<FnId, bytecode::Function>,
+    root_fnid: FnID,
+    functions: HashMap<FnID, bytecode::Function>,
     breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
