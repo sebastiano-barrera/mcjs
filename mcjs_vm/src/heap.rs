@@ -581,17 +581,17 @@ impl Heap {
         self.init_exotic(oid, self.func_proto, Exotic::Function { closure });
     }
 
-    pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectID {
+    pub fn new_array(&mut self, elements: Vec<Value>) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_array(oid, elements);
         oid
     }
-    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectID {
+    pub fn new_function(&mut self, closure: Closure) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_function(oid, closure);
         oid
     }
-    pub(crate) fn new_string(&mut self, string: JSString) -> StringID {
+    pub fn new_string(&mut self, string: JSString) -> StringID {
         self.strings.insert(string)
     }
 
