@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::interpreter::{Closure, Value};
+use crate::{
+    interpreter::{Closure, NativeFn, Value},
+    NativeClosure,
+};
 
 //
 // Object access API
@@ -591,6 +594,9 @@ impl Heap {
         self.init_function(oid, closure);
         oid
     }
+    pub fn new_native_function(&mut self, nf: NativeFn) -> ObjectID {
+        self.new_function(Closure::Native(NativeClosure(nf)))
+    }
     pub fn new_string(&mut self, string: JSString) -> StringID {
         self.strings.insert(string)
     }
@@ -822,7 +828,7 @@ impl JSString {
         }
     }
 
-    pub(crate) fn to_string(&self) -> String {
+    pub fn to_string(&self) -> String {
         String::from_utf16_lossy(self.view())
     }
 }

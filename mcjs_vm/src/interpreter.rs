@@ -90,8 +90,8 @@ pub enum Closure {
 }
 
 #[derive(Clone, Copy)]
-pub struct NativeClosure(NativeFn);
-type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+pub struct NativeClosure(pub NativeFn);
+pub type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
@@ -1020,10 +1020,11 @@ fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectI
         .map_err(|_| RunError::Internal(error!("bug: ReferenceError is not an object?!")))
 }
 
-type RunResult<T> = std::result::Result<T, RunError>;
+pub type RunResult<T> = std::result::Result<T, RunError>;
+
 /// The error type only used internally by `run_frame` and `run_internal`.
 #[derive(Debug)]
-enum RunError {
+pub enum RunError {
     Exception(Value),
     #[cfg(feature = "debugger")]
     Suspended(SuspendCause),
