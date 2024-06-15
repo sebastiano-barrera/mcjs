@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::{
-    interpreter::{Closure, NativeFn, Value},
-    NativeClosure,
-};
+use crate::interpreter::{Closure, NativeClosure, NativeFn, Value};
 
 //
 // Object access API
@@ -589,7 +586,7 @@ impl Heap {
         self.init_array(oid, elements);
         oid
     }
-    pub fn new_function(&mut self, closure: Closure) -> ObjectID {
+    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_function(oid, closure);
         oid

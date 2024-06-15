@@ -13,13 +13,10 @@ mod util;
 pub use bytecode::{FnID, GlobalIID, Literal, IID};
 pub use common::Error;
 pub use interpreter::{
-    Closure,
     Interpreter,
     JSClosure,
     // The following types are re-exported to allow mcjs clients to define
     // NativeFunction's
-    NativeClosure,
-    NativeFn,
     Realm,
     RunError,
     RunResult,

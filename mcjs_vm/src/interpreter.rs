@@ -84,14 +84,14 @@ gen_value_expect!(expect_obj, Object, heap::ObjectID);
 /// It can be cloned, and the resulting value will "point" to the same closure as the
 /// first one. (These semantics are also in `Value`, and `Closure` inherits them from it).
 #[derive(Clone)]
-pub enum Closure {
+pub(crate) enum Closure {
     Native(NativeClosure),
     JS(Rc<JSClosure>),
 }
 
 #[derive(Clone, Copy)]
-pub struct NativeClosure(pub NativeFn);
-pub type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+pub(crate) struct NativeClosure(pub NativeFn);
+pub(crate) type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
