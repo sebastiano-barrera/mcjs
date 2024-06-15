@@ -54,6 +54,7 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Object(heap::ObjectID),
+    String(heap::StringID),
     Null,
     Undefined,
 
@@ -466,7 +467,8 @@ fn run_inner(
 
                 Instr::OpAdd(dest, a, b) => match get_operand(data, *a)? {
                     Value::Number(_) => with_numbers(data, *dest, *a, *b, |x, y| x + y)?,
-                    Value::Object(_) => {
+                    // TODO replace this with coercing
+                    Value::String(_) | Value::Object(_) => {
                         let value = str_append(data, realm, *a, *b)?;
                         data.top_mut().set_result(*dest, value);
                     }
@@ -877,7 +879,7 @@ fn run_inner(
 
                 Instr::StrCreateEmpty(dest) => {
                     let oid = realm.heap.new_string(JSString::empty());
-                    data.top_mut().set_result(*dest, Value::Object(oid));
+                    data.top_mut().set_result(*dest, Value::String(oid));
                 }
                 Instr::StrAppend(buf_reg, tail) => {
                     let value = str_append(data, realm, *buf_reg, *tail)?;
@@ -919,7 +921,7 @@ fn run_inner(
                             let exc = Value::Object(realm.heap.new_ordinary_object());
                             realm.heap.set_proto(exc, Some(exc_proto));
                             realm.heap.set_own(exc, IndexOrKey::Key("message"), {
-                                let value = Value::Object(msg);
+                                let value = Value::String(msg);
                                 heap::Property::Enumerable(value)
                             });
 
@@ -994,7 +996,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) 
 
     realm.heap.set_proto(exc, Some(exc_proto));
     realm.heap.set_own(exc, IndexOrKey::Key("message"), {
-        let value = Value::Object(message);
+        let value = Value::String(message);
         heap::Property::Enumerable(value)
     });
 
@@ -1104,7 +1106,7 @@ fn obj_get_keys(
         .map(|name| {
             let name = JSString::new_from_str(&name);
             let new_string = realm.heap.new_string(name);
-            Value::Object(new_string)
+            Value::String(new_string)
         })
         .collect();
     let keys_oid = realm.heap.new_array(keys);
@@ -1248,7 +1250,7 @@ fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
 
     let ty_s = JSString::new_from_str(ty_s);
     let ty_s = realm.heap.new_string(ty_s);
-    Value::Object(ty_s)
+    Value::String(ty_s)
 }
 
 fn is_instance_of(
@@ -1312,20 +1314,24 @@ fn compare(
         // null and undefined are mutually ==
         (Value::Null | Value::Undefined, Value::Null | Value::Undefined) => ValueOrdering::Equal,
         #[rustfmt::skip]
-        (Value::Object(a_oid), Value::Object(b_oid)) => {
-            let a_str = realm.heap.as_str(Value::Object(*a_oid));
-            let b_str = realm.heap.as_str(Value::Object(*b_oid));
+        _ => {
+            // TODO should this be implemented via coercing?
+            let a_str = realm.heap.as_str(a);
+            let b_str = realm.heap.as_str(b);
 
             // TODO Remove this special case when strings become primitives (i.e. Value::String)
             if let (Some(a_str), Some(b_str)) = (a_str, b_str) {
                 a_str.view().cmp(b_str.view()).into()
-            } else if a_oid == b_oid {
-                ValueOrdering::Equal
+            } else if let (Value::Object(a_oid), Value::Object(b_oid)) = (a, b)  {
+                if a_oid == b_oid {
+                    ValueOrdering::Equal
+                } else {
+                    ValueOrdering::Incomparable
+                }
             } else {
                 ValueOrdering::Incomparable
             }
         }
-        _ => ValueOrdering::Incomparable,
     };
 
     data.top_mut().set_result(dest, Value::Bool(test(ordering)));
@@ -1347,6 +1353,8 @@ fn to_number(value: Value) -> Option<f64> {
         Value::Bool(false) => Some(0.0),
         Value::Number(num) => Some(num),
         Value::Object(_) => Some(f64::NAN),
+        // TODO
+        Value::String(_) => Some(f64::NAN),
         Value::Undefined => Some(f64::NAN),
         Value::Symbol(_) => None,
     }
@@ -1360,7 +1368,7 @@ fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
 fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
     match prop {
         heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => Ok(*value),
-        heap::Property::Substring(jss) => Ok(Value::Object(heap.new_string(jss.clone()))),
+        heap::Property::Substring(jss) => Ok(Value::String(heap.new_string(jss.clone()))),
     }
 }
 
@@ -1432,7 +1440,7 @@ fn str_append(
     buf.extend_from_slice(tail.view());
     let jss: JSString = JSString::new(buf);
     let sid = realm.heap.new_string(jss);
-    Ok(Value::Object(sid))
+    Ok(Value::String(sid))
 }
 
 /// Create a Value based on the given Literal.
@@ -1445,14 +1453,14 @@ fn literal_to_value(lit: bytecode::Literal, heap: &mut heap::Heap) -> Value {
             // TODO(performance) avoid this allocation
             let jss = JSString::new_from_str(&st);
             let oid = heap.new_string(jss);
-            Value::Object(oid)
+            Value::String(oid)
         }
         bytecode::Literal::Symbol(sym) => Value::Symbol(sym),
         bytecode::Literal::JsWord(jsw) => {
             // TODO(performance) avoid this allocation
             let jss = JSString::new_from_str(&jsw.to_string());
             let oid = heap.new_string(jss);
-            Value::Object(oid)
+            Value::String(oid)
         }
         bytecode::Literal::Bool(bo) => Value::Bool(bo),
         bytecode::Literal::Null => Value::Null,
@@ -1465,9 +1473,10 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
     match value {
         Value::Number(num) => Some(bytecode::Literal::Number(num)),
         Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
-        Value::Object(_) => heap
+        Value::String(_) => heap
             .as_str(value)
             .map(|s| bytecode::Literal::String(s.to_string())),
+        Value::Object(_) => None,
         Value::Symbol(sym) => Some(bytecode::Literal::Symbol(sym)),
         Value::Null => Some(bytecode::Literal::Null),
         Value::Undefined => Some(bytecode::Literal::Undefined),
@@ -1485,12 +1494,12 @@ fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::Index
                 None
             }
         }
-        Value::Object(_) => {
+        // TODO Use string coercing?
+        Value::Symbol(sym) => Some(heap::IndexOrKeyOwned::Symbol(sym)),
+        _ => {
             let string = heap.as_str(*value)?.to_string();
             Some(heap::IndexOrKeyOwned::Key(string))
         }
-        Value::Symbol(sym) => Some(heap::IndexOrKeyOwned::Symbol(sym)),
-        _ => None,
     }
 }
 
@@ -2299,6 +2308,25 @@ mod tests {
                 Some(Literal::String("obj5".into())),
             ],
         );
+    }
+
+    #[test]
+    fn test_number_constructor_prototype() {
+        let mut loader = loader::Loader::new_cwd();
+        let realm = Realm::new(&mut loader);
+        let number = realm
+            .heap
+            .get_chained(realm.global_obj, heap::IndexOrKey::Key("Number"))
+            .unwrap()
+            .value()
+            .unwrap();
+        let prototype = realm
+            .heap
+            .get_chained(number, heap::IndexOrKey::Key("prototype"))
+            .unwrap()
+            .value()
+            .unwrap();
+        assert_eq!(prototype, Value::Object(realm.heap.number_proto()));
     }
 
     #[test]

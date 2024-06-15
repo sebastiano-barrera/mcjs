@@ -1097,7 +1097,7 @@ mod widgets {
     const COLOR_NUMBER: egui::Color32 = COLOR_GREEN;
     const COLOR_SINGLETON: egui::Color32 = COLOR_BLUE;
     const COLOR_OBJECT: egui::Color32 = COLOR_LIGHT_BLUE;
-    const _COLOR_STRING: egui::Color32 = _COLOR_ROSE;
+    const COLOR_STRING: egui::Color32 = _COLOR_ROSE;
     const _COLOR_KEYWORD: egui::Color32 = _COLOR_MAGENTA;
     const _COLOR_IID: egui::Color32 = COLOR_GREY;
     const COLOR_INVALID: egui::Color32 = COLOR_GREY;
@@ -1222,6 +1222,12 @@ mod widgets {
             Value::Number(n) => egui::RichText::new(n.to_string()).color(COLOR_NUMBER),
             Value::Bool(true) => egui::RichText::new("true").color(COLOR_SINGLETON),
             Value::Bool(false) => egui::RichText::new("false").color(COLOR_SINGLETON),
+            Value::String(sid) => {
+                let sid = format!("{:?}", sid);
+                let sid = peel_parens(&sid);
+                let sid = format!("obj{}", sid);
+                egui::RichText::new(sid).color(COLOR_STRING)
+            }
             Value::Object(obj_id) => {
                 let obj_id = format!("{:?}", obj_id);
                 let obj_id = peel_parens(&obj_id);
