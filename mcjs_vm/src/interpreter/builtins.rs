@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use super::{make_exception, to_number, NativeClosure, NativeFn, RunError, RunResult};
-use super::{value_to_string, Closure, JSClosure, Realm, Value};
+use super::{to_string, to_string_or_throw, Closure, JSClosure, Realm, Value};
 
 use crate::error;
 use crate::heap;
@@ -241,11 +241,14 @@ fn nf_Array_pop(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<V
 
 fn nf_RegExp(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
     let source = match args.first() {
-        Some(val) => value_to_string(*val, &mut realm.heap)?,
-        None => JSString::new_from_str("(?:)"),
+        Some(val) => to_string_or_throw(*val, realm)?,
+        None => {
+            let jss = JSString::new_from_str(":?");
+            let sid = realm.heap.new_string(jss);
+            Value::String(sid)
+        }
     };
 
-    let source = Value::String(realm.heap.new_string(source));
     realm.heap.set_own(
         *this,
         heap::IndexOrKey::Key("source"),
@@ -324,35 +327,34 @@ fn nf_Number(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Valu
     }
 }
 
-fn nf_Number_prototype_toString(realm: &mut Realm, this: &Value, _: &[Value]) -> RunResult<Value> {
-    let num_value = match this {
-        Value::Number(num_value) => num_value,
-        _ => return Err(error!("Not a number value!").into()),
-    };
-
-    let num_str = JSString::new_from_str(&num_value.to_string());
-    let sid = realm.heap.new_string(num_str);
-    Ok(Value::String(sid))
+fn nf_Number_prototype_toString(
+    realm: &mut Realm,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    to_string_or_throw(*this, realm)
 }
 
 fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
     let value = args.first().copied();
 
     let value_str = match value {
-        None => JSString::empty(),
-        Some(v) => value_to_string(v, &realm.heap)?,
+        None => {
+            let sid = realm.heap.new_string(JSString::empty());
+            Value::String(sid)
+        }
+        Some(v) => to_string_or_throw(v, realm)?,
     };
-    let value_str = realm.heap.new_string(value_str);
 
     match this {
-        Value::Object(oid) => {
+        Value::Object(_) => {
             // called as a constructor: string primitive as prototype of new ordinary object
             // TODO Boxing required here!
-            Ok(Value::Object(*oid))
+            todo!("boxing primitives into objects (string -> String)")
         }
         Value::Undefined => {
             // called as function, not constructor -> return string primitive
-            Ok(Value::String(value_str))
+            Ok(value_str)
         }
         _ => panic!("bug: 'this' not an object: {:?}", this),
     }
@@ -419,9 +421,12 @@ fn nf_Function(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Valu
 }
 
 fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+    use std::borrow::Cow;
+
     for arg in args {
-        let jss = realm.heap.js_to_string(*arg);
-        let str = jss.to_string();
+        let str: Cow<_> = to_string(*arg, &mut realm.heap)
+            .map(|val| realm.heap.as_str(val).unwrap().to_string().into())
+            .unwrap_or("<can't convert to string>".into());
         println!("{}", str);
     }
     Ok(Value::Undefined)

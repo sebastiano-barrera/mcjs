@@ -243,24 +243,6 @@ impl Heap {
         }
     }
 
-    pub fn js_to_string(&self, obj: Value) -> JSString {
-        match obj {
-            Value::Number(n) => JSString::new_from_str(&n.to_string()),
-            Value::Bool(b) => JSString::new_from_str(&b.to_string()),
-            Value::String(sid) => self.strings.get(sid).unwrap().clone(),
-            Value::Object(obj) => {
-                let obj = self.get(obj).unwrap();
-                match &obj.exotic_part {
-                    Exotic::Array { .. } | Exotic::None => JSString::new_from_str("<object>"),
-                    Exotic::Function { .. } => JSString::new_from_str("<closure>"),
-                }
-            }
-            Value::Symbol(_) => todo!(),
-            Value::Null => JSString::new_from_str("null"),
-            Value::Undefined => JSString::new_from_str("undefined"),
-        }
-    }
-
     pub fn show_debug(&self, obj: Value) -> String {
         match obj {
             Value::Number(n) => format!("object number {}", n),

@@ -1040,6 +1040,40 @@ fn to_number(value: Value, heap: &heap::Heap) -> Option<f64> {
     }
 }
 
+pub(crate) fn to_string(value: Value, heap: &mut heap::Heap) -> Option<Value> {
+    // TODO we always allocate on the string heap. it should be possible to
+    // - use interned strings
+    // - avoid any allocation if value is Value::String(_)
+    use std::borrow::Cow;
+
+    let s: Cow<str> = match value {
+        Value::Number(n) => n.to_string().into(),
+        Value::Bool(true) => "true".into(),
+        Value::Bool(false) => "false".into(),
+        // FIXME: we're not reusing the allocation here
+        Value::String(_) => heap.as_str(value).unwrap().to_string().into(),
+        Value::Object(_) => {
+            // TODO use primitive coercing here. re-enable this block:
+            // let prim = to_primitive(value, heap)?;
+            // assert!(!matches!(prim, Value::Object(_)));
+            // to_number(prim, heap)
+
+            match heap.as_closure(value) {
+                Some(_) => "<closure>",
+                None => "<object>",
+            }
+            .into()
+        }
+        Value::Symbol(_) => return None,
+        Value::Null => "null".into(),
+        Value::Undefined => "undefined".into(),
+    };
+
+    let jss = JSString::new_from_str(s.as_ref());
+    let sid = heap.new_string(jss);
+    Some(Value::String(sid))
+}
+
 fn to_primitive(_value: Value, _heap: &heap::Heap) -> Option<Value> {
     todo!("not yet implemented: primitive coercion")
 }
@@ -1405,9 +1439,12 @@ fn compare(
 }
 
 /// Implements JavaScript's implicit conversion to string.
-fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
-    // TODO Sink the error mgmt that was here into js_to_string
-    Ok(heap.js_to_string(value))
+fn to_string_or_throw(value: Value, realm: &mut Realm) -> RunResult<Value> {
+    to_string(value, &mut realm.heap).ok_or_else(|| {
+        let msg = &format!("can't convert to string: {:?}", value);
+        let exc = make_exception(realm, "TypeError", msg);
+        RunError::Exception(exc)
+    })
 }
 
 fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
@@ -1481,7 +1518,8 @@ fn str_append(
     let b = get_operand(data, b)?;
 
     let mut buf = a.view().to_vec();
-    let tail = value_to_string(b, &realm.heap)?;
+    let tail = to_string_or_throw(b, realm)?;
+    let tail = realm.heap.as_str(tail).unwrap();
     buf.extend_from_slice(tail.view());
     let jss: JSString = JSString::new(buf);
     let sid = realm.heap.new_string(jss);
