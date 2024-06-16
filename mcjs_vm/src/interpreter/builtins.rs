@@ -2,7 +2,9 @@
 
 use std::rc::Rc;
 
-use super::{make_exception, to_boolean, to_number, NativeClosure, NativeFn, RunError, RunResult};
+use super::{
+    make_exception, to_boolean, to_number, to_object, NativeClosure, NativeFn, RunError, RunResult,
+};
 use super::{to_string, to_string_or_throw, Closure, JSClosure, Realm, Value};
 
 use crate::error;
@@ -122,9 +124,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         });
     }
 
-    // Not completely correct. See the rules in
-    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
-    let Object = Value::Object(heap.new_function(native_closure(nf_do_nothing)));
+    let Object = Value::Object(heap.new_function(native_closure(nf_Object)));
 
     let cash_print = Value::Object(heap.new_function(native_closure(nf_cash_print)));
 
@@ -418,6 +418,13 @@ fn nf_Boolean(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Val
 
 fn nf_Function(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Value> {
     todo!("not yet implemented!")
+}
+
+/// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
+fn nf_Object(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+    let arg = args.first().copied().unwrap_or(Value::Undefined);
+    Ok(to_object(arg, &mut realm.heap)
+        .unwrap_or_else(|| Value::Object(realm.heap.new_ordinary_object())))
 }
 
 fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {

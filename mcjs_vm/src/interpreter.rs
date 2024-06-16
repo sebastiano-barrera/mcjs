@@ -574,8 +574,7 @@ fn run_inner(
                         None => {
                             let val_s = realm.heap.show_debug(callee);
                             let msg = &format!("can't call non-closure: {:?}", val_s);
-                            let jss = JSString::new_from_str(msg);
-                            let exc = make_exception(realm, "TypeError", jss);
+                            let exc = make_exception(realm, "TypeError", msg);
                             return Err(RunError::Exception(exc));
                         }
                     };
@@ -1095,6 +1094,34 @@ pub(crate) fn to_boolean(value: Value, heap: &heap::Heap) -> bool {
         Value::Symbol(_) => true,
         Value::Null | Value::Undefined => false,
     }
+}
+
+/// Convert to object.
+///
+/// Simply returns None, if the conversion fails. For a version with
+/// JS-compatible error management, see `to_object_or_throw`.
+///
+/// For details on object coercion, see: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object#object_coercion
+fn to_object(value: Value, heap: &mut heap::Heap) -> Option<Value> {
+    match value {
+        Value::Null | Value::Undefined => None,
+        Value::Object(_) => Some(value),
+        Value::Number(_) | Value::Bool(_) | Value::String(_) | Value::Symbol(_) => {
+            let oid = heap.wrap_primitive(value);
+            Some(Value::Object(oid))
+        }
+    }
+}
+
+/// Convert to object.  On failure, throws TypeError.
+///
+/// See `to_object`.
+fn to_object_or_throw(value: Value, realm: &mut Realm) -> RunResult<Value> {
+    to_object(value, &mut realm.heap).ok_or_else(|| {
+        let message = &format!("cannot convert to object: {:?}", value);
+        let exc = make_exception(realm, "TypeError", message);
+        RunError::Exception(exc)
+    })
 }
 
 fn to_primitive(_value: Value, _heap: &heap::Heap) -> Option<Value> {

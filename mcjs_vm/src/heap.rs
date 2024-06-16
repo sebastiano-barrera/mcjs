@@ -135,7 +135,7 @@ impl Heap {
                 let obj = self.get(obj).unwrap();
 
                 match &obj.exotic_part {
-                    Exotic::None | Exotic::Function { .. } => {}
+                    Exotic::None | Exotic::Function { .. } | Exotic::Primitive(_) => {}
                     Exotic::Array { elements } => {
                         for i in 0..elements.len() {
                             out.push(i.to_string());
@@ -171,7 +171,7 @@ impl Heap {
                 // TODO Handle specific failure
                 let obj = self.get(obj).unwrap();
                 match &obj.exotic_part {
-                    Exotic::None | Exotic::Array { .. } => Typeof::Object,
+                    Exotic::None | Exotic::Array { .. } | Exotic::Primitive(_) => Typeof::Object,
                     Exotic::Function { .. } => Typeof::Function,
                 }
             }
@@ -237,9 +237,8 @@ impl Heap {
                 let obj = self.get(obj).unwrap();
                 match &obj.exotic_part {
                     Exotic::None => format!("object ({} properties)", obj.properties.len()),
-                    Exotic::Array { elements } => {
-                        format!("array ({} elements)", elements.len())
-                    }
+                    Exotic::Primitive(prim) => format!("[object of {}]", self.show_debug(*prim)),
+                    Exotic::Array { elements } => format!("array ({} elements)", elements.len()),
                     Exotic::Function { .. } => "<closure>".to_owned(),
                 }
             }
@@ -562,6 +561,21 @@ impl Heap {
         self.strings.insert(string)
     }
 
+    pub(crate) fn wrap_primitive(&mut self, prim: Value) -> ObjectID {
+        let proto_oid = match prim {
+            Value::Number(_) => self.number_proto,
+            Value::Bool(_) => self.bool_proto,
+            Value::String(_) => self.string_proto,
+            Value::Symbol(_) => todo!("symbol proto"),
+            Value::Null | Value::Undefined | Value::Object(_) => panic!("bug: not a primitive"),
+        };
+
+        // TODO avoid the create + init; just create the object correctly init'ed
+        let oid = self.new_ordinary_object();
+        self.init_exotic(oid, proto_oid, Exotic::Primitive(prim));
+        oid
+    }
+
     fn get(&self, oid: ObjectID) -> Option<&HeapObject> {
         self.objects.get(oid)
     }
@@ -626,6 +640,7 @@ impl Property {
 enum Exotic {
     /// An ordinary object
     None,
+    Primitive(Value),
     Array {
         elements: Vec<Value>,
     },
