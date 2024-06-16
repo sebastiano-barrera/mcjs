@@ -548,11 +548,7 @@ fn run_inner(
                 }
                 Instr::ToNumber { dest, arg } => {
                     let value = get_operand(data, *arg)?;
-                    let value = to_number_value(value).ok_or_else(|| {
-                        let message = format!("cannot convert to a number: {:?}", *arg);
-                        let exc = make_exception(realm, "TypeError", &message);
-                        RunError::Exception(exc)
-                    })?;
+                    let value = to_number_or_throw(value, realm)?;
                     data.top_mut().set_result(*dest, value);
                 }
 
@@ -990,6 +986,40 @@ fn run_inner(
     }
 }
 
+/// Perform number coercion (see `to_number`).
+///
+/// On error, throw a TypeError (as per JS semantics.)
+fn to_number_or_throw(arg: Value, realm: &mut Realm) -> RunResult<Value> {
+    to_number(arg).map(Value::Number).ok_or_else(|| {
+        let message = &format!("cannot convert to a number: {:?}", arg);
+        let exc = make_exception(realm, "TypeError", message);
+        RunError::Exception(exc)
+    })
+}
+
+/// Perform number coercion. Converts the given value to a number, in the way
+/// that is typically invoked by the unary plus operator (e.g. `+{}`, `+123.0`)
+///
+/// (The BigInt type is not yet implemented, so neither is BigInt coercion. As a
+/// consequence, this method also implements "numeric" coercion, as far as this
+/// interpreter is capable.)
+///
+/// A `Some` is returned for a successful conversion. On failure (e.g. for
+/// Symbol), a `None` is returned.
+fn to_number(value: Value) -> Option<f64> {
+    match value {
+        Value::Null => Some(0.0),
+        Value::Bool(true) => Some(1.0),
+        Value::Bool(false) => Some(0.0),
+        Value::Number(num) => Some(num),
+        Value::Object(_) => Some(f64::NAN),
+        // TODO
+        Value::String(_) => Some(f64::NAN),
+        Value::Undefined => Some(f64::NAN),
+        Value::Symbol(_) => None,
+    }
+}
+
 fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> Value {
     let message = JSString::new_from_str(message);
     let message = realm.heap.new_string(message);
@@ -1350,27 +1380,6 @@ fn compare(
     Ok(())
 }
 
-/// Converts the given value to a number, in the way that is typically invoked
-/// by the unary plus operator (e.g. `+{}`, `+123.0`)
-///
-/// A `Some` is returned for a successful conversion. On failure (e.g. for
-/// Symbol), a `None` is returned.
-fn to_number_value(value: Value) -> Option<Value> {
-    to_number(value).map(Value::Number)
-}
-fn to_number(value: Value) -> Option<f64> {
-    match value {
-        Value::Null => Some(0.0),
-        Value::Bool(true) => Some(1.0),
-        Value::Bool(false) => Some(0.0),
-        Value::Number(num) => Some(num),
-        Value::Object(_) => Some(f64::NAN),
-        // TODO
-        Value::String(_) => Some(f64::NAN),
-        Value::Undefined => Some(f64::NAN),
-        Value::Symbol(_) => None,
-    }
-}
 /// Implements JavaScript's implicit conversion to string.
 fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
     // TODO Sink the error mgmt that was here into js_to_string
