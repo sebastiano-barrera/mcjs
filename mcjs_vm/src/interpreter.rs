@@ -515,7 +515,7 @@ fn run_inner(
 
                 Instr::JmpIf { cond, dest } => {
                     let cond_value = get_operand(data, *cond)?;
-                    let cond_value = realm.heap.to_boolean(cond_value);
+                    let cond_value = to_boolean(cond_value, &realm.heap);
                     if cond_value {
                         next_ndx = dest.0;
                     } else {
@@ -524,7 +524,7 @@ fn run_inner(
                 }
                 Instr::JmpIfNot { cond, dest } => {
                     let cond_value = get_operand(data, *cond)?;
-                    let cond_value = realm.heap.to_boolean(cond_value);
+                    let cond_value = to_boolean(cond_value, &realm.heap);
                     if !cond_value {
                         next_ndx = dest.0;
                     } else {
@@ -543,7 +543,7 @@ fn run_inner(
                 Instr::Nop => {}
                 Instr::BoolNot { dest, arg } => {
                     let value = get_operand(data, *arg)?;
-                    let value = Value::Bool(!realm.heap.to_boolean(value));
+                    let value = Value::Bool(!to_boolean(value, &realm.heap));
                     data.top_mut().set_result(*dest, value);
                 }
                 Instr::ToNumber { dest, arg } => {
@@ -770,14 +770,14 @@ fn run_inner(
                 Instr::BoolOpAnd(dest, a, b) => {
                     let a = get_operand(data, *a)?;
                     let b = get_operand(data, *b)?;
-                    let a_bool = realm.heap.to_boolean(a);
+                    let a_bool = to_boolean(a, &realm.heap);
                     let res = if a_bool { b } else { Value::Bool(false) };
                     data.top_mut().set_result(*dest, res);
                 }
                 Instr::BoolOpOr(dest, a, b) => {
                     let a = get_operand(data, *a)?;
                     let b = get_operand(data, *b)?;
-                    let a_bool = realm.heap.to_boolean(a);
+                    let a_bool = to_boolean(a, &realm.heap);
                     let res = if a_bool { a } else { b };
                     data.top_mut().set_result(*dest, res);
                 }
@@ -1073,6 +1073,28 @@ pub(crate) fn to_string(value: Value, heap: &mut heap::Heap) -> Option<Value> {
     let jss = JSString::new_from_str(s.as_ref());
     let sid = heap.new_string(jss);
     Some(Value::String(sid))
+}
+
+/// Converts the given value to a boolean (e.g. for use by `if`,
+/// or operators `&&` and `||`)
+///
+/// See:
+///  - https://262.ecma-international.org/14.0/#sec-toboolean
+///  - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Boolean#boolean_coercion
+pub(crate) fn to_boolean(value: Value, heap: &heap::Heap) -> bool {
+    match value {
+        Value::Number(0.0) => false,
+        Value::Number(n) if n.is_nan() => false,
+        Value::Number(_) => true,
+        Value::Bool(b) => b,
+        Value::String(_) => {
+            let string = heap.as_str(value).unwrap();
+            !string.view().is_empty()
+        }
+        Value::Object(_) => true,
+        Value::Symbol(_) => true,
+        Value::Null | Value::Undefined => false,
+    }
 }
 
 fn to_primitive(_value: Value, _heap: &heap::Heap) -> Option<Value> {

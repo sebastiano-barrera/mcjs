@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use super::{make_exception, to_number, NativeClosure, NativeFn, RunError, RunResult};
+use super::{make_exception, to_boolean, to_number, NativeClosure, NativeFn, RunError, RunResult};
 use super::{to_string, to_string_or_throw, Closure, JSClosure, Realm, Value};
 
 use crate::error;
@@ -412,7 +412,7 @@ fn nf_Boolean(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Val
     // TODO Provide correct implementation for `new Boolean(...)` in addition to
     // `Boolean(...)`
     let arg = args.first().copied().unwrap_or(Value::Undefined);
-    let bool_val = realm.heap.to_boolean(arg);
+    let bool_val = to_boolean(arg, &realm.heap);
     Ok(Value::Bool(bool_val))
 }
 

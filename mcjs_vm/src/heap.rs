@@ -225,24 +225,6 @@ impl Heap {
         }
     }
 
-    /// Converts the given value to a boolean (e.g. for use by `if`,
-    /// or operators `&&` and `||`)
-    ///
-    /// See: https://262.ecma-international.org/14.0/#sec-toboolean
-    pub fn to_boolean(&self, obj: Value) -> bool {
-        match obj {
-            Value::Number(n) => n != 0.0,
-            Value::Bool(b) => b,
-            Value::String(sid) => {
-                let string = self.strings.get(sid).unwrap();
-                !string.view().is_empty()
-            }
-            Value::Object(_) => true,
-            Value::Symbol(_) => true,
-            Value::Null | Value::Undefined => false,
-        }
-    }
-
     pub fn show_debug(&self, obj: Value) -> String {
         match obj {
             Value::Number(n) => format!("object number {}", n),
