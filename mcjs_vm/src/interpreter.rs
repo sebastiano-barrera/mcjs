@@ -990,11 +990,13 @@ fn run_inner(
 ///
 /// On error, throw a TypeError (as per JS semantics.)
 fn to_number_or_throw(arg: Value, realm: &mut Realm) -> RunResult<Value> {
-    to_number(arg).map(Value::Number).ok_or_else(|| {
-        let message = &format!("cannot convert to a number: {:?}", arg);
-        let exc = make_exception(realm, "TypeError", message);
-        RunError::Exception(exc)
-    })
+    to_number(arg, &realm.heap)
+        .map(Value::Number)
+        .ok_or_else(|| {
+            let message = &format!("cannot convert to a number: {:?}", arg);
+            let exc = make_exception(realm, "TypeError", message);
+            RunError::Exception(exc)
+        })
 }
 
 /// Perform number coercion. Converts the given value to a number, in the way
@@ -1006,18 +1008,40 @@ fn to_number_or_throw(arg: Value, realm: &mut Realm) -> RunResult<Value> {
 ///
 /// A `Some` is returned for a successful conversion. On failure (e.g. for
 /// Symbol), a `None` is returned.
-fn to_number(value: Value) -> Option<f64> {
+fn to_number(value: Value, heap: &heap::Heap) -> Option<f64> {
     match value {
         Value::Null => Some(0.0),
         Value::Bool(true) => Some(1.0),
         Value::Bool(false) => Some(0.0),
         Value::Number(num) => Some(num),
-        Value::Object(_) => Some(f64::NAN),
-        // TODO
-        Value::String(_) => Some(f64::NAN),
+        Value::Object(_) => {
+            // TODO use primitive coercing here. re-enable this block:
+            // let prim = to_primitive(value, heap)?;
+            // assert!(!matches!(prim, Value::Object(_)));
+            // to_number(prim, heap)
+
+            // in the meantime, this keeps a basic case ok:
+            Some(f64::NAN)
+        }
         Value::Undefined => Some(f64::NAN),
         Value::Symbol(_) => None,
+        Value::String(_) => {
+            let jss = heap.as_str(value).unwrap();
+            // hopefully not too costly...
+            // TODO cache utf16 -> utf8 conversion?
+            let s = jss.to_string();
+            match s.as_str().trim() {
+                "" => Some(0.0),
+                "+Infinity" => Some(f64::INFINITY),
+                "-Infinity" => Some(f64::NEG_INFINITY),
+                _ => s.parse().ok(),
+            }
+        }
     }
+}
+
+fn to_primitive(_value: Value, _heap: &heap::Heap) -> Option<Value> {
+    todo!("not yet implemented: primitive coercion")
 }
 
 fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> Value {
@@ -1044,7 +1068,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
     exc
 }
 
-fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectID> {
+fn get_builtin(realm: &Realm, builtin_name: &str) -> RunResult<heap::ObjectID> {
     realm
         .heap
         .get_own(realm.global_obj, IndexOrKey::Key(builtin_name))

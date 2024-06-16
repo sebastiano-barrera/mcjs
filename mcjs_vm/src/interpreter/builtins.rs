@@ -361,7 +361,7 @@ fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value
 fn nf_String_fromCodePoint(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
     let s = match args.first().copied() {
         Some(value) => {
-            let value_num = to_number(value).ok_or_else(|| -> RunError {
+            let value_num = to_number(value, &realm.heap).ok_or_else(|| -> RunError {
                 error!("invalid number: {:?}", realm.heap.show_debug(value)).into()
             })?;
 
@@ -386,7 +386,7 @@ fn nf_String_fromCodePoint(realm: &mut Realm, _this: &Value, args: &[Value]) -> 
 fn nf_String_codePointAt(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
     let index = {
         let index = args.first().copied().unwrap_or(Value::Number(0.0));
-        let index = to_number(index).ok_or_else(|| -> RunError {
+        let index = to_number(index, &realm.heap).ok_or_else(|| -> RunError {
             error!("invalid index: {}", realm.heap.show_debug(index)).into()
         })?;
         if index.fract() != 0.0 {
