@@ -576,10 +576,16 @@ fn run_inner(
                     return_value: return_value_reg,
                 } => {
                     let callee = get_operand(data, *callee)?;
-                    let closure: &Closure = realm.heap.as_closure(callee).ok_or_else(|| {
-                        let val_s = realm.heap.show_debug(callee);
-                        error!("can't call non-closure: {}", val_s)
-                    })?;
+                    let closure = match realm.heap.as_closure(callee) {
+                        Some(c) => c,
+                        None => {
+                            let val_s = realm.heap.show_debug(callee);
+                            let msg = &format!("can't call non-closure: {:?}", val_s);
+                            let jss = JSString::new_from_str(msg);
+                            let exc = make_exception(realm, "TypeError", jss);
+                            return Err(RunError::Exception(exc));
+                        }
+                    };
 
                     // NOTE The arguments have to be "read" before adding the stack frame;
                     // they will no longer be accessible
