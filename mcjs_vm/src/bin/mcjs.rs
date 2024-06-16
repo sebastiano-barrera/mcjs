@@ -95,7 +95,7 @@ fn run_to_completion(realm: &mut Realm, loader: &mut Loader, fnid: FnID) {
                 err.error.write_to(&mut buf, Some(loader)).unwrap();
                 buf
             };
-            panic!("{}", detailed_message);
+            eprintln!("{}", detailed_message);
         }
     }
 }
