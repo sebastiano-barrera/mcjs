@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::error_item;
 use crate::heap::JSString;
 use crate::{
-    bytecode::{self, FnId, Instr, VReg, IID},
+    bytecode::{self, FnID, Instr, VReg, IID},
     common::{self, Result},
     define_flag, error,
     heap::{self, IndexOrKey},
@@ -18,7 +18,7 @@ pub mod stack;
 
 #[cfg(feature = "debugger")]
 pub use stack::SlotDebug;
-use stack::UpvalueId;
+use stack::UpvalueID;
 
 // Public versions of the private `RunResult` and `RunError`
 pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
@@ -53,7 +53,8 @@ impl std::fmt::Debug for InterpreterError {
 pub enum Value {
     Number(f64),
     Bool(bool),
-    Object(heap::ObjectId),
+    Object(heap::ObjectID),
+    String(heap::StringID),
     Null,
     Undefined,
 
@@ -76,7 +77,7 @@ macro_rules! gen_value_expect {
 }
 
 gen_value_expect!(expect_num, Number, f64);
-gen_value_expect!(expect_obj, Object, heap::ObjectId);
+gen_value_expect!(expect_obj, Object, heap::ObjectID);
 
 /// A *reference* to a closure.
 ///
@@ -89,24 +90,24 @@ pub(crate) enum Closure {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct NativeClosure(NativeFn);
-type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+pub(crate) struct NativeClosure(pub NativeFn);
+pub(crate) type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
 
 #[derive(Clone)]
 pub struct JSClosure {
-    fnid: FnId,
+    fnid: FnID,
     /// TODO There oughta be a better data structure for this
-    upvalues: Vec<UpvalueId>,
+    upvalues: Vec<UpvalueID>,
     forced_this: Option<Value>,
     generator_snapshot: RefCell<Option<stack::FrameSnapshot>>,
 }
 impl JSClosure {
     #[cfg(feature = "debugger")]
-    pub fn fnid(&self) -> FnId {
+    pub fn fnid(&self) -> FnID {
         self.fnid
     }
 
-    pub fn upvalues(&self) -> &[UpvalueId] {
+    pub fn upvalues(&self) -> &[UpvalueID] {
         &self.upvalues
     }
 }
@@ -131,7 +132,7 @@ impl std::fmt::Debug for Closure {
 pub struct Realm {
     heap: heap::Heap,
     // Key is the root fnid of each module
-    module_objs: HashMap<bytecode::FnId, Value>,
+    module_objs: HashMap<bytecode::FnID, Value>,
     global_obj: Value,
 }
 
@@ -154,9 +155,16 @@ impl Realm {
         realm
     }
 
-    #[cfg(feature = "debugger")]
     pub fn heap(&self) -> &heap::Heap {
         &self.heap
+    }
+
+    pub fn heap_mut(&mut self) -> &mut heap::Heap {
+        &mut self.heap
+    }
+
+    pub fn global_obj(&self) -> Value {
+        self.global_obj
     }
 }
 
@@ -208,7 +216,7 @@ impl Exit {
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnId) -> Self {
+    pub fn new(realm: &'a mut Realm, loader: &'a mut loader::Loader, fnid: bytecode::FnID) -> Self {
         // Initialize the stack with a single frame, corresponding to a call to fnid with no
         // parameters, then put it into an Interpreter
         let mut data = init_stack(loader, realm, fnid);
@@ -329,7 +337,7 @@ impl<'a> Interpreter<'a> {
 pub fn init_stack(
     loader: &mut loader::Loader,
     realm: &mut Realm,
-    fnid: FnId,
+    fnid: FnID,
 ) -> stack::InterpreterData {
     let mut data = stack::InterpreterData::new();
     let root_fn = loader.get_function(fnid).unwrap();
@@ -466,7 +474,8 @@ fn run_inner(
 
                 Instr::OpAdd(dest, a, b) => match get_operand(data, *a)? {
                     Value::Number(_) => with_numbers(data, *dest, *a, *b, |x, y| x + y)?,
-                    Value::Object(_) => {
+                    // TODO replace this with coercing
+                    Value::String(_) | Value::Object(_) => {
                         let value = str_append(data, realm, *a, *b)?;
                         data.top_mut().set_result(*dest, value);
                     }
@@ -877,7 +886,7 @@ fn run_inner(
 
                 Instr::StrCreateEmpty(dest) => {
                     let oid = realm.heap.new_string(JSString::empty());
-                    data.top_mut().set_result(*dest, Value::Object(oid));
+                    data.top_mut().set_result(*dest, Value::String(oid));
                 }
                 Instr::StrAppend(buf_reg, tail) => {
                     let value = str_append(data, realm, *buf_reg, *tail)?;
@@ -919,7 +928,7 @@ fn run_inner(
                             let exc = Value::Object(realm.heap.new_ordinary_object());
                             realm.heap.set_proto(exc, Some(exc_proto));
                             realm.heap.set_own(exc, IndexOrKey::Key("message"), {
-                                let value = Value::Object(msg);
+                                let value = Value::String(msg);
                                 heap::Property::Enumerable(value)
                             });
 
@@ -994,14 +1003,14 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) 
 
     realm.heap.set_proto(exc, Some(exc_proto));
     realm.heap.set_own(exc, IndexOrKey::Key("message"), {
-        let value = Value::Object(message);
+        let value = Value::String(message);
         heap::Property::Enumerable(value)
     });
 
     exc
 }
 
-fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectId> {
+fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectID> {
     realm
         .heap
         .get_own(realm.global_obj, IndexOrKey::Key(builtin_name))
@@ -1011,10 +1020,11 @@ fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectI
         .map_err(|_| RunError::Internal(error!("bug: ReferenceError is not an object?!")))
 }
 
-type RunResult<T> = std::result::Result<T, RunError>;
+pub type RunResult<T> = std::result::Result<T, RunError>;
+
 /// The error type only used internally by `run_frame` and `run_internal`.
 #[derive(Debug)]
-enum RunError {
+pub enum RunError {
     Exception(Value),
     #[cfg(feature = "debugger")]
     Suspended(SuspendCause),
@@ -1104,7 +1114,7 @@ fn obj_get_keys(
         .map(|name| {
             let name = JSString::new_from_str(&name);
             let new_string = realm.heap.new_string(name);
-            Value::Object(new_string)
+            Value::String(new_string)
         })
         .collect();
     let keys_oid = realm.heap.new_array(keys);
@@ -1248,7 +1258,7 @@ fn js_typeof(value: &Value, realm: &mut Realm) -> Value {
 
     let ty_s = JSString::new_from_str(ty_s);
     let ty_s = realm.heap.new_string(ty_s);
-    Value::Object(ty_s)
+    Value::String(ty_s)
 }
 
 fn is_instance_of(
@@ -1312,20 +1322,24 @@ fn compare(
         // null and undefined are mutually ==
         (Value::Null | Value::Undefined, Value::Null | Value::Undefined) => ValueOrdering::Equal,
         #[rustfmt::skip]
-        (Value::Object(a_oid), Value::Object(b_oid)) => {
-            let a_str = realm.heap.as_str(Value::Object(*a_oid));
-            let b_str = realm.heap.as_str(Value::Object(*b_oid));
+        _ => {
+            // TODO should this be implemented via coercing?
+            let a_str = realm.heap.as_str(a);
+            let b_str = realm.heap.as_str(b);
 
             // TODO Remove this special case when strings become primitives (i.e. Value::String)
             if let (Some(a_str), Some(b_str)) = (a_str, b_str) {
                 a_str.view().cmp(b_str.view()).into()
-            } else if a_oid == b_oid {
-                ValueOrdering::Equal
+            } else if let (Value::Object(a_oid), Value::Object(b_oid)) = (a, b)  {
+                if a_oid == b_oid {
+                    ValueOrdering::Equal
+                } else {
+                    ValueOrdering::Incomparable
+                }
             } else {
                 ValueOrdering::Incomparable
             }
         }
-        _ => ValueOrdering::Incomparable,
     };
 
     data.top_mut().set_result(dest, Value::Bool(test(ordering)));
@@ -1347,6 +1361,8 @@ fn to_number(value: Value) -> Option<f64> {
         Value::Bool(false) => Some(0.0),
         Value::Number(num) => Some(num),
         Value::Object(_) => Some(f64::NAN),
+        // TODO
+        Value::String(_) => Some(f64::NAN),
         Value::Undefined => Some(f64::NAN),
         Value::Symbol(_) => None,
     }
@@ -1360,7 +1376,7 @@ fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
 fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
     match prop {
         heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => Ok(*value),
-        heap::Property::Substring(jss) => Ok(Value::Object(heap.new_string(jss.clone()))),
+        heap::Property::Substring(jss) => Ok(Value::String(heap.new_string(jss.clone()))),
     }
 }
 
@@ -1432,7 +1448,7 @@ fn str_append(
     buf.extend_from_slice(tail.view());
     let jss: JSString = JSString::new(buf);
     let sid = realm.heap.new_string(jss);
-    Ok(Value::Object(sid))
+    Ok(Value::String(sid))
 }
 
 /// Create a Value based on the given Literal.
@@ -1445,14 +1461,14 @@ fn literal_to_value(lit: bytecode::Literal, heap: &mut heap::Heap) -> Value {
             // TODO(performance) avoid this allocation
             let jss = JSString::new_from_str(&st);
             let oid = heap.new_string(jss);
-            Value::Object(oid)
+            Value::String(oid)
         }
         bytecode::Literal::Symbol(sym) => Value::Symbol(sym),
         bytecode::Literal::JsWord(jsw) => {
             // TODO(performance) avoid this allocation
             let jss = JSString::new_from_str(&jsw.to_string());
             let oid = heap.new_string(jss);
-            Value::Object(oid)
+            Value::String(oid)
         }
         bytecode::Literal::Bool(bo) => Value::Bool(bo),
         bytecode::Literal::Null => Value::Null,
@@ -1465,9 +1481,10 @@ fn try_value_to_literal(value: Value, heap: &heap::Heap) -> Option<bytecode::Lit
     match value {
         Value::Number(num) => Some(bytecode::Literal::Number(num)),
         Value::Bool(b) => Some(bytecode::Literal::Bool(b)),
-        Value::Object(_) => heap
+        Value::String(_) => heap
             .as_str(value)
             .map(|s| bytecode::Literal::String(s.to_string())),
+        Value::Object(_) => None,
         Value::Symbol(sym) => Some(bytecode::Literal::Symbol(sym)),
         Value::Null => Some(bytecode::Literal::Null),
         Value::Undefined => Some(bytecode::Literal::Undefined),
@@ -1485,12 +1502,12 @@ fn value_to_index_or_key(heap: &heap::Heap, value: &Value) -> Option<heap::Index
                 None
             }
         }
-        Value::Object(_) => {
+        // TODO Use string coercing?
+        Value::Symbol(sym) => Some(heap::IndexOrKeyOwned::Symbol(sym)),
+        _ => {
             let string = heap.as_str(*value)?.to_string();
             Some(heap::IndexOrKeyOwned::Key(string))
         }
-        Value::Symbol(sym) => Some(heap::IndexOrKeyOwned::Symbol(sym)),
-        _ => None,
     }
 }
 
@@ -1777,7 +1794,7 @@ mod tests {
         complete_run(&mut loader, chunk_fnid)
     }
 
-    fn complete_run(loader: &mut crate::Loader, root_fnid: FnId) -> FinishedData {
+    fn complete_run(loader: &mut crate::Loader, root_fnid: FnID) -> FinishedData {
         let mut realm = Realm::new(loader);
         let vm = Interpreter::new(&mut realm, loader, root_fnid);
         match vm.run() {
@@ -2299,6 +2316,25 @@ mod tests {
                 Some(Literal::String("obj5".into())),
             ],
         );
+    }
+
+    #[test]
+    fn test_number_constructor_prototype() {
+        let mut loader = loader::Loader::new_cwd();
+        let realm = Realm::new(&mut loader);
+        let number = realm
+            .heap
+            .get_chained(realm.global_obj, heap::IndexOrKey::Key("Number"))
+            .unwrap()
+            .value()
+            .unwrap();
+        let prototype = realm
+            .heap
+            .get_chained(number, heap::IndexOrKey::Key("prototype"))
+            .unwrap()
+            .value()
+            .unwrap();
+        assert_eq!(prototype, Value::Object(realm.heap.number_proto()));
     }
 
     #[test]
@@ -2947,7 +2983,7 @@ do {
 
                 let giid = debugger::giid(&intrp_state);
                 eprintln!("we are at: {:?}; sink = {:?}", giid, intrp_state.sink);
-                if giid.0 == bytecode::FnId(2) {
+                if giid.0 == bytecode::FnID(2) {
                     assert_eq!(&intrp_state.sink, &[Value::Number(1.0)]);
                 } else {
                     assert_eq!(&intrp_state.sink, &[]);

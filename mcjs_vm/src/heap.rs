@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::interpreter::{Closure, Value};
+use crate::interpreter::{Closure, NativeClosure, NativeFn, Value};
 
 //
 // Object access API
@@ -19,46 +19,51 @@ impl Heap {
 
         let iok_index = iok.ensure_number_is_index();
 
-        let obj = match obj {
-            Value::Object(obj) => obj,
+        match obj {
+            Value::Object(obj) => {
+                // TODO Separate the failure case where the object doesn't exist
+                // from the one where the property does not exist
+                let obj = self.get(obj).unwrap();
+                match (&obj.exotic_part, iok, iok_index) {
+                    (Exotic::Array { elements }, _, IndexOrKey::Key("length")) => {
+                        let value = Value::Number(elements.len() as f64);
+                        Some(Property::NonEnumerable(value))
+                    }
+                    (Exotic::Array { elements }, _, IndexOrKey::Index(index)) => elements
+                        .get(index as usize)
+                        .copied()
+                        .map(Property::Enumerable),
+
+                    (_, iok, _) => match iok {
+                        IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).cloned(),
+                        IndexOrKey::Key(key) => obj.properties.get(key).cloned(),
+                        IndexOrKey::Symbol(sym) => obj.sym_properties.get(sym).cloned(),
+                    },
+                }
+            }
+            Value::String(sid) => {
+                let jss = self.strings.get(sid).unwrap();
+                match (iok, iok_index) {
+                    (IndexOrKey::Key("length"), _) => {
+                        let value = Value::Number(jss.view().len() as f64);
+                        Some(Property::NonEnumerable(value))
+                    }
+                    (_, IndexOrKey::Index(index)) => {
+                        let substr = jss.substring(index, index + 1);
+                        if substr.view().len() == 0 {
+                            Some(Property::NonEnumerable(Value::Undefined))
+                        } else {
+                            Some(Property::Substring(substr))
+                        }
+                    }
+                    _ => None,
+                }
+            }
             Value::Number(_)
             | Value::Bool(_)
             | Value::Symbol(_)
             | Value::Null
             | Value::Undefined => return None,
-        };
-
-        // TODO Separate the failure case where the object doesn't exist
-        // from the one where the property does not exist
-        let obj = self.get(obj).unwrap();
-        match (&obj.exotic_part, iok, iok_index) {
-            (Exotic::Array { elements }, _, IndexOrKey::Key("length")) => {
-                let value = Value::Number(elements.len() as f64);
-                Some(Property::NonEnumerable(value))
-            }
-            (Exotic::Array { elements }, _, IndexOrKey::Index(index)) => elements
-                .get(index as usize)
-                .copied()
-                .map(Property::Enumerable),
-
-            (Exotic::String { string }, IndexOrKey::Key("length"), _) => {
-                let value = Value::Number(string.view().len() as f64);
-                Some(Property::NonEnumerable(value))
-            }
-            (Exotic::String { string }, _, IndexOrKey::Index(index)) => {
-                let substr = string.substring(index, index + 1);
-                if substr.view().len() == 0 {
-                    Some(Property::NonEnumerable(Value::Undefined))
-                } else {
-                    Some(Property::Substring(substr))
-                }
-            }
-
-            (_, iok, _) => match iok {
-                IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).cloned(),
-                IndexOrKey::Key(key) => obj.properties.get(key).cloned(),
-                IndexOrKey::Symbol(sym) => obj.sym_properties.get(sym).cloned(),
-            },
         }
     }
 
@@ -91,7 +96,7 @@ impl Heap {
         }
     }
 
-    pub fn is_instance_of(&self, obj: Value, sup_oid: ObjectId) -> bool {
+    pub fn is_instance_of(&self, obj: Value, sup_oid: ObjectID) -> bool {
         if let Value::Object(oid) = obj {
             if sup_oid == oid {
                 return true;
@@ -124,36 +129,37 @@ impl Heap {
 
     // I know, inefficient, but so, *so* simple
     pub fn own_properties(&self, obj: Value, only_enumerable: bool, out: &mut Vec<String>) {
-        let obj = match obj {
-            Value::Object(obj) => obj,
-            _ => return,
-        };
-        // TODO Handle specific failure?
-        let obj = self.get(obj).unwrap();
+        match obj {
+            Value::Object(obj) => {
+                // TODO Handle specific failure?
+                let obj = self.get(obj).unwrap();
 
-        match &obj.exotic_part {
-            Exotic::None | Exotic::Function { .. } => {}
-            Exotic::Array { elements } => {
-                for i in 0..elements.len() {
-                    out.push(i.to_string());
+                match &obj.exotic_part {
+                    Exotic::None | Exotic::Function { .. } => {}
+                    Exotic::Array { elements } => {
+                        for i in 0..elements.len() {
+                            out.push(i.to_string());
+                        }
+                        if !only_enumerable {
+                            out.push("length".to_owned());
+                        }
+                    }
+                };
+
+                for key in &obj.order {
+                    if let Some(prop) = obj.properties.get(key) {
+                        if !only_enumerable || prop.is_enumerable() {
+                            out.push(key.clone());
+                        }
+                    }
                 }
+            }
+            Value::String(_) => {
                 if !only_enumerable {
                     out.push("length".to_owned());
                 }
             }
-            Exotic::String { .. } => {
-                if !only_enumerable {
-                    out.push("length".to_owned());
-                }
-            }
-        };
-
-        for key in &obj.order {
-            if let Some(prop) = obj.properties.get(key) {
-                if !only_enumerable || prop.is_enumerable() {
-                    out.push(key.clone());
-                }
-            }
+            _ => {}
         }
     }
 
@@ -166,20 +172,21 @@ impl Heap {
                 let obj = self.get(obj).unwrap();
                 match &obj.exotic_part {
                     Exotic::None | Exotic::Array { .. } => Typeof::Object,
-                    Exotic::String { .. } => Typeof::String,
                     Exotic::Function { .. } => Typeof::Function,
                 }
             }
+            Value::String(_) => Typeof::String,
             Value::Symbol(_) => Typeof::Symbol,
             Value::Null => Typeof::Symbol,
             Value::Undefined => Typeof::Undefined,
         }
     }
-    pub fn proto(&self, obj: Value) -> Option<ObjectId> {
+    pub fn proto(&self, obj: Value) -> Option<ObjectID> {
         match obj {
             Value::Number(_) => Some(self.number_proto),
             Value::Bool(_) => Some(self.bool_proto),
             Value::Object(obj) => self.get(obj).unwrap().proto_id,
+            Value::String(_) => Some(self.string_proto),
             Value::Symbol(_) => todo!("symbol prototype"),
             Value::Null | Value::Undefined => None,
         }
@@ -187,13 +194,7 @@ impl Heap {
 
     pub fn as_str(&self, obj: Value) -> Option<&JSString> {
         match obj {
-            Value::Object(obj) => {
-                let obj = self.get(obj).unwrap();
-                match &obj.exotic_part {
-                    Exotic::String { string } => Some(string),
-                    _ => None,
-                }
-            }
+            Value::String(sid) => self.strings.get(sid),
             _ => None,
         }
     }
@@ -232,13 +233,11 @@ impl Heap {
         match obj {
             Value::Number(n) => n != 0.0,
             Value::Bool(b) => b,
-            Value::Object(obj) => {
-                let obj = self.get(obj).unwrap();
-                match &obj.exotic_part {
-                    Exotic::None | Exotic::Array { .. } | Exotic::Function { .. } => true,
-                    Exotic::String { string } => !string.view().is_empty(),
-                }
+            Value::String(sid) => {
+                let string = self.strings.get(sid).unwrap();
+                !string.view().is_empty()
             }
+            Value::Object(_) => true,
             Value::Symbol(_) => true,
             Value::Null | Value::Undefined => false,
         }
@@ -248,11 +247,11 @@ impl Heap {
         match obj {
             Value::Number(n) => JSString::new_from_str(&n.to_string()),
             Value::Bool(b) => JSString::new_from_str(&b.to_string()),
+            Value::String(sid) => self.strings.get(sid).unwrap().clone(),
             Value::Object(obj) => {
                 let obj = self.get(obj).unwrap();
                 match &obj.exotic_part {
                     Exotic::Array { .. } | Exotic::None => JSString::new_from_str("<object>"),
-                    Exotic::String { string } => string.clone(),
                     Exotic::Function { .. } => JSString::new_from_str("<closure>"),
                 }
             }
@@ -266,6 +265,10 @@ impl Heap {
         match obj {
             Value::Number(n) => format!("object number {}", n),
             Value::Bool(b) => format!("object boolean {}", b),
+            Value::String(sid) => {
+                let string = self.strings.get(sid).unwrap();
+                format!("{:?}", string)
+            }
             Value::Object(obj) => {
                 let obj = self.get(obj).unwrap();
                 match &obj.exotic_part {
@@ -273,7 +276,6 @@ impl Heap {
                     Exotic::Array { elements } => {
                         format!("array ({} elements)", elements.len())
                     }
-                    Exotic::String { string } => format!("{:?}", string),
                     Exotic::Function { .. } => "<closure>".to_owned(),
                 }
             }
@@ -308,6 +310,7 @@ impl Heap {
             Value::Null
             | Value::Undefined
             | Value::Number(_)
+            | Value::String(_)
             | Value::Bool(_)
             | Value::Symbol(_) => return,
         };
@@ -362,12 +365,13 @@ impl Heap {
             Value::Number(_)
             | Value::Bool(_)
             | Value::Symbol(_)
+            | Value::String(_)
             | Value::Null
             | Value::Undefined => return false,
         };
 
         match (&mut hobj.exotic_part, index_or_key) {
-            (Exotic::Array { .. } | Exotic::String { .. }, IndexOrKey::Key("length")) => {
+            (Exotic::Array { .. }, IndexOrKey::Key("length")) => {
                 // do nothing
             }
             (Exotic::Array { elements }, IndexOrKey::Index(index)) => {
@@ -400,7 +404,7 @@ impl Heap {
         true
     }
 
-    pub fn set_proto(&mut self, obj: Value, proto_id: Option<ObjectId>) {
+    pub fn set_proto(&mut self, obj: Value, proto_id: Option<ObjectID>) {
         if let Value::Object(oid) = obj {
             self.get_mut(oid).unwrap().proto_id = proto_id;
         }
@@ -489,17 +493,19 @@ impl IndexOrKeyOwned {
 // Ordinary objects
 //
 
-slotmap::new_key_type! { pub struct ObjectId; }
+slotmap::new_key_type! { pub struct ObjectID; }
+slotmap::new_key_type! { pub struct StringID; }
 
 pub struct Heap {
-    objects: slotmap::SlotMap<ObjectId, HeapObject>,
+    objects: slotmap::SlotMap<ObjectID, HeapObject>,
+    strings: slotmap::SlotMap<StringID, JSString>,
 
-    object_proto: ObjectId,
-    number_proto: ObjectId,
-    string_proto: ObjectId,
-    func_proto: ObjectId,
-    array_proto: ObjectId,
-    bool_proto: ObjectId,
+    object_proto: ObjectID,
+    number_proto: ObjectID,
+    string_proto: ObjectID,
+    func_proto: ObjectID,
+    array_proto: ObjectID,
+    bool_proto: ObjectID,
 }
 
 impl Heap {
@@ -514,6 +520,7 @@ impl Heap {
 
         Heap {
             objects,
+            strings: slotmap::SlotMap::with_key(),
             object_proto,
             number_proto,
             string_proto,
@@ -523,29 +530,29 @@ impl Heap {
         }
     }
 
-    pub fn object_proto(&self) -> ObjectId {
+    pub fn object_proto(&self) -> ObjectID {
         self.object_proto
     }
-    pub fn number_proto(&self) -> ObjectId {
+    pub fn number_proto(&self) -> ObjectID {
         self.number_proto
     }
-    pub fn func_proto(&self) -> ObjectId {
+    pub fn func_proto(&self) -> ObjectID {
         self.func_proto
     }
-    pub fn array_proto(&self) -> ObjectId {
+    pub fn array_proto(&self) -> ObjectID {
         self.array_proto
     }
     // These are going to be used at some point. No use in delaying their writing
     #[allow(dead_code)]
-    pub fn string_proto(&self) -> ObjectId {
+    pub fn string_proto(&self) -> ObjectID {
         self.string_proto
     }
     #[allow(dead_code)]
-    pub fn bool_proto(&self) -> ObjectId {
+    pub fn bool_proto(&self) -> ObjectID {
         self.bool_proto
     }
 
-    pub(crate) fn new_ordinary_object(&mut self) -> ObjectId {
+    pub(crate) fn new_ordinary_object(&mut self) -> ObjectID {
         self.objects.insert(HeapObject {
             proto_id: Some(self.object_proto),
             properties: HashMap::new(),
@@ -560,41 +567,42 @@ impl Heap {
     // them to the property of JavaScript constructors, which act on a
     // pre-created (ordinary) object passed as `this`.
 
-    fn init_exotic(&mut self, oid: ObjectId, proto_oid: ObjectId, exotic_part: Exotic) {
+    fn init_exotic(&mut self, oid: ObjectID, proto_oid: ObjectID, exotic_part: Exotic) {
         let obj = self.objects.get_mut(oid).unwrap();
         assert!(matches!(obj.exotic_part, Exotic::None));
         obj.proto_id = Some(proto_oid);
         obj.exotic_part = exotic_part;
     }
 
-    pub(crate) fn init_array(&mut self, oid: ObjectId, elements: Vec<Value>) {
+    pub(crate) fn init_array(&mut self, oid: ObjectID, elements: Vec<Value>) {
         self.init_exotic(oid, self.array_proto, Exotic::Array { elements });
     }
-    pub(crate) fn init_function(&mut self, oid: ObjectId, closure: Closure) {
+    pub(crate) fn init_function(&mut self, oid: ObjectID, closure: Closure) {
         self.init_exotic(oid, self.func_proto, Exotic::Function { closure });
     }
 
-    pub(crate) fn new_array(&mut self, elements: Vec<Value>) -> ObjectId {
+    pub fn new_array(&mut self, elements: Vec<Value>) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_array(oid, elements);
         oid
     }
-    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectId {
+    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_function(oid, closure);
         oid
     }
-    pub(crate) fn new_string(&mut self, string: JSString) -> ObjectId {
-        let oid = self.new_ordinary_object();
-        self.init_exotic(oid, self.string_proto, Exotic::String { string: string });
-        oid
+    pub fn new_native_function(&mut self, nf: NativeFn) -> ObjectID {
+        self.new_function(Closure::Native(NativeClosure(nf)))
+    }
+    pub fn new_string(&mut self, string: JSString) -> StringID {
+        self.strings.insert(string)
     }
 
-    fn get(&self, oid: ObjectId) -> Option<&HeapObject> {
+    fn get(&self, oid: ObjectID) -> Option<&HeapObject> {
         self.objects.get(oid)
     }
 
-    fn get_mut(&mut self, oid: ObjectId) -> Option<&mut HeapObject> {
+    fn get_mut(&mut self, oid: ObjectID) -> Option<&mut HeapObject> {
         self.objects.get_mut(oid)
     }
 }
@@ -607,7 +615,7 @@ impl Heap {
 /// are visited in the same order on iteration.
 #[derive(Debug, Clone)]
 pub struct HeapObject {
-    proto_id: Option<ObjectId>,
+    proto_id: Option<ObjectID>,
     properties: HashMap<String, Property>,
     sym_properties: HashMap<&'static str, Property>,
     order: Vec<String>,
@@ -656,9 +664,6 @@ enum Exotic {
     None,
     Array {
         elements: Vec<Value>,
-    },
-    String {
-        string: JSString,
     },
     Function {
         closure: Closure,
@@ -755,10 +760,10 @@ mod tests {
 ///
 /// Immutable.
 ///
-/// Actually, following JavaScript semantics, this type represents a slice view
-/// into a buffer of characters that may be shared between other views
-/// (instances of JSString). Cloning a JSString cheaply produces a second
-/// equivalent instance of JSString without copying the underlying buffer.
+/// Actually, following JavaScript semantics, this type represents a slice
+/// view into a buffer of characters that may be shared among other JSString
+/// instances. Cloning a JSString cheaply produces a second equivalent instance
+/// of JSString without copying the underlying buffer.
 #[derive(Clone)]
 pub struct JSString {
     // The string is internally represented as UTF-16.
@@ -820,7 +825,7 @@ impl JSString {
         }
     }
 
-    pub(crate) fn to_string(&self) -> String {
+    pub fn to_string(&self) -> String {
         String::from_utf16_lossy(self.view())
     }
 }

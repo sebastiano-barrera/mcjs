@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 
-use mcjs_vm::{FnId, Interpreter, Loader, Realm};
+use mcjs_vm::{FnID, Interpreter, Loader, Realm};
 
 fn main() {
     let mut stdout = std::io::stdout().lock();
@@ -83,7 +83,7 @@ fn main() {
     }
 }
 
-fn run_to_completion(realm: &mut Realm, loader: &mut Loader, fnid: FnId) {
+fn run_to_completion(realm: &mut Realm, loader: &mut Loader, fnid: FnID) {
     let intrp = Interpreter::new(realm, loader, fnid);
     match intrp.run() {
         Ok(exit) => {

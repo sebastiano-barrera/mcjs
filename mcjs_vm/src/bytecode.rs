@@ -26,16 +26,16 @@ impl std::fmt::Debug for IID {
 /// codebase, regardless of the module it belongs to.
 // TODO Merge FnId and LocalFnId (maybe make the integer wider).
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct FnId(pub u32);
+pub struct FnID(pub u32);
 
-impl std::fmt::Debug for FnId {
+impl std::fmt::Debug for FnID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "f{}", self.0)
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct GlobalIID(pub FnId, pub IID);
+pub struct GlobalIID(pub FnID, pub IID);
 
 impl std::fmt::Debug for GlobalIID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,7 +50,7 @@ impl GlobalIID {
         let fnid = fnid_s.parse().ok()?;
         let iid = iid_s.parse().ok()?;
 
-        Some(GlobalIID(FnId(fnid), IID(iid)))
+        Some(GlobalIID(FnID(fnid), IID(iid)))
     }
 }
 
@@ -174,7 +174,7 @@ pub enum Instr {
 
     ClosureNew {
         dest: VReg,
-        fnid: FnId,
+        fnid: FnID,
         forced_this: Option<VReg>,
     },
     ClosureAddCapture(VReg),
@@ -397,7 +397,7 @@ pub enum Literal {
     Undefined,
 }
 
-pub type NativeFnId = u32;
+pub type NativeFnID = u32;
 
 impl From<String> for Literal {
     fn from(value: String) -> Self {
@@ -419,7 +419,7 @@ impl From<String> for Literal {
 pub struct BreakRange {
     pub lo: swc_common::BytePos,
     pub hi: swc_common::BytePos,
-    pub fnid: FnId,
+    pub fnid: FnID,
     pub iid_start: IID,
     pub iid_end: IID,
 }

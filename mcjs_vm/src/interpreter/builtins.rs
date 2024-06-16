@@ -89,6 +89,10 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         let fromCodePoint = Property::NonEnumerable(Value::Object(
             heap.new_function(native_closure(nf_String_fromCodePoint)),
         ));
+        heap.set_own(String, "prototype".into(), {
+            let value = Value::Object(heap.string_proto());
+            Property::NonEnumerable(value)
+        });
         heap.set_own(
             String,
             heap::IndexOrKey::Key("fromCodePoint"),
@@ -170,7 +174,7 @@ fn add_exception_type(
         _ => panic!("bug: add_exception_type: parent prototype must be object"),
     };
 
-    let name_obj = Value::Object(heap.new_string(JSString::new_from_str(name)));
+    let name_obj = Value::String(heap.new_string(JSString::new_from_str(name)));
 
     let prototype = Value::Object(heap.new_ordinary_object());
     heap.set_proto(prototype, Some(parent_prototype));
@@ -242,7 +246,7 @@ fn nf_RegExp(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value
         None => JSString::new_from_str("(?:)"),
     };
 
-    let source = Value::Object(realm.heap.new_string(source));
+    let source = Value::String(realm.heap.new_string(source));
     realm.heap.set_own(
         *this,
         heap::IndexOrKey::Key("source"),
@@ -295,15 +299,16 @@ fn nf_Array(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value>
     Ok(Value::Undefined)
 }
 
-fn nf_Number(_realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_Number(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
     let value = args.first().copied().unwrap_or(Value::Undefined);
 
     match value {
         Value::Number(_) => Ok(value),
         Value::Bool(true) => Ok(Value::Number(1.)),
         Value::Bool(false) => Ok(Value::Number(0.)),
-        Value::Object(_) => {
-            let value: f64 = _realm
+        Value::Object(_) => Ok(Value::Number(f64::NAN)),
+        Value::String(_) => {
+            let value: f64 = realm
                 .heap
                 .as_str(value)
                 .and_then(|jss| jss.to_string().parse::<f64>().ok())
@@ -315,7 +320,7 @@ fn nf_Number(_realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Val
         Value::Undefined => Ok(Value::Number(f64::NAN)),
         Value::Symbol(_) => {
             let message = JSString::new_from_str("Cannot convert a Symbol value to a number");
-            let exc = make_exception(_realm, "TypeError", message);
+            let exc = make_exception(realm, "TypeError", message);
             Err(RunError::Exception(exc))
         }
     }
@@ -328,8 +333,8 @@ fn nf_Number_prototype_toString(realm: &mut Realm, this: &Value, _: &[Value]) ->
     };
 
     let num_str = JSString::new_from_str(&num_value.to_string());
-    let oid = realm.heap.new_string(num_str);
-    Ok(Value::Object(oid))
+    let sid = realm.heap.new_string(num_str);
+    Ok(Value::String(sid))
 }
 
 fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
@@ -344,12 +349,12 @@ fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value
     match this {
         Value::Object(oid) => {
             // called as a constructor: string primitive as prototype of new ordinary object
-            realm.heap.set_proto(Value::Object(*oid), Some(value_str));
+            // TODO Boxing required here!
             Ok(Value::Object(*oid))
         }
         Value::Undefined => {
             // called as function, not constructor -> return string primitive
-            Ok(Value::Object(value_str))
+            Ok(Value::String(value_str))
         }
         _ => panic!("bug: 'this' not an object: {:?}", this),
     }
@@ -377,7 +382,7 @@ fn nf_String_fromCodePoint(realm: &mut Realm, _this: &Value, args: &[Value]) -> 
     };
 
     let s = realm.heap.new_string(s);
-    Ok(Value::Object(s))
+    Ok(Value::String(s))
 }
 
 fn nf_String_codePointAt(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {

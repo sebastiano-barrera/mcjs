@@ -2,7 +2,7 @@
 
 extern crate mcjs_vm;
 
-use mcjs_vm::{interpreter::debugger, Literal};
+use mcjs_vm::interpreter::debugger;
 use std::path::PathBuf;
 
 #[test]
@@ -80,29 +80,39 @@ fn test_remove_sbkpt_with_ibkpt() {
 }
 
 fn test_integration_script(filename: &str) {
+    use mcjs_vm::heap::IndexOrKey;
+
     let mut prereq = prepare_vm(filename);
+
     let interpreter = prereq.make_vm();
-    let sink = interpreter
+    interpreter
         .run()
         .unwrap_or_else(|err| panic!("runtime error:\n{:?}", err))
-        .expect_finished()
-        .sink;
+        .expect_finished();
 
-    assert_eq!(
-        &sink,
-        &[
-            Some(Literal::String("null".into())),
-            Some(Literal::String("123".into())),
-            Some(Literal::String("456.78".into())),
-            Some(Literal::String("true".into())),
-            Some(Literal::String("false".into())),
-        ]
-    );
+    let g = prereq.realm.global_obj();
+    let heap = prereq.realm.heap_mut();
+
+    let json5_encoded = heap
+        .get_chained(g, IndexOrKey::Key("json5Encoded"))
+        .unwrap()
+        .value()
+        .unwrap();
+
+    let elms = heap
+        .array_elements(json5_encoded)
+        .expect("expected an array");
+    let strings: Vec<_> = elms
+        .iter()
+        .map(|val| heap.as_str(*val).unwrap().to_string())
+        .collect();
+
+    assert_eq!(&strings, &["null", "123", "456.78", "true", "false"]);
 }
 
 struct VMPrereq {
     loader: mcjs_vm::Loader,
-    root_fnid: mcjs_vm::FnId,
+    root_fnid: mcjs_vm::FnID,
     realm: mcjs_vm::Realm,
     dbg: debugger::DebuggingState,
 }
@@ -114,7 +124,7 @@ impl VMPrereq {
 
 fn prepare_vm(filename: &str) -> VMPrereq {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root_path = manifest_dir.join("test-resources/test-scripts/json5/");
+    let root_path = manifest_dir.join("test-resources/json5/");
 
     let mut loader = mcjs_vm::Loader::new(root_path.clone());
     let root_fnid = loader
