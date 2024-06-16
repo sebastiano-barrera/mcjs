@@ -611,6 +611,7 @@ fn run_inner(
                             assert_eq!(arg_vals.len(), n_params);
 
                             let this = get_operand(data, *this)?;
+                            // TODO coerce `this` to object
 
                             data.top_mut().set_return_target(*return_value_reg);
                             data.top_mut().set_resume_iid(return_to_iid);
