@@ -549,11 +549,8 @@ fn run_inner(
                 Instr::ToNumber { dest, arg } => {
                     let value = get_operand(data, *arg)?;
                     let value = to_number_value(value).ok_or_else(|| {
-                        let message = JSString::new_from_str(&format!(
-                            "cannot convert to a number: {:?}",
-                            *arg
-                        ));
-                        let exc = make_exception(realm, "TypeError", message);
+                        let message = format!("cannot convert to a number: {:?}", *arg);
+                        let exc = make_exception(realm, "TypeError", &message);
                         RunError::Exception(exc)
                     })?;
                     data.top_mut().set_result(*dest, value);
@@ -721,7 +718,7 @@ fn run_inner(
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let was_actually_obj = realm.heap.delete_own(obj, key.to_ref());
                     if !was_actually_obj {
-                        let message = JSString::new_from_str(&format!("not an object: {:?}", obj));
+                        let message = &format!("not an object: {:?}", obj);
                         let exc = make_exception(realm, "TypeError", message);
                         throw_exc(
                             exc,
@@ -993,7 +990,8 @@ fn run_inner(
     }
 }
 
-fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) -> Value {
+fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> Value {
+    let message = JSString::new_from_str(message);
     let message = realm.heap.new_string(message);
 
     let exc_cons = get_builtin(realm, constructor_name).unwrap();

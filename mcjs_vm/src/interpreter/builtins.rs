@@ -233,8 +233,7 @@ fn nf_Array_pop(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<V
     match realm.heap.as_array_mut(*this) {
         Some(elements) => Ok(elements.pop().unwrap_or(Value::Undefined)),
         None => {
-            let message = JSString::new_from_str("not an array");
-            let exc = super::make_exception(realm, "Error", message);
+            let exc = super::make_exception(realm, "Error", "not an array");
             Err(RunError::Exception(exc))
         }
     }
@@ -266,8 +265,7 @@ fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
         None => return Ok(Value::Undefined),
     };
     let source = realm.heap.as_str(source).cloned().ok_or_else(|| {
-        let msg = JSString::new_from_str("property `source` is not a string");
-        let exc = super::make_exception(realm, "Error", msg);
+        let exc = super::make_exception(realm, "Error", "property `source` is not a string");
         RunError::Exception(exc)
     })?;
 
@@ -275,7 +273,7 @@ fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
     let source = source.to_string();
 
     let regex = regress::Regex::new(&source).map_err(|re_err| {
-        let msg = JSString::new_from_str(&format!("Regex error: {}", re_err));
+        let msg = &format!("Regex error: {}", re_err);
         let exc = super::make_exception(realm, "Error", msg);
         RunError::Exception(exc)
     })?;
@@ -319,7 +317,7 @@ fn nf_Number(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Valu
         Value::Null => Ok(Value::Number(0.)),
         Value::Undefined => Ok(Value::Number(f64::NAN)),
         Value::Symbol(_) => {
-            let message = JSString::new_from_str("Cannot convert a Symbol value to a number");
+            let message = "Cannot convert a Symbol value to a number";
             let exc = make_exception(realm, "TypeError", message);
             Err(RunError::Exception(exc))
         }
@@ -368,7 +366,7 @@ fn nf_String_fromCodePoint(realm: &mut Realm, _this: &Value, args: &[Value]) -> 
             })?;
 
             if value_num.fract() != 0.0 {
-                let message = JSString::new_from_str(&format!("invalid code point {}", value_num));
+                let message = &format!("invalid code point {}", value_num);
                 let exc = super::make_exception(realm, "RangeError", message);
                 return Err(RunError::Exception(exc));
             }
