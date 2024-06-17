@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::interpreter::{Closure, NativeClosure, NativeFn, Value};
+use crate::interpreter::{Closure, NativeFn, Value};
 
 //
 // Object access API
@@ -199,7 +199,7 @@ impl Heap {
         }
     }
 
-    pub(crate) fn as_closure(&self, obj: Value) -> Option<&Closure> {
+    pub(crate) fn as_closure(&self, obj: Value) -> Option<&Rc<Closure>> {
         match obj {
             Value::Object(obj) => {
                 let obj = self.get(obj).unwrap();
@@ -540,7 +540,7 @@ impl Heap {
     pub(crate) fn init_array(&mut self, oid: ObjectID, elements: Vec<Value>) {
         self.init_exotic(oid, self.array_proto, Exotic::Array { elements });
     }
-    pub(crate) fn init_function(&mut self, oid: ObjectID, closure: Closure) {
+    pub(crate) fn init_function(&mut self, oid: ObjectID, closure: Rc<Closure>) {
         self.init_exotic(oid, self.func_proto, Exotic::Function { closure });
     }
 
@@ -549,13 +549,13 @@ impl Heap {
         self.init_array(oid, elements);
         oid
     }
-    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectID {
+    pub(crate) fn new_function(&mut self, closure: Rc<Closure>) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_function(oid, closure);
         oid
     }
     pub fn new_native_function(&mut self, nf: NativeFn) -> ObjectID {
-        self.new_function(Closure::Native(NativeClosure(nf)))
+        self.new_function(Rc::new(Closure::new_native(nf)))
     }
     pub fn new_string(&mut self, string: JSString) -> StringID {
         self.strings.insert(string)
@@ -645,7 +645,7 @@ enum Exotic {
         elements: Vec<Value>,
     },
     Function {
-        closure: Closure,
+        closure: Rc<Closure>,
     },
 }
 

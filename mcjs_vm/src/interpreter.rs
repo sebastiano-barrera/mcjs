@@ -79,53 +79,65 @@ macro_rules! gen_value_expect {
 gen_value_expect!(expect_num, Number, f64);
 gen_value_expect!(expect_obj, Object, heap::ObjectID);
 
-/// A *reference* to a closure.
+/// A closure.
 ///
-/// It can be cloned, and the resulting value will "point" to the same closure as the
-/// first one. (These semantics are also in `Value`, and `Closure` inherits them from it).
+/// It can be cloned, and the resulting value will be independent from the
+/// source. It will be backed by the same function, and use the same upvalues,
+/// have the same "forced this", etc., but these can be changed independently.
 #[derive(Clone)]
-pub(crate) enum Closure {
-    Native(NativeClosure),
-    JS(Rc<JSClosure>),
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct NativeClosure(pub NativeFn);
-pub(crate) type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
-
-#[derive(Clone)]
-pub struct JSClosure {
-    fnid: FnID,
+pub struct Closure {
+    func: Func,
     /// TODO There oughta be a better data structure for this
     upvalues: Vec<UpvalueID>,
     forced_this: Option<Value>,
     generator_snapshot: RefCell<Option<stack::FrameSnapshot>>,
 }
-impl JSClosure {
-    #[cfg(feature = "debugger")]
-    pub fn fnid(&self) -> FnID {
-        self.fnid
-    }
-
+impl Closure {
     pub fn upvalues(&self) -> &[UpvalueID] {
         &self.upvalues
     }
+
+    /// Create a simple closure backed by a native function.
+    ///
+    /// This is a shorthand for the common case where native functions are
+    /// trivially wrapped into a closure, without upvalues, generator state,
+    /// etc.
+    pub(crate) fn new_native(nf: NativeFn) -> Self {
+        Closure {
+            func: Func::Native(nf),
+            upvalues: Vec::new(),
+            forced_this: None,
+            generator_snapshot: RefCell::new(None),
+        }
+    }
 }
+
+#[derive(Clone)]
+enum Func {
+    Native(NativeFn),
+    JS(JSFn),
+}
+
+pub(crate) type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+#[derive(Clone, Copy)]
+pub struct JSFn(FnID);
 
 impl std::fmt::Debug for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Closure::Native(nf) => {
-                write!(f, "<native closure {:?}>", (nf as *const _))
+        match self.func {
+            Func::Native(nf) => {
+                write!(f, "<native closure {:?} ", (nf as *const ()))?;
             }
-            Closure::JS(closure) => {
-                write!(f, "<closure {:?} | ", closure.fnid)?;
-                for upv in &closure.upvalues {
-                    write!(f, "{:?} ", upv)?;
-                }
-                write!(f, ">")
+            Func::JS(JSFn(fnid)) => {
+                write!(f, "<closure {:?} ", fnid)?;
             }
+        };
+
+        write!(f, "| ")?;
+        for upv in &self.upvalues {
+            write!(f, "{:?} ", upv)?;
         }
+        write!(f, ">")
     }
 }
 
@@ -602,8 +614,8 @@ fn run_inner(
                     let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
                     let return_to_iid = IID(iid.0 + n_args_u16 + 1);
 
-                    match closure {
-                        Closure::JS(closure) => {
+                    match &closure.func {
+                        Func::JS(_) => {
                             let n_params = bytecode::ARGS_COUNT_MAX as usize;
                             arg_vals.truncate(n_params);
                             arg_vals.resize(n_params, Value::Undefined);
@@ -622,8 +634,7 @@ fn run_inner(
 
                             continue 'reborrow;
                         }
-                        Closure::Native(nf) => {
-                            let NativeClosure(nf) = *nf;
+                        Func::Native(nf) => {
                             let this = get_operand(data, *this)?;
                             match nf(realm, &this, &arg_vals) {
                                 Ok(ret_val) => {
@@ -796,12 +807,12 @@ fn run_inner(
                     }
 
                     let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
-                    let closure = Closure::JS(Rc::new(JSClosure {
-                        fnid: *fnid,
+                    let closure = Rc::new(Closure {
+                        func: Func::JS(JSFn(*fnid)),
                         upvalues,
                         forced_this,
                         generator_snapshot: RefCell::new(None),
-                    }));
+                    });
 
                     let oid = realm.heap.new_function(closure);
                     data.top_mut().set_result(*dest, Value::Object(oid));

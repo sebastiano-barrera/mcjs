@@ -3,7 +3,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX};
-use crate::interpreter::{JSClosure, Value};
+use crate::interpreter::{Closure, JSFn, Value};
+
+use super::Func;
 
 /// The interpreter's stack.
 ///
@@ -93,7 +95,7 @@ pub struct FrameHeader {
     // TODO Move this to closure
     pub is_module_root_fn: bool,
 
-    pub closure: Rc<JSClosure>,
+    pub closure: Rc<Closure>,
 }
 
 impl InterpreterData {
@@ -142,8 +144,8 @@ impl InterpreterData {
         func: &bytecode::Function,
         this: Value,
     ) {
-        let closure = Rc::new(JSClosure {
-            fnid,
+        let closure = Rc::new(Closure {
+            func: Func::JS(JSFn(fnid)),
             upvalues: Vec::new(),
             forced_this: Some(this),
             generator_snapshot: RefCell::new(None),
@@ -179,21 +181,20 @@ impl InterpreterData {
     /// substitution happens [1].
     pub(crate) fn push_call(
         &mut self,
-        closure: Rc<JSClosure>,
+        closure: Rc<Closure>,
         local_this: Value,
         loader: &crate::Loader,
     ) {
-        let callee_func = loader.get_function(closure.fnid).unwrap();
-
-        let is_strict = callee_func.is_strict_mode();
-        let this = match (closure.forced_this, is_strict, local_this) {
-            (Some(value), _, _) => value,
-            // "this" substitution (see [1]).  If I understand this correctly, we don't
-            // need to box anything right now.  We just pass the value, and the callee
-            // will box it when needed.
-            (_, false, Value::Null | Value::Undefined) => self.default_this,
-            (_, _, _) => local_this,
+        let fnid = match &closure.func {
+            Func::Native(_) => {
+                panic!("bug: push_call requires a JS function (not Native)")
+            }
+            Func::JS(JSFn(fnid)) => *fnid,
         };
+        let callee_func = loader.get_function(fnid).unwrap();
+        let is_strict = callee_func.is_strict_mode();
+
+        let this = self.substitute_this(local_this, closure.forced_this, is_strict);
 
         let gen_snap = closure.generator_snapshot.borrow_mut().take();
 
@@ -202,7 +203,7 @@ impl InterpreterData {
             let frame_hdr = FrameHeader {
                 regs_offset: self.values.len().try_into().unwrap(),
                 regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
-                fnid: closure.fnid,
+                fnid,
                 iid: gen_snap.iid,
                 this: gen_snap.this,
                 return_target: gen_snap.return_target,
@@ -219,7 +220,7 @@ impl InterpreterData {
             let frame_hdr = FrameHeader {
                 regs_offset: self.values.len().try_into().unwrap(),
                 regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
-                fnid: closure.fnid,
+                fnid,
                 iid: bytecode::IID(0),
                 this,
                 return_target: None,
@@ -234,6 +235,22 @@ impl InterpreterData {
         };
 
         self.check_invariants();
+    }
+
+    fn substitute_this(
+        &mut self,
+        local_this: Value,
+        forced_this: Option<Value>,
+        is_strict: bool,
+    ) -> Value {
+        match (forced_this, is_strict, local_this) {
+            (Some(value), _, _) => value,
+            // "this" substitution (see [1]).  If I understand this correctly, we don't
+            // need to box anything right now.  We just pass the value, and the callee
+            // will box it when needed.
+            (_, false, Value::Null | Value::Undefined) => self.default_this,
+            (_, _, _) => local_this,
+        }
     }
 
     fn check_invariants(&self) {

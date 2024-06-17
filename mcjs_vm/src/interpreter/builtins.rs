@@ -3,9 +3,9 @@
 use std::rc::Rc;
 
 use super::{
-    make_exception, to_boolean, to_number, to_object, NativeClosure, NativeFn, RunError, RunResult,
+    make_exception, to_boolean, to_number, to_object, Closure, NativeFn, RunError, RunResult,
 };
-use super::{to_string, to_string_or_throw, Closure, JSClosure, Realm, Value};
+use super::{to_string, to_string_or_throw, Realm, Value};
 
 use crate::error;
 use crate::heap;
@@ -13,8 +13,8 @@ use crate::heap::JSString;
 use crate::heap::Property;
 
 #[inline]
-fn native_closure(nfn: NativeFn) -> Closure {
-    Closure::Native(NativeClosure(nfn))
+fn native_closure(nf: NativeFn) -> Rc<Closure> {
+    Rc::new(Closure::new_native(nf))
 }
 
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
@@ -205,10 +205,6 @@ fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
     realm
         .heap
         .set_own(*this, "message".into(), Property::Enumerable(message));
-    Ok(Value::Undefined)
-}
-
-fn nf_do_nothing(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> RunResult<Value> {
     Ok(Value::Undefined)
 }
 
@@ -440,23 +436,14 @@ fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<
 }
 
 fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
-    let closure = realm
+    let orig_closure = realm
         .heap
         .as_closure(*this)
         .ok_or_else(|| error!("not a function"))?;
-    let js_closure = match closure {
-        Closure::Native(_) => return Err(error!("can't bind a native function (yet)").into()),
-        Closure::JS(jsc) => jsc,
-    };
 
-    let forced_this = Some(args.first().copied().unwrap_or(Value::Undefined));
-    let new_closure = JSClosure {
-        forced_this,
-        fnid: js_closure.fnid,
-        upvalues: js_closure.upvalues.clone(),
-        generator_snapshot: js_closure.generator_snapshot.clone(),
-    };
+    let mut closure: Closure = (**orig_closure).clone();
+    closure.forced_this = Some(args.first().copied().unwrap_or(Value::Undefined));
 
-    let new_obj_id = realm.heap.new_function(Closure::JS(Rc::new(new_closure)));
+    let new_obj_id = realm.heap.new_function(Rc::new(closure));
     Ok(Value::Object(new_obj_id))
 }
