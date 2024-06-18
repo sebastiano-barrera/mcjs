@@ -358,12 +358,13 @@ fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value
         }
         Some(v) => to_string_or_throw(v, realm)?,
     };
+    debug_assert!(matches!(value_str, Value::String(_)));
 
     match this {
         Value::Object(_) => {
-            // called as a constructor: string primitive as prototype of new ordinary object
-            // TODO Boxing required here!
-            todo!("boxing primitives into objects (string -> String)")
+            // called as a constructor -> create primitive-wrapper
+            // TODO discarding this. does this make sense?
+            Ok(Value::Object(realm.heap.wrap_primitive(value_str)))
         }
         Value::Undefined => {
             // called as function, not constructor -> return string primitive
