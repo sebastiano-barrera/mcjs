@@ -34,6 +34,8 @@ impl Heap {
                         .copied()
                         .map(Property::Enumerable),
 
+                    (Exotic::Primitive(prim), iok, _) => self.get_own(*prim, iok),
+
                     (_, iok, _) => match iok {
                         IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).cloned(),
                         IndexOrKey::Key(key) => obj.properties.get(key).cloned(),
