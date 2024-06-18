@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::interpreter::{Closure, NativeClosure, NativeFn, Value};
+use crate::interpreter::{Closure, NativeFn, Value};
 
 //
 // Object access API
@@ -33,6 +33,8 @@ impl Heap {
                         .get(index as usize)
                         .copied()
                         .map(Property::Enumerable),
+
+                    (Exotic::Primitive(prim), iok, _) => self.get_own(*prim, iok),
 
                     (_, iok, _) => match iok {
                         IndexOrKey::Index(num) => obj.properties.get(&num.to_string()).cloned(),
@@ -135,7 +137,7 @@ impl Heap {
                 let obj = self.get(obj).unwrap();
 
                 match &obj.exotic_part {
-                    Exotic::None | Exotic::Function { .. } => {}
+                    Exotic::None | Exotic::Function { .. } | Exotic::Primitive(_) => {}
                     Exotic::Array { elements } => {
                         for i in 0..elements.len() {
                             out.push(i.to_string());
@@ -171,7 +173,7 @@ impl Heap {
                 // TODO Handle specific failure
                 let obj = self.get(obj).unwrap();
                 match &obj.exotic_part {
-                    Exotic::None | Exotic::Array { .. } => Typeof::Object,
+                    Exotic::None | Exotic::Array { .. } | Exotic::Primitive(_) => Typeof::Object,
                     Exotic::Function { .. } => Typeof::Function,
                 }
             }
@@ -199,7 +201,7 @@ impl Heap {
         }
     }
 
-    pub(crate) fn as_closure(&self, obj: Value) -> Option<&Closure> {
+    pub(crate) fn as_closure(&self, obj: Value) -> Option<&Rc<Closure>> {
         match obj {
             Value::Object(obj) => {
                 let obj = self.get(obj).unwrap();
@@ -225,42 +227,6 @@ impl Heap {
         }
     }
 
-    /// Converts the given value to a boolean (e.g. for use by `if`,
-    /// or operators `&&` and `||`)
-    ///
-    /// See: https://262.ecma-international.org/14.0/#sec-toboolean
-    pub fn to_boolean(&self, obj: Value) -> bool {
-        match obj {
-            Value::Number(n) => n != 0.0,
-            Value::Bool(b) => b,
-            Value::String(sid) => {
-                let string = self.strings.get(sid).unwrap();
-                !string.view().is_empty()
-            }
-            Value::Object(_) => true,
-            Value::Symbol(_) => true,
-            Value::Null | Value::Undefined => false,
-        }
-    }
-
-    pub fn js_to_string(&self, obj: Value) -> JSString {
-        match obj {
-            Value::Number(n) => JSString::new_from_str(&n.to_string()),
-            Value::Bool(b) => JSString::new_from_str(&b.to_string()),
-            Value::String(sid) => self.strings.get(sid).unwrap().clone(),
-            Value::Object(obj) => {
-                let obj = self.get(obj).unwrap();
-                match &obj.exotic_part {
-                    Exotic::Array { .. } | Exotic::None => JSString::new_from_str("<object>"),
-                    Exotic::Function { .. } => JSString::new_from_str("<closure>"),
-                }
-            }
-            Value::Symbol(_) => todo!(),
-            Value::Null => JSString::new_from_str("null"),
-            Value::Undefined => JSString::new_from_str("undefined"),
-        }
-    }
-
     pub fn show_debug(&self, obj: Value) -> String {
         match obj {
             Value::Number(n) => format!("object number {}", n),
@@ -273,9 +239,8 @@ impl Heap {
                 let obj = self.get(obj).unwrap();
                 match &obj.exotic_part {
                     Exotic::None => format!("object ({} properties)", obj.properties.len()),
-                    Exotic::Array { elements } => {
-                        format!("array ({} elements)", elements.len())
-                    }
+                    Exotic::Primitive(prim) => format!("[object of {}]", self.show_debug(*prim)),
+                    Exotic::Array { elements } => format!("array ({} elements)", elements.len()),
                     Exotic::Function { .. } => "<closure>".to_owned(),
                 }
             }
@@ -577,7 +542,7 @@ impl Heap {
     pub(crate) fn init_array(&mut self, oid: ObjectID, elements: Vec<Value>) {
         self.init_exotic(oid, self.array_proto, Exotic::Array { elements });
     }
-    pub(crate) fn init_function(&mut self, oid: ObjectID, closure: Closure) {
+    pub(crate) fn init_function(&mut self, oid: ObjectID, closure: Rc<Closure>) {
         self.init_exotic(oid, self.func_proto, Exotic::Function { closure });
     }
 
@@ -586,16 +551,43 @@ impl Heap {
         self.init_array(oid, elements);
         oid
     }
-    pub(crate) fn new_function(&mut self, closure: Closure) -> ObjectID {
+    pub(crate) fn new_function(&mut self, closure: Rc<Closure>) -> ObjectID {
         let oid = self.new_ordinary_object();
         self.init_function(oid, closure);
         oid
     }
     pub fn new_native_function(&mut self, nf: NativeFn) -> ObjectID {
-        self.new_function(Closure::Native(NativeClosure(nf)))
+        self.new_function(Rc::new(Closure::new_native(nf)))
     }
     pub fn new_string(&mut self, string: JSString) -> StringID {
         self.strings.insert(string)
+    }
+
+    pub(crate) fn wrap_primitive(&mut self, prim: Value) -> ObjectID {
+        let proto_oid = match prim {
+            Value::Number(_) => self.number_proto,
+            Value::Bool(_) => self.bool_proto,
+            Value::String(_) => self.string_proto,
+            Value::Symbol(_) => todo!("symbol proto"),
+            Value::Null | Value::Undefined | Value::Object(_) => panic!("bug: not a primitive"),
+        };
+
+        // TODO avoid the create + init; just create the object correctly init'ed
+        let oid = self.new_ordinary_object();
+        self.init_exotic(oid, proto_oid, Exotic::Primitive(prim));
+        oid
+    }
+    pub(crate) fn as_primitive(&self, value: Value) -> Option<Value> {
+        match value {
+            Value::Object(oid) => {
+                let obj = self.get(oid).unwrap();
+                match &obj.exotic_part {
+                    Exotic::Primitive(value) => Some(*value),
+                    _ => None,
+                }
+            }
+            other => Some(other),
+        }
     }
 
     fn get(&self, oid: ObjectID) -> Option<&HeapObject> {
@@ -662,11 +654,12 @@ impl Property {
 enum Exotic {
     /// An ordinary object
     None,
+    Primitive(Value),
     Array {
         elements: Vec<Value>,
     },
     Function {
-        closure: Closure,
+        closure: Rc<Closure>,
     },
 }
 

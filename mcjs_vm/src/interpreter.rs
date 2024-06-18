@@ -79,53 +79,68 @@ macro_rules! gen_value_expect {
 gen_value_expect!(expect_num, Number, f64);
 gen_value_expect!(expect_obj, Object, heap::ObjectID);
 
-/// A *reference* to a closure.
+/// A closure.
 ///
-/// It can be cloned, and the resulting value will "point" to the same closure as the
-/// first one. (These semantics are also in `Value`, and `Closure` inherits them from it).
+/// It can be cloned, and the resulting value will be independent from the
+/// source. It will be backed by the same function, and use the same upvalues,
+/// have the same "forced this", etc., but these can be changed independently.
 #[derive(Clone)]
-pub(crate) enum Closure {
-    Native(NativeClosure),
-    JS(Rc<JSClosure>),
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct NativeClosure(pub NativeFn);
-pub(crate) type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
-
-#[derive(Clone)]
-pub struct JSClosure {
-    fnid: FnID,
+pub struct Closure {
+    func: Func,
+    is_strict: bool,
     /// TODO There oughta be a better data structure for this
     upvalues: Vec<UpvalueID>,
     forced_this: Option<Value>,
     generator_snapshot: RefCell<Option<stack::FrameSnapshot>>,
 }
-impl JSClosure {
-    #[cfg(feature = "debugger")]
-    pub fn fnid(&self) -> FnID {
-        self.fnid
-    }
-
+impl Closure {
     pub fn upvalues(&self) -> &[UpvalueID] {
         &self.upvalues
     }
+
+    /// Create a simple closure backed by a native function.
+    ///
+    /// This is a shorthand for the common case where native functions are
+    /// trivially wrapped into a closure, without upvalues, generator state,
+    /// etc.
+    pub(crate) fn new_native(nf: NativeFn) -> Self {
+        Closure {
+            func: Func::Native(nf),
+            upvalues: Vec::new(),
+            forced_this: None,
+            generator_snapshot: RefCell::new(None),
+            // by convention, native functions are always strict
+            is_strict: true,
+        }
+    }
 }
+
+#[derive(Clone, Copy)]
+enum Func {
+    Native(NativeFn),
+    JS(JSFn),
+}
+
+pub(crate) type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+#[derive(Clone, Copy)]
+pub struct JSFn(FnID);
 
 impl std::fmt::Debug for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Closure::Native(nf) => {
-                write!(f, "<native closure {:?}>", (nf as *const _))
+        match self.func {
+            Func::Native(nf) => {
+                write!(f, "<native closure {:?} ", (nf as *const ()))?;
             }
-            Closure::JS(closure) => {
-                write!(f, "<closure {:?} | ", closure.fnid)?;
-                for upv in &closure.upvalues {
-                    write!(f, "{:?} ", upv)?;
-                }
-                write!(f, ">")
+            Func::JS(JSFn(fnid)) => {
+                write!(f, "<closure {:?} ", fnid)?;
             }
+        };
+
+        write!(f, "| ")?;
+        for upv in &self.upvalues {
+            write!(f, "{:?} ", upv)?;
         }
+        write!(f, ">")
     }
 }
 
@@ -515,7 +530,7 @@ fn run_inner(
 
                 Instr::JmpIf { cond, dest } => {
                     let cond_value = get_operand(data, *cond)?;
-                    let cond_value = realm.heap.to_boolean(cond_value);
+                    let cond_value = to_boolean(cond_value, &realm.heap);
                     if cond_value {
                         next_ndx = dest.0;
                     } else {
@@ -524,7 +539,7 @@ fn run_inner(
                 }
                 Instr::JmpIfNot { cond, dest } => {
                     let cond_value = get_operand(data, *cond)?;
-                    let cond_value = realm.heap.to_boolean(cond_value);
+                    let cond_value = to_boolean(cond_value, &realm.heap);
                     if !cond_value {
                         next_ndx = dest.0;
                     } else {
@@ -543,19 +558,12 @@ fn run_inner(
                 Instr::Nop => {}
                 Instr::BoolNot { dest, arg } => {
                     let value = get_operand(data, *arg)?;
-                    let value = Value::Bool(!realm.heap.to_boolean(value));
+                    let value = Value::Bool(!to_boolean(value, &realm.heap));
                     data.top_mut().set_result(*dest, value);
                 }
                 Instr::ToNumber { dest, arg } => {
                     let value = get_operand(data, *arg)?;
-                    let value = to_number_value(value).ok_or_else(|| {
-                        let message = JSString::new_from_str(&format!(
-                            "cannot convert to a number: {:?}",
-                            *arg
-                        ));
-                        let exc = make_exception(realm, "TypeError", message);
-                        RunError::Exception(exc)
-                    })?;
+                    let value = to_number_or_throw(value, realm)?;
                     data.top_mut().set_result(*dest, value);
                 }
 
@@ -577,12 +585,11 @@ fn run_inner(
                 } => {
                     let callee = get_operand(data, *callee)?;
                     let closure = match realm.heap.as_closure(callee) {
-                        Some(c) => c,
+                        Some(c) => Rc::clone(&c),
                         None => {
                             let val_s = realm.heap.show_debug(callee);
                             let msg = &format!("can't call non-closure: {:?}", val_s);
-                            let jss = JSString::new_from_str(msg);
-                            let exc = make_exception(realm, "TypeError", jss);
+                            let exc = make_exception(realm, "TypeError", msg);
                             return Err(RunError::Exception(exc));
                         }
                     };
@@ -610,46 +617,54 @@ fn run_inner(
                     let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
                     let return_to_iid = IID(iid.0 + n_args_u16 + 1);
 
-                    match closure {
-                        Closure::JS(closure) => {
-                            let n_params = bytecode::ARGS_COUNT_MAX as usize;
-                            arg_vals.truncate(n_params);
-                            arg_vals.resize(n_params, Value::Undefined);
-                            assert_eq!(arg_vals.len(), n_params);
+                    let n_params = bytecode::ARGS_COUNT_MAX as usize;
+                    arg_vals.truncate(n_params);
 
-                            let this = get_operand(data, *this)?;
+                    let this = get_operand(data, *this)?;
+                    // Perform "this substitution", in preparation for a function call.
+                    // See: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
+                    let this = match (closure.forced_this, closure.is_strict, this) {
+                        (Some(value), _, _) => value,
+                        (_, false, Value::Null | Value::Undefined) => realm.global_obj,
+                        _ => this,
+                    };
+                    let this = if closure.is_strict {
+                        this
+                    } else {
+                        to_object_or_throw(this, realm)?
+                    };
 
+                    match closure.func {
+                        Func::JS(_) => {
                             data.top_mut().set_return_target(*return_value_reg);
                             data.top_mut().set_resume_iid(return_to_iid);
 
-                            data.push_call(Rc::clone(closure), this, loader);
-                            for (i, arg) in arg_vals.into_iter().enumerate() {
-                                data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
+                            data.push_call(closure, this, loader);
+                            for i in 0..bytecode::ARGS_COUNT_MAX {
+                                let arg = arg_vals.get(i as usize).unwrap_or(&Value::Undefined);
+                                data.top_mut().set_arg(bytecode::ArgIndex(i as _), *arg);
                             }
 
+                            // stack is prepared, just continue turning the crank to run the callee
                             continue 'reborrow;
                         }
-                        Closure::Native(nf) => {
-                            let NativeClosure(nf) = *nf;
-                            let this = get_operand(data, *this)?;
-                            match nf(realm, &this, &arg_vals) {
-                                Ok(ret_val) => {
-                                    data.top_mut().set_result(*return_value_reg, ret_val);
-                                    next_ndx = return_to_iid.0;
-                                }
-                                Err(RunError::Exception(exc)) => {
-                                    throw_exc(
-                                        exc,
-                                        iid,
-                                        data,
-                                        #[cfg(feature = "debugger")]
-                                        dbg,
-                                    )?;
-                                    continue 'reborrow;
-                                }
-                                Err(other_err) => return Err(other_err),
-                            };
-                        }
+                        Func::Native(nf) => match nf(realm, &this, &arg_vals) {
+                            Ok(ret_val) => {
+                                data.top_mut().set_result(*return_value_reg, ret_val);
+                                next_ndx = return_to_iid.0;
+                            }
+                            Err(RunError::Exception(exc)) => {
+                                throw_exc(
+                                    exc,
+                                    iid,
+                                    data,
+                                    #[cfg(feature = "debugger")]
+                                    dbg,
+                                )?;
+                                continue 'reborrow;
+                            }
+                            Err(other_err) => return Err(other_err),
+                        },
                     }
                 }
                 Instr::CallArg(_) => {
@@ -675,6 +690,7 @@ fn run_inner(
                 }
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = get_operand(data, *obj)?;
+                    let obj = to_object_or_throw(obj, realm)?;
                     let key = get_operand(data, *key)?;
                     let key = value_to_index_or_key(&realm.heap, &key);
 
@@ -721,7 +737,7 @@ fn run_inner(
                         .ok_or_else(|| error!("invalid object key: {:?}", key))?;
                     let was_actually_obj = realm.heap.delete_own(obj, key.to_ref());
                     if !was_actually_obj {
-                        let message = JSString::new_from_str(&format!("not an object: {:?}", obj));
+                        let message = &format!("not an object: {:?}", obj);
                         let exc = make_exception(realm, "TypeError", message);
                         throw_exc(
                             exc,
@@ -776,14 +792,14 @@ fn run_inner(
                 Instr::BoolOpAnd(dest, a, b) => {
                     let a = get_operand(data, *a)?;
                     let b = get_operand(data, *b)?;
-                    let a_bool = realm.heap.to_boolean(a);
+                    let a_bool = to_boolean(a, &realm.heap);
                     let res = if a_bool { b } else { Value::Bool(false) };
                     data.top_mut().set_result(*dest, res);
                 }
                 Instr::BoolOpOr(dest, a, b) => {
                     let a = get_operand(data, *a)?;
                     let b = get_operand(data, *b)?;
-                    let a_bool = realm.heap.to_boolean(a);
+                    let a_bool = to_boolean(a, &realm.heap);
                     let res = if a_bool { a } else { b };
                     data.top_mut().set_result(*dest, res);
                 }
@@ -802,13 +818,15 @@ fn run_inner(
                         next_ndx += 1;
                     }
 
+                    let is_strict = loader.get_function(*fnid).unwrap().is_strict_mode();
                     let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
-                    let closure = Closure::JS(Rc::new(JSClosure {
-                        fnid: *fnid,
+                    let closure = Rc::new(Closure {
+                        func: Func::JS(JSFn(*fnid)),
                         upvalues,
                         forced_this,
                         generator_snapshot: RefCell::new(None),
-                    }));
+                        is_strict,
+                    });
 
                     let oid = realm.heap.new_function(closure);
                     data.top_mut().set_result(*dest, Value::Object(oid));
@@ -847,6 +865,7 @@ fn run_inner(
                         data.top_mut().set_return_target(*dest);
                         data.top_mut().set_resume_iid(IID(iid.0 + 1));
 
+                        debug_assert!(root_fn.is_strict_mode());
                         data.push_direct(root_fnid, root_fn, Value::Undefined);
                         data.top_mut().set_is_module_root_fn();
                     }
@@ -993,7 +1012,150 @@ fn run_inner(
     }
 }
 
-fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) -> Value {
+/// Perform number coercion (see `to_number`).
+///
+/// On error, throw a TypeError (as per JS semantics.)
+fn to_number_or_throw(arg: Value, realm: &mut Realm) -> RunResult<Value> {
+    to_number(arg, &realm.heap)
+        .map(Value::Number)
+        .ok_or_else(|| {
+            let message = &format!("cannot convert to a number: {:?}", arg);
+            let exc = make_exception(realm, "TypeError", message);
+            RunError::Exception(exc)
+        })
+}
+
+/// Perform number coercion. Converts the given value to a number, in the way
+/// that is typically invoked by the unary plus operator (e.g. `+{}`, `+123.0`)
+///
+/// (The BigInt type is not yet implemented, so neither is BigInt coercion. As a
+/// consequence, this method also implements "numeric" coercion, as far as this
+/// interpreter is capable.)
+///
+/// A `Some` is returned for a successful conversion. On failure (e.g. for
+/// Symbol), a `None` is returned.
+fn to_number(value: Value, heap: &heap::Heap) -> Option<f64> {
+    match value {
+        Value::Null => Some(0.0),
+        Value::Bool(true) => Some(1.0),
+        Value::Bool(false) => Some(0.0),
+        Value::Number(num) => Some(num),
+        Value::Object(_) => {
+            // TODO use primitive coercing here. re-enable this block:
+            // let prim = to_primitive(value, heap)?;
+            // assert!(!matches!(prim, Value::Object(_)));
+            // to_number(prim, heap)
+
+            // in the meantime, this keeps a basic case ok:
+            Some(f64::NAN)
+        }
+        Value::Undefined => Some(f64::NAN),
+        Value::Symbol(_) => None,
+        Value::String(_) => {
+            let jss = heap.as_str(value).unwrap();
+            // hopefully not too costly...
+            // TODO cache utf16 -> utf8 conversion?
+            let s = jss.to_string();
+            match s.as_str().trim() {
+                "" => Some(0.0),
+                "+Infinity" => Some(f64::INFINITY),
+                "-Infinity" => Some(f64::NEG_INFINITY),
+                _ => s.parse().ok(),
+            }
+        }
+    }
+}
+
+pub(crate) fn to_string(value: Value, heap: &mut heap::Heap) -> Option<Value> {
+    // TODO we always allocate on the string heap. it should be possible to
+    // - use interned strings
+    // - avoid any allocation if value is Value::String(_)
+    use std::borrow::Cow;
+
+    let s: Cow<str> = match value {
+        Value::Number(n) => n.to_string().into(),
+        Value::Bool(true) => "true".into(),
+        Value::Bool(false) => "false".into(),
+        // FIXME: we're not reusing the allocation here
+        Value::String(_) => heap.as_str(value).unwrap().to_string().into(),
+        Value::Object(_) => {
+            // TODO use primitive coercing here. re-enable this block:
+            // let prim = to_primitive(value, heap)?;
+            // assert!(!matches!(prim, Value::Object(_)));
+            // to_number(prim, heap)
+
+            match heap.as_closure(value) {
+                Some(_) => "<closure>",
+                None => "<object>",
+            }
+            .into()
+        }
+        Value::Symbol(_) => return None,
+        Value::Null => "null".into(),
+        Value::Undefined => "undefined".into(),
+    };
+
+    let jss = JSString::new_from_str(s.as_ref());
+    let sid = heap.new_string(jss);
+    Some(Value::String(sid))
+}
+
+/// Converts the given value to a boolean (e.g. for use by `if`,
+/// or operators `&&` and `||`)
+///
+/// See:
+///  - https://262.ecma-international.org/14.0/#sec-toboolean
+///  - https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Boolean#boolean_coercion
+pub(crate) fn to_boolean(value: Value, heap: &heap::Heap) -> bool {
+    match value {
+        Value::Number(0.0) => false,
+        Value::Number(n) if n.is_nan() => false,
+        Value::Number(_) => true,
+        Value::Bool(b) => b,
+        Value::String(_) => {
+            let string = heap.as_str(value).unwrap();
+            !string.view().is_empty()
+        }
+        Value::Object(_) => true,
+        Value::Symbol(_) => true,
+        Value::Null | Value::Undefined => false,
+    }
+}
+
+/// Convert to object.
+///
+/// Simply returns None, if the conversion fails. For a version with
+/// JS-compatible error management, see `to_object_or_throw`.
+///
+/// For details on object coercion, see: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object#object_coercion
+fn to_object(value: Value, heap: &mut heap::Heap) -> Option<Value> {
+    match value {
+        Value::Null | Value::Undefined => None,
+        Value::Object(_) => Some(value),
+        Value::Number(_) | Value::Bool(_) | Value::String(_) | Value::Symbol(_) => {
+            let oid = heap.wrap_primitive(value);
+            Some(Value::Object(oid))
+        }
+    }
+}
+
+/// Convert to object.  On failure, throws TypeError.
+///
+/// See `to_object`.
+fn to_object_or_throw(value: Value, realm: &mut Realm) -> RunResult<Value> {
+    to_object(value, &mut realm.heap).ok_or_else(|| {
+        let message = &format!("cannot convert to object: {:?}", value);
+        let exc = make_exception(realm, "TypeError", message);
+        RunError::Exception(exc)
+    })
+}
+
+fn to_primitive(_value: Value, _heap: &heap::Heap) -> Option<Value> {
+    todo!("not yet implemented: primitive coercion")
+}
+
+fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> Value {
+    let message = JSString::new_from_str(message);
     let message = realm.heap.new_string(message);
 
     let exc_cons = get_builtin(realm, constructor_name).unwrap();
@@ -1016,7 +1178,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: JSString) 
     exc
 }
 
-fn get_builtin(realm: &mut Realm, builtin_name: &str) -> RunResult<heap::ObjectID> {
+fn get_builtin(realm: &Realm, builtin_name: &str) -> RunResult<heap::ObjectID> {
     realm
         .heap
         .get_own(realm.global_obj, IndexOrKey::Key(builtin_name))
@@ -1352,31 +1514,13 @@ fn compare(
     Ok(())
 }
 
-/// Converts the given value to a number, in the way that is typically invoked
-/// by the unary plus operator (e.g. `+{}`, `+123.0`)
-///
-/// A `Some` is returned for a successful conversion. On failure (e.g. for
-/// Symbol), a `None` is returned.
-fn to_number_value(value: Value) -> Option<Value> {
-    to_number(value).map(Value::Number)
-}
-fn to_number(value: Value) -> Option<f64> {
-    match value {
-        Value::Null => Some(0.0),
-        Value::Bool(true) => Some(1.0),
-        Value::Bool(false) => Some(0.0),
-        Value::Number(num) => Some(num),
-        Value::Object(_) => Some(f64::NAN),
-        // TODO
-        Value::String(_) => Some(f64::NAN),
-        Value::Undefined => Some(f64::NAN),
-        Value::Symbol(_) => None,
-    }
-}
 /// Implements JavaScript's implicit conversion to string.
-fn value_to_string(value: Value, heap: &heap::Heap) -> Result<JSString> {
-    // TODO Sink the error mgmt that was here into js_to_string
-    Ok(heap.js_to_string(value))
+fn to_string_or_throw(value: Value, realm: &mut Realm) -> RunResult<Value> {
+    to_string(value, &mut realm.heap).ok_or_else(|| {
+        let msg = &format!("can't convert to string: {:?}", value);
+        let exc = make_exception(realm, "TypeError", msg);
+        RunError::Exception(exc)
+    })
 }
 
 fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
@@ -1450,7 +1594,8 @@ fn str_append(
     let b = get_operand(data, b)?;
 
     let mut buf = a.view().to_vec();
-    let tail = value_to_string(b, &realm.heap)?;
+    let tail = to_string_or_throw(b, realm)?;
+    let tail = realm.heap.as_str(tail).unwrap();
     buf.extend_from_slice(tail.view());
     let jss: JSString = JSString::new(buf);
     let sid = realm.heap.new_string(jss);
@@ -2359,6 +2504,12 @@ mod tests {
             &output.sink,
             &[Some(Literal::String("Hello, I'm 123.45!".into())),],
         );
+    }
+
+    #[test]
+    fn test_array_init() {
+        let output = quick_run_script("sink([].length)");
+        assert_eq!(&output.sink, &[Some(Literal::Number(0.0))]);
     }
 
     #[test]

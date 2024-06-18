@@ -2,8 +2,10 @@
 
 use std::rc::Rc;
 
-use super::{make_exception, to_number, NativeClosure, NativeFn, RunError, RunResult};
-use super::{value_to_string, Closure, JSClosure, Realm, Value};
+use super::{
+    make_exception, to_boolean, to_number, to_object, Closure, NativeFn, RunError, RunResult,
+};
+use super::{to_string, to_string_or_throw, Realm, Value};
 
 use crate::error;
 use crate::heap;
@@ -11,8 +13,8 @@ use crate::heap::JSString;
 use crate::heap::Property;
 
 #[inline]
-fn native_closure(nfn: NativeFn) -> Closure {
-    Closure::Native(NativeClosure(nfn))
+fn native_closure(nf: NativeFn) -> Rc<Closure> {
+    Rc::new(Closure::new_native(nf))
 }
 
 pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
@@ -69,16 +71,17 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
 
     let Number = Value::Object(heap.new_function(native_closure(nf_Number)));
     {
+        let number_proto = Value::Object(heap.number_proto());
+        heap.set_own(
+            Number,
+            "prototype".into(),
+            Property::NonEnumerable(number_proto),
+        );
+
         let toString =
             Value::Object(heap.new_function(native_closure(nf_Number_prototype_toString)));
-
-        heap.set_own(Number, "prototype".into(), {
-            let value = Value::Object(heap.number_proto());
-            Property::NonEnumerable(value)
-        });
-
         heap.set_own(
-            Value::Object(heap.number_proto()),
+            number_proto,
             "toString".into(),
             Property::NonEnumerable(toString),
         )
@@ -122,9 +125,7 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         });
     }
 
-    // Not completely correct. See the rules in
-    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
-    let Object = Value::Object(heap.new_function(native_closure(nf_do_nothing)));
+    let Object = Value::Object(heap.new_function(native_closure(nf_Object)));
 
     let cash_print = Value::Object(heap.new_function(native_closure(nf_cash_print)));
 
@@ -208,10 +209,6 @@ fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
     Ok(Value::Undefined)
 }
 
-fn nf_do_nothing(_realm: &mut Realm, _this: &Value, _args: &[Value]) -> RunResult<Value> {
-    Ok(Value::Undefined)
-}
-
 fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
     let value = if let Some(obj) = args.first() {
         realm.heap.array_elements(*obj).is_some()
@@ -233,8 +230,7 @@ fn nf_Array_pop(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<V
     match realm.heap.as_array_mut(*this) {
         Some(elements) => Ok(elements.pop().unwrap_or(Value::Undefined)),
         None => {
-            let message = JSString::new_from_str("not an array");
-            let exc = super::make_exception(realm, "Error", message);
+            let exc = super::make_exception(realm, "Error", "not an array");
             Err(RunError::Exception(exc))
         }
     }
@@ -242,11 +238,14 @@ fn nf_Array_pop(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<V
 
 fn nf_RegExp(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
     let source = match args.first() {
-        Some(val) => value_to_string(*val, &mut realm.heap)?,
-        None => JSString::new_from_str("(?:)"),
+        Some(val) => to_string_or_throw(*val, realm)?,
+        None => {
+            let jss = JSString::new_from_str(":?");
+            let sid = realm.heap.new_string(jss);
+            Value::String(sid)
+        }
     };
 
-    let source = Value::String(realm.heap.new_string(source));
     realm.heap.set_own(
         *this,
         heap::IndexOrKey::Key("source"),
@@ -266,8 +265,7 @@ fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
         None => return Ok(Value::Undefined),
     };
     let source = realm.heap.as_str(source).cloned().ok_or_else(|| {
-        let msg = JSString::new_from_str("property `source` is not a string");
-        let exc = super::make_exception(realm, "Error", msg);
+        let exc = super::make_exception(realm, "Error", "property `source` is not a string");
         RunError::Exception(exc)
     })?;
 
@@ -275,7 +273,7 @@ fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
     let source = source.to_string();
 
     let regex = regress::Regex::new(&source).map_err(|re_err| {
-        let msg = JSString::new_from_str(&format!("Regex error: {}", re_err));
+        let msg = &format!("Regex error: {}", re_err);
         let exc = super::make_exception(realm, "Error", msg);
         RunError::Exception(exc)
     })?;
@@ -319,42 +317,58 @@ fn nf_Number(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Valu
         Value::Null => Ok(Value::Number(0.)),
         Value::Undefined => Ok(Value::Number(f64::NAN)),
         Value::Symbol(_) => {
-            let message = JSString::new_from_str("Cannot convert a Symbol value to a number");
+            let message = "Cannot convert a Symbol value to a number";
             let exc = make_exception(realm, "TypeError", message);
             Err(RunError::Exception(exc))
         }
     }
 }
 
-fn nf_Number_prototype_toString(realm: &mut Realm, this: &Value, _: &[Value]) -> RunResult<Value> {
-    let num_value = match this {
-        Value::Number(num_value) => num_value,
-        _ => return Err(error!("Not a number value!").into()),
-    };
+fn nf_Number_prototype_toString(
+    realm: &mut Realm,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    let prim = realm.heap.as_primitive(*this).ok_or_else(|| {
+        let msg = "not a primitive! (and therefore not a number)";
+        let exc = super::make_exception(realm, "TypeError", msg);
+        RunError::Exception(exc)
+    })?;
 
-    let num_str = JSString::new_from_str(&num_value.to_string());
-    let sid = realm.heap.new_string(num_str);
-    Ok(Value::String(sid))
+    match prim {
+        Value::Number(n) => {
+            let jss = JSString::new_from_str(&n.to_string());
+            let sid = realm.heap.new_string(jss);
+            Ok(Value::String(sid))
+        }
+        _ => {
+            let exc = super::make_exception(realm, "TypeError", "not a number");
+            Err(RunError::Exception(exc))
+        }
+    }
 }
 
 fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
     let value = args.first().copied();
 
     let value_str = match value {
-        None => JSString::empty(),
-        Some(v) => value_to_string(v, &realm.heap)?,
+        None => {
+            let sid = realm.heap.new_string(JSString::empty());
+            Value::String(sid)
+        }
+        Some(v) => to_string_or_throw(v, realm)?,
     };
-    let value_str = realm.heap.new_string(value_str);
+    debug_assert!(matches!(value_str, Value::String(_)));
 
     match this {
-        Value::Object(oid) => {
-            // called as a constructor: string primitive as prototype of new ordinary object
-            // TODO Boxing required here!
-            Ok(Value::Object(*oid))
+        Value::Object(_) => {
+            // called as a constructor -> create primitive-wrapper
+            // TODO discarding this. does this make sense?
+            Ok(Value::Object(realm.heap.wrap_primitive(value_str)))
         }
         Value::Undefined => {
             // called as function, not constructor -> return string primitive
-            Ok(Value::String(value_str))
+            Ok(value_str)
         }
         _ => panic!("bug: 'this' not an object: {:?}", this),
     }
@@ -363,12 +377,12 @@ fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value
 fn nf_String_fromCodePoint(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
     let s = match args.first().copied() {
         Some(value) => {
-            let value_num = to_number(value).ok_or_else(|| -> RunError {
+            let value_num = to_number(value, &realm.heap).ok_or_else(|| -> RunError {
                 error!("invalid number: {:?}", realm.heap.show_debug(value)).into()
             })?;
 
             if value_num.fract() != 0.0 {
-                let message = JSString::new_from_str(&format!("invalid code point {}", value_num));
+                let message = &format!("invalid code point {}", value_num);
                 let exc = super::make_exception(realm, "RangeError", message);
                 return Err(RunError::Exception(exc));
             }
@@ -388,7 +402,7 @@ fn nf_String_fromCodePoint(realm: &mut Realm, _this: &Value, args: &[Value]) -> 
 fn nf_String_codePointAt(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
     let index = {
         let index = args.first().copied().unwrap_or(Value::Number(0.0));
-        let index = to_number(index).ok_or_else(|| -> RunError {
+        let index = to_number(index, &realm.heap).ok_or_else(|| -> RunError {
             error!("invalid index: {}", realm.heap.show_debug(index)).into()
         })?;
         if index.fract() != 0.0 {
@@ -412,7 +426,7 @@ fn nf_Boolean(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Val
     // TODO Provide correct implementation for `new Boolean(...)` in addition to
     // `Boolean(...)`
     let arg = args.first().copied().unwrap_or(Value::Undefined);
-    let bool_val = realm.heap.to_boolean(arg);
+    let bool_val = to_boolean(arg, &realm.heap);
     Ok(Value::Bool(bool_val))
 }
 
@@ -420,33 +434,34 @@ fn nf_Function(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Valu
     todo!("not yet implemented!")
 }
 
+/// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
+fn nf_Object(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+    let arg = args.first().copied().unwrap_or(Value::Undefined);
+    Ok(to_object(arg, &mut realm.heap)
+        .unwrap_or_else(|| Value::Object(realm.heap.new_ordinary_object())))
+}
+
 fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+    use std::borrow::Cow;
+
     for arg in args {
-        let jss = realm.heap.js_to_string(*arg);
-        let str = jss.to_string();
+        let str: Cow<_> = to_string(*arg, &mut realm.heap)
+            .map(|val| realm.heap.as_str(val).unwrap().to_string().into())
+            .unwrap_or("<can't convert to string>".into());
         println!("{}", str);
     }
     Ok(Value::Undefined)
 }
 
 fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
-    let closure = realm
+    let orig_closure = realm
         .heap
         .as_closure(*this)
         .ok_or_else(|| error!("not a function"))?;
-    let js_closure = match closure {
-        Closure::Native(_) => return Err(error!("can't bind a native function (yet)").into()),
-        Closure::JS(jsc) => jsc,
-    };
 
-    let forced_this = Some(args.first().copied().unwrap_or(Value::Undefined));
-    let new_closure = JSClosure {
-        forced_this,
-        fnid: js_closure.fnid,
-        upvalues: js_closure.upvalues.clone(),
-        generator_snapshot: js_closure.generator_snapshot.clone(),
-    };
+    let mut closure: Closure = (**orig_closure).clone();
+    closure.forced_this = Some(args.first().copied().unwrap_or(Value::Undefined));
 
-    let new_obj_id = realm.heap.new_function(Closure::JS(Rc::new(new_closure)));
+    let new_obj_id = realm.heap.new_function(Rc::new(closure));
     Ok(Value::Object(new_obj_id))
 }

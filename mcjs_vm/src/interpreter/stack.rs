@@ -1,9 +1,10 @@
-//! [1] "this" substituion: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX};
-use crate::interpreter::{JSClosure, Value};
+use crate::interpreter::{Closure, JSFn, Value};
+
+use super::Func;
 
 /// The interpreter's stack.
 ///
@@ -93,7 +94,7 @@ pub struct FrameHeader {
     // TODO Move this to closure
     pub is_module_root_fn: bool,
 
-    pub closure: Rc<JSClosure>,
+    pub closure: Rc<Closure>,
 }
 
 impl InterpreterData {
@@ -142,11 +143,12 @@ impl InterpreterData {
         func: &bytecode::Function,
         this: Value,
     ) {
-        let closure = Rc::new(JSClosure {
-            fnid,
+        let closure = Rc::new(Closure {
+            func: Func::JS(JSFn(fnid)),
             upvalues: Vec::new(),
             forced_this: Some(this),
             generator_snapshot: RefCell::new(None),
+            is_strict: func.is_strict_mode(),
         });
 
         let frame_hdr = FrameHeader {
@@ -177,32 +179,23 @@ impl InterpreterData {
     /// In the new stack frame, `local_this` is used as the value for `this` unless the
     /// closure has a `forced_this` value (result of `Function.prototype.bind`) or "this"
     /// substitution happens [1].
-    pub(crate) fn push_call(
-        &mut self,
-        closure: Rc<JSClosure>,
-        local_this: Value,
-        loader: &crate::Loader,
-    ) {
-        let callee_func = loader.get_function(closure.fnid).unwrap();
-
-        let is_strict = callee_func.is_strict_mode();
-        let this = match (closure.forced_this, is_strict, local_this) {
-            (Some(value), _, _) => value,
-            // "this" substitution (see [1]).  If I understand this correctly, we don't
-            // need to box anything right now.  We just pass the value, and the callee
-            // will box it when needed.
-            (_, false, Value::Null | Value::Undefined) => self.default_this,
-            (_, _, _) => local_this,
+    pub(crate) fn push_call(&mut self, closure: Rc<Closure>, this: Value, loader: &crate::Loader) {
+        let fnid = match &closure.func {
+            Func::Native(_) => panic!("bug: push_call requires a JS function (not Native)"),
+            Func::JS(JSFn(fnid)) => *fnid,
         };
+        let callee_func = loader.get_function(fnid).unwrap();
 
         let gen_snap = closure.generator_snapshot.borrow_mut().take();
+        let regs_offset = self.values.len().try_into().unwrap();
+        let regs_count = callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32;
 
         if let Some(gen_snap) = gen_snap {
             // resume the suspended of the generator
             let frame_hdr = FrameHeader {
-                regs_offset: self.values.len().try_into().unwrap(),
-                regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
-                fnid: closure.fnid,
+                regs_offset,
+                regs_count,
+                fnid,
                 iid: gen_snap.iid,
                 this: gen_snap.this,
                 return_target: gen_snap.return_target,
@@ -217,9 +210,9 @@ impl InterpreterData {
         } else {
             // brand new call (or just not a generator)
             let frame_hdr = FrameHeader {
-                regs_offset: self.values.len().try_into().unwrap(),
-                regs_count: callee_func.n_regs() as u32 + ARGS_COUNT_MAX as u32,
-                fnid: closure.fnid,
+                regs_offset,
+                regs_count,
+                fnid,
                 iid: bytecode::IID(0),
                 this,
                 return_target: None,
