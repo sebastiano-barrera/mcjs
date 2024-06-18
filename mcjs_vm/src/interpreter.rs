@@ -87,6 +87,7 @@ gen_value_expect!(expect_obj, Object, heap::ObjectID);
 #[derive(Clone)]
 pub struct Closure {
     func: Func,
+    is_strict: bool,
     /// TODO There oughta be a better data structure for this
     upvalues: Vec<UpvalueID>,
     forced_this: Option<Value>,
@@ -108,11 +109,13 @@ impl Closure {
             upvalues: Vec::new(),
             forced_this: None,
             generator_snapshot: RefCell::new(None),
+            // by convention, native functions are always strict
+            is_strict: true,
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 enum Func {
     Native(NativeFn),
     JS(JSFn),
@@ -582,7 +585,7 @@ fn run_inner(
                 } => {
                     let callee = get_operand(data, *callee)?;
                     let closure = match realm.heap.as_closure(callee) {
-                        Some(c) => c,
+                        Some(c) => Rc::clone(&c),
                         None => {
                             let val_s = realm.heap.show_debug(callee);
                             let msg = &format!("can't call non-closure: {:?}", val_s);
@@ -614,46 +617,57 @@ fn run_inner(
                     let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
                     let return_to_iid = IID(iid.0 + n_args_u16 + 1);
 
-                    match &closure.func {
+                    let n_params = bytecode::ARGS_COUNT_MAX as usize;
+                    arg_vals.truncate(n_params);
+                    arg_vals.resize(n_params, Value::Undefined);
+                    assert_eq!(arg_vals.len(), n_params);
+
+                    let this = get_operand(data, *this)?;
+                    // Perform "this substitution", in preparation for a function call.
+                    //
+                    // See: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
+                    let this = match (closure.forced_this, closure.is_strict, this) {
+                        (Some(value), _, _) => value,
+                        (_, false, Value::Null | Value::Undefined) => realm.global_obj,
+                        _ => this,
+                    };
+                    let this = if closure.is_strict {
+                        this
+                    } else {
+                        to_object_or_throw(this, realm)?
+                    };
+
+                    // TODO coerce `this` to object
+                    match closure.func {
                         Func::JS(_) => {
-                            let n_params = bytecode::ARGS_COUNT_MAX as usize;
-                            arg_vals.truncate(n_params);
-                            arg_vals.resize(n_params, Value::Undefined);
-                            assert_eq!(arg_vals.len(), n_params);
-
-                            let this = get_operand(data, *this)?;
-                            // TODO coerce `this` to object
-
                             data.top_mut().set_return_target(*return_value_reg);
                             data.top_mut().set_resume_iid(return_to_iid);
 
-                            data.push_call(Rc::clone(closure), this, loader);
+                            data.push_call(closure, this, loader);
                             for (i, arg) in arg_vals.into_iter().enumerate() {
                                 data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
                             }
 
+                            // stack is prepared, just continue turning the crank to run the callee
                             continue 'reborrow;
                         }
-                        Func::Native(nf) => {
-                            let this = get_operand(data, *this)?;
-                            match nf(realm, &this, &arg_vals) {
-                                Ok(ret_val) => {
-                                    data.top_mut().set_result(*return_value_reg, ret_val);
-                                    next_ndx = return_to_iid.0;
-                                }
-                                Err(RunError::Exception(exc)) => {
-                                    throw_exc(
-                                        exc,
-                                        iid,
-                                        data,
-                                        #[cfg(feature = "debugger")]
-                                        dbg,
-                                    )?;
-                                    continue 'reborrow;
-                                }
-                                Err(other_err) => return Err(other_err),
-                            };
-                        }
+                        Func::Native(nf) => match nf(realm, &this, &arg_vals) {
+                            Ok(ret_val) => {
+                                data.top_mut().set_result(*return_value_reg, ret_val);
+                                next_ndx = return_to_iid.0;
+                            }
+                            Err(RunError::Exception(exc)) => {
+                                throw_exc(
+                                    exc,
+                                    iid,
+                                    data,
+                                    #[cfg(feature = "debugger")]
+                                    dbg,
+                                )?;
+                                continue 'reborrow;
+                            }
+                            Err(other_err) => return Err(other_err),
+                        },
                     }
                 }
                 Instr::CallArg(_) => {
@@ -806,12 +820,14 @@ fn run_inner(
                         next_ndx += 1;
                     }
 
+                    let is_strict = loader.get_function(*fnid).unwrap().is_strict_mode();
                     let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
                     let closure = Rc::new(Closure {
                         func: Func::JS(JSFn(*fnid)),
                         upvalues,
                         forced_this,
                         generator_snapshot: RefCell::new(None),
+                        is_strict,
                     });
 
                     let oid = realm.heap.new_function(closure);
@@ -851,6 +867,7 @@ fn run_inner(
                         data.top_mut().set_return_target(*dest);
                         data.top_mut().set_resume_iid(IID(iid.0 + 1));
 
+                        debug_assert!(root_fn.is_strict_mode());
                         data.push_direct(root_fnid, root_fn, Value::Undefined);
                         data.top_mut().set_is_module_root_fn();
                     }
