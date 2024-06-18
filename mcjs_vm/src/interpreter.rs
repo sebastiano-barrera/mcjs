@@ -619,8 +619,6 @@ fn run_inner(
 
                     let n_params = bytecode::ARGS_COUNT_MAX as usize;
                     arg_vals.truncate(n_params);
-                    arg_vals.resize(n_params, Value::Undefined);
-                    assert_eq!(arg_vals.len(), n_params);
 
                     let this = get_operand(data, *this)?;
                     // Perform "this substitution", in preparation for a function call.
@@ -637,15 +635,15 @@ fn run_inner(
                         to_object_or_throw(this, realm)?
                     };
 
-                    // TODO coerce `this` to object
                     match closure.func {
                         Func::JS(_) => {
                             data.top_mut().set_return_target(*return_value_reg);
                             data.top_mut().set_resume_iid(return_to_iid);
 
                             data.push_call(closure, this, loader);
-                            for (i, arg) in arg_vals.into_iter().enumerate() {
-                                data.top_mut().set_arg(bytecode::ArgIndex(i as _), arg);
+                            for i in 0..bytecode::ARGS_COUNT_MAX {
+                                let arg = arg_vals.get(i as usize).unwrap_or(&Value::Undefined);
+                                data.top_mut().set_arg(bytecode::ArgIndex(i as _), *arg);
                             }
 
                             // stack is prepared, just continue turning the crank to run the callee
@@ -2506,6 +2504,12 @@ mod tests {
             &output.sink,
             &[Some(Literal::String("Hello, I'm 123.45!".into())),],
         );
+    }
+
+    #[test]
+    fn test_array_init() {
+        let output = quick_run_script("sink([].length)");
+        assert_eq!(&output.sink, &[Some(Literal::Number(0.0))]);
     }
 
     #[test]
