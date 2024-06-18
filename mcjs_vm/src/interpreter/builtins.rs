@@ -71,16 +71,17 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
 
     let Number = Value::Object(heap.new_function(native_closure(nf_Number)));
     {
+        let number_proto = Value::Object(heap.number_proto());
+        heap.set_own(
+            Number,
+            "prototype".into(),
+            Property::NonEnumerable(number_proto),
+        );
+
         let toString =
             Value::Object(heap.new_function(native_closure(nf_Number_prototype_toString)));
-
-        heap.set_own(Number, "prototype".into(), {
-            let value = Value::Object(heap.number_proto());
-            Property::NonEnumerable(value)
-        });
-
         heap.set_own(
-            Value::Object(heap.number_proto()),
+            number_proto,
             "toString".into(),
             Property::NonEnumerable(toString),
         )
@@ -328,7 +329,23 @@ fn nf_Number_prototype_toString(
     this: &Value,
     _args: &[Value],
 ) -> RunResult<Value> {
-    to_string_or_throw(*this, realm)
+    let prim = realm.heap.as_primitive(*this).ok_or_else(|| {
+        let msg = "not a primitive! (and therefore not a number)";
+        let exc = super::make_exception(realm, "TypeError", msg);
+        RunError::Exception(exc)
+    })?;
+
+    match prim {
+        Value::Number(n) => {
+            let jss = JSString::new_from_str(&n.to_string());
+            let sid = realm.heap.new_string(jss);
+            Ok(Value::String(sid))
+        }
+        _ => {
+            let exc = super::make_exception(realm, "TypeError", "not a number");
+            Err(RunError::Exception(exc))
+        }
+    }
 }
 
 fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {

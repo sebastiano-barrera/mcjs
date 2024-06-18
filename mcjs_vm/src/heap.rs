@@ -575,6 +575,18 @@ impl Heap {
         self.init_exotic(oid, proto_oid, Exotic::Primitive(prim));
         oid
     }
+    pub(crate) fn as_primitive(&self, value: Value) -> Option<Value> {
+        match value {
+            Value::Object(oid) => {
+                let obj = self.get(oid).unwrap();
+                match &obj.exotic_part {
+                    Exotic::Primitive(value) => Some(*value),
+                    _ => None,
+                }
+            }
+            other => Some(other),
+        }
+    }
 
     fn get(&self, oid: ObjectID) -> Option<&HeapObject> {
         self.objects.get(oid)
