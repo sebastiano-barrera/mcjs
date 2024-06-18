@@ -622,7 +622,6 @@ fn run_inner(
 
                     let this = get_operand(data, *this)?;
                     // Perform "this substitution", in preparation for a function call.
-                    //
                     // See: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
                     let this = match (closure.forced_this, closure.is_strict, this) {
                         (Some(value), _, _) => value,
@@ -691,6 +690,7 @@ fn run_inner(
                 }
                 Instr::ObjGet { dest, obj, key } => {
                     let obj = get_operand(data, *obj)?;
+                    let obj = to_object_or_throw(obj, realm)?;
                     let key = get_operand(data, *key)?;
                     let key = value_to_index_or_key(&realm.heap, &key);
 
