@@ -1219,11 +1219,7 @@ fn do_return(ret_val: Value, data: &mut stack::InterpreterData, realm: &mut Real
     }
 
     data.pop();
-    if !data.is_empty() {
-        if let Some(rv_reg) = data.top_mut().take_return_target() {
-            data.top_mut().set_result(rv_reg, ret_val);
-        }
-    }
+    data.set_return_value(ret_val);
 }
 
 fn obj_set(

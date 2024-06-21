@@ -22,6 +22,14 @@ pub struct InterpreterData {
     /// that is currently running).
     cur_exc: Option<Value>,
 
+    /// The "final" return value, i.e. the value returned by the top-level call that the
+    /// interpreter was initialized with.
+    ///
+    /// Normally, when a function call returns, the return value is stored somewhere in
+    /// the parent stack frame. The toplevel stack frame has no parent, so the return
+    /// value is stored here instead.
+    final_ret_val: Value,
+
     // TODO Make tests work without this hack
     #[cfg(any(test, feature = "debugger"))]
     pub sink: Vec<Value>,
@@ -110,9 +118,10 @@ impl InterpreterData {
 
             cur_exc: None,
 
+            final_ret_val: Value::Undefined,
+
             #[cfg(any(test, feature = "debugger"))]
             sink: Vec::new(),
-
             #[cfg(feature = "debugger")]
             resuming_from_breakpoint: false,
         }
@@ -291,6 +300,19 @@ impl InterpreterData {
     pub fn frames(&self) -> impl ExactSizeIterator<Item = Frame> {
         let n_frames = self.headers.len();
         (0..n_frames).rev().map(|ndx| self.nth_frame(ndx))
+    }
+
+    pub(super) fn set_return_value(&mut self, value: Value) {
+        if self.is_empty() {
+            self.final_ret_val = value;
+        } else {
+            if let Some(rv_reg) = self.top_mut().take_return_target() {
+                self.top_mut().set_result(rv_reg, value);
+            }
+        }
+    }
+    pub(super) fn final_return_value(&self) -> Value {
+        self.final_ret_val
     }
 
     pub(crate) fn capture_to_var(
