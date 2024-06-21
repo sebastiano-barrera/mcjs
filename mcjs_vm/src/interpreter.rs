@@ -8,9 +8,7 @@ use crate::heap::JSString;
 use crate::{
     bytecode::{self, FnID, Instr, VReg, IID},
     common::{self, Result},
-    define_flag, error,
-    heap::{self, IndexOrKey},
-    loader,
+    define_flag, error, heap, loader,
 };
 
 mod builtins;
@@ -236,6 +234,33 @@ impl<'a> Interpreter<'a> {
         // parameters, then put it into an Interpreter
         let mut data = init_stack(loader, realm, fnid);
         data.set_default_this(realm.global_obj);
+        Interpreter {
+            realm,
+            data,
+            loader,
+            #[cfg(feature = "debugger")]
+            dbg: None,
+        }
+    }
+
+    fn new_call(
+        realm: &'a mut Realm,
+        loader: &'a mut crate::Loader,
+        closure: Rc<Closure>,
+        this: Value,
+        args: &[Value],
+    ) -> Self {
+        // Initialize the stack with a single frame, corresponding to a call to fnid with no
+        // parameters, then put it into an Interpreter
+        let mut data = stack::InterpreterData::new();
+        data.set_default_this(realm.global_obj);
+
+        data.push_call(closure, this, loader);
+        for i in 0..bytecode::ARGS_COUNT_MAX {
+            let arg = args.get(i as usize).unwrap_or(&Value::Undefined);
+            data.top_mut().set_arg(bytecode::ArgIndex(i as _), *arg);
+        }
+
         Interpreter {
             realm,
             data,
@@ -952,7 +977,7 @@ fn run_inner(
                             let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
                             let exc = Value::Object(realm.heap.new_ordinary_object());
                             realm.heap.set_proto(exc, Some(exc_proto));
-                            realm.heap.set_own(exc, IndexOrKey::Key("message"), {
+                            realm.heap.set_own(exc, heap::IndexOrKey::Key("message"), {
                                 let value = Value::String(msg);
                                 heap::Property::Enumerable(value)
                             });
