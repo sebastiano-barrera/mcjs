@@ -205,6 +205,7 @@ pub struct Interpreter<'a> {
 }
 
 pub struct FinishedData {
+    pub ret_val: Value,
     #[cfg(any(test, feature = "debugger"))]
     pub sink: Vec<Option<bytecode::Literal>>,
 }
@@ -329,6 +330,7 @@ impl<'a> Interpreter<'a> {
                     .collect();
 
                 Ok(Exit::Finished(FinishedData {
+                    ret_val: self.data.final_return_value(),
                     #[cfg(any(test, feature = "debugger"))]
                     sink,
                 }))
@@ -1186,7 +1188,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
     let exc_cons = get_builtin(realm, constructor_name).unwrap();
     let exc_proto = realm
         .heap
-        .get_own(Value::Object(exc_cons), IndexOrKey::Key("prototype"))
+        .get_own(Value::Object(exc_cons), heap::IndexOrKey::Key("prototype"))
         .unwrap()
         .value()
         .unwrap()
@@ -1195,7 +1197,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
     let exc = Value::Object(realm.heap.new_ordinary_object());
 
     realm.heap.set_proto(exc, Some(exc_proto));
-    realm.heap.set_own(exc, IndexOrKey::Key("message"), {
+    realm.heap.set_own(exc, heap::IndexOrKey::Key("message"), {
         let value = Value::String(message);
         heap::Property::Enumerable(value)
     });
@@ -1206,7 +1208,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
 fn get_builtin(realm: &Realm, builtin_name: &str) -> RunResult<heap::ObjectID> {
     realm
         .heap
-        .get_own(realm.global_obj, IndexOrKey::Key(builtin_name))
+        .get_own(realm.global_obj, heap::IndexOrKey::Key(builtin_name))
         .map(|p| p.value().unwrap())
         .ok_or_else(|| error!("missing required builtin: {}", builtin_name))?
         .expect_obj()
@@ -1581,7 +1583,10 @@ fn show_value_ex<W: std::io::Write>(
                 write!(out, "    ").unwrap();
             }
 
-            let property = realm.heap.get_own(value, IndexOrKey::Key(&key)).unwrap();
+            let property = realm
+                .heap
+                .get_own(value, heap::IndexOrKey::Key(&key))
+                .unwrap();
             write!(out, "  - {:?} = ", key).unwrap();
             show_value_ex(
                 out,
@@ -3070,6 +3075,51 @@ do {
                 Some(Literal::Bool(false)),
             ]
         );
+    }
+
+    #[test]
+    fn test_final_return_value() {
+        let mut loader = loader::Loader::new_cwd();
+        let mut realm = Realm::new(&mut loader);
+
+        let init_script = r#"
+            const myVariable = 123;
+            globalThis.aFunction = function() { return myVariable; }
+        "#;
+        let chunk_fnid = loader
+            .load_script_anon(init_script.to_string())
+            .expect("couldn't compile test script");
+        Interpreter::new(&mut realm, &mut loader, chunk_fnid)
+            .run()
+            .unwrap()
+            .expect_finished();
+
+        let global_obj = realm.global_obj;
+        let inner_closure = realm
+            .heap
+            .get_chained(global_obj, heap::IndexOrKey::Key("aFunction"))
+            .expect("no property `aFunction`")
+            .value()
+            .unwrap();
+        let inner_closure = realm
+            .heap
+            .as_closure(inner_closure)
+            .expect("`aFunction` not a closure");
+        let inner_closure = Rc::clone(&inner_closure);
+
+        let finish = Interpreter::new_call(
+            &mut realm,
+            &mut loader,
+            inner_closure,
+            Value::Undefined,
+            &[],
+        )
+        .run()
+        .unwrap()
+        .expect_finished();
+
+        let lit = try_value_to_literal(finish.ret_val, &realm.heap);
+        assert_eq!(lit, Some(Literal::Number(123.0)));
     }
 
     mod debugging {
