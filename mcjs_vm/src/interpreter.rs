@@ -476,7 +476,7 @@ fn run_inner(
     loader: &mut loader::Loader,
     #[cfg(feature = "debugger")] dbg: &mut Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
-    'reborrow: loop {
+    loop {
         if data.is_empty() {
             // We're done.
             return Ok(());
@@ -485,514 +485,208 @@ fn run_inner(
         let fnid = data.top().header().fnid;
         let func = loader.get_function(fnid).unwrap();
 
-        loop {
-            let iid = data.top().header().iid;
-            if iid.0 as usize == func.instrs().len() {
-                // Bytecode "finished" => Implicitly return undefined
-                do_return(Value::Undefined, data, realm);
-                continue 'reborrow;
+        let iid = data.top().header().iid;
+        if iid.0 as usize == func.instrs().len() {
+            // Bytecode "finished" => Implicitly return undefined
+            do_return(Value::Undefined, data, realm);
+            continue;
+        }
+
+        let instr = func.instrs()[iid.0 as usize];
+        let mut next_ndx = iid.0 + 1;
+
+        // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
+        #[cfg(feature = "debugger")]
+        if let Some(dbg) = dbg {
+            if dbg.fuel_empty() {
+                dbg.set_fuel(debugger::Fuel::Unlimited);
+                return Err(force_suspend_for_breakpoint(data, iid));
             }
 
-            let instr = func.instrs()[iid.0 as usize];
-            let mut next_ndx = iid.0 + 1;
+            let giid = bytecode::GlobalIID(fnid, iid);
+            if let Some(bkpt) = dbg.instr_bkpt_at(&giid) {
+                suspend_for_breakpoint(data, iid)?;
 
-            // TODO Checking for breakpoints here in this hot loop is going to be *very* slow!
-            #[cfg(feature = "debugger")]
-            if let Some(dbg) = dbg {
-                if dbg.fuel_empty() {
-                    dbg.set_fuel(debugger::Fuel::Unlimited);
-                    return Err(force_suspend_for_breakpoint(data, iid));
+                if bkpt.delete_on_hit {
+                    dbg.clear_instr_bkpt(giid);
                 }
+            }
+        }
 
-                let giid = bytecode::GlobalIID(fnid, iid);
-                if let Some(bkpt) = dbg.instr_bkpt_at(&giid) {
-                    suspend_for_breakpoint(data, iid)?;
+        match &instr {
+            Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
+                let literal = func.consts()[*const_ndx as usize].clone();
+                let value = literal_to_value(literal, &mut realm.heap);
+                data.top_mut().set_result(*dest, value);
+            }
 
-                    if bkpt.delete_on_hit {
-                        dbg.clear_instr_bkpt(giid);
-                    }
+            Instr::OpAdd(dest, a, b) => match get_operand(data, *a)? {
+                Value::Number(_) => with_numbers(data, *dest, *a, *b, |x, y| x + y)?,
+                // TODO replace this with coercing
+                Value::String(_) | Value::Object(_) => {
+                    let value = str_append(data, realm, *a, *b)?;
+                    data.top_mut().set_result(*dest, value);
+                }
+                other => return Err(error!("unsupported operator '+' for: {:?}", other).into()),
+            },
+            Instr::ArithSub(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x - y)?,
+            Instr::ArithMul(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x * y)?,
+            Instr::ArithDiv(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x / y)?,
+
+            Instr::PushToSink(operand) => {
+                #[allow(unused_variables)]
+                let value = get_operand(data, *operand)?;
+                #[cfg(test)]
+                data.push_to_sink(value);
+                #[cfg(not(test))]
+                panic!("PushToSink instruction not implemented outside of unit tests");
+            }
+
+            Instr::CmpGE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                ord == ValueOrdering::Greater || ord == ValueOrdering::Equal
+            })?,
+            Instr::CmpGT(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                ord == ValueOrdering::Greater
+            })?,
+            Instr::CmpLT(dest, a, b) => {
+                compare(data, realm, *dest, *a, *b, |ord| ord == ValueOrdering::Less)?
+            }
+            Instr::CmpLE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                ord == ValueOrdering::Less || ord == ValueOrdering::Equal
+            })?,
+            Instr::CmpEQ(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                ord == ValueOrdering::Equal
+            })?,
+            Instr::CmpNE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
+                ord != ValueOrdering::Equal
+            })?,
+
+            Instr::JmpIf { cond, dest } => {
+                let cond_value = get_operand(data, *cond)?;
+                let cond_value = to_boolean(cond_value, &realm.heap);
+                if cond_value {
+                    next_ndx = dest.0;
+                } else {
+                    // Just go to the next instruction
+                }
+            }
+            Instr::JmpIfNot { cond, dest } => {
+                let cond_value = get_operand(data, *cond)?;
+                let cond_value = to_boolean(cond_value, &realm.heap);
+                if !cond_value {
+                    next_ndx = dest.0;
+                } else {
+                    // Just go to the next instruction
                 }
             }
 
-            match &instr {
-                Instr::LoadConst(dest, bytecode::ConstIndex(const_ndx)) => {
-                    let literal = func.consts()[*const_ndx as usize].clone();
-                    let value = literal_to_value(literal, &mut realm.heap);
-                    data.top_mut().set_result(*dest, value);
-                }
+            Instr::Copy { dst, src } => {
+                let value = get_operand(data, *src)?;
+                data.top_mut().set_result(*dst, value);
+            }
+            Instr::LoadCapture(dest, cap_ndx) => {
+                data.capture_to_var(*cap_ndx, *dest);
+            }
 
-                Instr::OpAdd(dest, a, b) => match get_operand(data, *a)? {
-                    Value::Number(_) => with_numbers(data, *dest, *a, *b, |x, y| x + y)?,
-                    // TODO replace this with coercing
-                    Value::String(_) | Value::Object(_) => {
-                        let value = str_append(data, realm, *a, *b)?;
-                        data.top_mut().set_result(*dest, value);
+            Instr::Nop => {}
+            Instr::BoolNot { dest, arg } => {
+                let value = get_operand(data, *arg)?;
+                let value = Value::Bool(!to_boolean(value, &realm.heap));
+                data.top_mut().set_result(*dest, value);
+            }
+            Instr::ToNumber { dest, arg } => {
+                let value = get_operand(data, *arg)?;
+                let value = to_number_or_throw(value, realm, loader)?;
+                data.top_mut().set_result(*dest, value);
+            }
+
+            Instr::Jmp(IID(dest_ndx)) => {
+                next_ndx = *dest_ndx;
+            }
+            Instr::SaveFrameSnapshot(resume_iid) => {
+                data.top_mut().save_snapshot(*resume_iid);
+            }
+            Instr::Return(value) => {
+                let return_value = get_operand(data, *value)?;
+                do_return(return_value, data, realm);
+                continue;
+            }
+            Instr::Call {
+                callee,
+                this,
+                return_value: return_value_reg,
+            } => {
+                let callee = get_operand(data, *callee)?;
+                let closure = match realm.heap.as_closure(callee) {
+                    Some(c) => Rc::clone(&c),
+                    None => {
+                        let val_s = realm.heap.show_debug(callee);
+                        let msg = &format!("can't call non-closure: {:?}", val_s);
+                        let exc = make_exception(realm, "TypeError", msg);
+                        return Err(RunError::Exception(exc));
                     }
-                    other => return Err(error!("unsupported operator '+' for: {:?}", other).into()),
-                },
-                Instr::ArithSub(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x - y)?,
-                Instr::ArithMul(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x * y)?,
-                Instr::ArithDiv(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x / y)?,
+                };
 
-                Instr::PushToSink(operand) => {
-                    #[allow(unused_variables)]
-                    let value = get_operand(data, *operand)?;
-                    #[cfg(test)]
-                    data.push_to_sink(value);
-                    #[cfg(not(test))]
-                    panic!("PushToSink instruction not implemented outside of unit tests");
-                }
+                // NOTE The arguments have to be "read" before adding the stack frame;
+                // they will no longer be accessible
+                // afterwards
+                //
+                // TODO make the above fact false, and avoid this allocation
+                //
+                // NOTE Note that we collect into Result<Vec<_>>, and *then* try (?). This is
+                // to ensure that, if get_operand fails, we return early. otherwise we
+                // would risk that arg_vals.len() != the number of CallArg instructions
+                let res: RunResult<Vec<_>> = func
+                    .instrs()
+                    .iter()
+                    .skip(iid.0 as usize + 1)
+                    .map_while(|instr| match instr {
+                        Instr::CallArg(arg_reg) => Some(*arg_reg),
+                        _ => None,
+                    })
+                    .map(|vreg| get_operand(data, vreg))
+                    .collect();
+                let mut arg_vals = res?;
+                let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
+                let return_to_iid = IID(iid.0 + n_args_u16 + 1);
 
-                Instr::CmpGE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
-                    ord == ValueOrdering::Greater || ord == ValueOrdering::Equal
-                })?,
-                Instr::CmpGT(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
-                    ord == ValueOrdering::Greater
-                })?,
-                Instr::CmpLT(dest, a, b) => {
-                    compare(data, realm, *dest, *a, *b, |ord| ord == ValueOrdering::Less)?
-                }
-                Instr::CmpLE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
-                    ord == ValueOrdering::Less || ord == ValueOrdering::Equal
-                })?,
-                Instr::CmpEQ(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
-                    ord == ValueOrdering::Equal
-                })?,
-                Instr::CmpNE(dest, a, b) => compare(data, realm, *dest, *a, *b, |ord| {
-                    ord != ValueOrdering::Equal
-                })?,
+                let n_params = bytecode::ARGS_COUNT_MAX as usize;
+                arg_vals.truncate(n_params);
 
-                Instr::JmpIf { cond, dest } => {
-                    let cond_value = get_operand(data, *cond)?;
-                    let cond_value = to_boolean(cond_value, &realm.heap);
-                    if cond_value {
-                        next_ndx = dest.0;
-                    } else {
-                        // Just go to the next instruction
-                    }
-                }
-                Instr::JmpIfNot { cond, dest } => {
-                    let cond_value = get_operand(data, *cond)?;
-                    let cond_value = to_boolean(cond_value, &realm.heap);
-                    if !cond_value {
-                        next_ndx = dest.0;
-                    } else {
-                        // Just go to the next instruction
-                    }
-                }
+                let this = get_operand(data, *this)?;
+                // Perform "this substitution", in preparation for a function call.
+                // See: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
+                let this = match (closure.forced_this, closure.is_strict, this) {
+                    (Some(value), _, _) => value,
+                    (_, false, Value::Null | Value::Undefined) => realm.global_obj,
+                    _ => this,
+                };
+                let this = if closure.is_strict {
+                    this
+                } else {
+                    to_object_or_throw(this, realm)?
+                };
 
-                Instr::Copy { dst, src } => {
-                    let value = get_operand(data, *src)?;
-                    data.top_mut().set_result(*dst, value);
-                }
-                Instr::LoadCapture(dest, cap_ndx) => {
-                    data.capture_to_var(*cap_ndx, *dest);
-                }
+                match closure.func {
+                    Func::JS(_) => {
+                        data.top_mut().set_return_target(*return_value_reg);
+                        data.top_mut().set_resume_iid(return_to_iid);
 
-                Instr::Nop => {}
-                Instr::BoolNot { dest, arg } => {
-                    let value = get_operand(data, *arg)?;
-                    let value = Value::Bool(!to_boolean(value, &realm.heap));
-                    data.top_mut().set_result(*dest, value);
-                }
-                Instr::ToNumber { dest, arg } => {
-                    let value = get_operand(data, *arg)?;
-                    let value = to_number_or_throw(value, realm, loader)?;
-                    data.top_mut().set_result(*dest, value);
-                    data.top_mut().set_resume_iid(bytecode::IID(iid.0 + 1));
-                    continue 'reborrow;
-                }
-
-                Instr::Jmp(IID(dest_ndx)) => {
-                    next_ndx = *dest_ndx;
-                }
-                Instr::SaveFrameSnapshot(resume_iid) => {
-                    data.top_mut().save_snapshot(*resume_iid);
-                }
-                Instr::Return(value) => {
-                    let return_value = get_operand(data, *value)?;
-                    do_return(return_value, data, realm);
-                    continue 'reborrow;
-                }
-                Instr::Call {
-                    callee,
-                    this,
-                    return_value: return_value_reg,
-                } => {
-                    let callee = get_operand(data, *callee)?;
-                    let closure = match realm.heap.as_closure(callee) {
-                        Some(c) => Rc::clone(&c),
-                        None => {
-                            let val_s = realm.heap.show_debug(callee);
-                            let msg = &format!("can't call non-closure: {:?}", val_s);
-                            let exc = make_exception(realm, "TypeError", msg);
-                            return Err(RunError::Exception(exc));
+                        data.push_call(closure, this, loader);
+                        for i in 0..bytecode::ARGS_COUNT_MAX {
+                            let arg = arg_vals.get(i as usize).unwrap_or(&Value::Undefined);
+                            data.top_mut().set_arg(bytecode::ArgIndex(i as _), *arg);
                         }
-                    };
 
-                    // NOTE The arguments have to be "read" before adding the stack frame;
-                    // they will no longer be accessible
-                    // afterwards
-                    //
-                    // TODO make the above fact false, and avoid this allocation
-                    //
-                    // NOTE Note that we collect into Result<Vec<_>>, and *then* try (?). This is
-                    // to ensure that, if get_operand fails, we return early. otherwise we
-                    // would risk that arg_vals.len() != the number of CallArg instructions
-                    let res: RunResult<Vec<_>> = func
-                        .instrs()
-                        .iter()
-                        .skip(iid.0 as usize + 1)
-                        .map_while(|instr| match instr {
-                            Instr::CallArg(arg_reg) => Some(*arg_reg),
-                            _ => None,
-                        })
-                        .map(|vreg| get_operand(data, vreg))
-                        .collect();
-                    let mut arg_vals = res?;
-                    let n_args_u16: u16 = arg_vals.len().try_into().unwrap();
-                    let return_to_iid = IID(iid.0 + n_args_u16 + 1);
-
-                    let n_params = bytecode::ARGS_COUNT_MAX as usize;
-                    arg_vals.truncate(n_params);
-
-                    let this = get_operand(data, *this)?;
-                    // Perform "this substitution", in preparation for a function call.
-                    // See: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode#no_this_substitution
-                    let this = match (closure.forced_this, closure.is_strict, this) {
-                        (Some(value), _, _) => value,
-                        (_, false, Value::Null | Value::Undefined) => realm.global_obj,
-                        _ => this,
-                    };
-                    let this = if closure.is_strict {
-                        this
-                    } else {
-                        to_object_or_throw(this, realm)?
-                    };
-
-                    match closure.func {
-                        Func::JS(_) => {
-                            data.top_mut().set_return_target(*return_value_reg);
+                        // stack is prepared, just continue turning the crank to run
+                        // the callee
+                    }
+                    Func::Native(nf) => match nf(realm, loader, &this, &arg_vals) {
+                        Ok(ret_val) => {
+                            data.top_mut().set_result(*return_value_reg, ret_val);
                             data.top_mut().set_resume_iid(return_to_iid);
-
-                            data.push_call(closure, this, loader);
-                            for i in 0..bytecode::ARGS_COUNT_MAX {
-                                let arg = arg_vals.get(i as usize).unwrap_or(&Value::Undefined);
-                                data.top_mut().set_arg(bytecode::ArgIndex(i as _), *arg);
-                            }
-
-                            // stack is prepared, just continue turning the crank to run
-                            // the callee
                         }
-                        Func::Native(nf) => match nf(realm, loader, &this, &arg_vals) {
-                            Ok(ret_val) => {
-                                data.top_mut().set_result(*return_value_reg, ret_val);
-                                data.top_mut().set_resume_iid(return_to_iid);
-                            }
-                            Err(RunError::Exception(exc)) => {
-                                throw_exc(
-                                    exc,
-                                    iid,
-                                    data,
-                                    #[cfg(feature = "debugger")]
-                                    dbg,
-                                )?;
-                            }
-                            Err(other_err) => return Err(other_err),
-                        },
-                    }
-                    continue 'reborrow;
-                }
-                Instr::CallArg(_) => {
-                    unreachable!("interpreter bug: CallArg goes through another path!")
-                }
-
-                Instr::LoadArg(dest, arg_ndx) => {
-                    // extra copy?
-                    // TODO usize is a bit too wide
-                    let value = data.top().get_arg(*arg_ndx).unwrap_or(Value::Undefined);
-                    data.top_mut().set_result(*dest, value);
-                }
-
-                Instr::ObjCreateEmpty(dest) => {
-                    let oid = realm.heap.new_ordinary_object();
-                    data.top_mut().set_result(*dest, Value::Object(oid));
-                }
-                Instr::ObjSet { obj, key, value } => {
-                    obj_set(data, realm, obj, key, value, true)?;
-                }
-                Instr::ObjSetN { obj, key, value } => {
-                    obj_set(data, realm, obj, key, value, false)?;
-                }
-                Instr::ObjGet { dest, obj, key } => {
-                    let obj = get_operand(data, *obj)?;
-                    let obj = to_object_or_throw(obj, realm)?;
-                    let key = get_operand(data, *key)?;
-                    let key = value_to_index_or_key(&realm.heap, &key);
-
-                    let property = key
-                        .and_then(|key| realm.heap.get_chained(obj, key.to_ref()))
-                        .unwrap_or(heap::Property::NonEnumerable(Value::Undefined));
-                    let value = property_to_value(&property, &mut realm.heap)?;
-
-                    data.top_mut().set_result(*dest, value);
-                }
-                Instr::ObjGetKeysOE { dest, obj } => obj_get_keys(
-                    data,
-                    realm,
-                    obj,
-                    dest,
-                    OnlyEnumerable::Yes,
-                    IncludeInherited::No,
-                )?,
-                Instr::ObjGetKeysIE { dest, obj } => obj_get_keys(
-                    data,
-                    realm,
-                    obj,
-                    dest,
-                    OnlyEnumerable::Yes,
-                    IncludeInherited::Yes,
-                )?,
-                Instr::ObjGetKeysO { dest, obj } => obj_get_keys(
-                    data,
-                    realm,
-                    obj,
-                    dest,
-                    OnlyEnumerable::No,
-                    IncludeInherited::No,
-                )?,
-                Instr::ObjDelete { obj, key } => {
-                    let obj = get_operand(data, *obj)?;
-                    // the boolean is necessary instead of a normal match on
-                    // Option, because borrowck can't prove that the destructor
-                    // won't run.
-                    // TODO Change this if the heap switches to something other
-                    // than RefCells (qcell?)
-                    let key = get_operand(data, *key)?;
-                    let key = value_to_index_or_key(&realm.heap, &key)
-                        .ok_or_else(|| error!("invalid object key: {:?}", key))?;
-                    let was_actually_obj = realm.heap.delete_own(obj, key.to_ref());
-                    if !was_actually_obj {
-                        let message = &format!("not an object: {:?}", obj);
-                        let exc = make_exception(realm, "TypeError", message);
-                        throw_exc(
-                            exc,
-                            iid,
-                            data,
-                            #[cfg(feature = "debugger")]
-                            dbg,
-                        )?;
-                        // FIX No continue 'reborrow?
-                    }
-                }
-
-                Instr::ArrayPush { arr, value } => {
-                    let arr = get_operand(data, *arr)?;
-                    let value = get_operand(data, *value)?;
-                    let was_array = realm.heap.array_push(arr, value);
-                    assert!(was_array);
-                }
-                Instr::ArrayNth { dest, arr, index } => {
-                    let value = {
-                        let arr = get_operand(data, *arr)?;
-                        let elements = realm.heap.array_elements(arr).unwrap();
-
-                        let num = get_operand(data, *index)?.expect_num()?;
-                        let num_trunc = num.trunc();
-                        if num_trunc == num {
-                            let ndx = num_trunc as usize;
-                            elements.get(ndx).copied().unwrap_or(Value::Undefined)
-                        } else {
-                            Value::Undefined
-                        }
-                    };
-                    data.top_mut().set_result(*dest, value);
-                }
-                Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
-                Instr::ArrayLen { dest, arr } => {
-                    let arr = get_operand(data, *arr)?;
-                    let len = realm
-                        .heap
-                        .array_elements(arr)
-                        .ok_or_else(|| error!("not an array!"))?
-                        .len();
-                    data.top_mut().set_result(*dest, Value::Number(len as f64));
-                }
-
-                Instr::TypeOf { dest, arg: value } => {
-                    let value = get_operand(data, *value)?;
-                    let result = js_typeof(&value, realm);
-                    data.top_mut().set_result(*dest, result);
-                }
-
-                Instr::BoolOpAnd(dest, a, b) => {
-                    let a = get_operand(data, *a)?;
-                    let b = get_operand(data, *b)?;
-                    let a_bool = to_boolean(a, &realm.heap);
-                    let res = if a_bool { b } else { Value::Bool(false) };
-                    data.top_mut().set_result(*dest, res);
-                }
-                Instr::BoolOpOr(dest, a, b) => {
-                    let a = get_operand(data, *a)?;
-                    let b = get_operand(data, *b)?;
-                    let a_bool = to_boolean(a, &realm.heap);
-                    let res = if a_bool { a } else { b };
-                    data.top_mut().set_result(*dest, res);
-                }
-
-                Instr::ClosureNew {
-                    dest,
-                    fnid,
-                    forced_this,
-                } => {
-                    let mut upvalues = Vec::new();
-                    while let Some(Instr::ClosureAddCapture(cap)) =
-                        func.instrs().get(next_ndx as usize)
-                    {
-                        let upv_id = data.top_mut().ensure_in_upvalue(*cap);
-                        upvalues.push(upv_id);
-                        next_ndx += 1;
-                    }
-
-                    let is_strict = loader.get_function(*fnid).unwrap().is_strict_mode();
-                    let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
-                    let closure = Rc::new(Closure {
-                        func: Func::JS(JSFn(*fnid)),
-                        upvalues,
-                        forced_this,
-                        generator_snapshot: RefCell::new(None),
-                        is_strict,
-                    });
-
-                    let oid = realm.heap.new_function(closure);
-                    data.top_mut().set_result(*dest, Value::Object(oid));
-                }
-                // This is always handled in the code for ClosureNew
-                Instr::ClosureAddCapture(_) => {
-                    unreachable!(
-                            "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
-                        )
-                }
-                Instr::Unshare(reg) => {
-                    data.top_mut().ensure_inline(*reg);
-                }
-
-                Instr::UnaryMinus { dest, arg } => {
-                    let arg_val: f64 = get_operand(data, *arg)?.expect_num()?;
-                    data.top_mut().set_result(*dest, Value::Number(-arg_val));
-                }
-
-                Instr::ImportModule(dest, module_path) => {
-                    use common::Context;
-
-                    let module_path = get_operand_string(data, realm, *module_path)?.to_string();
-                    let root_fnid = loader
-                        .load_import_from_fn(&module_path, fnid)
-                        .with_context(error_item!("while trying to import '{}'", module_path))?;
-
-                    // Commit before reborrowing
-                    data.top_mut().set_resume_iid(bytecode::IID(iid.0 + 1));
-
-                    if let Some(&module_value) = realm.module_objs.get(&root_fnid) {
-                        data.top_mut().set_result(*dest, module_value);
-                    } else {
-                        let root_fn = loader.get_function(root_fnid).unwrap();
-
-                        data.top_mut().set_return_target(*dest);
-                        data.top_mut().set_resume_iid(IID(iid.0 + 1));
-
-                        debug_assert!(root_fn.is_strict_mode());
-                        data.push_direct(root_fnid, root_fn, Value::Undefined);
-                        data.top_mut().set_is_module_root_fn();
-                    }
-
-                    // This satisfies the borrow checker
-                    // (`loader.load_import_from_fn` mut-borrows the whole
-                    // Loader, so the compiler can't prove that the same FnId
-                    // won't correspond to a different function or even stay
-                    // valid across the call)
-                    continue 'reborrow;
-                }
-
-                Instr::LoadNull(dest) => {
-                    data.top_mut().set_result(*dest, Value::Null);
-                }
-                Instr::LoadUndefined(dest) => {
-                    data.top_mut().set_result(*dest, Value::Undefined);
-                }
-                Instr::LoadThis(dest) => {
-                    let value = data.top().header().this;
-                    data.top_mut().set_result(*dest, value);
-                }
-                Instr::ArithInc(dest, src) => {
-                    let val = get_operand(data, *src)?
-                        .expect_num()
-                        .map_err(|_| error!("bytecode bug: ArithInc on non-number"))?;
-                    data.top_mut().set_result(*dest, Value::Number(val + 1.0));
-                }
-                Instr::ArithDec(dest, src) => {
-                    let val = get_operand(data, *src)?
-                        .expect_num()
-                        .map_err(|_| error!("bytecode bug: ArithDec on non-number"))?;
-                    data.top_mut().set_result(*dest, Value::Number(val - 1.0));
-                }
-                Instr::IsInstanceOf(dest, obj, sup) => {
-                    let result = is_instance_of(data, realm, *obj, *sup)?;
-                    data.top_mut().set_result(*dest, Value::Bool(result));
-                }
-                Instr::NewIterator { dest: _, obj: _ } => todo!(),
-                Instr::IteratorGetCurrent { dest: _, iter: _ } => todo!(),
-                Instr::IteratorAdvance { iter: _ } => todo!(),
-                Instr::JmpIfIteratorFinished { iter: _, dest: _ } => todo!(),
-
-                Instr::StrCreateEmpty(dest) => {
-                    let oid = realm.heap.new_string(JSString::empty());
-                    data.top_mut().set_result(*dest, Value::String(oid));
-                }
-                Instr::StrAppend(buf_reg, tail) => {
-                    let value = str_append(data, realm, *buf_reg, *tail)?;
-                    data.top_mut().set_result(*buf_reg, value);
-                }
-
-                Instr::GetGlobalThis(dest) => {
-                    data.top_mut().set_result(*dest, realm.global_obj);
-                }
-                Instr::GetGlobal {
-                    dest,
-                    name: bytecode::ConstIndex(name_cndx),
-                } => {
-                    let literal = func.consts()[*name_cndx as usize].clone();
-                    let key_str = match &literal {
-                        bytecode::Literal::String(s) => s,
-                        bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
-                        _ => panic!(
-                            "malformed bytecode: GetGlobal argument `name` not a string literal"
-                        ),
-                    };
-                    let key = heap::IndexOrKey::Key(key_str);
-
-                    let lookup_result = realm.heap.get_own(realm.global_obj, key);
-
-                    let prop = match lookup_result {
-                        None => None,
-                        Some(prop) if prop.value() == Some(Value::Undefined) => None,
-                        Some(prop) => Some(prop),
-                    };
-
-                    match prop {
-                        None => {
-                            let msg =
-                                JSString::new_from_str(&format!("{} is not defined", key_str));
-                            let msg = realm.heap.new_string(msg);
-
-                            let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
-                            let exc = Value::Object(realm.heap.new_ordinary_object());
-                            realm.heap.set_proto(exc, Some(exc_proto));
-                            realm.heap.set_own(exc, heap::IndexOrKey::Key("message"), {
-                                let value = Value::String(msg);
-                                heap::Property::Enumerable(value)
-                            });
-
+                        Err(RunError::Exception(exc)) => {
                             throw_exc(
                                 exc,
                                 iid,
@@ -1000,26 +694,84 @@ fn run_inner(
                                 #[cfg(feature = "debugger")]
                                 dbg,
                             )?;
-                            continue 'reborrow;
                         }
-                        Some(prop) => {
-                            data.top_mut().set_result(*dest, prop.value().unwrap());
-                        }
-                    }
+                        Err(other_err) => return Err(other_err),
+                    },
                 }
+                continue;
+            }
+            Instr::CallArg(_) => {
+                unreachable!("interpreter bug: CallArg goes through another path!")
+            }
 
-                Instr::Breakpoint => {
-                    suspend_for_breakpoint(data, iid)?;
-                }
+            Instr::LoadArg(dest, arg_ndx) => {
+                // extra copy?
+                // TODO usize is a bit too wide
+                let value = data.top().get_arg(*arg_ndx).unwrap_or(Value::Undefined);
+                data.top_mut().set_result(*dest, value);
+            }
 
-                Instr::GetCurrentException(dest) => {
-                    let cur_exc = data
-                        .get_cur_exc()
-                        .expect("compiler bug: GetCurrentException but there isn't any");
-                    data.top_mut().set_result(*dest, cur_exc);
-                }
-                Instr::Throw(exc) => {
-                    let exc = get_operand(data, *exc)?;
+            Instr::ObjCreateEmpty(dest) => {
+                let oid = realm.heap.new_ordinary_object();
+                data.top_mut().set_result(*dest, Value::Object(oid));
+            }
+            Instr::ObjSet { obj, key, value } => {
+                obj_set(data, realm, obj, key, value, true)?;
+            }
+            Instr::ObjSetN { obj, key, value } => {
+                obj_set(data, realm, obj, key, value, false)?;
+            }
+            Instr::ObjGet { dest, obj, key } => {
+                let obj = get_operand(data, *obj)?;
+                let obj = to_object_or_throw(obj, realm)?;
+                let key = get_operand(data, *key)?;
+                let key = value_to_index_or_key(&realm.heap, &key);
+
+                let property = key
+                    .and_then(|key| realm.heap.get_chained(obj, key.to_ref()))
+                    .unwrap_or(heap::Property::NonEnumerable(Value::Undefined));
+                let value = property_to_value(&property, &mut realm.heap)?;
+
+                data.top_mut().set_result(*dest, value);
+            }
+            Instr::ObjGetKeysOE { dest, obj } => obj_get_keys(
+                data,
+                realm,
+                obj,
+                dest,
+                OnlyEnumerable::Yes,
+                IncludeInherited::No,
+            )?,
+            Instr::ObjGetKeysIE { dest, obj } => obj_get_keys(
+                data,
+                realm,
+                obj,
+                dest,
+                OnlyEnumerable::Yes,
+                IncludeInherited::Yes,
+            )?,
+            Instr::ObjGetKeysO { dest, obj } => obj_get_keys(
+                data,
+                realm,
+                obj,
+                dest,
+                OnlyEnumerable::No,
+                IncludeInherited::No,
+            )?,
+            Instr::ObjDelete { obj, key } => {
+                let obj = get_operand(data, *obj)?;
+                // the boolean is necessary instead of a normal match on
+                // Option, because borrowck can't prove that the destructor
+                // won't run.
+                // TODO Change this if the heap switches to something other
+                // than RefCells (qcell?)
+                let key = get_operand(data, *key)?;
+                let key = value_to_index_or_key(&realm.heap, &key)
+                    .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+                let was_actually_obj = realm.heap.delete_own(obj, key.to_ref());
+                if !was_actually_obj {
+                    let message = &format!("not an object: {:?}", obj);
+                    let exc = make_exception(realm, "TypeError", message);
                     throw_exc(
                         exc,
                         iid,
@@ -1027,23 +779,265 @@ fn run_inner(
                         #[cfg(feature = "debugger")]
                         dbg,
                     )?;
-                    continue 'reborrow;
+                    // FIX No continue 'reborrow?
                 }
-                Instr::PopExcHandler => {
-                    data.top_mut()
-                        .pop_exc_handler()
-                        .ok_or_else(|| error!("compiler bug: no exception handler to pop!"))?;
-                }
-                Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
             }
 
-            // TODO Inefficient, but prevents a number of bugs
-            data.top_mut().set_resume_iid(bytecode::IID(next_ndx));
-
-            #[cfg(feature = "debugger")]
-            if let Some(dbg) = dbg {
-                dbg.consume_1_fuel();
+            Instr::ArrayPush { arr, value } => {
+                let arr = get_operand(data, *arr)?;
+                let value = get_operand(data, *value)?;
+                let was_array = realm.heap.array_push(arr, value);
+                assert!(was_array);
             }
+            Instr::ArrayNth { dest, arr, index } => {
+                let value = {
+                    let arr = get_operand(data, *arr)?;
+                    let elements = realm.heap.array_elements(arr).unwrap();
+
+                    let num = get_operand(data, *index)?.expect_num()?;
+                    let num_trunc = num.trunc();
+                    if num_trunc == num {
+                        let ndx = num_trunc as usize;
+                        elements.get(ndx).copied().unwrap_or(Value::Undefined)
+                    } else {
+                        Value::Undefined
+                    }
+                };
+                data.top_mut().set_result(*dest, value);
+            }
+            Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
+            Instr::ArrayLen { dest, arr } => {
+                let arr = get_operand(data, *arr)?;
+                let len = realm
+                    .heap
+                    .array_elements(arr)
+                    .ok_or_else(|| error!("not an array!"))?
+                    .len();
+                data.top_mut().set_result(*dest, Value::Number(len as f64));
+            }
+
+            Instr::TypeOf { dest, arg: value } => {
+                let value = get_operand(data, *value)?;
+                let result = js_typeof(&value, realm);
+                data.top_mut().set_result(*dest, result);
+            }
+
+            Instr::BoolOpAnd(dest, a, b) => {
+                let a = get_operand(data, *a)?;
+                let b = get_operand(data, *b)?;
+                let a_bool = to_boolean(a, &realm.heap);
+                let res = if a_bool { b } else { Value::Bool(false) };
+                data.top_mut().set_result(*dest, res);
+            }
+            Instr::BoolOpOr(dest, a, b) => {
+                let a = get_operand(data, *a)?;
+                let b = get_operand(data, *b)?;
+                let a_bool = to_boolean(a, &realm.heap);
+                let res = if a_bool { a } else { b };
+                data.top_mut().set_result(*dest, res);
+            }
+
+            Instr::ClosureNew {
+                dest,
+                fnid,
+                forced_this,
+            } => {
+                let mut upvalues = Vec::new();
+                while let Some(Instr::ClosureAddCapture(cap)) = func.instrs().get(next_ndx as usize)
+                {
+                    let upv_id = data.top_mut().ensure_in_upvalue(*cap);
+                    upvalues.push(upv_id);
+                    next_ndx += 1;
+                }
+
+                let is_strict = loader.get_function(*fnid).unwrap().is_strict_mode();
+                let forced_this = forced_this.map(|reg| get_operand(data, reg)).transpose()?;
+                let closure = Rc::new(Closure {
+                    func: Func::JS(JSFn(*fnid)),
+                    upvalues,
+                    forced_this,
+                    generator_snapshot: RefCell::new(None),
+                    is_strict,
+                });
+
+                let oid = realm.heap.new_function(closure);
+                data.top_mut().set_result(*dest, Value::Object(oid));
+            }
+            // This is always handled in the code for ClosureNew
+            Instr::ClosureAddCapture(_) => {
+                unreachable!(
+                            "interpreter bug: ClosureAddCapture should be handled with ClosureNew. (Usual cause: the bytecode compiler has placed some other instruction between ClosureAddCapture and ClosureNew.)"
+                        )
+            }
+            Instr::Unshare(reg) => {
+                data.top_mut().ensure_inline(*reg);
+            }
+
+            Instr::UnaryMinus { dest, arg } => {
+                let arg_val: f64 = get_operand(data, *arg)?.expect_num()?;
+                data.top_mut().set_result(*dest, Value::Number(-arg_val));
+            }
+
+            Instr::ImportModule(dest, module_path) => {
+                use common::Context;
+
+                let module_path = get_operand_string(data, realm, *module_path)?.to_string();
+                let root_fnid = loader
+                    .load_import_from_fn(&module_path, fnid)
+                    .with_context(error_item!("while trying to import '{}'", module_path))?;
+
+                // Commit before reborrowing
+                data.top_mut().set_resume_iid(bytecode::IID(iid.0 + 1));
+
+                if let Some(&module_value) = realm.module_objs.get(&root_fnid) {
+                    data.top_mut().set_result(*dest, module_value);
+                } else {
+                    let root_fn = loader.get_function(root_fnid).unwrap();
+
+                    data.top_mut().set_return_target(*dest);
+                    data.top_mut().set_resume_iid(IID(iid.0 + 1));
+
+                    debug_assert!(root_fn.is_strict_mode());
+                    data.push_direct(root_fnid, root_fn, Value::Undefined);
+                    data.top_mut().set_is_module_root_fn();
+                }
+
+                // This satisfies the borrow checker
+                // (`loader.load_import_from_fn` mut-borrows the whole
+                // Loader, so the compiler can't prove that the same FnId
+                // won't correspond to a different function or even stay
+                // valid across the call)
+                continue;
+            }
+
+            Instr::LoadNull(dest) => {
+                data.top_mut().set_result(*dest, Value::Null);
+            }
+            Instr::LoadUndefined(dest) => {
+                data.top_mut().set_result(*dest, Value::Undefined);
+            }
+            Instr::LoadThis(dest) => {
+                let value = data.top().header().this;
+                data.top_mut().set_result(*dest, value);
+            }
+            Instr::ArithInc(dest, src) => {
+                let val = get_operand(data, *src)?
+                    .expect_num()
+                    .map_err(|_| error!("bytecode bug: ArithInc on non-number"))?;
+                data.top_mut().set_result(*dest, Value::Number(val + 1.0));
+            }
+            Instr::ArithDec(dest, src) => {
+                let val = get_operand(data, *src)?
+                    .expect_num()
+                    .map_err(|_| error!("bytecode bug: ArithDec on non-number"))?;
+                data.top_mut().set_result(*dest, Value::Number(val - 1.0));
+            }
+            Instr::IsInstanceOf(dest, obj, sup) => {
+                let result = is_instance_of(data, realm, *obj, *sup)?;
+                data.top_mut().set_result(*dest, Value::Bool(result));
+            }
+            Instr::NewIterator { dest: _, obj: _ } => todo!(),
+            Instr::IteratorGetCurrent { dest: _, iter: _ } => todo!(),
+            Instr::IteratorAdvance { iter: _ } => todo!(),
+            Instr::JmpIfIteratorFinished { iter: _, dest: _ } => todo!(),
+
+            Instr::StrCreateEmpty(dest) => {
+                let oid = realm.heap.new_string(JSString::empty());
+                data.top_mut().set_result(*dest, Value::String(oid));
+            }
+            Instr::StrAppend(buf_reg, tail) => {
+                let value = str_append(data, realm, *buf_reg, *tail)?;
+                data.top_mut().set_result(*buf_reg, value);
+            }
+
+            Instr::GetGlobalThis(dest) => {
+                data.top_mut().set_result(*dest, realm.global_obj);
+            }
+            Instr::GetGlobal {
+                dest,
+                name: bytecode::ConstIndex(name_cndx),
+            } => {
+                let literal = func.consts()[*name_cndx as usize].clone();
+                let key_str = match &literal {
+                    bytecode::Literal::String(s) => s,
+                    bytecode::Literal::JsWord(jsw) => jsw.as_ref(),
+                    _ => {
+                        panic!("malformed bytecode: GetGlobal argument `name` not a string literal")
+                    }
+                };
+                let key = heap::IndexOrKey::Key(key_str);
+
+                let lookup_result = realm.heap.get_own(realm.global_obj, key);
+
+                let prop = match lookup_result {
+                    None => None,
+                    Some(prop) if prop.value() == Some(Value::Undefined) => None,
+                    Some(prop) => Some(prop),
+                };
+
+                match prop {
+                    None => {
+                        let msg = JSString::new_from_str(&format!("{} is not defined", key_str));
+                        let msg = realm.heap.new_string(msg);
+
+                        let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
+                        let exc = Value::Object(realm.heap.new_ordinary_object());
+                        realm.heap.set_proto(exc, Some(exc_proto));
+                        realm.heap.set_own(exc, heap::IndexOrKey::Key("message"), {
+                            let value = Value::String(msg);
+                            heap::Property::Enumerable(value)
+                        });
+
+                        throw_exc(
+                            exc,
+                            iid,
+                            data,
+                            #[cfg(feature = "debugger")]
+                            dbg,
+                        )?;
+                        continue;
+                    }
+                    Some(prop) => {
+                        data.top_mut().set_result(*dest, prop.value().unwrap());
+                    }
+                }
+            }
+
+            Instr::Breakpoint => {
+                suspend_for_breakpoint(data, iid)?;
+            }
+
+            Instr::GetCurrentException(dest) => {
+                let cur_exc = data
+                    .get_cur_exc()
+                    .expect("compiler bug: GetCurrentException but there isn't any");
+                data.top_mut().set_result(*dest, cur_exc);
+            }
+            Instr::Throw(exc) => {
+                let exc = get_operand(data, *exc)?;
+                throw_exc(
+                    exc,
+                    iid,
+                    data,
+                    #[cfg(feature = "debugger")]
+                    dbg,
+                )?;
+                continue;
+            }
+            Instr::PopExcHandler => {
+                data.top_mut()
+                    .pop_exc_handler()
+                    .ok_or_else(|| error!("compiler bug: no exception handler to pop!"))?;
+            }
+            Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
+        }
+
+        // TODO Inefficient, but prevents a number of bugs
+        data.top_mut().set_resume_iid(bytecode::IID(next_ndx));
+
+        #[cfg(feature = "debugger")]
+        if let Some(dbg) = dbg {
+            dbg.consume_1_fuel();
         }
     }
 }
