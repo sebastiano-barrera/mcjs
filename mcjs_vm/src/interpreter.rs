@@ -8,9 +8,7 @@ use crate::heap::JSString;
 use crate::{
     bytecode::{self, FnID, Instr, VReg, IID},
     common::{self, Result},
-    define_flag, error,
-    heap::{self, IndexOrKey},
-    loader,
+    define_flag, error, heap, loader,
 };
 
 mod builtins;
@@ -18,7 +16,8 @@ pub mod stack;
 
 #[cfg(feature = "debugger")]
 pub use stack::SlotDebug;
-use stack::UpvalueID;
+
+use stack::UpvalueRef;
 
 // Public versions of the private `RunResult` and `RunError`
 pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
@@ -89,12 +88,12 @@ pub struct Closure {
     func: Func,
     is_strict: bool,
     /// TODO There oughta be a better data structure for this
-    upvalues: Vec<UpvalueID>,
+    upvalues: Vec<UpvalueRef>,
     forced_this: Option<Value>,
     generator_snapshot: RefCell<Option<stack::FrameSnapshot>>,
 }
 impl Closure {
-    pub fn upvalues(&self) -> &[UpvalueID] {
+    pub fn upvalues(&self) -> &[UpvalueRef] {
         &self.upvalues
     }
 
@@ -207,6 +206,7 @@ pub struct Interpreter<'a> {
 }
 
 pub struct FinishedData {
+    pub ret_val: Value,
     #[cfg(any(test, feature = "debugger"))]
     pub sink: Vec<Option<bytecode::Literal>>,
 }
@@ -236,6 +236,33 @@ impl<'a> Interpreter<'a> {
         // parameters, then put it into an Interpreter
         let mut data = init_stack(loader, realm, fnid);
         data.set_default_this(realm.global_obj);
+        Interpreter {
+            realm,
+            data,
+            loader,
+            #[cfg(feature = "debugger")]
+            dbg: None,
+        }
+    }
+
+    fn new_call(
+        realm: &'a mut Realm,
+        loader: &'a mut crate::Loader,
+        closure: Rc<Closure>,
+        this: Value,
+        args: &[Value],
+    ) -> Self {
+        // Initialize the stack with a single frame, corresponding to a call to fnid with no
+        // parameters, then put it into an Interpreter
+        let mut data = stack::InterpreterData::new();
+        data.set_default_this(realm.global_obj);
+
+        data.push_call(closure, this, loader);
+        for i in 0..bytecode::ARGS_COUNT_MAX {
+            let arg = args.get(i as usize).unwrap_or(&Value::Undefined);
+            data.top_mut().set_arg(bytecode::ArgIndex(i as _), *arg);
+        }
+
         Interpreter {
             realm,
             data,
@@ -304,6 +331,7 @@ impl<'a> Interpreter<'a> {
                     .collect();
 
                 Ok(Exit::Finished(FinishedData {
+                    ret_val: self.data.final_return_value(),
                     #[cfg(any(test, feature = "debugger"))]
                     sink,
                 }))
@@ -952,7 +980,7 @@ fn run_inner(
                             let exc_proto = get_builtin(realm, "ReferenceError").unwrap();
                             let exc = Value::Object(realm.heap.new_ordinary_object());
                             realm.heap.set_proto(exc, Some(exc_proto));
-                            realm.heap.set_own(exc, IndexOrKey::Key("message"), {
+                            realm.heap.set_own(exc, heap::IndexOrKey::Key("message"), {
                                 let value = Value::String(msg);
                                 heap::Property::Enumerable(value)
                             });
@@ -1161,7 +1189,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
     let exc_cons = get_builtin(realm, constructor_name).unwrap();
     let exc_proto = realm
         .heap
-        .get_own(Value::Object(exc_cons), IndexOrKey::Key("prototype"))
+        .get_own(Value::Object(exc_cons), heap::IndexOrKey::Key("prototype"))
         .unwrap()
         .value()
         .unwrap()
@@ -1170,7 +1198,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
     let exc = Value::Object(realm.heap.new_ordinary_object());
 
     realm.heap.set_proto(exc, Some(exc_proto));
-    realm.heap.set_own(exc, IndexOrKey::Key("message"), {
+    realm.heap.set_own(exc, heap::IndexOrKey::Key("message"), {
         let value = Value::String(message);
         heap::Property::Enumerable(value)
     });
@@ -1181,7 +1209,7 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
 fn get_builtin(realm: &Realm, builtin_name: &str) -> RunResult<heap::ObjectID> {
     realm
         .heap
-        .get_own(realm.global_obj, IndexOrKey::Key(builtin_name))
+        .get_own(realm.global_obj, heap::IndexOrKey::Key(builtin_name))
         .map(|p| p.value().unwrap())
         .ok_or_else(|| error!("missing required builtin: {}", builtin_name))?
         .expect_obj()
@@ -1219,11 +1247,7 @@ fn do_return(ret_val: Value, data: &mut stack::InterpreterData, realm: &mut Real
     }
 
     data.pop();
-    if !data.is_empty() {
-        if let Some(rv_reg) = data.top_mut().take_return_target() {
-            data.top_mut().set_result(rv_reg, ret_val);
-        }
-    }
+    data.set_return_value(ret_val);
 }
 
 fn obj_set(
@@ -1560,7 +1584,10 @@ fn show_value_ex<W: std::io::Write>(
                 write!(out, "    ").unwrap();
             }
 
-            let property = realm.heap.get_own(value, IndexOrKey::Key(&key)).unwrap();
+            let property = realm
+                .heap
+                .get_own(value, heap::IndexOrKey::Key(&key))
+                .unwrap();
             write!(out, "  - {:?} = ", key).unwrap();
             show_value_ex(
                 out,
@@ -3049,6 +3076,51 @@ do {
                 Some(Literal::Bool(false)),
             ]
         );
+    }
+
+    #[test]
+    fn test_final_return_value() {
+        let mut loader = loader::Loader::new_cwd();
+        let mut realm = Realm::new(&mut loader);
+
+        let init_script = r#"
+            const myVariable = 123;
+            globalThis.aFunction = function() { return myVariable; }
+        "#;
+        let chunk_fnid = loader
+            .load_script_anon(init_script.to_string())
+            .expect("couldn't compile test script");
+        Interpreter::new(&mut realm, &mut loader, chunk_fnid)
+            .run()
+            .unwrap()
+            .expect_finished();
+
+        let global_obj = realm.global_obj;
+        let inner_closure = realm
+            .heap
+            .get_chained(global_obj, heap::IndexOrKey::Key("aFunction"))
+            .expect("no property `aFunction`")
+            .value()
+            .unwrap();
+        let inner_closure = realm
+            .heap
+            .as_closure(inner_closure)
+            .expect("`aFunction` not a closure");
+        let inner_closure = Rc::clone(&inner_closure);
+
+        let finish = Interpreter::new_call(
+            &mut realm,
+            &mut loader,
+            inner_closure,
+            Value::Undefined,
+            &[],
+        )
+        .run()
+        .unwrap()
+        .expect_finished();
+
+        let lit = try_value_to_literal(finish.ret_val, &realm.heap);
+        assert_eq!(lit, Some(Literal::Number(123.0)));
     }
 
     mod debugging {
