@@ -3,7 +3,8 @@
 use std::rc::Rc;
 
 use super::{
-    make_exception, to_boolean, to_number, to_object, Closure, NativeFn, RunError, RunResult,
+    make_exception, to_boolean, to_number, to_object, to_object_or_throw, Closure, NativeFn,
+    RunError, RunResult,
 };
 use super::{to_string, to_string_or_throw, Realm, Value};
 
@@ -116,6 +117,12 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     }
 
     let Boolean = Value::Object(heap.new_function(native_closure(nf_Boolean)));
+    {
+        heap.set_own(Boolean, "prototype".into(), {
+            let value = Value::Object(heap.bool_proto());
+            Property::NonEnumerable(value)
+        });
+    }
 
     let Function = Value::Object(heap.new_function(native_closure(nf_Function)));
     {
@@ -126,6 +133,22 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     }
 
     let Object = Value::Object(heap.new_function(native_closure(nf_Object)));
+    {
+        heap.set_own(Object, "prototype".into(), {
+            let value = Value::Object(heap.object_proto());
+            Property::NonEnumerable(value)
+        });
+    }
+
+    let object_proto = Value::Object(heap.object_proto());
+    {
+        let valueOf = Value::Object(heap.new_function(native_closure(nf_Object_valueOf)));
+        heap.set_own(
+            object_proto,
+            "valueOf".into(),
+            Property::NonEnumerable(valueOf),
+        );
+    }
 
     let cash_print = Value::Object(heap.new_function(native_closure(nf_cash_print)));
 
@@ -437,8 +460,22 @@ fn nf_Function(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Valu
 /// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
 fn nf_Object(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
     let arg = args.first().copied().unwrap_or(Value::Undefined);
+    // unlike `Object.prototype.valueOf`, conversion failures fall back to an empty object
     Ok(to_object(arg, &mut realm.heap)
         .unwrap_or_else(|| Value::Object(realm.heap.new_ordinary_object())))
+}
+
+fn nf_Object_valueOf(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<Value> {
+    // This implementation of valueOf only 'converts to object'.
+
+    // In non-strict mode, 'this substitution' [1] kicks in before the call
+    // to this function. In most cases, `this` will have already been boxed
+    // (converted to object) by the time we get here.
+
+    to_object_or_throw(*this, realm)
+
+    // More interesting conversions happen in other prototypes (e.g. Number.prototype,
+    // String.prototype, etc.)
 }
 
 fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {

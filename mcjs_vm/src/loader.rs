@@ -151,7 +151,7 @@ impl Loader {
                 Function.prototype.call = function (new_this, arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
                     // `this` is the function to call
                     const bound = this.bind(new_this);
-                    return bound(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+                    return bound(arg0, arg1, arg2, arg3, arg4, arg5, arg6);
                 }
 
                 Function.prototype.apply = function (new_this, args) {

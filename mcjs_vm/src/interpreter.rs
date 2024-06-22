@@ -59,6 +59,11 @@ pub enum Value {
 
     Symbol(&'static str),
 }
+impl Value {
+    fn is_primitive(&self) -> bool {
+        !matches!(self, Value::Object(_))
+    }
+}
 
 macro_rules! gen_value_expect {
     ($fn_name:ident, $variant:tt, $inner_ty:ty) => {
@@ -1178,8 +1183,68 @@ fn to_object_or_throw(value: Value, realm: &mut Realm) -> RunResult<Value> {
     })
 }
 
-fn to_primitive(_value: Value, _heap: &heap::Heap) -> Option<Value> {
-    todo!("not yet implemented: primitive coercion")
+fn to_primitive(
+    value: Value,
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+) -> RunResult<Option<Value>> {
+    // This whole ordeal needs to happen even if value is not an object, because some
+    // funny guy could set a custom function to a wrapper's valueOf:
+    //    > (123).valueOf()
+    //    123
+    //    > Number.prototype.valueOf = function() { return 'HEYOOO' }
+    //    [Function (anonymous)]
+    //    > (123).valueOf()
+    //    'HEYOOO'
+    #![allow(non_snake_case)]
+
+    if let Value::Null | Value::Undefined = value {
+        let exc = make_exception(
+            realm,
+            "TypeError",
+            "Cannot convert undefined or null to object",
+        );
+        return Err(RunError::Exception(exc));
+    }
+
+    // call x.valueOf(); return it if not an object
+    if let Some(valueOf) = realm
+        .heap
+        .get_chained(value, heap::IndexOrKey::Key("valueOf"))
+    {
+        let valueOf = valueOf.value().unwrap();
+        if let Some(valueOf) = realm.heap.as_closure(valueOf) {
+            let closure = Rc::clone(&valueOf);
+            let ret_val = Interpreter::new_call(realm, loader, closure, value, &[])
+                .run()?
+                .expect_finished()
+                .ret_val;
+
+            if ret_val.is_primitive() {
+                return Ok(Some(ret_val));
+            }
+        }
+    }
+
+    if let Some(toString) = realm
+        .heap
+        .get_chained(value, heap::IndexOrKey::Key("toString"))
+    {
+        let toString = toString.value().unwrap();
+        if let Some(toString) = realm.heap.as_closure(toString) {
+            let closure = Rc::clone(&toString);
+            let ret_val = Interpreter::new_call(realm, loader, closure, value, &[])
+                .run()?
+                .expect_finished()
+                .ret_val;
+
+            if ret_val.is_primitive() {
+                return Ok(Some(ret_val));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> Value {
@@ -1229,6 +1294,11 @@ pub enum RunError {
 impl From<common::Error> for RunError {
     fn from(err: common::Error) -> Self {
         RunError::Internal(err)
+    }
+}
+impl From<InterpreterError> for RunError {
+    fn from(intrp_err: InterpreterError) -> Self {
+        intrp_err.error.into()
     }
 }
 
@@ -2975,6 +3045,55 @@ do {
             // Check for equality, including NaN
             assert_eq!(f64::to_bits(out), f64::to_bits(exp));
         }
+    }
+
+    #[test]
+    fn test_autobox() {
+        let output = quick_run_script(
+            "
+            function tryValue(value, expectedPrototype, sentinelValue) {
+                expectedPrototype.sentinel = sentinelValue;
+                sink(value.sentinel === sentinelValue);
+            }
+            tryValue(123.45,            Number.prototype,  'sentinel:number');
+            tryValue(true,              Boolean.prototype, 'sentinel:boolean');
+            tryValue('some string',     String.prototype,  'sentinel:string');
+            // TODO fix this test when I implement 'Symbol'
+            if (globalThis.Symbol) {
+                throw new Error('re-enable this portion of the test!');
+                // tryValue(Symbol.for('someSymbol'), Symbol.prototype, 'sentinel:symbol');
+            }
+            ",
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_autobox_failure() {
+        quick_run_script(
+            "
+            function tryValue(value) {
+                try {
+                    Object.prototype.valueOf.call(value);
+                    throw new Error('an exception should have been caught!');
+                } catch (err) {
+                    if (err.name !== 'TypeError') {
+                        throw new Error('the exception should have been a TypeError, not a ' + err.name);
+                    }
+                }
+            }
+            tryValue(null);
+            tryValue(undefined);
+            ",
+        );
     }
 
     #[test]
