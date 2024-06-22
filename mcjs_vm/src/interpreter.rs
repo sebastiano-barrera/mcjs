@@ -1198,6 +1198,15 @@ fn to_primitive(
     //    'HEYOOO'
     #![allow(non_snake_case)]
 
+    if let Value::Null | Value::Undefined = value {
+        let exc = make_exception(
+            realm,
+            "TypeError",
+            "Cannot convert undefined or null to object",
+        );
+        return Err(RunError::Exception(exc));
+    }
+
     // call x.valueOf(); return it if not an object
     if let Some(valueOf) = realm
         .heap
@@ -3036,6 +3045,55 @@ do {
             // Check for equality, including NaN
             assert_eq!(f64::to_bits(out), f64::to_bits(exp));
         }
+    }
+
+    #[test]
+    fn test_autobox() {
+        let output = quick_run_script(
+            "
+            function tryValue(value, expectedPrototype, sentinelValue) {
+                expectedPrototype.sentinel = sentinelValue;
+                sink(value.sentinel === sentinelValue);
+            }
+            tryValue(123.45,            Number.prototype,  'sentinel:number');
+            tryValue(true,              Boolean.prototype, 'sentinel:boolean');
+            tryValue('some string',     String.prototype,  'sentinel:string');
+            // TODO fix this test when I implement 'Symbol'
+            if (globalThis.Symbol) {
+                throw new Error('re-enable this portion of the test!');
+                // tryValue(Symbol.for('someSymbol'), Symbol.prototype, 'sentinel:symbol');
+            }
+            ",
+        );
+
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+                Some(Literal::Bool(true)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_autobox_failure() {
+        quick_run_script(
+            "
+            function tryValue(value) {
+                try {
+                    Object.prototype.valueOf.call(value);
+                    throw new Error('an exception should have been caught!');
+                } catch (err) {
+                    if (err.name !== 'TypeError') {
+                        throw new Error('the exception should have been a TypeError, not a ' + err.name);
+                    }
+                }
+            }
+            tryValue(null);
+            tryValue(undefined);
+            ",
+        );
     }
 
     #[test]
