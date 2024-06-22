@@ -125,7 +125,8 @@ enum Func {
     JS(JSFn),
 }
 
-pub(crate) type NativeFn = fn(&mut Realm, &Value, &[Value]) -> RunResult<Value>;
+pub(crate) type NativeFn =
+    fn(&mut Realm, &mut loader::Loader, &Value, &[Value]) -> RunResult<Value>;
 #[derive(Clone, Copy)]
 pub struct JSFn(FnID);
 
@@ -596,8 +597,10 @@ fn run_inner(
                 }
                 Instr::ToNumber { dest, arg } => {
                     let value = get_operand(data, *arg)?;
-                    let value = to_number_or_throw(value, realm)?;
+                    let value = to_number_or_throw(value, realm, loader)?;
                     data.top_mut().set_result(*dest, value);
+                    data.top_mut().set_resume_iid(bytecode::IID(iid.0 + 1));
+                    continue 'reborrow;
                 }
 
                 Instr::Jmp(IID(dest_ndx)) => {
@@ -678,13 +681,13 @@ fn run_inner(
                                 data.top_mut().set_arg(bytecode::ArgIndex(i as _), *arg);
                             }
 
-                            // stack is prepared, just continue turning the crank to run the callee
-                            continue 'reborrow;
+                            // stack is prepared, just continue turning the crank to run
+                            // the callee
                         }
-                        Func::Native(nf) => match nf(realm, &this, &arg_vals) {
+                        Func::Native(nf) => match nf(realm, loader, &this, &arg_vals) {
                             Ok(ret_val) => {
                                 data.top_mut().set_result(*return_value_reg, ret_val);
-                                next_ndx = return_to_iid.0;
+                                data.top_mut().set_resume_iid(return_to_iid);
                             }
                             Err(RunError::Exception(exc)) => {
                                 throw_exc(
@@ -694,11 +697,11 @@ fn run_inner(
                                     #[cfg(feature = "debugger")]
                                     dbg,
                                 )?;
-                                continue 'reborrow;
                             }
                             Err(other_err) => return Err(other_err),
                         },
                     }
+                    continue 'reborrow;
                 }
                 Instr::CallArg(_) => {
                     unreachable!("interpreter bug: CallArg goes through another path!")
@@ -1048,8 +1051,12 @@ fn run_inner(
 /// Perform number coercion (see `to_number`).
 ///
 /// On error, throw a TypeError (as per JS semantics.)
-fn to_number_or_throw(arg: Value, realm: &mut Realm) -> RunResult<Value> {
-    to_number(arg, &realm.heap)
+fn to_number_or_throw(
+    arg: Value,
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+) -> RunResult<Value> {
+    to_number(arg, realm, loader)?
         .map(Value::Number)
         .ok_or_else(|| {
             let message = &format!("cannot convert to a number: {:?}", arg);
@@ -1067,34 +1074,37 @@ fn to_number_or_throw(arg: Value, realm: &mut Realm) -> RunResult<Value> {
 ///
 /// A `Some` is returned for a successful conversion. On failure (e.g. for
 /// Symbol), a `None` is returned.
-fn to_number(value: Value, heap: &heap::Heap) -> Option<f64> {
+fn to_number(
+    value: Value,
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+) -> RunResult<Option<f64>> {
     match value {
-        Value::Null => Some(0.0),
-        Value::Bool(true) => Some(1.0),
-        Value::Bool(false) => Some(0.0),
-        Value::Number(num) => Some(num),
-        Value::Object(_) => {
-            // TODO use primitive coercing here. re-enable this block:
-            // let prim = to_primitive(value, heap)?;
-            // assert!(!matches!(prim, Value::Object(_)));
-            // to_number(prim, heap)
-
-            // in the meantime, this keeps a basic case ok:
-            Some(f64::NAN)
-        }
-        Value::Undefined => Some(f64::NAN),
-        Value::Symbol(_) => None,
+        Value::Null => Ok(Some(0.0)),
+        Value::Bool(true) => Ok(Some(1.0)),
+        Value::Bool(false) => Ok(Some(0.0)),
+        Value::Number(num) => Ok(Some(num)),
+        Value::Object(_) => match to_primitive(value, realm, loader)? {
+            Some(prim) => {
+                assert!(prim.is_primitive());
+                to_number(prim, realm, loader)
+            }
+            None => Ok(None),
+        },
+        Value::Undefined => Ok(Some(f64::NAN)),
+        Value::Symbol(_) => Ok(None),
         Value::String(_) => {
-            let jss = heap.as_str(value).unwrap();
+            let jss = realm.heap.as_str(value).unwrap();
             // hopefully not too costly...
             // TODO cache utf16 -> utf8 conversion?
             let s = jss.to_string();
-            match s.as_str().trim() {
+            let val = match s.as_str().trim() {
                 "" => Some(0.0),
                 "+Infinity" => Some(f64::INFINITY),
                 "-Infinity" => Some(f64::NEG_INFINITY),
                 _ => s.parse().ok(),
-            }
+            };
+            Ok(val)
         }
     }
 }

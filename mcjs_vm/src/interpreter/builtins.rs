@@ -12,6 +12,7 @@ use crate::error;
 use crate::heap;
 use crate::heap::JSString;
 use crate::heap::Property;
+use crate::loader;
 
 #[inline]
 fn native_closure(nf: NativeFn) -> Rc<Closure> {
@@ -224,7 +225,12 @@ fn add_exception_type(
     prototype
 }
 
-fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_set_message(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let message = *args.get(0).unwrap_or(&Value::Undefined);
     realm
         .heap
@@ -232,7 +238,12 @@ fn nf_set_message(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
     Ok(Value::Undefined)
 }
 
-fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_Array_isArray(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    _this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let value = if let Some(obj) = args.first() {
         realm.heap.array_elements(*obj).is_some()
     } else {
@@ -242,14 +253,24 @@ fn nf_Array_isArray(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResu
     Ok(Value::Bool(value))
 }
 
-fn nf_Array_push(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_Array_push(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     // TODO Proper error handling, instead of these unwrap
     let value = *args.first().unwrap();
     realm.heap.array_push(*this, value);
     Ok(Value::Undefined)
 }
 
-fn nf_Array_pop(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<Value> {
+fn nf_Array_pop(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
     match realm.heap.as_array_mut(*this) {
         Some(elements) => Ok(elements.pop().unwrap_or(Value::Undefined)),
         None => {
@@ -259,7 +280,12 @@ fn nf_Array_pop(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<V
     }
 }
 
-fn nf_RegExp(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_RegExp(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let source = match args.first() {
         Some(val) => to_string_or_throw(*val, realm)?,
         None => {
@@ -277,7 +303,12 @@ fn nf_RegExp(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value
     Ok(*this)
 }
 
-fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_RegExp_test(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     // TODO Insanely slow! Cache the Regex object
 
     let source = realm
@@ -311,7 +342,12 @@ fn nf_RegExp_test(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<
     Ok(Value::Bool(found))
 }
 
-fn nf_Array(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_Array(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let this = this
         .expect_obj()
         .expect("compiler bug: new Array(...): non-object this");
@@ -320,7 +356,12 @@ fn nf_Array(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value>
     Ok(Value::Undefined)
 }
 
-fn nf_Number(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_Number(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    _this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let value = args.first().copied().unwrap_or(Value::Undefined);
 
     match value {
@@ -349,6 +390,7 @@ fn nf_Number(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Valu
 
 fn nf_Number_prototype_toString(
     realm: &mut Realm,
+    _loader: &mut loader::Loader,
     this: &Value,
     _args: &[Value],
 ) -> RunResult<Value> {
@@ -371,7 +413,12 @@ fn nf_Number_prototype_toString(
     }
 }
 
-fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_String(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let value = args.first().copied();
 
     let value_str = match value {
@@ -397,10 +444,15 @@ fn nf_String(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value
     }
 }
 
-fn nf_String_fromCodePoint(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_String_fromCodePoint(
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+    _this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let s = match args.first().copied() {
         Some(value) => {
-            let value_num = to_number(value, &realm.heap).ok_or_else(|| -> RunError {
+            let value_num = to_number(value, realm, loader)?.ok_or_else(|| -> RunError {
                 error!("invalid number: {:?}", realm.heap.show_debug(value)).into()
             })?;
 
@@ -422,10 +474,15 @@ fn nf_String_fromCodePoint(realm: &mut Realm, _this: &Value, args: &[Value]) -> 
     Ok(Value::String(s))
 }
 
-fn nf_String_codePointAt(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_String_codePointAt(
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+    this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let index = {
         let index = args.first().copied().unwrap_or(Value::Number(0.0));
-        let index = to_number(index, &realm.heap).ok_or_else(|| -> RunError {
+        let index = to_number(index, realm, loader)?.ok_or_else(|| -> RunError {
             error!("invalid index: {}", realm.heap.show_debug(index)).into()
         })?;
         if index.fract() != 0.0 {
@@ -445,7 +502,12 @@ fn nf_String_codePointAt(realm: &mut Realm, this: &Value, args: &[Value]) -> Run
         .unwrap_or(Value::Undefined))
 }
 
-fn nf_Boolean(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_Boolean(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    _this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     // TODO Provide correct implementation for `new Boolean(...)` in addition to
     // `Boolean(...)`
     let arg = args.first().copied().unwrap_or(Value::Undefined);
@@ -453,19 +515,34 @@ fn nf_Boolean(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Val
     Ok(Value::Bool(bool_val))
 }
 
-fn nf_Function(_realm: &mut Realm, _this: &Value, _: &[Value]) -> RunResult<Value> {
+fn nf_Function(
+    _realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    _this: &Value,
+    _: &[Value],
+) -> RunResult<Value> {
     todo!("not yet implemented!")
 }
 
 /// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value
-fn nf_Object(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_Object(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    _this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let arg = args.first().copied().unwrap_or(Value::Undefined);
     // unlike `Object.prototype.valueOf`, conversion failures fall back to an empty object
     Ok(to_object(arg, &mut realm.heap)
         .unwrap_or_else(|| Value::Object(realm.heap.new_ordinary_object())))
 }
 
-fn nf_Object_valueOf(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunResult<Value> {
+fn nf_Object_valueOf(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
     // This implementation of valueOf only 'converts to object'.
 
     // In non-strict mode, 'this substitution' [1] kicks in before the call
@@ -478,7 +555,12 @@ fn nf_Object_valueOf(realm: &mut Realm, this: &Value, _args: &[Value]) -> RunRes
     // String.prototype, etc.)
 }
 
-fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_cash_print(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    _this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     use std::borrow::Cow;
 
     for arg in args {
@@ -490,7 +572,12 @@ fn nf_cash_print(realm: &mut Realm, _this: &Value, args: &[Value]) -> RunResult<
     Ok(Value::Undefined)
 }
 
-fn nf_Function_bind(realm: &mut Realm, this: &Value, args: &[Value]) -> RunResult<Value> {
+fn nf_Function_bind(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    args: &[Value],
+) -> RunResult<Value> {
     let orig_closure = realm
         .heap
         .as_closure(*this)
