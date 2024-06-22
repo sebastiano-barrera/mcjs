@@ -16,7 +16,8 @@ pub mod stack;
 
 #[cfg(feature = "debugger")]
 pub use stack::SlotDebug;
-use stack::UpvalueID;
+
+use stack::UpvalueRef;
 
 // Public versions of the private `RunResult` and `RunError`
 pub type InterpreterResult<T> = std::result::Result<T, InterpreterError>;
@@ -87,12 +88,12 @@ pub struct Closure {
     func: Func,
     is_strict: bool,
     /// TODO There oughta be a better data structure for this
-    upvalues: Vec<UpvalueID>,
+    upvalues: Vec<UpvalueRef>,
     forced_this: Option<Value>,
     generator_snapshot: RefCell<Option<stack::FrameSnapshot>>,
 }
 impl Closure {
-    pub fn upvalues(&self) -> &[UpvalueID] {
+    pub fn upvalues(&self) -> &[UpvalueRef] {
         &self.upvalues
     }
 

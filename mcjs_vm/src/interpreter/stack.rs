@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::bytecode::{self, VReg, ARGS_COUNT_MAX};
@@ -10,7 +10,6 @@ use super::Func;
 ///
 /// Mostly stores local variables.
 pub struct InterpreterData {
-    upv_alloc: Upvalues,
     headers: Vec<FrameHeader>,
     values: Vec<Slot>,
 
@@ -48,17 +47,16 @@ pub struct InterpreterData {
 // represents an uninitialized storage location corresponding to a variable still in the
 // temporal dead zone.   See [1] for the source-level semantics in JavaScript.
 //
-// [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/let#temporal_dead_zone_tdz
+// [1] https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/let#temporal_ded_zone_tdz
 
-slotmap::new_key_type! { pub struct UpvalueID; }
-
-type Upvalues = slotmap::SlotMap<UpvalueID, Option<Value>>;
-
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Slot {
     Inline(Option<Value>),
-    Upvalue(UpvalueID),
+    Upvalue(UpvalueRef),
 }
+
+// TODO Benchmark! Is Rc overkill for such a small value? Right now I don't care
+pub type UpvalueRef = Rc<Cell<Option<Value>>>;
 
 #[cfg(feature = "debugger")]
 #[derive(Debug)]
@@ -67,15 +65,17 @@ pub enum SlotDebug {
     // "Inline(None)"
     Uninitialized,
     Inline(Value),
-    Upvalue(UpvalueID),
+    // A numeric ID (just the addr cast to number), just to make the Rc representable on UIs and
+    // the sort. To be treated just as an opaque ID.
+    Upvalue(usize),
 }
 #[cfg(feature = "debugger")]
-impl From<Slot> for SlotDebug {
-    fn from(value: Slot) -> Self {
+impl From<&Slot> for SlotDebug {
+    fn from(value: &Slot) -> Self {
         match value {
             Slot::Inline(None) => SlotDebug::Uninitialized,
-            Slot::Inline(Some(x)) => SlotDebug::Inline(x),
-            Slot::Upvalue(x) => SlotDebug::Upvalue(x),
+            Slot::Inline(Some(x)) => SlotDebug::Inline(*x),
+            Slot::Upvalue(x) => SlotDebug::Upvalue(Rc::as_ptr(&x) as usize),
         }
     }
 }
@@ -111,7 +111,6 @@ impl InterpreterData {
 
     pub(crate) fn new() -> Self {
         InterpreterData {
-            upv_alloc: slotmap::SlotMap::with_key(),
             headers: Vec::with_capacity(Self::INIT_CAPACITY),
             values: Vec::with_capacity(Self::INIT_CAPACITY),
             default_this: Value::Undefined,
@@ -269,11 +268,7 @@ impl InterpreterData {
         let regs_offset = header.regs_offset as usize;
         let regs_count = header.regs_count as usize;
         let values = &self.values[regs_offset..regs_offset + regs_count];
-        Frame {
-            header,
-            values,
-            upv_alloc: &self.upv_alloc,
-        }
+        Frame { header, values }
     }
 
     fn nth_frame_mut(&mut self, ndx: usize) -> FrameMut {
@@ -281,11 +276,7 @@ impl InterpreterData {
         let regs_offset = header.regs_offset as usize;
         let regs_count = header.regs_count as usize;
         let values = &mut self.values[regs_offset..regs_offset + regs_count];
-        FrameMut {
-            header,
-            values,
-            upv_alloc: &mut self.upv_alloc,
-        }
+        FrameMut { header, values }
     }
 
     pub fn top(&self) -> Frame {
@@ -320,8 +311,8 @@ impl InterpreterData {
         capture_ndx: bytecode::CaptureIndex,
         vreg: bytecode::VReg,
     ) {
-        let upv_id = self.top().get_capture(capture_ndx);
-        self.top_mut().values[vreg.0 as usize] = Slot::Upvalue(upv_id);
+        let upv = self.top().get_capture(capture_ndx);
+        self.top_mut().values[vreg.0 as usize] = Slot::Upvalue(upv);
     }
 
     #[cfg(test)]
@@ -359,12 +350,10 @@ impl InterpreterData {
 pub struct Frame<'a> {
     header: &'a FrameHeader,
     values: &'a [Slot],
-    upv_alloc: &'a Upvalues,
 }
 pub struct FrameMut<'a> {
     header: &'a mut FrameHeader,
     values: &'a mut [Slot],
-    upv_alloc: &'a mut Upvalues,
 }
 
 impl<'a> Frame<'a> {
@@ -374,7 +363,7 @@ impl<'a> Frame<'a> {
 
     #[cfg(feature = "debugger")]
     pub fn get_slot(&self, vreg: bytecode::VReg) -> SlotDebug {
-        self.values[vreg.0 as usize].into()
+        (&self.values[vreg.0 as usize]).into()
     }
 
     /// Return the value of the given virtual register.
@@ -385,10 +374,7 @@ impl<'a> Frame<'a> {
         let slot = &self.values[vreg.0 as usize];
         match slot {
             Slot::Inline(value) => *value,
-            Slot::Upvalue(upv_id) => *self
-                .upv_alloc
-                .get(*upv_id)
-                .expect("gc bug: value deleted but still referenced by stack"),
+            Slot::Upvalue(upv) => upv.get(),
         }
     }
     /// Returns an iterator for the value of each virtual register.  See `get_result`.
@@ -414,28 +400,19 @@ impl<'a> Frame<'a> {
         (0..ARGS_COUNT_MAX).map(|i| self.get_arg(bytecode::ArgIndex(i.try_into().unwrap())))
     }
 
-    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueID {
+    pub fn get_capture(&self, capture_ndx: bytecode::CaptureIndex) -> UpvalueRef {
         // another/better approach: add N slots to the header and use them as cache for the
         // closure's captures.
-        self.header
+        let upv = self
+            .header
             .closure
             .upvalues
             .get(capture_ndx.0 as usize)
-            .copied()
-            .expect("capture index is out of range")
+            .expect("capture index is out of range");
+        Rc::clone(upv)
     }
-    pub fn captures(&self) -> impl '_ + ExactSizeIterator<Item = UpvalueID> {
-        self.header.closure.upvalues.iter().copied()
-    }
-
-    /// Get the upvalue with the given ID.
-    ///
-    /// The return value has (unfortunately) two levels of `Option` with distinct meaning:
-    /// - the outer Option is None iff the given `upv_id` is invalid.
-    /// - the inner Option is None iff the upvalue exists but contains an uninitialized
-    ///   value (i.e. in the temporal dead zone).
-    pub fn deref_upvalue(&self, upv_id: UpvalueID) -> Option<Option<Value>> {
-        self.upv_alloc.get(upv_id).copied()
+    pub fn captures(&self) -> impl ExactSizeIterator<Item = &UpvalueRef> {
+        self.header.closure.upvalues.iter()
     }
 
     pub fn return_target_reg(&self) -> Option<VReg> {
@@ -450,12 +427,8 @@ impl<'a> FrameMut<'a> {
             Slot::Inline(slot_value) => {
                 *slot_value = Some(value);
             }
-            Slot::Upvalue(upv_id) => {
-                let heap_value = self
-                    .upv_alloc
-                    .get_mut(*upv_id)
-                    .expect("gc bug: value deleted but still referenced by stack");
-                *heap_value = Some(value);
+            Slot::Upvalue(upv) => {
+                upv.set(Some(value));
             }
         };
     }
@@ -470,15 +443,15 @@ impl<'a> FrameMut<'a> {
         self.set_result(bytecode::VReg(argndx.0 as u16), value)
     }
 
-    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueID {
+    pub(crate) fn ensure_in_upvalue(&mut self, var: bytecode::VReg) -> UpvalueRef {
         let slot = &mut self.values[var.0 as usize];
         match slot {
             Slot::Inline(value) => {
-                let upv_id = self.upv_alloc.insert(*value);
-                *slot = Slot::Upvalue(upv_id);
-                upv_id
+                let upv = Rc::new(Cell::new(*value));
+                *slot = Slot::Upvalue(Rc::clone(&upv));
+                upv
             }
-            Slot::Upvalue(upv_id) => *upv_id,
+            Slot::Upvalue(upv) => Rc::clone(upv),
         }
     }
 
@@ -486,8 +459,8 @@ impl<'a> FrameMut<'a> {
         let slot = &mut self.values[var.0 as usize];
         match slot {
             Slot::Inline(_) => {}
-            Slot::Upvalue(upv_id) => {
-                let value = *self.upv_alloc.get(*upv_id).unwrap();
+            Slot::Upvalue(upv) => {
+                let value = upv.get();
                 *slot = Slot::Inline(value);
             }
         }
