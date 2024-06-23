@@ -784,7 +784,11 @@ impl JSString {
     }
 
     pub fn new_from_str(s: &str) -> Self {
-        let full: Rc<Vec<u16>> = Rc::new(s.encode_utf16().collect());
+        let s_u16 = s.encode_utf16().collect();
+        Self::new_from_utf16(s_u16)
+    }
+    pub fn new_from_utf16(s: Vec<u16>) -> Self {
+        let full: Rc<Vec<u16>> = Rc::new(s);
         let start = 0;
         let end = full.len().try_into().unwrap();
         JSString { full, start, end }

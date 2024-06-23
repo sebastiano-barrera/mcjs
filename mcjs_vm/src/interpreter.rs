@@ -520,15 +520,38 @@ fn run_inner(
                 data.top_mut().set_result(*dest, value);
             }
 
-            Instr::OpAdd(dest, a, b) => match get_operand(data, *a)? {
-                Value::Number(_) => with_numbers(data, *dest, *a, *b, |x, y| x + y)?,
-                // TODO replace this with coercing
-                Value::String(_) | Value::Object(_) => {
-                    let value = str_append(data, realm, *a, *b)?;
-                    data.top_mut().set_result(*dest, value);
-                }
-                other => return Err(error!("unsupported operator '+' for: {:?}", other).into()),
-            },
+            Instr::OpAdd(dest, a, b) => {
+                let a = get_operand(data, *a)?;
+                let b = get_operand(data, *b)?;
+
+                let a_prim = to_primitive(a, realm, loader)?;
+                let b_prim = to_primitive(b, realm, loader)?;
+
+                let result = match (a_prim, b_prim) {
+                    (Value::String(_), _) | (_, Value::String(_)) => {
+                        let a_strv = to_string_or_throw(a, realm)?;
+                        let b_strv = to_string_or_throw(b, realm)?;
+
+                        let a_str = realm.heap.as_str(a_strv).unwrap().view();
+                        let b_str = realm.heap.as_str(b_strv).unwrap().view();
+
+                        let mut concated = Vec::with_capacity(a_str.len() + b_str.len());
+                        concated.extend_from_slice(a_str);
+                        concated.extend_from_slice(b_str);
+                        let concated = JSString::new_from_utf16(concated);
+                        let concated = realm.heap.new_string(concated);
+
+                        Value::String(concated)
+                    }
+                    _ => {
+                        let an = to_number_or_throw(a_prim, realm, loader)?;
+                        let bn = to_number_or_throw(b_prim, realm, loader)?;
+                        Value::Number(an + bn)
+                    }
+                };
+
+                data.top_mut().set_result(*dest, result);
+            }
             Instr::ArithSub(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x - y)?,
             Instr::ArithMul(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x * y)?,
             Instr::ArithDiv(dest, a, b) => with_numbers(data, *dest, *a, *b, |x, y| x / y)?,
@@ -597,7 +620,7 @@ fn run_inner(
             Instr::ToNumber { dest, arg } => {
                 let value = get_operand(data, *arg)?;
                 let value = to_number_or_throw(value, realm, loader)?;
-                data.top_mut().set_result(*dest, value);
+                data.top_mut().set_result(*dest, Value::Number(value));
             }
 
             Instr::Jmp(IID(dest_ndx)) => {
@@ -1049,14 +1072,12 @@ fn to_number_or_throw(
     arg: Value,
     realm: &mut Realm,
     loader: &mut loader::Loader,
-) -> RunResult<Value> {
-    to_number(arg, realm, loader)?
-        .map(Value::Number)
-        .ok_or_else(|| {
-            let message = &format!("cannot convert to a number: {:?}", arg);
-            let exc = make_exception(realm, "TypeError", message);
-            RunError::Exception(exc)
-        })
+) -> RunResult<f64> {
+    to_number(arg, realm, loader)?.ok_or_else(|| {
+        let message = &format!("cannot convert to a number: {:?}", arg);
+        let exc = make_exception(realm, "TypeError", message);
+        RunError::Exception(exc)
+    })
 }
 
 /// Perform number coercion. Converts the given value to a number, in the way
@@ -1078,13 +1099,11 @@ fn to_number(
         Value::Bool(true) => Ok(Some(1.0)),
         Value::Bool(false) => Ok(Some(0.0)),
         Value::Number(num) => Ok(Some(num)),
-        Value::Object(_) => match to_primitive(value, realm, loader)? {
-            Some(prim) => {
-                assert!(prim.is_primitive());
-                to_number(prim, realm, loader)
-            }
-            None => Ok(Some(f64::NAN)),
-        },
+        Value::Object(_) => {
+            let prim = to_primitive(value, realm, loader)?;
+            assert!(prim.is_primitive());
+            to_number(prim, realm, loader)
+        }
         Value::Undefined => Ok(Some(f64::NAN)),
         Value::Symbol(_) => Ok(None),
         Value::String(_) => {
@@ -1115,11 +1134,14 @@ pub(crate) fn to_string(value: Value, heap: &mut heap::Heap) -> Option<Value> {
         Value::Bool(false) => "false".into(),
         Value::String(_) => return Some(value),
         Value::Object(_) => {
-            // TODO use primitive coercing here. re-enable this block:
+            // TODO use primitive coercing here, with 'string' hint (which hasn't been implemented
+            // yet)
+            //
             // let prim = to_primitive(value, heap)?;
             // assert!(!matches!(prim, Value::Object(_)));
             // to_number(prim, heap)
 
+            // TODO Move this behavior to Object.prototype.toString
             match heap.as_closure(value) {
                 Some(_) => "<closure>",
                 None => "<object>",
@@ -1186,29 +1208,24 @@ fn to_object_or_throw(value: Value, realm: &mut Realm) -> RunResult<Value> {
     })
 }
 
-fn to_primitive(
-    value: Value,
-    realm: &mut Realm,
-    loader: &mut loader::Loader,
-) -> RunResult<Option<Value>> {
+fn ensure_primitive() {}
+
+/// Convert the given value to a primitive, via PRIMITIVE COERCION.
+///
+/// Note that this procedure may invoke the value's `valueOf` and `toString`
+/// methods, even if the value is already a primitive.  This is because
+/// JavaScript allows overriding those methods even for built-in primitive
+/// wrappers such as Number and String.  For example:
+///
+/// ```js
+/// (123).valueOf()    // 123
+/// Number.prototype.valueOf = function() { return 'HEYOOO' }
+/// (123).valueOf()    // 'HEYOOO'
+/// ````
+fn to_primitive(value: Value, realm: &mut Realm, loader: &mut loader::Loader) -> RunResult<Value> {
     // This whole ordeal needs to happen even if value is not an object, because some
     // funny guy could set a custom function to a wrapper's valueOf:
-    //    > (123).valueOf()
-    //    123
-    //    > Number.prototype.valueOf = function() { return 'HEYOOO' }
-    //    [Function (anonymous)]
-    //    > (123).valueOf()
-    //    'HEYOOO'
     #![allow(non_snake_case)]
-
-    if let Value::Null | Value::Undefined = value {
-        let exc = make_exception(
-            realm,
-            "TypeError",
-            "Cannot convert undefined or null to object",
-        );
-        return Err(RunError::Exception(exc));
-    }
 
     // call x.valueOf(); return it if not an object
     if let Some(valueOf) = realm
@@ -1219,7 +1236,7 @@ fn to_primitive(
         if let Some(valueOf) = realm.heap.as_closure(valueOf) {
             let ret_val = call_closure(realm, loader, Rc::clone(&valueOf), value, &[])?;
             if ret_val.is_primitive() {
-                return Ok(Some(ret_val));
+                return Ok(ret_val);
             }
         }
     }
@@ -1230,19 +1247,17 @@ fn to_primitive(
     {
         let toString = toString.value().unwrap();
         if let Some(toString) = realm.heap.as_closure(toString) {
-            let closure = Rc::clone(&toString);
-            let ret_val = Interpreter::new_call(realm, loader, closure, value, &[])
-                .run()?
-                .expect_finished()
-                .ret_val;
+            let ret_val = call_closure(realm, loader, Rc::clone(&toString), value, &[])?;
 
             if ret_val.is_primitive() {
-                return Ok(Some(ret_val));
+                return Ok(ret_val);
             }
         }
     }
 
-    Ok(None)
+    let message = format!("Cannot convert to primitive: {:?}", value);
+    let exc = make_exception(realm, "TypeError", &message);
+    return Err(RunError::Exception(exc));
 }
 
 fn call_closure(

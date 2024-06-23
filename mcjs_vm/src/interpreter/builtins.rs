@@ -86,7 +86,14 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
             number_proto,
             "toString".into(),
             Property::NonEnumerable(toString),
-        )
+        );
+
+        let valueOf = Value::Object(heap.new_function(native_closure(nf_Number_prototype_valueOf)));
+        heap.set_own(
+            number_proto,
+            "valueOf".into(),
+            Property::NonEnumerable(valueOf),
+        );
     }
 
     let String = Value::Object(heap.new_function(native_closure(nf_String)));
@@ -94,15 +101,21 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         let fromCodePoint = Property::NonEnumerable(Value::Object(
             heap.new_function(native_closure(nf_String_fromCodePoint)),
         ));
-        heap.set_own(String, "prototype".into(), {
-            let value = Value::Object(heap.string_proto());
-            Property::NonEnumerable(value)
-        });
         heap.set_own(
             String,
             heap::IndexOrKey::Key("fromCodePoint"),
             fromCodePoint,
         );
+
+        let string_proto = Value::Object(heap.string_proto());
+        heap.set_own(String, "prototype".into(), {
+            Property::NonEnumerable(string_proto)
+        });
+
+        let valueOf = Property::NonEnumerable(Value::Object(
+            heap.new_native_function(nf_String_prototype_valueOf),
+        ));
+        heap.set_own(string_proto, heap::IndexOrKey::Key("valueOf"), valueOf);
     }
 
     let string_proto = Value::Object(heap.string_proto());
@@ -388,6 +401,23 @@ fn nf_Number(
     }
 }
 
+fn nf_Number_prototype_valueOf(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    realm
+        .heap
+        .as_primitive(*this)
+        .filter(|x| matches!(x, Value::Number(_)))
+        .ok_or_else(|| {
+            let message = "Number.prototype.valueOf requires that 'this' be a Number";
+            let exc = make_exception(realm, "TypeError", message);
+            RunError::Exception(exc)
+        })
+}
+
 fn nf_Number_prototype_toString(
     realm: &mut Realm,
     _loader: &mut loader::Loader,
@@ -500,6 +530,23 @@ fn nf_String_codePointAt(
         .get(index)
         .map(|ndx| Value::Number(*ndx as f64))
         .unwrap_or(Value::Undefined))
+}
+
+fn nf_String_prototype_valueOf(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    realm
+        .heap
+        .as_primitive(*this)
+        .filter(|x| matches!(x, Value::String(_)))
+        .ok_or_else(|| {
+            let message = "String.prototype.valueOf requires that 'this' be a String";
+            let exc = make_exception(realm, "TypeError", message);
+            RunError::Exception(exc)
+        })
 }
 
 fn nf_Boolean(
