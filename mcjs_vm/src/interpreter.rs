@@ -3259,6 +3259,37 @@ do {
         assert_eq!(lit, Some(Literal::Number(123.0)));
     }
 
+    #[test]
+    fn test_string_nonstring_concat() {
+        let output = quick_run_script("sink('xx' + 99);");
+        assert_eq!(&output.sink, &[Some(Literal::String("xx99".to_string()))]);
+    }
+
+    #[test]
+    fn test_nonstring_string_concat() {
+        let output = quick_run_script(
+            "
+            const x = { valueOf: () => 'hello' };
+            sink(99 + x)
+        ",
+        );
+        assert_eq!(
+            &output.sink,
+            &[Some(Literal::String("99hello".to_string()))]
+        );
+    }
+
+    #[test]
+    fn test_number_nonnumber_add() {
+        let output = quick_run_script(
+            "
+            const x = { valueOf: () => 99 };
+            sink(99 + x)
+        ",
+        );
+        assert_eq!(&output.sink, &[Some(Literal::Number(198.0))]);
+    }
+
     mod debugging {
         use super::*;
         use crate::Loader;
