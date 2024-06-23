@@ -1113,8 +1113,7 @@ pub(crate) fn to_string(value: Value, heap: &mut heap::Heap) -> Option<Value> {
         Value::Number(n) => n.to_string().into(),
         Value::Bool(true) => "true".into(),
         Value::Bool(false) => "false".into(),
-        // FIXME: we're not reusing the allocation here
-        Value::String(_) => heap.as_str(value).unwrap().to_string().into(),
+        Value::String(_) => return Some(value),
         Value::Object(_) => {
             // TODO use primitive coercing here. re-enable this block:
             // let prim = to_primitive(value, heap)?;
