@@ -1217,12 +1217,7 @@ fn to_primitive(
     {
         let valueOf = valueOf.value().unwrap();
         if let Some(valueOf) = realm.heap.as_closure(valueOf) {
-            let closure = Rc::clone(&valueOf);
-            let ret_val = Interpreter::new_call(realm, loader, closure, value, &[])
-                .run()?
-                .expect_finished()
-                .ret_val;
-
+            let ret_val = call_closure(realm, loader, Rc::clone(&valueOf), value, &[])?;
             if ret_val.is_primitive() {
                 return Ok(Some(ret_val));
             }
@@ -1248,6 +1243,25 @@ fn to_primitive(
     }
 
     Ok(None)
+}
+
+fn call_closure(
+    realm: &mut Realm,
+    loader: &mut crate::Loader,
+    closure: Rc<Closure>,
+    this: Value,
+    args: &[Value; 0],
+) -> RunResult<Value> {
+    match closure.func {
+        Func::Native(nf) => nf(realm, loader, &this, args),
+        Func::JS(_) => {
+            let ret_val = Interpreter::new_call(realm, loader, closure, this, args)
+                .run()?
+                .expect_finished()
+                .ret_val;
+            Ok(ret_val)
+        }
+    }
 }
 
 fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> Value {
