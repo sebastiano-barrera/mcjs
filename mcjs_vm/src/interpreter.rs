@@ -1083,7 +1083,7 @@ fn to_number(
                 assert!(prim.is_primitive());
                 to_number(prim, realm, loader)
             }
-            None => Ok(None),
+            None => Ok(Some(f64::NAN)),
         },
         Value::Undefined => Ok(Some(f64::NAN)),
         Value::Symbol(_) => Ok(None),
