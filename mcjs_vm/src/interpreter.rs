@@ -1112,12 +1112,12 @@ fn to_number(
             // TODO cache utf16 -> utf8 conversion?
             let s = jss.to_string();
             let val = match s.as_str().trim() {
-                "" => Some(0.0),
-                "+Infinity" => Some(f64::INFINITY),
-                "-Infinity" => Some(f64::NEG_INFINITY),
-                _ => s.parse().ok(),
+                "" => 0.0,
+                "+Infinity" => f64::INFINITY,
+                "-Infinity" => f64::NEG_INFINITY,
+                _ => s.parse().unwrap_or(f64::NAN),
             };
-            Ok(val)
+            Ok(Some(val))
         }
     }
 }
