@@ -1227,6 +1227,11 @@ fn to_primitive(value: Value, realm: &mut Realm, loader: &mut loader::Loader) ->
     // funny guy could set a custom function to a wrapper's valueOf:
     #![allow(non_snake_case)]
 
+    if value.is_primitive() {
+        return Ok(value);
+    }
+    debug_assert!(matches!(value, Value::Object(_)));
+
     // call x.valueOf(); return it if not an object
     if let Some(valueOf) = realm
         .heap
@@ -3291,6 +3296,18 @@ do {
         assert_eq!(
             &output.sink,
             &[Some(Literal::String("99hello".to_string()))]
+        );
+    }
+
+    #[test]
+    fn test_number_null_concat() {
+        let output = quick_run_script("sink('1' + null); sink(null + '1');");
+        assert_eq!(
+            &output.sink,
+            &[
+                Some(Literal::String("1null".to_string())),
+                Some(Literal::String("null1".to_string()))
+            ]
         );
     }
 
