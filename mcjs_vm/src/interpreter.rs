@@ -529,8 +529,8 @@ fn run_inner(
 
                 let result = match (a_prim, b_prim) {
                     (Value::String(_), _) | (_, Value::String(_)) => {
-                        let a_strv = to_string_or_throw(a, realm)?;
-                        let b_strv = to_string_or_throw(b, realm)?;
+                        let a_strv = to_string_or_throw(a, realm, loader)?;
+                        let b_strv = to_string_or_throw(b, realm, loader)?;
 
                         let a_str = realm.heap.as_str(a_strv).unwrap().view();
                         let b_str = realm.heap.as_str(b_strv).unwrap().view();
@@ -969,7 +969,7 @@ fn run_inner(
                 data.top_mut().set_result(*dest, Value::String(oid));
             }
             Instr::StrAppend(buf_reg, tail) => {
-                let value = str_append(data, realm, *buf_reg, *tail)?;
+                let value = str_append(data, *buf_reg, *tail, realm, loader)?;
                 data.top_mut().set_result(*buf_reg, value);
             }
 
@@ -1122,7 +1122,12 @@ fn to_number(
     }
 }
 
-pub(crate) fn to_string(value: Value, heap: &mut heap::Heap) -> Option<Value> {
+/// Implements JavaScript's implicit conversion to string.
+pub(crate) fn to_string_or_throw(
+    value: Value,
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+) -> RunResult<Value> {
     // TODO we always allocate on the string heap. it should be possible to
     // - use interned strings
     // - avoid any allocation if value is Value::String(_)
@@ -1132,30 +1137,34 @@ pub(crate) fn to_string(value: Value, heap: &mut heap::Heap) -> Option<Value> {
         Value::Number(n) => n.to_string().into(),
         Value::Bool(true) => "true".into(),
         Value::Bool(false) => "false".into(),
-        Value::String(_) => return Some(value),
+        Value::String(_) => return Ok(value),
         Value::Object(_) => {
-            // TODO use primitive coercing here, with 'string' hint (which hasn't been implemented
-            // yet)
-            //
-            // let prim = to_primitive(value, heap)?;
-            // assert!(!matches!(prim, Value::Object(_)));
-            // to_number(prim, heap)
-
             // TODO Move this behavior to Object.prototype.toString
-            match heap.as_closure(value) {
-                Some(_) => "<closure>",
-                None => "<object>",
-            }
-            .into()
+            // match heap.as_closure(value) {
+            //     Some(_) => "<closure>",
+            //     None => "<object>",
+            // }
+            // .into()
+
+            let prim = to_primitive(value, realm, loader)?;
+            assert!(prim.is_primitive());
+            return to_string_or_throw(prim, realm, loader);
         }
-        Value::Symbol(_) => return None,
+        Value::Symbol(_) => {
+            let exc = make_exception(
+                realm,
+                "TypeError",
+                "Cannot convert Symbol value to a string",
+            );
+            return Err(RunError::Exception(exc));
+        }
         Value::Null => "null".into(),
         Value::Undefined => "undefined".into(),
     };
 
     let jss = JSString::new_from_str(s.as_ref());
-    let sid = heap.new_string(jss);
-    Some(Value::String(sid))
+    let sid = realm.heap.new_string(jss);
+    Ok(Value::String(sid))
 }
 
 /// Converts the given value to a boolean (e.g. for use by `if`,
@@ -1207,8 +1216,6 @@ fn to_object_or_throw(value: Value, realm: &mut Realm) -> RunResult<Value> {
         RunError::Exception(exc)
     })
 }
-
-fn ensure_primitive() {}
 
 /// Convert the given value to a primitive, via PRIMITIVE COERCION.
 ///
@@ -1645,15 +1652,6 @@ fn compare(
     Ok(())
 }
 
-/// Implements JavaScript's implicit conversion to string.
-fn to_string_or_throw(value: Value, realm: &mut Realm) -> RunResult<Value> {
-    to_string(value, &mut realm.heap).ok_or_else(|| {
-        let msg = &format!("can't convert to string: {:?}", value);
-        let exc = make_exception(realm, "TypeError", msg);
-        RunError::Exception(exc)
-    })
-}
-
 fn property_to_value(prop: &heap::Property, heap: &mut heap::Heap) -> Result<Value> {
     match prop {
         heap::Property::Enumerable(value) | heap::Property::NonEnumerable(value) => Ok(*value),
@@ -1719,16 +1717,17 @@ struct ShowValueParams {
 
 fn str_append(
     data: &stack::InterpreterData,
-    realm: &mut Realm,
     a: VReg,
     b: VReg,
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
 ) -> RunResult<Value> {
     // TODO Make this at least *decently* efficient!
     let a = get_operand_string(data, realm, a)?;
     let b = get_operand(data, b)?;
 
     let mut buf = a.view().to_vec();
-    let tail = to_string_or_throw(b, realm)?;
+    let tail = to_string_or_throw(b, realm, loader)?;
     let tail = realm.heap.as_str(tail).unwrap();
     buf.extend_from_slice(tail.view());
     let jss: JSString = JSString::new(buf);

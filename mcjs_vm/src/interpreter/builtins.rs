@@ -6,7 +6,7 @@ use super::{
     make_exception, to_boolean, to_number, to_object, to_object_or_throw, Closure, NativeFn,
     RunError, RunResult,
 };
-use super::{to_string, to_string_or_throw, Realm, Value};
+use super::{to_string_or_throw, Realm, Value};
 
 use crate::error;
 use crate::heap;
@@ -295,12 +295,12 @@ fn nf_Array_pop(
 
 fn nf_RegExp(
     realm: &mut Realm,
-    _loader: &mut loader::Loader,
+    loader: &mut loader::Loader,
     this: &Value,
     args: &[Value],
 ) -> RunResult<Value> {
     let source = match args.first() {
-        Some(val) => to_string_or_throw(*val, realm)?,
+        Some(val) => to_string_or_throw(*val, realm, loader)?,
         None => {
             let jss = JSString::new_from_str(":?");
             let sid = realm.heap.new_string(jss);
@@ -445,7 +445,7 @@ fn nf_Number_prototype_toString(
 
 fn nf_String(
     realm: &mut Realm,
-    _loader: &mut loader::Loader,
+    loader: &mut loader::Loader,
     this: &Value,
     args: &[Value],
 ) -> RunResult<Value> {
@@ -456,7 +456,7 @@ fn nf_String(
             let sid = realm.heap.new_string(JSString::empty());
             Value::String(sid)
         }
-        Some(v) => to_string_or_throw(v, realm)?,
+        Some(v) => to_string_or_throw(v, realm, loader)?,
     };
     debug_assert!(matches!(value_str, Value::String(_)));
 
@@ -604,16 +604,13 @@ fn nf_Object_valueOf(
 
 fn nf_cash_print(
     realm: &mut Realm,
-    _loader: &mut loader::Loader,
+    loader: &mut loader::Loader,
     _this: &Value,
     args: &[Value],
 ) -> RunResult<Value> {
-    use std::borrow::Cow;
-
     for arg in args {
-        let str: Cow<_> = to_string(*arg, &mut realm.heap)
-            .map(|val| realm.heap.as_str(val).unwrap().to_string().into())
-            .unwrap_or("<can't convert to string>".into());
+        let val = to_string_or_throw(*arg, realm, loader)?;
+        let str = realm.heap.as_str(val).unwrap().to_string();
         println!("{}", str);
     }
     Ok(Value::Undefined)
