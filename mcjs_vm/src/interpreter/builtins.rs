@@ -6,7 +6,7 @@ use super::{
     make_exception, to_boolean, to_number, to_object, to_object_or_throw, Closure, NativeFn,
     RunError, RunResult,
 };
-use super::{to_string, to_string_or_throw, Realm, Value};
+use super::{to_string_or_throw, Realm, Value};
 
 use crate::error;
 use crate::heap;
@@ -86,27 +86,46 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
             number_proto,
             "toString".into(),
             Property::NonEnumerable(toString),
-        )
+        );
+
+        let valueOf = Value::Object(heap.new_function(native_closure(nf_Number_prototype_valueOf)));
+        heap.set_own(
+            number_proto,
+            "valueOf".into(),
+            Property::NonEnumerable(valueOf),
+        );
     }
 
     let String = Value::Object(heap.new_function(native_closure(nf_String)));
     {
-        let fromCodePoint = Property::NonEnumerable(Value::Object(
-            heap.new_function(native_closure(nf_String_fromCodePoint)),
-        ));
-        heap.set_own(String, "prototype".into(), {
-            let value = Value::Object(heap.string_proto());
-            Property::NonEnumerable(value)
-        });
-        heap.set_own(
-            String,
-            heap::IndexOrKey::Key("fromCodePoint"),
-            fromCodePoint,
-        );
+        {
+            let fromCodePoint = Property::NonEnumerable(Value::Object(
+                heap.new_function(native_closure(nf_String_fromCodePoint)),
+            ));
+            heap.set_own(
+                String,
+                heap::IndexOrKey::Key("fromCodePoint"),
+                fromCodePoint,
+            );
+        }
     }
 
-    let string_proto = Value::Object(heap.string_proto());
     {
+        let string_proto = Value::Object(heap.string_proto());
+        heap.set_own(String, "prototype".into(), {
+            Property::NonEnumerable(string_proto)
+        });
+
+        let valueOf = Property::NonEnumerable(Value::Object(
+            heap.new_native_function(nf_String_prototype_valueOf),
+        ));
+        heap.set_own(string_proto, heap::IndexOrKey::Key("valueOf"), valueOf);
+
+        let toString = Property::NonEnumerable(Value::Object(
+            heap.new_native_function(nf_String_prototype_toString),
+        ));
+        heap.set_own(string_proto, heap::IndexOrKey::Key("toString"), toString);
+
         let codePointAt = Property::NonEnumerable(Value::Object(
             heap.new_function(native_closure(nf_String_codePointAt)),
         ));
@@ -125,12 +144,33 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         });
     }
 
+    {
+        let bool_proto = Value::Object(heap.bool_proto());
+        let valueOf = Property::NonEnumerable(Value::Object(
+            heap.new_native_function(nf_Boolean_prototype_valueOf),
+        ));
+        heap.set_own(bool_proto, heap::IndexOrKey::Key("valueOf"), valueOf);
+
+        let toString = Property::NonEnumerable(Value::Object(
+            heap.new_native_function(nf_Boolean_prototype_toString),
+        ));
+        heap.set_own(bool_proto, heap::IndexOrKey::Key("toString"), toString);
+    }
+
     let Function = Value::Object(heap.new_function(native_closure(nf_Function)));
     {
         heap.set_own(Function, "prototype".into(), {
             let value = Value::Object(heap.func_proto());
             Property::NonEnumerable(value)
         });
+    }
+
+    {
+        let func_proto = Value::Object(heap.func_proto());
+        let toString = Property::NonEnumerable(Value::Object(
+            heap.new_native_function(nf_Function_prototype_toString),
+        ));
+        heap.set_own(func_proto, heap::IndexOrKey::Key("toString"), toString);
     }
 
     let Object = Value::Object(heap.new_function(native_closure(nf_Object)));
@@ -141,13 +181,22 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
         });
     }
 
-    let object_proto = Value::Object(heap.object_proto());
     {
-        let valueOf = Value::Object(heap.new_function(native_closure(nf_Object_valueOf)));
+        let object_proto = Value::Object(heap.object_proto());
+
+        let valueOf = Value::Object(heap.new_function(native_closure(nf_Object_prototype_valueOf)));
         heap.set_own(
             object_proto,
             "valueOf".into(),
             Property::NonEnumerable(valueOf),
+        );
+
+        let toString =
+            Value::Object(heap.new_function(native_closure(nf_Object_prototype_toString)));
+        heap.set_own(
+            object_proto,
+            "toString".into(),
+            Property::NonEnumerable(toString),
         );
     }
 
@@ -282,12 +331,12 @@ fn nf_Array_pop(
 
 fn nf_RegExp(
     realm: &mut Realm,
-    _loader: &mut loader::Loader,
+    loader: &mut loader::Loader,
     this: &Value,
     args: &[Value],
 ) -> RunResult<Value> {
     let source = match args.first() {
-        Some(val) => to_string_or_throw(*val, realm)?,
+        Some(val) => to_string_or_throw(*val, realm, loader)?,
         None => {
             let jss = JSString::new_from_str(":?");
             let sid = realm.heap.new_string(jss);
@@ -388,6 +437,23 @@ fn nf_Number(
     }
 }
 
+fn nf_Number_prototype_valueOf(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    realm
+        .heap
+        .as_primitive(*this)
+        .filter(|x| matches!(x, Value::Number(_)))
+        .ok_or_else(|| {
+            let message = "Number.prototype.valueOf requires that 'this' be a Number";
+            let exc = make_exception(realm, "TypeError", message);
+            RunError::Exception(exc)
+        })
+}
+
 fn nf_Number_prototype_toString(
     realm: &mut Realm,
     _loader: &mut loader::Loader,
@@ -415,7 +481,7 @@ fn nf_Number_prototype_toString(
 
 fn nf_String(
     realm: &mut Realm,
-    _loader: &mut loader::Loader,
+    loader: &mut loader::Loader,
     this: &Value,
     args: &[Value],
 ) -> RunResult<Value> {
@@ -426,7 +492,7 @@ fn nf_String(
             let sid = realm.heap.new_string(JSString::empty());
             Value::String(sid)
         }
-        Some(v) => to_string_or_throw(v, realm)?,
+        Some(v) => to_string_or_throw(v, realm, loader)?,
     };
     debug_assert!(matches!(value_str, Value::String(_)));
 
@@ -465,7 +531,7 @@ fn nf_String_fromCodePoint(
             let code_point: u16 = (value_num as usize).try_into().map_err(|_| -> RunError {
                 error!("invalid code point (too large): {}", value_num).into()
             })?;
-            JSString::new(vec![code_point])
+            JSString::new_from_utf16(vec![code_point])
         }
         None => JSString::empty(),
     };
@@ -502,6 +568,32 @@ fn nf_String_codePointAt(
         .unwrap_or(Value::Undefined))
 }
 
+fn nf_String_prototype_valueOf(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    realm
+        .heap
+        .as_primitive(*this)
+        .filter(|x| matches!(x, Value::String(_)))
+        .ok_or_else(|| {
+            let message = "String.prototype.valueOf requires that 'this' be a String";
+            let exc = make_exception(realm, "TypeError", message);
+            RunError::Exception(exc)
+        })
+}
+
+fn nf_String_prototype_toString(
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    nf_String_prototype_valueOf(realm, loader, this, &[])
+}
+
 fn nf_Boolean(
     realm: &mut Realm,
     _loader: &mut loader::Loader,
@@ -513,6 +605,32 @@ fn nf_Boolean(
     let arg = args.first().copied().unwrap_or(Value::Undefined);
     let bool_val = to_boolean(arg, &realm.heap);
     Ok(Value::Bool(bool_val))
+}
+
+fn nf_Boolean_prototype_valueOf(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    realm
+        .heap
+        .as_primitive(*this)
+        .filter(|x| matches!(x, Value::Bool(_)))
+        .ok_or_else(|| {
+            let message = "Boolean.prototype.valueOf requires that 'this' be a Boolean";
+            let exc = make_exception(realm, "TypeError", message);
+            RunError::Exception(exc)
+        })
+}
+
+fn nf_Boolean_prototype_toString(
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    nf_Boolean_prototype_valueOf(realm, loader, this, &[])
 }
 
 fn nf_Function(
@@ -537,7 +655,7 @@ fn nf_Object(
         .unwrap_or_else(|| Value::Object(realm.heap.new_ordinary_object())))
 }
 
-fn nf_Object_valueOf(
+fn nf_Object_prototype_valueOf(
     realm: &mut Realm,
     _loader: &mut loader::Loader,
     this: &Value,
@@ -555,18 +673,35 @@ fn nf_Object_valueOf(
     // String.prototype, etc.)
 }
 
-fn nf_cash_print(
+fn nf_Object_prototype_toString(
     realm: &mut Realm,
     _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    let particle = match this {
+        Value::Number(_) => "Number",
+        Value::Bool(_) => "Bool",
+        Value::Object(_) => "Object",
+        Value::String(_) => "String",
+        Value::Null => "Null",
+        Value::Undefined => "Undefined",
+        Value::Symbol(_) => "Symbol",
+    };
+    let jss = JSString::new_from_str(&format!("[object {particle}]"));
+    let sid = realm.heap.new_string(jss);
+    Ok(Value::String(sid))
+}
+
+fn nf_cash_print(
+    realm: &mut Realm,
+    loader: &mut loader::Loader,
     _this: &Value,
     args: &[Value],
 ) -> RunResult<Value> {
-    use std::borrow::Cow;
-
     for arg in args {
-        let str: Cow<_> = to_string(*arg, &mut realm.heap)
-            .map(|val| realm.heap.as_str(val).unwrap().to_string().into())
-            .unwrap_or("<can't convert to string>".into());
+        let val = to_string_or_throw(*arg, realm, loader)?;
+        let str = realm.heap.as_str(val).unwrap().to_string();
         println!("{}", str);
     }
     Ok(Value::Undefined)
@@ -588,4 +723,22 @@ fn nf_Function_bind(
 
     let new_obj_id = realm.heap.new_function(Rc::new(closure));
     Ok(Value::Object(new_obj_id))
+}
+
+fn nf_Function_prototype_toString(
+    realm: &mut Realm,
+    _loader: &mut loader::Loader,
+    this: &Value,
+    _args: &[Value],
+) -> RunResult<Value> {
+    // TODO Return the function's code as string? This could work by using the loader's API...
+    if realm.heap.as_closure(*this).is_some() {
+        let jss = JSString::new_from_str("<Function>");
+        let sid = realm.heap.new_string(jss);
+        Ok(Value::String(sid))
+    } else {
+        let message = "Boolean.prototype.valueOf requires that 'this' be a Boolean";
+        let exc = make_exception(realm, "TypeError", message);
+        Err(RunError::Exception(exc))
+    }
 }
