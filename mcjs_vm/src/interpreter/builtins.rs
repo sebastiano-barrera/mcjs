@@ -495,7 +495,7 @@ fn nf_String_fromCodePoint(
             let code_point: u16 = (value_num as usize).try_into().map_err(|_| -> RunError {
                 error!("invalid code point (too large): {}", value_num).into()
             })?;
-            JSString::new(vec![code_point])
+            JSString::new_from_utf16(vec![code_point])
         }
         None => JSString::empty(),
     };

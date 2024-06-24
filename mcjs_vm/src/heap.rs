@@ -774,7 +774,7 @@ impl JSString {
         }
     }
 
-    pub(crate) fn new(buf: Vec<u16>) -> Self {
+    pub(crate) fn new_from_utf16(buf: Vec<u16>) -> Self {
         let end = buf.len().try_into().unwrap();
         Self {
             full: Rc::new(buf),
@@ -785,13 +785,7 @@ impl JSString {
 
     pub fn new_from_str(s: &str) -> Self {
         let s_u16 = s.encode_utf16().collect();
-        Self::new_from_utf16(s_u16)
-    }
-    pub fn new_from_utf16(s: Vec<u16>) -> Self {
-        let full: Rc<Vec<u16>> = Rc::new(s);
-        let start = 0;
-        let end = full.len().try_into().unwrap();
-        JSString { full, start, end }
+        JSString::new_from_utf16(s_u16)
     }
 
     pub fn view(&self) -> &[u16] {

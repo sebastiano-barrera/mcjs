@@ -1730,7 +1730,7 @@ fn str_append(
     let tail = to_string_or_throw(b, realm, loader)?;
     let tail = realm.heap.as_str(tail).unwrap();
     buf.extend_from_slice(tail.view());
-    let jss: JSString = JSString::new(buf);
+    let jss: JSString = JSString::new_from_utf16(buf);
     let sid = realm.heap.new_string(jss);
     Ok(Value::String(sid))
 }
