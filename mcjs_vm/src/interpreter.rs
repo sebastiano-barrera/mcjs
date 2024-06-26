@@ -1271,10 +1271,10 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
     let message = JSString::new_from_str(message);
     let message = realm.heap.new_string(message);
 
-    let exc_cons = get_builtin(realm, constructor_name).unwrap();
+    let exc_cons = Value::Object(get_builtin(realm, constructor_name).unwrap());
     let exc_proto = realm
         .heap
-        .get_own(Value::Object(exc_cons), heap::IndexOrKey::Key("prototype"))
+        .get_own(exc_cons, heap::IndexOrKey::Key("prototype"))
         .unwrap()
         .value()
         .unwrap()
@@ -1287,6 +1287,11 @@ fn make_exception(realm: &mut Realm, constructor_name: &str, message: &str) -> V
         let value = Value::String(message);
         heap::Property::Enumerable(value)
     });
+    realm.heap.set_own(
+        exc,
+        heap::IndexOrKey::Key("constructor"),
+        heap::Property::NonEnumerable(exc_cons),
+    );
 
     exc
 }
@@ -2504,6 +2509,38 @@ mod tests {
             &output.sink,
             &[Some(Literal::Bool(true)), Some(Literal::Bool(false))]
         );
+    }
+
+    #[test]
+    fn test_make_exception() {
+        #![allow(non_snake_case)]
+
+        let mut loader = loader::Loader::new_cwd();
+        let mut realm = Realm::new(&mut loader);
+        let global_this = realm.global_obj();
+
+        let message = "some message";
+        let cons_name = "TypeError";
+        let TypeError = realm.heap.get_chained_key(global_this, cons_name).unwrap();
+
+        let exc = make_exception(&mut realm, cons_name, message);
+
+        {
+            let chk_message = realm.heap.get_chained_key(exc, "message").unwrap();
+            let chk_message = realm.heap.as_str(chk_message).unwrap().to_string();
+            assert_eq!(&chk_message, message);
+        }
+
+        {
+            let chk_prototype = Value::Object(realm.heap.proto(exc).unwrap());
+            let exp_prototype = realm.heap.get_chained_key(TypeError, "prototype").unwrap();
+            assert_eq!(chk_prototype, exp_prototype);
+        }
+
+        {
+            let chk_cons = realm.heap.get_chained_key(exc, "constructor").unwrap();
+            assert_eq!(chk_cons, TypeError);
+        }
     }
 
     #[test]
