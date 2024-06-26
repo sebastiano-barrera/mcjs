@@ -736,7 +736,12 @@ fn run_inner(
             }
             Instr::ObjGet { dest, obj, key } => {
                 let obj = get_operand(data, *obj)?;
-                let obj = to_object_or_throw(obj, realm)?;
+                if let Value::Null | Value::Undefined = obj {
+                    let message = "cannot read property of null or undefined";
+                    let exc = make_exception(realm, "TypeError", message);
+                    return Err(RunError::Exception(exc));
+                };
+                // fine; obj is an object or will be treated as such by heap's API
                 let key = get_operand(data, *key)?;
                 let key = value_to_index_or_key(&realm.heap, &key);
 
