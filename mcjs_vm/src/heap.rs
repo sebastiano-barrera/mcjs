@@ -86,6 +86,10 @@ impl Heap {
         }
     }
 
+    pub fn get_chained_key(&self, obj: Value, key: &str) -> Option<Value> {
+        self.get_chained(obj, IndexOrKey::Key(key))?.value()
+    }
+
     pub fn list_properties_prototypes(
         &self,
         obj: Value,
