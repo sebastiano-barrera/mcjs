@@ -404,20 +404,38 @@ fn run(
     loader: &mut loader::Loader,
     #[cfg(feature = "debugger")] dbg: &mut Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
-    run_inner(
-        data,
-        realm,
-        loader,
-        #[cfg(feature = "debugger")]
-        dbg,
-    )
-    .map_err(|err| {
-        match err {
-            // do nothing
-            RunError::Exception(_) => err,
+    loop {
+        let res = run_inner(
+            data,
+            realm,
+            loader,
             #[cfg(feature = "debugger")]
-            RunError::Suspended(_) => err,
-            RunError::Internal(mut err) => {
+            dbg,
+        );
+
+        match res {
+            Ok(_) => return res,
+            Err(RunError::Exception(exc)) => {
+                // run_inner does not handle exception; we do it here
+
+                // `handle_exception` returns:
+                //  - Err(RunError::Exception(_)) if the exception is unhandled => bubble up to
+                //    caller
+                //  - Ok(()) => there IS an handler and `data` is ready to resume execution from the
+                //    handler, just call run_inner again
+                handle_exception(
+                    exc,
+                    data,
+                    #[cfg(feature = "debugger")]
+                    dbg,
+                )?;
+
+                // just loop back, resume exec
+            }
+            #[cfg(feature = "debugger")]
+            Err(RunError::Suspended(_)) => return res,
+            Err(RunError::Internal(mut err)) => {
+                // just add some context and bubble it up
                 for frame in data.frames() {
                     let mut ctx = error_item!("<- interpreter was here");
                     let giid = bytecode::GlobalIID(frame.header().fnid, frame.header().iid);
@@ -425,51 +443,34 @@ fn run(
                     err.push_context(ctx);
                 }
 
-                RunError::Internal(err)
+                return Err(RunError::Internal(err));
             }
         }
-    })
+    }
 }
 
-/// Run bytecode until the stack is depleted.  This is the core of the interpreter.
+/// Run bytecode. This is the core of the interpreter.
 ///
-/// Before and after each call, `data` must hold the interpreter's state in
-/// enough detail that this function can resume execution even across separate
-/// calls.  This function uphold this postcondition, too.
+/// Keeps going, until either:
+///  - the stack is depleted (execution has finished normally);
+///  - an exception is thrown
+///  - the interpreter suspends (e.g. for a debugger breakpoint)
 ///
-/// This function assumes that the stack frame has already been set up
-/// beforehand, but will pop it before returning successfully. When returning
-/// due to failure/suspend, the stack frame stays there, to allow for resuming.
+/// Right before this function is called, `data` is presumed to hold the
+/// interpreter's stack in a consistent state.  At least one stack frame must
+/// be present, and the top frame represents the function and instruction
+/// where execution resumes.  
 ///
-/// In order to restore execution correctly, callers of this function external
-/// to the function itself should always pass `0` as the `stack_level`
-/// parameter. Any different value is a bug (akin to undefined behavior, that
-/// is, not necessarily detected at run-time).
+/// In case of exception or breakpoint, `data` is left representing
+/// the interpreter's state at the time of suspension. It can be inspected,
+/// manipulated, and eventually used in a new call to `run_inner` to resume
+/// execution.
 ///
-/// For external callers, this function returns when:
-///  - the interpreter has finished its work (gone through the program without errors)
-///  - an unhandled exception has been thrown
-///  - the debugger has suspended execution (e.g. a breakpoint has been reached).
+/// JavaScript exceptions are NOT handled by this function.
 ///
 /// If a bug is detected (e.g. assertion failed), the function panics. The
 /// interpreter's data is not unwind-safe in general, so execution can only
-/// restart by initializing a new interpreter instance.
-///
-/// ## Implementation details
-///
-/// This function calls itself recursively, so that each JS stack frame maps 1:1
-/// with a native `run_internal` stack frame.
-///
-/// For a call coming from within `run_internal` itself (recursively), it
-/// returns when:
-///  - the function has returned successfully (no exception)
-///  - an as-of-yet-unhandled exception has been thrown (may be handled by one of the
-///    parent frames or bubble up to the user unhandled)
-///  - the debugger has suspended execution (e.g. a breakpoint has been reached).
-///
-/// Upon starting, `run_internal` calls itself again with a 1-higher
-/// `stack_level` so as to restore the mapping between JS and native stacks.
-/// Then it resumes JS execution.
+/// restart by initializing a new Interpreter instance.
 fn run_inner(
     data: &mut stack::InterpreterData,
     realm: &mut Realm,
@@ -704,22 +705,11 @@ fn run_inner(
                         // stack is prepared, just continue turning the crank to run
                         // the callee
                     }
-                    Func::Native(nf) => match nf(realm, loader, &this, &arg_vals) {
-                        Ok(ret_val) => {
-                            data.top_mut().set_result(*return_value_reg, ret_val);
-                            data.top_mut().set_resume_iid(return_to_iid);
-                        }
-                        Err(RunError::Exception(exc)) => {
-                            throw_exc(
-                                exc,
-                                iid,
-                                data,
-                                #[cfg(feature = "debugger")]
-                                dbg,
-                            )?;
-                        }
-                        Err(other_err) => return Err(other_err),
-                    },
+                    Func::Native(nf) => {
+                        let ret_val = nf(realm, loader, &this, &arg_vals)?;
+                        data.top_mut().set_result(*return_value_reg, ret_val);
+                        data.top_mut().set_resume_iid(return_to_iid);
+                    }
                 }
                 continue;
             }
@@ -795,14 +785,7 @@ fn run_inner(
                 if !was_actually_obj {
                     let message = &format!("not an object: {:?}", obj);
                     let exc = make_exception(realm, "TypeError", message);
-                    throw_exc(
-                        exc,
-                        iid,
-                        data,
-                        #[cfg(feature = "debugger")]
-                        dbg,
-                    )?;
-                    // FIX No continue 'reborrow?
+                    return Err(RunError::Exception(exc));
                 }
             }
 
@@ -1011,14 +994,7 @@ fn run_inner(
                             heap::Property::Enumerable(value)
                         });
 
-                        throw_exc(
-                            exc,
-                            iid,
-                            data,
-                            #[cfg(feature = "debugger")]
-                            dbg,
-                        )?;
-                        continue;
+                        return Err(RunError::Exception(exc));
                     }
                     Some(prop) => {
                         data.top_mut().set_result(*dest, prop.value().unwrap());
@@ -1038,14 +1014,7 @@ fn run_inner(
             }
             Instr::Throw(exc) => {
                 let exc = get_operand(data, *exc)?;
-                throw_exc(
-                    exc,
-                    iid,
-                    data,
-                    #[cfg(feature = "debugger")]
-                    dbg,
-                )?;
-                continue;
+                return Err(RunError::Exception(exc));
             }
             Instr::PopExcHandler => {
                 data.top_mut()
@@ -1442,9 +1411,8 @@ fn obj_get_keys(
 /// When feature `debugging` is enabled, this function can also return
 /// `Err(RunError::Suspended(...))`. In this case, the interpreter's state is
 /// prepared for a subsequent resume.
-fn throw_exc(
+fn handle_exception(
     exc: Value,
-    iid: bytecode::IID,
     data: &mut stack::InterpreterData,
     #[cfg(feature = "debugger")] dbg: &Option<&mut debugger::DebuggingState>,
 ) -> RunResult<()> {
@@ -1464,8 +1432,6 @@ fn throw_exc(
         if dbg.should_break_on_throw()
             || (dbg.should_break_on_unhandled_throw() && handler_depth.is_some())
         {
-            // Save the IID so that execution can resume correctly afterwards
-            data.top_mut().set_resume_iid(iid);
             return Err(RunError::Suspended(SuspendCause::Exception(exc)));
         }
     }
