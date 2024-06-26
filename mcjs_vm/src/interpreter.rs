@@ -740,7 +740,7 @@ fn run_inner(
                     let message = "cannot read property of null or undefined";
                     let exc = make_exception(realm, "TypeError", message);
                     return Err(RunError::Exception(exc));
-                };
+                }
                 // fine; obj is an object or will be treated as such by heap's API
                 let key = get_operand(data, *key)?;
                 let key = value_to_index_or_key(&realm.heap, &key);
@@ -778,14 +778,16 @@ fn run_inner(
             )?,
             Instr::ObjDelete { obj, key } => {
                 let obj = get_operand(data, *obj)?;
-                // the boolean is necessary instead of a normal match on
-                // Option, because borrowck can't prove that the destructor
-                // won't run.
-                // TODO Change this if the heap switches to something other
-                // than RefCells (qcell?)
+                if let Value::Null | Value::Undefined = obj {
+                    let msg = "can't delete properties from null or undefined";
+                    let exc = make_exception(realm, "TypeError", msg);
+                    return Err(RunError::Exception(exc));
+                }
+
                 let key = get_operand(data, *key)?;
                 let key = value_to_index_or_key(&realm.heap, &key)
                     .ok_or_else(|| error!("invalid object key: {:?}", key))?;
+
                 let was_actually_obj = realm.heap.delete_own(obj, key.to_ref());
                 if !was_actually_obj {
                     let message = &format!("not an object: {:?}", obj);
@@ -1375,8 +1377,13 @@ fn obj_get_keys(
 ) -> RunResult<()> {
     let keys = {
         let obj = get_operand(data, *obj)?;
-        let mut keys = Vec::new();
+        if let Value::Null | Value::Undefined = obj {
+            let message = "cannot traverse keys of null or undefined";
+            let exc = make_exception(realm, "TypeError", message);
+            return Err(RunError::Exception(exc));
+        }
 
+        let mut keys = Vec::new();
         realm
             .heap
             .own_properties(obj, only_enumerable.into(), &mut keys);
