@@ -507,7 +507,7 @@ fn compile_expr(
         Expr::ArrayCreate => {
             let array = get_dest(fnb);
             let constructor: bytecode::VReg = compile_read_global(fnb, "Array".into());
-            compile_new(fnb, array, constructor, &[]);
+            complex::compile_new(fnb, array, constructor, &[]);
             array
         }
         Expr::ArrayNth { arr, index } => {
@@ -671,7 +671,7 @@ fn compile_expr(
                 .collect();
 
             let obj = get_dest(fnb);
-            compile_new(fnb, obj, constructor, &arg_regs);
+            complex::compile_new(fnb, obj, constructor, &arg_regs);
 
             obj
         }
@@ -706,59 +706,12 @@ fn compile_expr(
             let flags_reg = fnb.gen_reg();
             compile_load_const(fnb, flags_reg, Literal::String(flags.clone()));
 
-            compile_new(fnb, obj, constructor, &[pattern_reg, flags_reg]);
+            complex::compile_new(fnb, obj, constructor, &[pattern_reg, flags_reg]);
 
             obj
         }
         Expr::Error => panic!("malformed PAST: Expr::Error left behind by previous phase"),
     }
-}
-
-fn compile_new(
-    fnb: &mut FnBuilder,
-    obj: bytecode::VReg,
-    constructor: bytecode::VReg,
-    arg_regs: &[bytecode::VReg],
-) {
-    fnb.emit(Instr::ObjCreateEmpty(obj));
-
-    {
-        // return value is discarded
-        let return_value = fnb.gen_reg();
-        fnb.emit(Instr::Call {
-            return_value,
-            this: obj,
-            callee: constructor,
-        });
-    }
-
-    for reg in arg_regs {
-        fnb.emit(Instr::CallArg(*reg));
-    }
-
-    let key = fnb.gen_reg();
-
-    let prototype = fnb.gen_reg();
-    compile_load_const(fnb, key, Literal::String("prototype".into()));
-    fnb.emit(Instr::ObjGet {
-        dest: prototype,
-        obj: constructor,
-        key,
-    });
-
-    compile_load_const(fnb, key, Literal::String("__proto__".into()));
-    fnb.emit(Instr::ObjSet {
-        obj,
-        key,
-        value: prototype,
-    });
-
-    compile_load_const(fnb, key, Literal::String("constructor".into()));
-    fnb.emit(Instr::ObjSetN {
-        obj,
-        key,
-        value: constructor,
-    });
 }
 
 fn compile_block(fnb: &mut FnBuilder, block: &Block) {
@@ -1183,5 +1136,60 @@ mod tests {
             super::compile_function(&globals, &mut module_builder, Vec::new(), &past_function);
 
         module_builder.build(root_lfnid)
+    }
+}
+
+mod complex {
+    // This module contains "complex instructions": bytecode templates for
+    // operations that can be seen as self-contained but are broken down into
+    // lower-level instructions during the compilation process.
+
+    use super::*;
+
+    pub(super) fn compile_new(
+        fnb: &mut FnBuilder,
+        obj: bytecode::VReg,
+        constructor: bytecode::VReg,
+        arg_regs: &[bytecode::VReg],
+    ) {
+        fnb.emit(Instr::ObjCreateEmpty(obj));
+
+        {
+            // return value is discarded
+            let return_value = fnb.gen_reg();
+            fnb.emit(Instr::Call {
+                return_value,
+                this: obj,
+                callee: constructor,
+            });
+        }
+
+        for reg in arg_regs {
+            fnb.emit(Instr::CallArg(*reg));
+        }
+
+        let key = fnb.gen_reg();
+
+        let prototype = fnb.gen_reg();
+        compile_load_const(fnb, key, Literal::String("prototype".into()));
+        fnb.emit(Instr::ObjGet {
+            dest: prototype,
+            obj: constructor,
+            key,
+        });
+
+        compile_load_const(fnb, key, Literal::String("__proto__".into()));
+        fnb.emit(Instr::ObjSet {
+            obj,
+            key,
+            value: prototype,
+        });
+
+        compile_load_const(fnb, key, Literal::String("constructor".into()));
+        fnb.emit(Instr::ObjSetN {
+            obj,
+            key,
+            value: constructor,
+        });
     }
 }
