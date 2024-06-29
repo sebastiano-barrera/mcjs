@@ -458,7 +458,11 @@ fn compile_expr(
                     let right = compile_expr(fnb, None, block, *right);
 
                     let instr = match op {
-                        swc_ecma_ast::BinaryOp::Add => Instr::OpAdd(dest, left, right),
+                        swc_ecma_ast::BinaryOp::Add => {
+                            let left = complex::compile_to_primitive(fnb, left);
+                            let right = complex::compile_to_primitive(fnb, right);
+                            Instr::OpAdd(dest, left, right)
+                        }
                         swc_ecma_ast::BinaryOp::Sub => Instr::ArithSub(dest, left, right),
                         swc_ecma_ast::BinaryOp::Mul => Instr::ArithMul(dest, left, right),
                         swc_ecma_ast::BinaryOp::Div => Instr::ArithDiv(dest, left, right),
@@ -1191,5 +1195,98 @@ mod complex {
             key,
             value: constructor,
         });
+    }
+
+    pub(super) fn compile_to_primitive(fnb: &mut FnBuilder, arg: bytecode::VReg) -> bytecode::VReg {
+        #![allow(non_snake_case)]
+
+        let lit_valueOf = fnb.add_const(Literal::JsWord("valueOf".into()));
+        let lit_toString = fnb.add_const(Literal::JsWord("toString".into()));
+
+        let key = fnb.gen_reg();
+        let property = fnb.gen_reg();
+        let value = fnb.gen_reg();
+
+        fnb.emit(Instr::Copy {
+            dst: value,
+            src: arg,
+        });
+        let jmp_if_arg_primitive = fnb.reserve_instr();
+
+        let mut jmp_if_ret_primitive0 = bytecode::IID(0);
+        let mut jmp_if_ret_primitive1 = bytecode::IID(0);
+
+        for (name, jmp_if_ret_primitive) in [
+            (lit_valueOf, &mut jmp_if_ret_primitive0),
+            (lit_toString, &mut jmp_if_ret_primitive1),
+        ] {
+            fnb.emit(Instr::LoadConst(key, name));
+            fnb.emit(Instr::ObjGet {
+                dest: property,
+                obj: arg,
+                key,
+            });
+            let jmp_if_property_not_closure = fnb.reserve_instr();
+
+            fnb.emit(Instr::LoadUndefined(key));
+            fnb.emit(Instr::Call {
+                return_value: value,
+                this: key,
+                callee: property,
+            });
+            *jmp_if_ret_primitive = fnb.reserve_instr();
+
+            let next = fnb.peek_iid();
+
+            fnb.set_instr(
+                jmp_if_property_not_closure,
+                Instr::JmpIfNotClosure {
+                    arg: property,
+                    dest: next,
+                },
+            );
+        }
+
+        // TODO These "standard exceptions" should be created at initializationa
+        // and reused instead of recreated every time
+        let k_message = fnb.add_const(Literal::String("Cannot convert to primitive".to_string()));
+        let message = fnb.gen_reg();
+        fnb.emit(Instr::LoadConst(message, k_message));
+
+        let TypeError = fnb.gen_reg();
+        let k_TypeError = fnb.add_const(Literal::String("TypeError".to_string()));
+        fnb.emit(Instr::GetGlobal {
+            dest: TypeError,
+            name: k_TypeError,
+        });
+        let exc = fnb.gen_reg();
+        compile_new(fnb, exc, TypeError, &[message]);
+        fnb.emit(Instr::Throw(exc));
+
+        let L_success = fnb.peek_iid();
+
+        fnb.set_instr(
+            jmp_if_ret_primitive0,
+            Instr::JmpIfPrimitive {
+                arg: value,
+                dest: L_success,
+            },
+        );
+        fnb.set_instr(
+            jmp_if_ret_primitive1,
+            Instr::JmpIfPrimitive {
+                arg: value,
+                dest: L_success,
+            },
+        );
+        fnb.set_instr(
+            jmp_if_arg_primitive,
+            Instr::JmpIfPrimitive {
+                arg,
+                dest: L_success,
+            },
+        );
+
+        value
     }
 }

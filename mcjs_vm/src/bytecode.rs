@@ -159,6 +159,14 @@ pub enum Instr {
         cond: VReg,
         dest: IID,
     },
+    JmpIfPrimitive {
+        arg: VReg,
+        dest: IID,
+    },
+    JmpIfNotClosure {
+        arg: VReg,
+        dest: IID,
+    },
     Jmp(IID),
     SaveFrameSnapshot(IID),
     PushToSink(VReg),
@@ -329,6 +337,8 @@ impl Instr {
             Instr::IsInstanceOf(dst, obj, super_) => { an(D::VRegWrite(*dst)); an(D::VRegRead(*obj)); an(D::VRegRead(*super_)); },
             Instr::JmpIf { cond, dest }
             | Instr::JmpIfNot { cond, dest } => { an(D::VRegRead(*cond)); an(D::IID(*dest)); },
+            Instr::JmpIfPrimitive { arg, dest } 
+            | Instr::JmpIfNotClosure { arg, dest } => { an(D::VRegRead(*arg)); an(D::IID(*dest)); },
             Instr::Jmp(dest)
      	    | Instr::SaveFrameSnapshot(dest) => { an(D::IID(*dest)); },
             Instr::PushToSink(arg) => { an(D::VRegRead(*arg)); },

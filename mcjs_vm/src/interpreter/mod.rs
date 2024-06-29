@@ -604,6 +604,18 @@ fn run_inner(
                     // Just go to the next instruction
                 }
             }
+            Instr::JmpIfPrimitive { arg, dest } => {
+                let arg = get_operand(data, *arg)?;
+                if arg.is_primitive() {
+                    next_ndx = dest.0;
+                }
+            }
+            Instr::JmpIfNotClosure { arg, dest } => {
+                let arg = get_operand(data, *arg)?;
+                if realm.heap.as_closure(arg).is_none() {
+                    next_ndx = dest.0;
+                }
+            }
 
             Instr::Copy { dst, src } => {
                 let value = get_operand(data, *src)?;
