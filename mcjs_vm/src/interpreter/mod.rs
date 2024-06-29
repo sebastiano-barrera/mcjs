@@ -526,10 +526,10 @@ fn run_inner(
                 let a = get_operand(data, *a)?;
                 let b = get_operand(data, *b)?;
 
-                let a_prim = to_primitive(a, realm, loader)?;
-                let b_prim = to_primitive(b, realm, loader)?;
+                assert!(a.is_primitive());
+                assert!(b.is_primitive());
 
-                let result = match (a_prim, b_prim) {
+                let result = match (a, b) {
                     (Value::String(_), _) | (_, Value::String(_)) => {
                         let a_strv = to_string_or_throw(a, realm, loader)?;
                         let b_strv = to_string_or_throw(b, realm, loader)?;
@@ -546,8 +546,8 @@ fn run_inner(
                         Value::String(concated)
                     }
                     _ => {
-                        let an = to_number_or_throw(a_prim, realm, loader)?;
-                        let bn = to_number_or_throw(b_prim, realm, loader)?;
+                        let an = to_number_or_throw(a, realm, loader)?;
+                        let bn = to_number_or_throw(b, realm, loader)?;
                         Value::Number(an + bn)
                     }
                 };
