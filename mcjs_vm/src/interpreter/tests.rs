@@ -1287,6 +1287,35 @@ fn test_number_nonnumber_add() {
     assert_eq!(&output.sink, &[Some(Literal::Number(198.0))]);
 }
 
+#[test]
+fn regression_cross_conversion_suspend() {
+    // with the current impl, suspensions in JS code executed during a
+    // native call (for example, primitive coercion) are broken: we don't get a
+    // proper return value, and can't resume.
+
+    let mut loader = loader::Loader::new_cwd();
+    let text = "
+            const x = { 
+                valueOf() {
+                    debugger;
+                    return 99;
+                }
+            };
+            sink(99 + x);
+        "
+    .to_string();
+    let chunk_fnid = loader
+        .load_script_anon(text)
+        .expect("couldn't compile test script");
+
+    let mut realm = Realm::new(&mut loader);
+    let exit = Interpreter::new(&mut realm, &mut loader, chunk_fnid)
+        .run()
+        .unwrap();
+
+    assert!(matches!(exit, Exit::Suspended { .. }));
+}
+
 mod debugging {
     use super::*;
     use crate::Loader;
