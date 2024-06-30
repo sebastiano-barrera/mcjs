@@ -4,6 +4,8 @@ use swc_common::Span;
 
 pub use swc_atoms::JsWord;
 
+pub(crate) mod simple_builder;
+
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[allow(clippy::upper_case_acronyms)]
@@ -279,6 +281,9 @@ pub enum Instr {
     GetCurrentException(VReg),
 
     Breakpoint,
+    JmpIfUndefined { arg: bytecode::VReg, dest: crate::IID },
+    JmpIfNotInteger { dest: _, arg: bytecode::VReg },
+    StrFromCodePoint { dest: bytecode::VReg, arg: bytecode::VReg },
 }
 
 #[derive(Clone, Copy)]

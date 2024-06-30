@@ -8,11 +8,11 @@ use super::{
 };
 use super::{to_string_or_throw, Realm, Value};
 
-use crate::error;
 use crate::heap;
 use crate::heap::JSString;
 use crate::heap::Property;
 use crate::loader;
+use crate::{bytecode, error};
 
 #[inline]
 fn native_closure(nf: NativeFn) -> Rc<Closure> {
@@ -508,6 +508,59 @@ fn nf_String(
         }
         _ => panic!("bug: 'this' not an object: {:?}", this),
     }
+}
+
+fn build_String_fromCodePoint() -> bytecode::Function {
+    use crate::bytecode::simple_builder::FnBuilder;
+    use crate::bytecode::{Instr, Literal};
+
+    let arg0 = bytecode::VReg(0);
+
+    let mut fnb = FnBuilder::new();
+    let ret_val = fnb.gen_reg();
+
+    let jmp_default_exit = fnb.reserve_instr();
+    // TODO ToPrimitive(arg0) here!
+    fnb.emit(Instr::ToNumber {
+        dest: arg0,
+        arg: arg0,
+    });
+    let jmp_invalid_codepoint = fnb.reserve_instr();
+
+    fnb.emit(Instr::StrFromCodePoint {
+        dest: arg0,
+        arg: arg0,
+    });
+    fnb.emit(Instr::Return(ret_val));
+
+    let default_exit = fnb.peek_iid();
+    fnb.emit(Instr::StrCreateEmpty(ret_val));
+    fnb.emit(Instr::Return(ret_val));
+
+    let invalid_codepoint_exit = fnb.peek_iid();
+    // TODO
+    let message = fnb.add_const(Literal::String(
+        "invalid code point (too large)".to_string(),
+    ));
+    fnb.emit(Instr::LoadConst(arg0, message));
+    fnb.emit(Instr::Return(arg0));
+
+    fnb.set_instr(
+        jmp_default_exit,
+        Instr::JmpIfUndefined {
+            arg: bytecode::VReg(0),
+            dest: default_exit,
+        },
+    );
+    fnb.set_instr(
+        jmp_invalid_codepoint,
+        Instr::JmpIfNotInteger {
+            dest: invalid_codepoint_exit,
+            arg: arg0,
+        },
+    );
+
+    fnb.build()
 }
 
 fn nf_String_fromCodePoint(
