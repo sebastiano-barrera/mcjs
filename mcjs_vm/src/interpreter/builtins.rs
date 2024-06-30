@@ -511,12 +511,12 @@ fn nf_String(
 }
 
 fn build_String_fromCodePoint() -> bytecode::Function {
-    use crate::bytecode::simple_builder::FnBuilder;
+    use crate::bytecode::builder::FnBuilder;
     use crate::bytecode::{Instr, Literal};
 
     let arg0 = bytecode::VReg(0);
 
-    let mut fnb = FnBuilder::new();
+    let mut fnb = FnBuilder::default();
     let ret_val = fnb.gen_reg();
 
     let jmp_default_exit = fnb.reserve_instr();
@@ -538,7 +538,6 @@ fn build_String_fromCodePoint() -> bytecode::Function {
     fnb.emit(Instr::Return(ret_val));
 
     let invalid_codepoint_exit = fnb.peek_iid();
-    // TODO
     let message = fnb.add_const(Literal::String(
         "invalid code point (too large)".to_string(),
     ));

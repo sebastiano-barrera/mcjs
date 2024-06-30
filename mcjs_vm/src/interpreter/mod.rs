@@ -616,6 +616,20 @@ fn run_inner(
                     next_ndx = dest.0;
                 }
             }
+            Instr::JmpIfUndefined { arg, dest } => {
+                let arg = get_operand(data, *arg)?;
+                if matches!(arg, Value::Undefined) {
+                    next_ndx = dest.0;
+                }
+            }
+            Instr::JmpIfNotInteger { arg, dest } => {
+                let arg = get_operand(data, *arg)?;
+                if let Value::Number(n) = arg {
+                    if n.fract() != 0.0 {
+                        next_ndx = dest.0;
+                    }
+                }
+            }
 
             Instr::Copy { dst, src } => {
                 let value = get_operand(data, *src)?;
@@ -974,6 +988,22 @@ fn run_inner(
             Instr::StrAppend(buf_reg, tail) => {
                 let value = str_append(data, *buf_reg, *tail, realm, loader)?;
                 data.top_mut().set_result(*buf_reg, value);
+            }
+            Instr::StrFromCodePoint { arg, dest } => {
+                let arg = get_operand(data, *arg)?
+                    .expect_num()
+                    .expect("compiler bug: StrFromCodePoint requires Number argument");
+                assert!(
+                    arg.fract() == 0.0,
+                    "compiler bug: StrFromCodePoint requires integer argument"
+                );
+                let code_point: u16 = (arg as usize)
+                    .try_into()
+                    .expect("compiler bug: code point too large, not caught in exception");
+
+                let jss = JSString::new_from_utf16(vec![code_point]);
+                let str_val = realm.heap.new_string(jss);
+                data.top_mut().set_result(*dest, Value::String(str_val));
             }
 
             Instr::GetGlobalThis(dest) => {

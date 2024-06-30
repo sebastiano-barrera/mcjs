@@ -4,7 +4,7 @@ use swc_common::Span;
 
 pub use swc_atoms::JsWord;
 
-pub(crate) mod simple_builder;
+pub(crate) mod builder;
 
 // Instruction ID. Can identify an instruction, or its result.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -169,6 +169,8 @@ pub enum Instr {
         arg: VReg,
         dest: IID,
     },
+    JmpIfUndefined { arg: VReg, dest: IID },
+    JmpIfNotInteger { arg: VReg, dest: IID },
     Jmp(IID),
     SaveFrameSnapshot(IID),
     PushToSink(VReg),
@@ -251,6 +253,7 @@ pub enum Instr {
     // TODO Replace these ops with native functions (?)
     StrCreateEmpty(VReg),
     StrAppend(VReg, VReg),
+    StrFromCodePoint { dest: VReg, arg: VReg },
 
     NewIterator {
         dest: VReg,
@@ -281,9 +284,6 @@ pub enum Instr {
     GetCurrentException(VReg),
 
     Breakpoint,
-    JmpIfUndefined { arg: bytecode::VReg, dest: crate::IID },
-    JmpIfNotInteger { dest: _, arg: bytecode::VReg },
-    StrFromCodePoint { dest: bytecode::VReg, arg: bytecode::VReg },
 }
 
 #[derive(Clone, Copy)]
@@ -343,7 +343,9 @@ impl Instr {
             Instr::JmpIf { cond, dest }
             | Instr::JmpIfNot { cond, dest } => { an(D::VRegRead(*cond)); an(D::IID(*dest)); },
             Instr::JmpIfPrimitive { arg, dest } 
-            | Instr::JmpIfNotClosure { arg, dest } => { an(D::VRegRead(*arg)); an(D::IID(*dest)); },
+            | Instr::JmpIfNotClosure { arg, dest } 
+            | Instr::JmpIfUndefined { arg, dest } 
+            | Instr::JmpIfNotInteger { arg, dest } => { an(D::VRegRead(*arg)); an(D::IID(*dest)); },
             Instr::Jmp(dest)
      	    | Instr::SaveFrameSnapshot(dest) => { an(D::IID(*dest)); },
             Instr::PushToSink(arg) => { an(D::VRegRead(*arg)); },
@@ -382,6 +384,7 @@ impl Instr {
             Instr::ArrayLen { dest, arr } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arr)); }
             Instr::StrCreateEmpty(dest) => { an(D::VRegWrite(*dest)); }
             Instr::StrAppend(recipient, src) => { an(D::VRegRead(*recipient)); an(D::VRegRead(*src)); }
+            Instr::StrFromCodePoint { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
             Instr::NewIterator { dest, obj } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); }
             Instr::IteratorGetCurrent { dest, iter } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*iter)); }
             Instr::IteratorAdvance { iter } => { an(D::VRegRead(*iter)); },
@@ -440,22 +443,6 @@ pub struct BreakRange {
 }
 
 pub struct Function {
-    instrs: Box<[Instr]>,
-    consts: Box<[Literal]>,
-    n_regs: u16,
-    ident_history: Vec<IdentAsmt>,
-    is_strict_mode: bool,
-    span: Span,
-}
-
-#[derive(Debug)]
-pub struct IdentAsmt {
-    pub iid: IID,
-    pub reg: VReg,
-    pub ident: JsWord,
-}
-
-pub struct FunctionBuilder {
     pub instrs: Box<[Instr]>,
     pub consts: Box<[Literal]>,
     pub n_regs: u16,
@@ -464,17 +451,11 @@ pub struct FunctionBuilder {
     pub span: Span,
 }
 
-impl FunctionBuilder {
-    pub(crate) fn build(self) -> Function {
-        Function {
-            instrs: self.instrs,
-            consts: self.consts,
-            n_regs: self.n_regs,
-            ident_history: self.ident_history,
-            is_strict_mode: self.is_strict_mode,
-            span: self.span,
-        }
-    }
+#[derive(Debug)]
+pub struct IdentAsmt {
+    pub iid: IID,
+    pub reg: VReg,
+    pub ident: JsWord,
 }
 
 impl Function {

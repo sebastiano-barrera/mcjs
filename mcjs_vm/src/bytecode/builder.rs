@@ -1,5 +1,5 @@
 use crate::{
-    bytecode::{ConstIndex, Function, FunctionBuilder, Instr, VReg},
+    bytecode::{ConstIndex, Function, Instr, VReg},
     Literal, IID,
 };
 
@@ -7,14 +7,12 @@ use crate::{
 pub struct FnBuilder {
     consts: Vec<Literal>,
     instrs: Vec<Instr>,
+    // The first ARGS_COUNT_MAX register are reserved for the first few function
+    // arguments
     n_regs: u16,
 }
 
 impl FnBuilder {
-    pub fn new() -> Self {
-        FnBuilder::default()
-    }
-
     pub fn add_const(&mut self, lit: Literal) -> ConstIndex {
         let ndx = self.consts.len().try_into().unwrap();
         self.consts.push(lit);
@@ -46,7 +44,7 @@ impl FnBuilder {
     }
 
     pub fn build(self) -> Function {
-        FunctionBuilder {
+        Function {
             instrs: self.instrs.into_boxed_slice(),
             consts: self.consts.into_boxed_slice(),
             n_regs: self.n_regs,
@@ -54,6 +52,5 @@ impl FnBuilder {
             is_strict_mode: true,
             span: Default::default(),
         }
-        .build()
     }
 }
