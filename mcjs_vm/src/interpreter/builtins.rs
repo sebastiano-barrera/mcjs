@@ -737,7 +737,7 @@ fn nf_Function_prototype_toString(
         let sid = realm.heap.new_string(jss);
         Ok(Value::String(sid))
     } else {
-        let message = "Boolean.prototype.valueOf requires that 'this' be a Boolean";
+        let message = "Function.prototype.valueOf requires that 'this' be a Function";
         let exc = make_exception(realm, "TypeError", message);
         Err(RunError::Exception(exc))
     }
