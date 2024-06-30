@@ -1228,10 +1228,9 @@ mod complex {
             });
             let jmp_if_property_not_closure = fnb.reserve_instr();
 
-            fnb.emit(Instr::LoadUndefined(key));
             fnb.emit(Instr::Call {
                 return_value: value,
-                this: key,
+                this: arg,
                 callee: property,
             });
             *jmp_if_ret_primitive = fnb.reserve_instr();
@@ -1247,7 +1246,7 @@ mod complex {
             );
         }
 
-        // TODO These "standard exceptions" should be created at initializationa
+        // TODO These "standard exceptions" should be created at initialization
         // and reused instead of recreated every time
         let k_message = fnb.add_const(Literal::String("Cannot convert to primitive".to_string()));
         let message = fnb.gen_reg();
