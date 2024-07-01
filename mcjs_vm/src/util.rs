@@ -9,6 +9,16 @@ macro_rules! define_flag {
             No,
         }
 
+        #[allow(dead_code)]
+        impl $type_name {
+            $vis fn is_yes(&self) -> bool {
+                *self == Self::Yes
+            }
+            $vis fn is_no(&self) -> bool {
+                *self == Self::No
+            }
+        }
+
         impl From<$type_name> for bool {
             fn from(value: $type_name) -> bool {
                 value == $type_name::Yes
