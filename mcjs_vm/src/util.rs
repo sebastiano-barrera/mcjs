@@ -2,9 +2,9 @@ mod formatter;
 
 #[macro_export]
 macro_rules! define_flag {
-    ($type_name:ident) => {
+    ($vis:vis $type_name:ident) => {
         #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-        enum $type_name {
+        $vis enum $type_name {
             Yes,
             No,
         }

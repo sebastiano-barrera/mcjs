@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use swc_atoms::JsWord;
 
 use super::js_to_past::{self, Block, DeclName, Stmt, StmtID, StmtOp};
-use super::CompiledModule;
+use super::{AllowDirectForms, CompiledModule};
 
 use crate::bytecode::{self, Instr, Literal};
 use crate::common::Result;
@@ -41,7 +41,11 @@ use crate::{error, tracing};
 
 use builder::{FnBuilder, Loc, ModuleBuilder};
 
-pub fn compile_module(func: &js_to_past::Function, min_fnid: u32) -> Result<CompiledModule> {
+pub fn compile_module(
+    func: &js_to_past::Function,
+    min_fnid: u32,
+    allow_direct_forms: AllowDirectForms,
+) -> Result<CompiledModule> {
     let res = std::panic::catch_unwind(move || {
         let mut module_builder = builder::ModuleBuilder::new(min_fnid);
 

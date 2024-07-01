@@ -7,7 +7,7 @@ use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
 use crate::bytecode::{self, FnID};
 use crate::common::{MultiError, Result};
 use crate::loader::FileIDRef;
-use crate::{error, error_item, tracing};
+use crate::{define_flag, error, error_item, tracing};
 
 pub use swc_common::SourceMap;
 
@@ -22,9 +22,20 @@ pub struct CompiledChunk {
     pub breakable_ranges: Vec<bytecode::BreakRange>,
 }
 
+define_flag!(pub AllowDirectForms);
+
 pub struct CompileFlags {
     pub min_fnid: u32,
     pub source_type: SourceType,
+
+    /// Whether to allow the use of "direct forms".
+    ///
+    /// These are special forms (bits of syntax) that result in emitting a
+    /// single bytecode instruction (or a very small sequence).
+    ///
+    /// They're designed to only be used with the bootstrap script, NEVER for
+    /// regular user script.
+    pub allow_direct_forms: AllowDirectForms,
 }
 
 /// Whether we're compiling an actual module or a 'classic script'.
@@ -177,7 +188,8 @@ fn compile_module(
 
     // At this level, function.unbound_names contains the list of variables that should be
     // accessed via `globalThis`.
-    let module = past_to_bytecode::compile_module(&function, flags.min_fnid)?;
+    let module =
+        past_to_bytecode::compile_module(&function, flags.min_fnid, flags.allow_direct_forms)?;
     Ok(module)
 }
 
@@ -195,6 +207,7 @@ fn compile_script(
 
     // At this level, function.unbound_names contains the list of variables that should be
     // accessed via `globalThis`.
-    let module = past_to_bytecode::compile_module(&function, flags.min_fnid)?;
+    let module =
+        past_to_bytecode::compile_module(&function, flags.min_fnid, flags.allow_direct_forms)?;
     Ok(module)
 }
