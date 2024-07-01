@@ -1042,6 +1042,10 @@ fn run_inner(
                     .ok_or_else(|| error!("compiler bug: no exception handler to pop!"))?;
             }
             Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
+
+            // TODO Reorder and implement
+            Instr::JmpIfNumberNotInteger { arg, dest } => todo!(),
+            Instr::StrFromCodePoint { dest, arg } => todo!(),
         }
 
         // TODO Inefficient, but prevents a number of bugs

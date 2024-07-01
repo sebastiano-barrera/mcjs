@@ -32,7 +32,7 @@ String.fromCodePoint = function (codePoint) {
   }
 
   codePoint = $ToNumber($ToPrimitive(codePoint));
-  if (!$IsInteger(codePoint)) {
+  if ($NumberNotInteger(codePoint)) {
     throw new RangeError('invalid code point: ' + codePoint);
   }
   return $StrFromCodePoint(codePoint);

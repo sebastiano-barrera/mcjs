@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use swc_atoms::JsWord;
 
 use super::js_to_past::{self, Block, DeclName, Stmt, StmtID, StmtOp};
-use super::{AllowDirectForms, CompiledModule};
+use super::CompiledModule;
 
 use crate::bytecode::{self, Instr, Literal};
 use crate::common::Result;
@@ -41,11 +41,7 @@ use crate::{error, tracing};
 
 use builder::{FnBuilder, Loc, ModuleBuilder};
 
-pub fn compile_module(
-    func: &js_to_past::Function,
-    min_fnid: u32,
-    allow_direct_forms: AllowDirectForms,
-) -> Result<CompiledModule> {
+pub fn compile_module(func: &js_to_past::Function, min_fnid: u32) -> Result<CompiledModule> {
     let res = std::panic::catch_unwind(move || {
         let mut module_builder = builder::ModuleBuilder::new(min_fnid);
 
@@ -190,14 +186,30 @@ fn compile_one_stmt<'a>(
         }
         StmtOp::IfNot { test } => {
             // IfNot can be understood as "skip the next op if <test>"
-            let cond = fnb.gen_reg();
-            compile_expr(fnb, Some(cond), block, *test);
-            let jmpif = fnb.reserve_instr();
+            use js_to_past::{DirectFormInstr, Expr};
+            match block.get_expr(*test) {
+                Expr::DirectForm {
+                    instr: DirectFormInstr::NumberNotInteger,
+                    arg,
+                } => {
+                    let arg = compile_expr(fnb, None, block, *arg);
+                    let jmpif = fnb.reserve_instr();
+                    compile_one_stmt(fnb, block, stmts);
 
-            compile_one_stmt(fnb, block, stmts);
+                    let dest = fnb.peek_iid();
+                    fnb.set_instr(jmpif, Instr::JmpIfNumberNotInteger { arg, dest });
+                }
+                _ => {
+                    let cond = fnb.gen_reg();
+                    compile_expr(fnb, Some(cond), block, *test);
+                    let jmpif = fnb.reserve_instr();
 
-            let dest = fnb.peek_iid();
-            fnb.set_instr(jmpif, Instr::JmpIf { cond, dest });
+                    compile_one_stmt(fnb, block, stmts);
+
+                    let dest = fnb.peek_iid();
+                    fnb.set_instr(jmpif, Instr::JmpIf { cond, dest });
+                }
+            };
         }
         StmtOp::Assign(dest, value_eid) => {
             if let Some(dest) = dest {
@@ -463,9 +475,13 @@ fn compile_expr(
 
                     let instr = match op {
                         swc_ecma_ast::BinaryOp::Add => {
-                            let left = complex::compile_to_primitive(fnb, left);
-                            let right = complex::compile_to_primitive(fnb, right);
-                            Instr::OpAdd(dest, left, right)
+                            let dleft = fnb.gen_reg();
+                            complex::compile_to_primitive(fnb, left, dleft);
+
+                            let dright = fnb.gen_reg();
+                            complex::compile_to_primitive(fnb, right, dright);
+
+                            Instr::OpAdd(dest, dleft, dright)
                         }
                         swc_ecma_ast::BinaryOp::Sub => Instr::ArithSub(dest, left, right),
                         swc_ecma_ast::BinaryOp::Mul => Instr::ArithMul(dest, left, right),
@@ -719,6 +735,24 @@ fn compile_expr(
             obj
         }
         Expr::Error => panic!("malformed PAST: Expr::Error left behind by previous phase"),
+        Expr::DirectForm { instr, arg } => {
+            let dest = get_dest(fnb);
+            let arg = compile_expr(fnb, None, block, *arg);
+
+            match instr {
+                js_to_past::DirectFormInstr::ToNumber => fnb.emit(Instr::ToNumber { dest, arg }),
+                js_to_past::DirectFormInstr::ToPrimitive => {
+                    complex::compile_to_primitive(fnb, arg, dest)
+                }
+                js_to_past::DirectFormInstr::NumberNotInteger => {
+                    panic!("compiler bug: $NumberNotInteger compiled as expr (not as if condition)")
+                }
+                js_to_past::DirectFormInstr::StrFromCodePoint => {
+                    fnb.emit(Instr::StrFromCodePoint { dest, arg })
+                }
+            }
+            fnb.gen_reg()
+        }
     }
 }
 
@@ -1053,7 +1087,10 @@ mod builder {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{bytecode, bytecode_compiler::CompiledModule};
+    use crate::{
+        bytecode,
+        bytecode_compiler::{AllowDirectForms, CompiledModule},
+    };
 
     #[test]
     fn test_global_var() {
@@ -1136,7 +1173,8 @@ mod tests {
 
     fn quick_compile(src: String) -> CompiledModule {
         let (swc_ast, source_map) = crate::bytecode_compiler::quick_parse_script(src);
-        let past_function = super::js_to_past::compile_script(&swc_ast, source_map).unwrap();
+        let past_function =
+            super::js_to_past::compile_script(&swc_ast, source_map, AllowDirectForms::No).unwrap();
 
         let mut module_builder = super::ModuleBuilder::new(0);
         let globals = past_function.unbound_names.iter().cloned().collect();
@@ -1201,7 +1239,11 @@ mod complex {
         });
     }
 
-    pub(super) fn compile_to_primitive(fnb: &mut FnBuilder, arg: bytecode::VReg) -> bytecode::VReg {
+    pub(super) fn compile_to_primitive(
+        fnb: &mut FnBuilder,
+        arg: bytecode::VReg,
+        dest: bytecode::VReg,
+    ) {
         #![allow(non_snake_case)]
 
         let lit_valueOf = fnb.add_const(Literal::JsWord("valueOf".into()));
@@ -1209,10 +1251,9 @@ mod complex {
 
         let key = fnb.gen_reg();
         let property = fnb.gen_reg();
-        let value = fnb.gen_reg();
 
         fnb.emit(Instr::Copy {
-            dst: value,
+            dst: dest,
             src: arg,
         });
         let jmp_if_arg_primitive = fnb.reserve_instr();
@@ -1233,7 +1274,7 @@ mod complex {
             let jmp_if_property_not_closure = fnb.reserve_instr();
 
             fnb.emit(Instr::Call {
-                return_value: value,
+                return_value: dest,
                 this: arg,
                 callee: property,
             });
@@ -1271,14 +1312,14 @@ mod complex {
         fnb.set_instr(
             jmp_if_ret_primitive0,
             Instr::JmpIfPrimitive {
-                arg: value,
+                arg: dest,
                 dest: L_success,
             },
         );
         fnb.set_instr(
             jmp_if_ret_primitive1,
             Instr::JmpIfPrimitive {
-                arg: value,
+                arg: dest,
                 dest: L_success,
             },
         );
@@ -1289,7 +1330,5 @@ mod complex {
                 dest: L_success,
             },
         );
-
-        value
     }
 }

@@ -181,15 +181,14 @@ fn compile_module(
 ) -> Result<CompiledModule> {
     let t = tracing::section("compile_script");
 
-    let function =
-        js_to_past::compile_module(ast_module, source_map).map_err(MultiError::into_single)?;
+    let function = js_to_past::compile_module(ast_module, source_map, flags.allow_direct_forms)
+        .map_err(MultiError::into_single)?;
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
 
     // At this level, function.unbound_names contains the list of variables that should be
     // accessed via `globalThis`.
-    let module =
-        past_to_bytecode::compile_module(&function, flags.min_fnid, flags.allow_direct_forms)?;
+    let module = past_to_bytecode::compile_module(&function, flags.min_fnid)?;
     Ok(module)
 }
 
@@ -200,14 +199,13 @@ fn compile_script(
 ) -> Result<CompiledModule> {
     let t = tracing::section("compile_script");
 
-    let function =
-        js_to_past::compile_script(&script_ast, source_map).map_err(MultiError::into_single)?;
+    let function = js_to_past::compile_script(&script_ast, source_map, flags.allow_direct_forms)
+        .map_err(MultiError::into_single)?;
     t.log_value("PAST", &function);
     assert!(function.parameters.is_empty());
 
     // At this level, function.unbound_names contains the list of variables that should be
     // accessed via `globalThis`.
-    let module =
-        past_to_bytecode::compile_module(&function, flags.min_fnid, flags.allow_direct_forms)?;
+    let module = past_to_bytecode::compile_module(&function, flags.min_fnid)?;
     Ok(module)
 }
