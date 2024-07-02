@@ -410,6 +410,7 @@ fn compile_expr(
                 }
                 swc_ecma_ast::UnaryOp::Plus => {
                     let arg = compile_expr(fnb, forced_dest, block, *arg_eid);
+                    complex::compile_to_primitive(fnb, arg, arg);
                     fnb.emit(Instr::ToNumber { dest, arg });
                 }
                 swc_ecma_ast::UnaryOp::Delete => {

@@ -500,13 +500,13 @@ fn nf_String(
 
 fn nf_String_codePointAt(
     realm: &mut Realm,
-    loader: &mut loader::Loader,
+    _loader: &mut loader::Loader,
     this: &Value,
     args: &[Value],
 ) -> RunResult<Value> {
     let index = {
         let index = args.first().copied().unwrap_or(Value::Number(0.0));
-        let index = to_number(index, realm, loader)?.ok_or_else(|| -> RunError {
+        let index = to_number(index, realm)?.ok_or_else(|| -> RunError {
             error!("invalid index: {}", realm.heap.show_debug(index)).into()
         })?;
         if index.fract() != 0.0 {

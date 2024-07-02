@@ -546,8 +546,8 @@ fn run_inner(
                         Value::String(concated)
                     }
                     _ => {
-                        let an = to_number_or_throw(a, realm, loader)?;
-                        let bn = to_number_or_throw(b, realm, loader)?;
+                        let an = to_number_or_throw(a, realm)?;
+                        let bn = to_number_or_throw(b, realm)?;
                         Value::Number(an + bn)
                     }
                 };
@@ -642,7 +642,7 @@ fn run_inner(
             }
             Instr::ToNumber { dest, arg } => {
                 let value = get_operand(data, *arg)?;
-                let value = to_number_or_throw(value, realm, loader)?;
+                let value = to_number_or_throw(value, realm)?;
                 data.top_mut().set_result(*dest, Value::Number(value));
             }
 
@@ -1083,12 +1083,8 @@ fn run_inner(
 /// Perform number coercion (see `to_number`).
 ///
 /// On error, throw a TypeError (as per JS semantics.)
-fn to_number_or_throw(
-    arg: Value,
-    realm: &mut Realm,
-    loader: &mut loader::Loader,
-) -> RunResult<f64> {
-    to_number(arg, realm, loader)?.ok_or_else(|| {
+fn to_number_or_throw(arg: Value, realm: &mut Realm) -> RunResult<f64> {
+    to_number(arg, realm)?.ok_or_else(|| {
         let message = &format!("cannot convert to a number: {:?}", arg);
         let exc = make_exception(realm, "TypeError", message);
         RunError::Exception(exc)
@@ -1104,20 +1100,17 @@ fn to_number_or_throw(
 ///
 /// A `Some` is returned for a successful conversion. On failure (e.g. for
 /// Symbol), a `None` is returned.
-fn to_number(
-    value: Value,
-    realm: &mut Realm,
-    loader: &mut loader::Loader,
-) -> RunResult<Option<f64>> {
+fn to_number(value: Value, realm: &mut Realm) -> RunResult<Option<f64>> {
     match value {
         Value::Null => Ok(Some(0.0)),
         Value::Bool(true) => Ok(Some(1.0)),
         Value::Bool(false) => Ok(Some(0.0)),
         Value::Number(num) => Ok(Some(num)),
         Value::Object(_) => {
-            let prim = to_primitive(value, realm, loader)?;
-            assert!(prim.is_primitive());
-            to_number(prim, realm, loader)
+            // Converting an object to a number is handled by first converting
+            // it to a primitive (via the $ToPrimitive direct from/complex
+            // instruction), then passing the result to to_number
+            panic!("compiler bug: to_number must be called with a primitive, not an object")
         }
         Value::Undefined => Ok(Some(f64::NAN)),
         Value::Symbol(_) => Ok(None),
