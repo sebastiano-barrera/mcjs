@@ -751,7 +751,8 @@ fn compile_expr(
                     fnb.emit(Instr::StrFromCodePoint { dest, arg })
                 }
             }
-            fnb.gen_reg()
+
+            dest
         }
     }
 }
