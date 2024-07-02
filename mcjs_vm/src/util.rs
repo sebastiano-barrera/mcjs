@@ -2,11 +2,21 @@ mod formatter;
 
 #[macro_export]
 macro_rules! define_flag {
-    ($type_name:ident) => {
+    ($vis:vis $type_name:ident) => {
         #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-        enum $type_name {
+        $vis enum $type_name {
             Yes,
             No,
+        }
+
+        #[allow(dead_code)]
+        impl $type_name {
+            $vis fn is_yes(&self) -> bool {
+                *self == Self::Yes
+            }
+            $vis fn is_no(&self) -> bool {
+                *self == Self::No
+            }
         }
 
         impl From<$type_name> for bool {

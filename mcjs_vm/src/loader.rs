@@ -144,24 +144,14 @@ impl Loader {
             boot_script_fnid: None,
         };
 
+        const BOOTSTRAP_SCRIPT: &str = include_str!("bootstrap.js");
+        let file_id = loader.gen_file_id();
         let fnid = loader
-            .load_script_anon(
-                r#"
-                // TODO TODO TODO This needs to be updated to support more than 8 args
-                Function.prototype.call = function (new_this, arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
-                    // `this` is the function to call
-                    const bound = this.bind(new_this);
-                    return bound(arg0, arg1, arg2, arg3, arg4, arg5, arg6);
-                }
-
-                Function.prototype.apply = function (new_this, args) {
-                    // TODO change once spread syntax (e.g. `f(...args)`) is implemented
-                    // `this` is the function to call
-                    args = args || [];
-                    return this.bind(new_this)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
-                }
-                "#
-                .into(),
+            .load_code(
+                file_id,
+                BOOTSTRAP_SCRIPT.into(),
+                bytecode_compiler::SourceType::Script,
+                bytecode_compiler::AllowDirectForms::Yes,
             )
             .unwrap();
         loader.boot_script_fnid = Some(fnid);
@@ -300,6 +290,7 @@ impl Loader {
             FileID::File(module_path.to_owned()),
             content,
             bytecode_compiler::SourceType::Module,
+            bytecode_compiler::AllowDirectForms::No,
         )
     }
 
@@ -310,7 +301,12 @@ impl Loader {
         content: String,
         source_type: bytecode_compiler::SourceType,
     ) -> Result<bytecode::FnID> {
-        self.load_code(file_id, content, source_type)
+        self.load_code(
+            file_id,
+            content,
+            source_type,
+            bytecode_compiler::AllowDirectForms::No,
+        )
     }
 
     fn load_code(
@@ -318,6 +314,7 @@ impl Loader {
         file_id: FileID,
         content: String,
         source_type: bytecode_compiler::SourceType,
+        allow_direct_forms: bytecode_compiler::AllowDirectForms,
     ) -> Result<bytecode::FnID> {
         let directory = match &file_id {
             FileID::Anon(_) => self.base_path.to_owned(),
@@ -332,6 +329,7 @@ impl Loader {
         let flags = bytecode_compiler::CompileFlags {
             min_fnid,
             source_type,
+            allow_direct_forms,
         };
 
         // TODO Modify compile_file so that we don't have to copy the Rc
@@ -396,11 +394,18 @@ impl Loader {
     /// "Anonymous" here means that the code is not linked to any file. This is the case,
     /// for example, for a piece of code coming from a REPL or similar tool.
     pub fn load_script_anon(&mut self, content: String) -> Result<bytecode::FnID> {
-        let file_id = {
-            self.next_anon_id += 1;
-            FileID::Anon(self.next_anon_id)
-        };
-        self.load_code(file_id, content, bytecode_compiler::SourceType::Script)
+        let file_id = self.gen_file_id();
+        self.load_code(
+            file_id,
+            content,
+            bytecode_compiler::SourceType::Script,
+            bytecode_compiler::AllowDirectForms::No,
+        )
+    }
+
+    fn gen_file_id(&mut self) -> FileID {
+        self.next_anon_id += 1;
+        FileID::Anon(self.next_anon_id)
     }
 
     pub fn load_script_file(&mut self, filename: &Path) -> Result<bytecode::FnID> {
@@ -421,7 +426,12 @@ impl Loader {
             bytecode_compiler::SourceType::Script
         };
 
-        self.load_code(FileID::File(filename), content, source_type)
+        self.load_code(
+            FileID::File(filename),
+            content,
+            source_type,
+            bytecode_compiler::AllowDirectForms::No,
+        )
     }
 
     pub fn resolve_break_loc(

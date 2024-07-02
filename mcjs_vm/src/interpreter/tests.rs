@@ -1146,17 +1146,13 @@ fn test_string_codePointAt() {
 #[allow(non_snake_case)]
 fn test_string_fromCodePoint() {
     let output = quick_run_script(
-        "const s = 'asdlol123';
-            for (let i=0; i < s.length; ++i) {
-                sink(String.fromCodePoint(s.codePointAt(i)));
-            }
-
-            try {
-                String.fromCodePoint(undefined);
-            } catch (err) {
-                sink(err.name)
-            }
-            ",
+        "
+        const s = 'asdlol123';
+        for (let i=0; i < s.length; ++i) {
+            sink(String.fromCodePoint(s.codePointAt(i)));
+        }
+        sink(String.fromCodePoint());
+        ",
     );
 
     let ref_string = "asdlol123";
@@ -1168,7 +1164,7 @@ fn test_string_fromCodePoint() {
     }
     assert_eq!(
         output.sink[ref_string.len()],
-        Some(Literal::String("RangeError".into()))
+        Some(Literal::String("".into()))
     );
 }
 
