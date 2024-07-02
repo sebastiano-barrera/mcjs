@@ -502,7 +502,7 @@ impl Function {
     }
 
     pub fn dump<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
-        writeln!(out, "-- instrs")?;
+        writeln!(out, "-- instrs ({} bytes)", std::mem::size_of_val(&*self.instrs))?;
         for (ndx, instr) in self.instrs.iter().enumerate() {
             write!(out, " {:4} {:15}  ", ndx, instr.opcode())?;
             instr.analyze(|desc| match desc {
