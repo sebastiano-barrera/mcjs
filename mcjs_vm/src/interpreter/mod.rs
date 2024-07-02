@@ -616,6 +616,15 @@ fn run_inner(
                     next_ndx = dest.0;
                 }
             }
+            Instr::JmpIfNumberNotInteger { arg, dest } => {
+                let arg = get_operand(data, *arg)?;
+                let num = arg.expect_num().expect(
+                    "compiler bug: argument to JmpIfNumberNotInteger is expected to be number",
+                );
+                if num.fract() != 0.0 {
+                    next_ndx = dest.0;
+                }
+            }
 
             Instr::Copy { dst, src } => {
                 let value = get_operand(data, *src)?;
@@ -975,6 +984,23 @@ fn run_inner(
                 let value = str_append(data, *buf_reg, *tail, realm, loader)?;
                 data.top_mut().set_result(*buf_reg, value);
             }
+            Instr::StrFromCodePoint { dest, arg } => {
+                let arg = get_operand(data, *arg)?;
+                let code_point_f64 = arg
+                    .expect_num()
+                    .expect("compiler bug: argument to StrFromCodePoint is expected to be number");
+                assert!(
+                    code_point_f64.fract() == 0.0,
+                    "compiler bug: argument to StrFromCodePoint is expected to be integer number"
+                );
+                let code_point: u16 = (code_point_f64 as usize)
+                    .try_into()
+                    .expect("compiler bug: argument to StrFromCodePoint does not fit into u16");
+
+                let jss = JSString::new_from_utf16(vec![code_point]);
+                let oid = realm.heap.new_string(jss);
+                data.top_mut().set_result(*dest, Value::String(oid));
+            }
 
             Instr::GetGlobalThis(dest) => {
                 data.top_mut().set_result(*dest, realm.global_obj);
@@ -1042,10 +1068,6 @@ fn run_inner(
                     .ok_or_else(|| error!("compiler bug: no exception handler to pop!"))?;
             }
             Instr::PushExcHandler(target_iid) => data.top_mut().push_exc_handler(*target_iid),
-
-            // TODO Reorder and implement
-            Instr::JmpIfNumberNotInteger { arg, dest } => todo!(),
-            Instr::StrFromCodePoint { dest, arg } => todo!(),
         }
 
         // TODO Inefficient, but prevents a number of bugs
