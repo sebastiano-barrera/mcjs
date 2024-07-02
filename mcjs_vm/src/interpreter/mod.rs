@@ -526,10 +526,10 @@ fn run_inner(
                 let a = get_operand(data, *a)?;
                 let b = get_operand(data, *b)?;
 
-                let a_prim = to_primitive(a, realm, loader)?;
-                let b_prim = to_primitive(b, realm, loader)?;
+                assert!(a.is_primitive());
+                assert!(b.is_primitive());
 
-                let result = match (a_prim, b_prim) {
+                let result = match (a, b) {
                     (Value::String(_), _) | (_, Value::String(_)) => {
                         let a_strv = to_string_or_throw(a, realm, loader)?;
                         let b_strv = to_string_or_throw(b, realm, loader)?;
@@ -546,8 +546,8 @@ fn run_inner(
                         Value::String(concated)
                     }
                     _ => {
-                        let an = to_number_or_throw(a_prim, realm, loader)?;
-                        let bn = to_number_or_throw(b_prim, realm, loader)?;
+                        let an = to_number_or_throw(a, realm)?;
+                        let bn = to_number_or_throw(b, realm)?;
                         Value::Number(an + bn)
                     }
                 };
@@ -604,6 +604,27 @@ fn run_inner(
                     // Just go to the next instruction
                 }
             }
+            Instr::JmpIfPrimitive { arg, dest } => {
+                let arg = get_operand(data, *arg)?;
+                if arg.is_primitive() {
+                    next_ndx = dest.0;
+                }
+            }
+            Instr::JmpIfNotClosure { arg, dest } => {
+                let arg = get_operand(data, *arg)?;
+                if realm.heap.as_closure(arg).is_none() {
+                    next_ndx = dest.0;
+                }
+            }
+            Instr::JmpIfNumberNotInteger { arg, dest } => {
+                let arg = get_operand(data, *arg)?;
+                let num = arg.expect_num().expect(
+                    "compiler bug: argument to JmpIfNumberNotInteger is expected to be number",
+                );
+                if num.fract() != 0.0 {
+                    next_ndx = dest.0;
+                }
+            }
 
             Instr::Copy { dst, src } => {
                 let value = get_operand(data, *src)?;
@@ -621,7 +642,7 @@ fn run_inner(
             }
             Instr::ToNumber { dest, arg } => {
                 let value = get_operand(data, *arg)?;
-                let value = to_number_or_throw(value, realm, loader)?;
+                let value = to_number_or_throw(value, realm)?;
                 data.top_mut().set_result(*dest, Value::Number(value));
             }
 
@@ -963,6 +984,23 @@ fn run_inner(
                 let value = str_append(data, *buf_reg, *tail, realm, loader)?;
                 data.top_mut().set_result(*buf_reg, value);
             }
+            Instr::StrFromCodePoint { dest, arg } => {
+                let arg = get_operand(data, *arg)?;
+                let code_point_f64 = arg
+                    .expect_num()
+                    .expect("compiler bug: argument to StrFromCodePoint is expected to be number");
+                assert!(
+                    code_point_f64.fract() == 0.0,
+                    "compiler bug: argument to StrFromCodePoint is expected to be integer number"
+                );
+                let code_point: u16 = (code_point_f64 as usize)
+                    .try_into()
+                    .expect("compiler bug: argument to StrFromCodePoint does not fit into u16");
+
+                let jss = JSString::new_from_utf16(vec![code_point]);
+                let oid = realm.heap.new_string(jss);
+                data.top_mut().set_result(*dest, Value::String(oid));
+            }
 
             Instr::GetGlobalThis(dest) => {
                 data.top_mut().set_result(*dest, realm.global_obj);
@@ -1045,12 +1083,8 @@ fn run_inner(
 /// Perform number coercion (see `to_number`).
 ///
 /// On error, throw a TypeError (as per JS semantics.)
-fn to_number_or_throw(
-    arg: Value,
-    realm: &mut Realm,
-    loader: &mut loader::Loader,
-) -> RunResult<f64> {
-    to_number(arg, realm, loader)?.ok_or_else(|| {
+fn to_number_or_throw(arg: Value, realm: &mut Realm) -> RunResult<f64> {
+    to_number(arg, realm)?.ok_or_else(|| {
         let message = &format!("cannot convert to a number: {:?}", arg);
         let exc = make_exception(realm, "TypeError", message);
         RunError::Exception(exc)
@@ -1066,20 +1100,17 @@ fn to_number_or_throw(
 ///
 /// A `Some` is returned for a successful conversion. On failure (e.g. for
 /// Symbol), a `None` is returned.
-fn to_number(
-    value: Value,
-    realm: &mut Realm,
-    loader: &mut loader::Loader,
-) -> RunResult<Option<f64>> {
+fn to_number(value: Value, realm: &mut Realm) -> RunResult<Option<f64>> {
     match value {
         Value::Null => Ok(Some(0.0)),
         Value::Bool(true) => Ok(Some(1.0)),
         Value::Bool(false) => Ok(Some(0.0)),
         Value::Number(num) => Ok(Some(num)),
         Value::Object(_) => {
-            let prim = to_primitive(value, realm, loader)?;
-            assert!(prim.is_primitive());
-            to_number(prim, realm, loader)
+            // Converting an object to a number is handled by first converting
+            // it to a primitive (via the $ToPrimitive direct from/complex
+            // instruction), then passing the result to to_number
+            panic!("compiler bug: to_number must be called with a primitive, not an object")
         }
         Value::Undefined => Ok(Some(f64::NAN)),
         Value::Symbol(_) => Ok(None),

@@ -97,18 +97,6 @@ pub(super) fn init_builtins(heap: &mut heap::Heap) -> Value {
     }
 
     let String = Value::Object(heap.new_function(native_closure(nf_String)));
-    {
-        {
-            let fromCodePoint = Property::NonEnumerable(Value::Object(
-                heap.new_function(native_closure(nf_String_fromCodePoint)),
-            ));
-            heap.set_own(
-                String,
-                heap::IndexOrKey::Key("fromCodePoint"),
-                fromCodePoint,
-            );
-        }
-    }
 
     {
         let string_proto = Value::Object(heap.string_proto());
@@ -510,45 +498,15 @@ fn nf_String(
     }
 }
 
-fn nf_String_fromCodePoint(
-    realm: &mut Realm,
-    loader: &mut loader::Loader,
-    _this: &Value,
-    args: &[Value],
-) -> RunResult<Value> {
-    let s = match args.first().copied() {
-        Some(value) => {
-            let value_num = to_number(value, realm, loader)?.ok_or_else(|| -> RunError {
-                error!("invalid number: {:?}", realm.heap.show_debug(value)).into()
-            })?;
-
-            if value_num.fract() != 0.0 {
-                let message = &format!("invalid code point {}", value_num);
-                let exc = super::make_exception(realm, "RangeError", message);
-                return Err(RunError::Exception(exc));
-            }
-
-            let code_point: u16 = (value_num as usize).try_into().map_err(|_| -> RunError {
-                error!("invalid code point (too large): {}", value_num).into()
-            })?;
-            JSString::new_from_utf16(vec![code_point])
-        }
-        None => JSString::empty(),
-    };
-
-    let s = realm.heap.new_string(s);
-    Ok(Value::String(s))
-}
-
 fn nf_String_codePointAt(
     realm: &mut Realm,
-    loader: &mut loader::Loader,
+    _loader: &mut loader::Loader,
     this: &Value,
     args: &[Value],
 ) -> RunResult<Value> {
     let index = {
         let index = args.first().copied().unwrap_or(Value::Number(0.0));
-        let index = to_number(index, realm, loader)?.ok_or_else(|| -> RunError {
+        let index = to_number(index, realm)?.ok_or_else(|| -> RunError {
             error!("invalid index: {}", realm.heap.show_debug(index)).into()
         })?;
         if index.fract() != 0.0 {
@@ -737,7 +695,7 @@ fn nf_Function_prototype_toString(
         let sid = realm.heap.new_string(jss);
         Ok(Value::String(sid))
     } else {
-        let message = "Boolean.prototype.valueOf requires that 'this' be a Boolean";
+        let message = "Function.prototype.valueOf requires that 'this' be a Function";
         let exc = make_exception(realm, "TypeError", message);
         Err(RunError::Exception(exc))
     }

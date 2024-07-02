@@ -163,6 +163,9 @@ impl Block {
                         check_expr_id(callee);
                         args.iter().for_each(&check_expr_id);
                     }
+                    Expr::DirectForm { instr: _, arg } => {
+                        check_expr_id(arg);
+                    }
                 }
             }
         }
@@ -474,6 +477,19 @@ pub enum Expr {
         flags: String,
     },
     Error,
+
+    DirectForm {
+        instr: DirectFormInstr,
+        arg: ExprID,
+    },
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DirectFormInstr {
+    ToNumber,
+    ToPrimitive,
+    NumberNotInteger,
+    StrFromCodePoint,
 }
 
 #[derive(Debug)]
@@ -502,6 +518,8 @@ const ONE: Expr = Expr::NumberLiteral(1.0);
 pub use builder::{BlockID, TmpID};
 use builder::{Builder, FnBuilder};
 
+use super::AllowDirectForms;
+
 mod builder {
     use crate::common::{Error, MultiError};
     use crate::util::pop_while;
@@ -528,6 +546,7 @@ mod builder {
     pub(super) struct Builder {
         next_id: u32,
         source_map: Rc<swc_common::SourceMap>,
+        allow_direct_forms: AllowDirectForms,
     }
 
     pub(super) struct FnBuilder<'a> {
@@ -581,6 +600,7 @@ mod builder {
             Builder {
                 source_map,
                 next_id: 0,
+                allow_direct_forms: AllowDirectForms::No,
             }
         }
 
@@ -589,6 +609,13 @@ mod builder {
         pub fn new_function(&mut self, initial_strict_mode: StrictMode) -> FnBuilder {
             FnBuilder::new(self, initial_strict_mode)
         }
+
+        pub fn allow_direct_forms(&mut self) {
+            self.allow_direct_forms = AllowDirectForms::Yes;
+        }
+        pub fn direct_forms_allowed(&self) -> bool {
+            self.allow_direct_forms.is_yes()
+        }
     }
 
     impl<'a> FnBuilder<'a> {
@@ -596,9 +623,9 @@ mod builder {
             let mut fnb = FnBuilder {
                 builder,
                 blocks: Vec::new(),
+                spans: Vec::new(),
                 break_exits: Vec::new(),
                 continue_exits: Vec::new(),
-                spans: Vec::new(),
                 errors: Vec::new(),
                 completion_value_var: None,
                 strict_mode: initial_strict_mode,
@@ -608,6 +635,10 @@ mod builder {
             fnb.push_block();
             fnb.allow_fn_decl();
             fnb
+        }
+
+        pub(super) fn direct_forms_allowed(&self) -> bool {
+            self.builder.direct_forms_allowed()
         }
 
         pub(super) fn is_generator_next(&self) -> bool {
@@ -931,8 +962,13 @@ mod builder {
 pub fn compile_script(
     script_ast: &swc_ecma_ast::Script,
     source_map: Rc<swc_common::SourceMap>,
+    allow_direct_forms: AllowDirectForms,
 ) -> MultiErrResult<Function> {
     let mut builder = Builder::new(source_map);
+    if allow_direct_forms.is_yes() {
+        builder.allow_direct_forms();
+    }
+
     let mut fnb = builder.new_function(StrictMode::Sloppy);
     for stmt in &script_ast.body {
         compile_stmt(&mut fnb, stmt);
@@ -966,10 +1002,14 @@ pub fn compile_script(
 pub fn compile_module(
     script_ast: &swc_ecma_ast::Module,
     source_map: Rc<swc_common::SourceMap>,
+    allow_direct_flags: AllowDirectForms,
 ) -> MultiErrResult<Function> {
     use swc_ecma_ast::ModuleItem;
 
     let mut builder = Builder::new(source_map);
+    if allow_direct_flags.is_yes() {
+        builder.allow_direct_forms();
+    }
     // Modules are "use strict" by definition
     let mut fnb = builder.new_function(StrictMode::Strict);
 
@@ -2237,6 +2277,27 @@ fn compile_call(
                 }
             }
         }
+
+        if fnb.direct_forms_allowed() {
+            let mut compile_direct_form = |di| {
+                assert_eq!(args.len(), 1, "direct form takes 1 arg, not {}", args.len());
+                let arg = args.first().unwrap();
+                assert!(arg.spread.is_none());
+
+                let arg = compile_expr(fnb, &*arg.expr);
+                fnb.add_expr(Expr::DirectForm { instr: di, arg })
+            };
+
+            if &ident.sym == "$ToNumber" {
+                return compile_direct_form(DirectFormInstr::ToNumber);
+            } else if &ident.sym == "$ToPrimitive" {
+                return compile_direct_form(DirectFormInstr::ToPrimitive);
+            } else if &ident.sym == "$NumberNotInteger" {
+                return compile_direct_form(DirectFormInstr::NumberNotInteger);
+            } else if &ident.sym == "$StrFromCodePoint" {
+                return compile_direct_form(DirectFormInstr::StrFromCodePoint);
+            }
+        }
     }
 
     let callee = compile_expr(fnb, callee);
@@ -2520,7 +2581,7 @@ fn find_unbound_references(root: &Block, param_names: &[JsWord]) -> Vec<JsWord> 
 
 #[cfg(test)]
 mod tests {
-    use crate::util::DumpExt;
+    use crate::{bytecode_compiler::AllowDirectForms, util::DumpExt};
 
     #[test]
     fn test_simple_for() {
@@ -2624,6 +2685,6 @@ mod tests {
     fn quick_compile(src: String) -> super::Function {
         let (swc_ast, source_map) = crate::bytecode_compiler::quick_parse_script(src);
 
-        super::compile_script(&swc_ast, source_map).unwrap()
+        super::compile_script(&swc_ast, source_map, AllowDirectForms::No).unwrap()
     }
 }

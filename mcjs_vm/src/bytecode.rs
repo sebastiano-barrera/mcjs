@@ -159,6 +159,15 @@ pub enum Instr {
         cond: VReg,
         dest: IID,
     },
+    JmpIfPrimitive {
+        arg: VReg,
+        dest: IID,
+    },
+    JmpIfNotClosure {
+        arg: VReg,
+        dest: IID,
+    },
+    JmpIfNumberNotInteger { arg: VReg, dest: IID },
     Jmp(IID),
     SaveFrameSnapshot(IID),
     PushToSink(VReg),
@@ -241,6 +250,7 @@ pub enum Instr {
     // TODO Replace these ops with native functions (?)
     StrCreateEmpty(VReg),
     StrAppend(VReg, VReg),
+    StrFromCodePoint { dest: VReg, arg: VReg },
 
     NewIterator {
         dest: VReg,
@@ -329,6 +339,9 @@ impl Instr {
             Instr::IsInstanceOf(dst, obj, super_) => { an(D::VRegWrite(*dst)); an(D::VRegRead(*obj)); an(D::VRegRead(*super_)); },
             Instr::JmpIf { cond, dest }
             | Instr::JmpIfNot { cond, dest } => { an(D::VRegRead(*cond)); an(D::IID(*dest)); },
+            Instr::JmpIfPrimitive { arg, dest } 
+            | Instr::JmpIfNotClosure { arg, dest } 
+            | Instr::JmpIfNumberNotInteger { arg, dest }=> { an(D::VRegRead(*arg)); an(D::IID(*dest)); },
             Instr::Jmp(dest)
      	    | Instr::SaveFrameSnapshot(dest) => { an(D::IID(*dest)); },
             Instr::PushToSink(arg) => { an(D::VRegRead(*arg)); },
@@ -367,6 +380,7 @@ impl Instr {
             Instr::ArrayLen { dest, arr } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arr)); }
             Instr::StrCreateEmpty(dest) => { an(D::VRegWrite(*dest)); }
             Instr::StrAppend(recipient, src) => { an(D::VRegRead(*recipient)); an(D::VRegRead(*src)); }
+            Instr::StrFromCodePoint { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
             Instr::NewIterator { dest, obj } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); }
             Instr::IteratorGetCurrent { dest, iter } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*iter)); }
             Instr::IteratorAdvance { iter } => { an(D::VRegRead(*iter)); },
@@ -488,7 +502,7 @@ impl Function {
     }
 
     pub fn dump<W: std::io::Write>(&self, out: &mut W) -> std::io::Result<()> {
-        writeln!(out, "-- instrs")?;
+        writeln!(out, "-- instrs ({} bytes)", std::mem::size_of_val(&*self.instrs))?;
         for (ndx, instr) in self.instrs.iter().enumerate() {
             write!(out, " {:4} {:15}  ", ndx, instr.opcode())?;
             instr.analyze(|desc| match desc {

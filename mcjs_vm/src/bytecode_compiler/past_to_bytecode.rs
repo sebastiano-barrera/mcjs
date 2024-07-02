@@ -186,14 +186,30 @@ fn compile_one_stmt<'a>(
         }
         StmtOp::IfNot { test } => {
             // IfNot can be understood as "skip the next op if <test>"
-            let cond = fnb.gen_reg();
-            compile_expr(fnb, Some(cond), block, *test);
-            let jmpif = fnb.reserve_instr();
+            use js_to_past::{DirectFormInstr, Expr};
+            match block.get_expr(*test) {
+                Expr::DirectForm {
+                    instr: DirectFormInstr::NumberNotInteger,
+                    arg,
+                } => {
+                    let arg = compile_expr(fnb, None, block, *arg);
+                    let jmpif = fnb.reserve_instr();
+                    compile_one_stmt(fnb, block, stmts);
 
-            compile_one_stmt(fnb, block, stmts);
+                    let dest = fnb.peek_iid();
+                    fnb.set_instr(jmpif, Instr::JmpIfNumberNotInteger { arg, dest });
+                }
+                _ => {
+                    let cond = fnb.gen_reg();
+                    compile_expr(fnb, Some(cond), block, *test);
+                    let jmpif = fnb.reserve_instr();
 
-            let dest = fnb.peek_iid();
-            fnb.set_instr(jmpif, Instr::JmpIf { cond, dest });
+                    compile_one_stmt(fnb, block, stmts);
+
+                    let dest = fnb.peek_iid();
+                    fnb.set_instr(jmpif, Instr::JmpIf { cond, dest });
+                }
+            };
         }
         StmtOp::Assign(dest, value_eid) => {
             if let Some(dest) = dest {
@@ -394,6 +410,7 @@ fn compile_expr(
                 }
                 swc_ecma_ast::UnaryOp::Plus => {
                     let arg = compile_expr(fnb, forced_dest, block, *arg_eid);
+                    complex::compile_to_primitive(fnb, arg, arg);
                     fnb.emit(Instr::ToNumber { dest, arg });
                 }
                 swc_ecma_ast::UnaryOp::Delete => {
@@ -458,7 +475,15 @@ fn compile_expr(
                     let right = compile_expr(fnb, None, block, *right);
 
                     let instr = match op {
-                        swc_ecma_ast::BinaryOp::Add => Instr::OpAdd(dest, left, right),
+                        swc_ecma_ast::BinaryOp::Add => {
+                            let dleft = fnb.gen_reg();
+                            complex::compile_to_primitive(fnb, left, dleft);
+
+                            let dright = fnb.gen_reg();
+                            complex::compile_to_primitive(fnb, right, dright);
+
+                            Instr::OpAdd(dest, dleft, dright)
+                        }
                         swc_ecma_ast::BinaryOp::Sub => Instr::ArithSub(dest, left, right),
                         swc_ecma_ast::BinaryOp::Mul => Instr::ArithMul(dest, left, right),
                         swc_ecma_ast::BinaryOp::Div => Instr::ArithDiv(dest, left, right),
@@ -507,7 +532,7 @@ fn compile_expr(
         Expr::ArrayCreate => {
             let array = get_dest(fnb);
             let constructor: bytecode::VReg = compile_read_global(fnb, "Array".into());
-            compile_new(fnb, array, constructor, &[]);
+            complex::compile_new(fnb, array, constructor, &[]);
             array
         }
         Expr::ArrayNth { arr, index } => {
@@ -671,7 +696,7 @@ fn compile_expr(
                 .collect();
 
             let obj = get_dest(fnb);
-            compile_new(fnb, obj, constructor, &arg_regs);
+            complex::compile_new(fnb, obj, constructor, &arg_regs);
 
             obj
         }
@@ -706,59 +731,31 @@ fn compile_expr(
             let flags_reg = fnb.gen_reg();
             compile_load_const(fnb, flags_reg, Literal::String(flags.clone()));
 
-            compile_new(fnb, obj, constructor, &[pattern_reg, flags_reg]);
+            complex::compile_new(fnb, obj, constructor, &[pattern_reg, flags_reg]);
 
             obj
         }
         Expr::Error => panic!("malformed PAST: Expr::Error left behind by previous phase"),
+        Expr::DirectForm { instr, arg } => {
+            let dest = get_dest(fnb);
+            let arg = compile_expr(fnb, None, block, *arg);
+
+            match instr {
+                js_to_past::DirectFormInstr::ToNumber => fnb.emit(Instr::ToNumber { dest, arg }),
+                js_to_past::DirectFormInstr::ToPrimitive => {
+                    complex::compile_to_primitive(fnb, arg, dest)
+                }
+                js_to_past::DirectFormInstr::NumberNotInteger => {
+                    panic!("compiler bug: $NumberNotInteger compiled as expr (not as if condition)")
+                }
+                js_to_past::DirectFormInstr::StrFromCodePoint => {
+                    fnb.emit(Instr::StrFromCodePoint { dest, arg })
+                }
+            }
+
+            dest
+        }
     }
-}
-
-fn compile_new(
-    fnb: &mut FnBuilder,
-    obj: bytecode::VReg,
-    constructor: bytecode::VReg,
-    arg_regs: &[bytecode::VReg],
-) {
-    fnb.emit(Instr::ObjCreateEmpty(obj));
-
-    {
-        // return value is discarded
-        let return_value = fnb.gen_reg();
-        fnb.emit(Instr::Call {
-            return_value,
-            this: obj,
-            callee: constructor,
-        });
-    }
-
-    for reg in arg_regs {
-        fnb.emit(Instr::CallArg(*reg));
-    }
-
-    let key = fnb.gen_reg();
-
-    let prototype = fnb.gen_reg();
-    compile_load_const(fnb, key, Literal::String("prototype".into()));
-    fnb.emit(Instr::ObjGet {
-        dest: prototype,
-        obj: constructor,
-        key,
-    });
-
-    compile_load_const(fnb, key, Literal::String("__proto__".into()));
-    fnb.emit(Instr::ObjSet {
-        obj,
-        key,
-        value: prototype,
-    });
-
-    compile_load_const(fnb, key, Literal::String("constructor".into()));
-    fnb.emit(Instr::ObjSetN {
-        obj,
-        key,
-        value: constructor,
-    });
 }
 
 fn compile_block(fnb: &mut FnBuilder, block: &Block) {
@@ -1092,7 +1089,10 @@ mod builder {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{bytecode, bytecode_compiler::CompiledModule};
+    use crate::{
+        bytecode,
+        bytecode_compiler::{AllowDirectForms, CompiledModule},
+    };
 
     #[test]
     fn test_global_var() {
@@ -1175,7 +1175,8 @@ mod tests {
 
     fn quick_compile(src: String) -> CompiledModule {
         let (swc_ast, source_map) = crate::bytecode_compiler::quick_parse_script(src);
-        let past_function = super::js_to_past::compile_script(&swc_ast, source_map).unwrap();
+        let past_function =
+            super::js_to_past::compile_script(&swc_ast, source_map, AllowDirectForms::No).unwrap();
 
         let mut module_builder = super::ModuleBuilder::new(0);
         let globals = past_function.unbound_names.iter().cloned().collect();
@@ -1183,5 +1184,153 @@ mod tests {
             super::compile_function(&globals, &mut module_builder, Vec::new(), &past_function);
 
         module_builder.build(root_lfnid)
+    }
+}
+
+mod complex {
+    // This module contains "complex instructions": bytecode templates for
+    // operations that can be seen as self-contained but are broken down into
+    // lower-level instructions during the compilation process.
+
+    use super::*;
+
+    pub(super) fn compile_new(
+        fnb: &mut FnBuilder,
+        obj: bytecode::VReg,
+        constructor: bytecode::VReg,
+        arg_regs: &[bytecode::VReg],
+    ) {
+        fnb.emit(Instr::ObjCreateEmpty(obj));
+
+        {
+            // return value is discarded
+            let return_value = fnb.gen_reg();
+            fnb.emit(Instr::Call {
+                return_value,
+                this: obj,
+                callee: constructor,
+            });
+        }
+
+        for reg in arg_regs {
+            fnb.emit(Instr::CallArg(*reg));
+        }
+
+        let key = fnb.gen_reg();
+
+        let prototype = fnb.gen_reg();
+        compile_load_const(fnb, key, Literal::String("prototype".into()));
+        fnb.emit(Instr::ObjGet {
+            dest: prototype,
+            obj: constructor,
+            key,
+        });
+
+        compile_load_const(fnb, key, Literal::String("__proto__".into()));
+        fnb.emit(Instr::ObjSet {
+            obj,
+            key,
+            value: prototype,
+        });
+
+        compile_load_const(fnb, key, Literal::String("constructor".into()));
+        fnb.emit(Instr::ObjSetN {
+            obj,
+            key,
+            value: constructor,
+        });
+    }
+
+    pub(super) fn compile_to_primitive(
+        fnb: &mut FnBuilder,
+        arg: bytecode::VReg,
+        dest: bytecode::VReg,
+    ) {
+        #![allow(non_snake_case)]
+
+        let lit_valueOf = fnb.add_const(Literal::JsWord("valueOf".into()));
+        let lit_toString = fnb.add_const(Literal::JsWord("toString".into()));
+
+        let key = fnb.gen_reg();
+        let property = fnb.gen_reg();
+
+        fnb.emit(Instr::Copy {
+            dst: dest,
+            src: arg,
+        });
+        let jmp_if_arg_primitive = fnb.reserve_instr();
+
+        let mut jmp_if_ret_primitive0 = bytecode::IID(0);
+        let mut jmp_if_ret_primitive1 = bytecode::IID(0);
+
+        for (name, jmp_if_ret_primitive) in [
+            (lit_valueOf, &mut jmp_if_ret_primitive0),
+            (lit_toString, &mut jmp_if_ret_primitive1),
+        ] {
+            fnb.emit(Instr::LoadConst(key, name));
+            fnb.emit(Instr::ObjGet {
+                dest: property,
+                obj: arg,
+                key,
+            });
+            let jmp_if_property_not_closure = fnb.reserve_instr();
+
+            fnb.emit(Instr::Call {
+                return_value: dest,
+                this: arg,
+                callee: property,
+            });
+            *jmp_if_ret_primitive = fnb.reserve_instr();
+
+            let next = fnb.peek_iid();
+
+            fnb.set_instr(
+                jmp_if_property_not_closure,
+                Instr::JmpIfNotClosure {
+                    arg: property,
+                    dest: next,
+                },
+            );
+        }
+
+        // TODO These "standard exceptions" should be created at initialization
+        // and reused instead of recreated every time
+        let k_message = fnb.add_const(Literal::String("Cannot convert to primitive".to_string()));
+        let message = fnb.gen_reg();
+        fnb.emit(Instr::LoadConst(message, k_message));
+
+        let TypeError = fnb.gen_reg();
+        let k_TypeError = fnb.add_const(Literal::String("TypeError".to_string()));
+        fnb.emit(Instr::GetGlobal {
+            dest: TypeError,
+            name: k_TypeError,
+        });
+        let exc = fnb.gen_reg();
+        compile_new(fnb, exc, TypeError, &[message]);
+        fnb.emit(Instr::Throw(exc));
+
+        let L_success = fnb.peek_iid();
+
+        fnb.set_instr(
+            jmp_if_ret_primitive0,
+            Instr::JmpIfPrimitive {
+                arg: dest,
+                dest: L_success,
+            },
+        );
+        fnb.set_instr(
+            jmp_if_ret_primitive1,
+            Instr::JmpIfPrimitive {
+                arg: dest,
+                dest: L_success,
+            },
+        );
+        fnb.set_instr(
+            jmp_if_arg_primitive,
+            Instr::JmpIfPrimitive {
+                arg,
+                dest: L_success,
+            },
+        );
     }
 }
