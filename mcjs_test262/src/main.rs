@@ -71,9 +71,12 @@ fn run_test(params: &CliOptions) -> Result<(), TestError> {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(err)) => Err(err),
         Err(panic_value) => {
-            let message = match panic_value.downcast_ref::<String>() {
-                Some(s) => s.to_string(),
-                None => "<panic value is not a string>".to_string(),
+            let message = if let Some(s) = panic_value.downcast_ref::<String>() {
+                s.to_string()
+            } else if let Some(s) = panic_value.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "<panic value is not a string>".to_string()
             };
             Err(TestError::Panic(message))
         }
