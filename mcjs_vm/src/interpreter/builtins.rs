@@ -597,7 +597,7 @@ fn nf_Function(
     _this: &Value,
     _: &[Value],
 ) -> RunResult<Value> {
-    todo!("not yet implemented!")
+    todo!("builtin Function()")
 }
 
 /// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/Object#return_value

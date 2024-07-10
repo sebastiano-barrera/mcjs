@@ -72,6 +72,8 @@ pub fn compile_module(func: &js_to_past::Function, min_fnid: u32) -> Result<Comp
         }
         Err(payload) => {
             let message = if let Some(message) = payload.downcast_ref::<String>() {
+                message.as_str()
+            } else if let Some(message) = payload.downcast_ref::<&str>() {
                 message
             } else {
                 "<not a string>"
