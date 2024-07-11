@@ -149,7 +149,6 @@ impl Block {
                         check_expr_id(arr);
                         check_expr_id(index);
                     }
-                    Expr::ArrayLen(eid) => check_expr_id(eid),
                     Expr::ObjectGet { obj, key } => {
                         check_expr_id(obj);
                         check_expr_id(key);
@@ -445,7 +444,6 @@ pub enum Expr {
         arr: ExprID,
         index: ExprID,
     },
-    ArrayLen(ExprID),
 
     ObjectCreate,
     ObjectGet {
@@ -1499,7 +1497,11 @@ fn compile_stmt_ex(fnb: &mut FnBuilder, stmt: &swc_ecma_ast::Stmt, label: Option
                     let keys = fnb.add_expr(Expr::ObjectGetKeys(iteree));
                     let (_, keys) = create_tmp(fnb, keys);
 
-                    let key_count = fnb.add_expr(Expr::ArrayLen(keys));
+                    let lit_length = fnb.add_expr(Expr::StringLiteral("length".into()));
+                    let key_count = fnb.add_expr(Expr::ObjectGet {
+                        obj: keys,
+                        key: lit_length,
+                    });
                     let (_, key_count) = create_tmp(fnb, key_count);
 
                     let loop_start = fnb.peek_stmt_id();
@@ -1869,7 +1871,7 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
 
                                 swc_ecma_ast::Prop::Assign(_)
                                 | swc_ecma_ast::Prop::Getter(_)
-                                | swc_ecma_ast::Prop::Setter(_) => todo!(),
+                                | swc_ecma_ast::Prop::Setter(_) => unsupported_node!(prop),
                             };
 
                             fnb.add_stmt(StmtOp::ObjectSet { obj, key, value });

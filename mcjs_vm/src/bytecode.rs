@@ -237,36 +237,11 @@ pub enum Instr {
         arr: VReg,
         index: VReg,
     },
-    ArraySetNth {
-        arr: VReg,
-        index: VReg,
-        value: VReg,
-    },
-    ArrayLen {
-        dest: VReg,
-        arr: VReg,
-    },
 
     // TODO Replace these ops with native functions (?)
     StrCreateEmpty(VReg),
     StrAppend(VReg, VReg),
     StrFromCodePoint { dest: VReg, arg: VReg },
-
-    NewIterator {
-        dest: VReg,
-        obj: VReg,
-    },
-    IteratorGetCurrent {
-        dest: VReg,
-        iter: VReg,
-    },
-    IteratorAdvance {
-        iter: VReg,
-    },
-    JmpIfIteratorFinished {
-        iter: VReg,
-        dest: IID,
-    },
 
     TypeOf {
         dest: VReg,
@@ -376,15 +351,9 @@ impl Instr {
             Instr::ObjDelete { obj, key } => { an(D::VRegRead(*obj)); an(D::VRegRead(*key)); }
             Instr::ArrayPush { arr, value } => { an(D::VRegRead(*arr)); an(D::VRegRead(*value)); }
             Instr::ArrayNth { dest, arr, index } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arr)); an(D::VRegRead(*index)); }
-            Instr::ArraySetNth { arr, index, value } => { an(D::VRegRead(*arr)); an(D::VRegRead(*index)); an(D::VRegRead(*value)); }
-            Instr::ArrayLen { dest, arr } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arr)); }
             Instr::StrCreateEmpty(dest) => { an(D::VRegWrite(*dest)); }
             Instr::StrAppend(recipient, src) => { an(D::VRegRead(*recipient)); an(D::VRegRead(*src)); }
             Instr::StrFromCodePoint { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); },
-            Instr::NewIterator { dest, obj } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*obj)); }
-            Instr::IteratorGetCurrent { dest, iter } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*iter)); }
-            Instr::IteratorAdvance { iter } => { an(D::VRegRead(*iter)); },
-            Instr::JmpIfIteratorFinished { iter, dest } => { an(D::VRegRead(*iter)); an(D::IID(*dest)); }
             Instr::TypeOf { dest, arg } => { an(D::VRegWrite(*dest)); an(D::VRegRead(*arg)); }
             Instr::ImportModule(dest, mod_spec) => { an(D::VRegWrite(*dest)); an(D::VRegRead(*mod_spec)); }
             Instr::Throw(arg) => { an(D::VRegRead(*arg)); }

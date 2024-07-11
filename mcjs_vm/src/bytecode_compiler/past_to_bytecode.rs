@@ -544,12 +544,6 @@ fn compile_expr(
             fnb.emit(Instr::ArrayNth { dest, arr, index });
             dest
         }
-        Expr::ArrayLen(arr) => {
-            let arr = compile_expr(fnb, None, block, *arr);
-            let dest = get_dest(fnb);
-            fnb.emit(Instr::ArrayLen { dest, arr });
-            dest
-        }
         Expr::ObjectCreate => {
             let obj = get_dest(fnb);
             fnb.emit(Instr::ObjCreateEmpty(obj));

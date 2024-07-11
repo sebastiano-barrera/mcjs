@@ -840,16 +840,6 @@ fn run_inner(
                 };
                 data.top_mut().set_result(*dest, value);
             }
-            Instr::ArraySetNth { .. } => todo!("ArraySetNth"),
-            Instr::ArrayLen { dest, arr } => {
-                let arr = get_operand(data, *arr)?;
-                let len = realm
-                    .heap
-                    .array_elements(arr)
-                    .ok_or_else(|| error!("not an array!"))?
-                    .len();
-                data.top_mut().set_result(*dest, Value::Number(len as f64));
-            }
 
             Instr::TypeOf { dest, arg: value } => {
                 let value = get_operand(data, *value)?;
@@ -971,10 +961,6 @@ fn run_inner(
                 let result = is_instance_of(data, realm, *obj, *sup)?;
                 data.top_mut().set_result(*dest, Value::Bool(result));
             }
-            Instr::NewIterator { dest: _, obj: _ } => todo!(),
-            Instr::IteratorGetCurrent { dest: _, iter: _ } => todo!(),
-            Instr::IteratorAdvance { iter: _ } => todo!(),
-            Instr::JmpIfIteratorFinished { iter: _, dest: _ } => todo!(),
 
             Instr::StrCreateEmpty(dest) => {
                 let oid = realm.heap.new_string(JSString::empty());

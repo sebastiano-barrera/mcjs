@@ -248,7 +248,7 @@ impl Heap {
                     Exotic::Function { .. } => "<closure>".to_owned(),
                 }
             }
-            Value::Symbol(_) => todo!(),
+            Value::Symbol(sym) => format!("sym:{}", sym),
             Value::Null => "null".to_owned(),
             Value::Undefined => "undefined".to_owned(),
         }
