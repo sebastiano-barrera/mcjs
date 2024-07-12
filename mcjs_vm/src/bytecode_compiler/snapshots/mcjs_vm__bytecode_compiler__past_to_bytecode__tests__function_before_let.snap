@@ -4,7 +4,7 @@ expression: dump_functions(&compiled_module.functions)
 ---
 fn f0
   k0 String("prototype")
-  k1 JsWord(Atom('Function' type=static))
+  k1 JsWord("Function")
   k2 String("constructor")
   ClosureNew { dest: v9, fnid: f1, forced_this: None }
   LoadConst(v10, const[0])
@@ -17,7 +17,7 @@ fn f0
   Call { return_value: v13, this: v8, callee: v9 }
 fn f1
   k0 String("prototype")
-  k1 JsWord(Atom('Function' type=static))
+  k1 JsWord("Function")
   k2 String("constructor")
   k3 Number(2.0)
   LoadUndefined(v8)
@@ -34,4 +34,3 @@ fn f2
   k0 Number(3.0)
   LoadCapture(v8, capture[0])
   LoadConst(v8, const[0])
-

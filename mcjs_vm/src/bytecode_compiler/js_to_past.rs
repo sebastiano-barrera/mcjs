@@ -13,6 +13,9 @@ use crate::define_flag;
 use crate::{common::MultiErrResult, error, impl_debug_via_dump, tracing, util};
 
 macro_rules! unsupported_node {
+    ($role:expr; $value:expr) => {{
+        todo!("unsupported AST node [{}]: {:#?}", $role, $value);
+    }};
     ($value:expr) => {{
         todo!("unsupported AST node: {:#?}", $value);
     }};
@@ -2120,16 +2123,40 @@ fn compile_expr(fnb: &mut FnBuilder, expr: &swc_ecma_ast::Expr) -> ExprID {
 
 fn compile_assignment(
     fnb: &mut FnBuilder<'_>,
-    left: &swc_ecma_ast::PatOrExpr,
+    left: &swc_ecma_ast::AssignTarget,
     op: swc_ecma_ast::AssignOp,
     right: ExprID,
 ) -> ExprID {
-    if let Some(ident) = left.as_ident() {
-        compile_assignment_to_ident(fnb, ident, op, right)
-    } else if let Some(target_expr) = left.as_expr() {
-        compile_assignment_to_expr(fnb, target_expr, op, right)
-    } else {
-        panic!("unsupported pattern as assignment target: {:?}", left)
+    match left {
+        swc_ecma_ast::AssignTarget::Simple(at_simple) => match at_simple {
+            swc_ecma_ast::SimpleAssignTarget::Ident(binding_ident) => {
+                // discard type annotation
+                compile_assignment_to_ident(fnb, &binding_ident.id, op, right)
+            }
+            swc_ecma_ast::SimpleAssignTarget::Member(member_expr) => {
+                compile_member_assignment(fnb, member_expr, op, right)
+            }
+
+            swc_ecma_ast::SimpleAssignTarget::SuperProp(_)
+            | swc_ecma_ast::SimpleAssignTarget::Paren(_)
+            | swc_ecma_ast::SimpleAssignTarget::OptChain(_) => {
+                unsupported_node!("assignment target"; left)
+            }
+
+            swc_ecma_ast::SimpleAssignTarget::TsAs(_)
+            | swc_ecma_ast::SimpleAssignTarget::TsSatisfies(_)
+            | swc_ecma_ast::SimpleAssignTarget::TsNonNull(_)
+            | swc_ecma_ast::SimpleAssignTarget::TsTypeAssertion(_)
+            | swc_ecma_ast::SimpleAssignTarget::TsInstantiation(_) => {
+                panic!("typescript syntax not supported (assignment target)")
+            }
+            swc_ecma_ast::SimpleAssignTarget::Invalid(_) => {
+                panic!("bug: parser returned invalid node instead of an error")
+            }
+        },
+        swc_ecma_ast::AssignTarget::Pat(pat) => {
+            unsupported_node!("assignment target pattern"; pat)
+        }
     }
 }
 
@@ -2315,14 +2342,14 @@ fn compile_eval_literal_arg(fnb: &mut FnBuilder, src: String) -> ExprID {
     let source_map = Rc::new(SourceMap::default());
     let err_handler = crate::bytecode_compiler::mk_error_handler(&source_map);
 
-    let filename = swc_common::FileName::Anon;
+    let filename = Rc::new(swc_common::FileName::Anon);
 
     let source_file = source_map.new_source_file(filename, src);
     let input = swc_ecma_parser::StringInput::from(source_file.as_ref());
 
     let lexer = Lexer::new(
         Syntax::Es(Default::default()),
-        EsVersion::Es2015,
+        EsVersion::Es2022,
         input,
         None,
     );

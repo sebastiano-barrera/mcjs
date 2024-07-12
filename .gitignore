@@ -1,5 +1,4 @@
 /target
-/Cargo.lock
 .vscode/
 .gdb_history
 .lite_workspace.lua

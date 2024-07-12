@@ -24,7 +24,7 @@ expression: function.dump_to_string()
                     exprs:
                       e0: NumberLiteral(23.0)
                       e1: Read(console)
-                      e2: StringLiteral(Atom('log' type=static))
+                      e2: StringLiteral("log")
                       e3: ObjectGet { obj: e1, key: e2 }
                       e4: Read(someGlobalVar)
                       e5: Read(someLocalVar)
