@@ -2322,7 +2322,7 @@ fn compile_eval_literal_arg(fnb: &mut FnBuilder, src: String) -> ExprID {
 
     let lexer = Lexer::new(
         Syntax::Es(Default::default()),
-        EsVersion::Es2015,
+        EsVersion::Es2022,
         input,
         None,
     );
