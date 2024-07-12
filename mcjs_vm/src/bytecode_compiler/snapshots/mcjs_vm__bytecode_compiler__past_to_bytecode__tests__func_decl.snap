@@ -3,9 +3,9 @@ source: mcjs_vm/src/bytecode_compiler/past_to_bytecode.rs
 expression: dump_functions(&compiled_module.functions)
 ---
 fn f0
-  k0 JsWord(Atom('myFunction' type=dynamic))
+  k0 JsWord("myFunction")
   k1 String("prototype")
-  k2 JsWord(Atom('Function' type=static))
+  k2 JsWord("Function")
   k3 String("constructor")
   GetGlobalThis(v8)
   LoadConst(v9, const[0])
@@ -21,4 +21,3 @@ fn f1
   k0 Number(3.0)
   LoadConst(v8, const[0])
   Return(v8)
-

@@ -47,11 +47,7 @@ impl ErrorItem {
                 .filter(|br| br.iid_start <= iid && iid < br.iid_end)
                 .min_by_key(|br| br.hi - br.lo)?;
 
-            Some(swc_common::Span::new(
-                breakrange.lo,
-                breakrange.hi,
-                swc_common::SyntaxContext::default(),
-            ))
+            Some(swc_common::Span::new(breakrange.lo, breakrange.hi))
         });
 
         if let Some(src_span) = &src_span {

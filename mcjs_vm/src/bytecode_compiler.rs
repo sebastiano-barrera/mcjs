@@ -76,7 +76,7 @@ pub fn compile_file(
         FileIDRef::File(path) => path.to_string_lossy().into_owned(),
     };
 
-    let source_file = source_map.new_source_file(swc_path, content);
+    let source_file = source_map.new_source_file(Rc::new(swc_path), content);
     let input = StringInput::from(source_file.as_ref());
 
     let err_handler = mk_error_handler(&source_map);
@@ -144,7 +144,7 @@ pub(crate) fn quick_parse_script(src: String) -> (swc_ecma_ast::Script, Rc<Sourc
     let source_map = Rc::new(SourceMap::default());
     let err_handler = crate::bytecode_compiler::mk_error_handler(&source_map);
 
-    let filename = swc_common::FileName::Anon;
+    let filename = Rc::new(swc_common::FileName::Anon);
 
     let source_file = source_map.new_source_file(filename, src);
     let input = StringInput::from(source_file.as_ref());
