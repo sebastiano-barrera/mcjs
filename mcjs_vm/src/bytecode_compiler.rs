@@ -82,7 +82,7 @@ pub fn compile_file(
     let err_handler = mk_error_handler(&source_map);
     let lexer = Lexer::new(
         Syntax::Es(Default::default()),
-        EsVersion::Es2015,
+        EsVersion::Es2022,
         input,
         None,
     );
