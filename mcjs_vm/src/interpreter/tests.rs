@@ -1309,7 +1309,15 @@ fn regression_cross_conversion_suspend() {
         .run()
         .unwrap();
 
-    assert!(matches!(exit, Exit::Suspended { .. }));
+    #[cfg(feature = "debugger")]
+    assert!(
+        matches!(exit, Exit::Suspended { .. }),
+        "interpreter did not suspend; sink = {:?}",
+        &exit.expect_finished().sink
+    );
+
+    #[cfg(not(feature = "debugger"))]
+    assert_eq!(exit.expect_finished().sink, &[Some(Literal::Number(198.0))]);
 }
 
 mod debugging {
